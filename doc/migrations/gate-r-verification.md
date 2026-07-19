@@ -2,7 +2,7 @@
 
 验收日期：2026-07-19（Asia/Shanghai）
 
-状态：**技术迁移已通过；等待用户确认本仓库为后续唯一产品代码基地。**
+状态：**核心迁移已通过；GitHub 私有仓库分支保护受当前账户套餐限制，且仍等待用户确认本仓库为后续唯一产品代码基地。**
 
 ## 结果
 
@@ -16,6 +16,8 @@
 | linked worktree 修复 | 通过 | 6 个 linked worktree 可读；HEAD、tracked 修改、untracked 文件哈希未改变 |
 | 新 GitHub 仓库 | 通过 | 私有 `taotaosihao/geneway` |
 | 新本地目录 | 通过 | `/home/gewu/work/geneway`，独立全新 Git 历史 |
+| 初始分支保护 | 受阻 | GitHub 对当前账户的私有仓库返回 HTTP 403：需升级 GitHub Pro 或改为 public；未降低仓库私密性来绕过 |
+| 访问控制 | 通过 | 仅 `taotaosihao` 为 Admin；默认分支为 `main` |
 | Paperclip 隔离 | 通过 | 无 Paperclip upstream；无运行代码或 `@paperclipai/*` 依赖；只迁入权威文档和迁移资料 |
 | Secret 迁移 | 通过 | 未复制任何 secret 值；新仓库 secret inventory 为空 |
 
@@ -43,4 +45,9 @@ c2f6d8b978017753447cd416db1d67f8ae8db53d
 
 ## 下一门禁
 
-用户确认本仓库为唯一产品代码基地后，Gate R 正式关闭。后续只能按最终实施合同进入 Gate 0.1，不自动实施 Gate 0.2 或 Gate A。
+当前有两个关闭条件：
+
+1. 用户确认本仓库为唯一产品代码基地；
+2. 用户决定升级 GitHub 套餐以启用私有仓库分支保护，或明确接受 MVP 阶段由单一 Admin、禁止 force-push 的操作规程代替平台强制保护。
+
+两项关闭后 Gate R 正式关闭。后续只能按最终实施合同进入 Gate 0.1，不自动实施 Gate 0.2 或 Gate A。

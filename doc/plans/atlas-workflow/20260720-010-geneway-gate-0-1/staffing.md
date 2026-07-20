@@ -1,5 +1,7 @@
 # geneway 责任说明
 
+> 历史审计记录：以下说明属于旧 revision 7 review，不是新任务 `20260720-010-geneway-gate-0-1` 的具名实施人员配置，也不授权产品代码实施。
+
 本轮按用户要求使用 Atlas native Team 做只读合同审查，不做代码实施或人员编制承诺。
 
 - 合同可执行性审查：检查 Atlas lint、First-code、阶段依赖、验收归属和 GearJob 前置。

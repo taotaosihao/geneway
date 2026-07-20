@@ -4,7 +4,9 @@
 
 日期：2026-07-18
 
-详细技术约束见[技术实施附录](2026-07-18-geneway-v19-technical-appendix.md)，编码合同见[最终实施合同](atlas-workflow/20260715-044-geneway-v19-reimplementation/implementation-contract.final.md)，界面细节见[界面设计说明](atlas-workflow/20260715-044-geneway-v19-reimplementation/ui-design.md)。
+文档角色：**非执行路线图**。本文件说明长期产品与阶段关系，不授予任何 Gate 的实施权限，也不能覆盖当前合同。
+
+详细技术约束见[技术实施附录](2026-07-18-geneway-v19-technical-appendix.md)，唯一可执行范围见[Gate 0.1 最终实施合同](atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md)，界面细节见[界面设计 ADR](atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md)。后续 Gate 必须由用户另行授权并建立新的 authority slice。
 
 ## 1. 一句话目标
 
@@ -24,7 +26,7 @@ GitHub：taotaosihao/geneway
 环境变量前缀：GENEWAY_
 ```
 
-当前旧项目仍在 `/home/gewu/work/GeneWay`，GitHub 旧仓库仍是 `taotaosihao/GeneWay`。它们属于 Paperclip 改造历史，只在“阶段 0：安全归档”中出现。没有完成可恢复归档前，不删除、不覆盖旧仓库，也不创建同名新目录。
+Gate R 已于 2026-07-19 关闭。旧 Paperclip 项目已归档为 `/home/gewu/work/geneway-paperclip-archive-20260719` 和 `taotaosihao/geneway-paperclip-archive-20260719`；当前唯一产品基地是 `/home/gewu/work/geneway` 与 `taotaosihao/geneway`。详情见 [`../migrations/gate-r-verification.md`](../migrations/gate-r-verification.md)。
 
 ## 3. 产品先做什么
 
@@ -142,21 +144,21 @@ flowchart LR
 
 ### 正式采用
 
-| 项目 | 用途 | 采用方式 |
-| --- | --- | --- |
-| [Hatchet](https://github.com/hatchet-dev/hatchet) | 长任务排队、等待、重试和恢复 | 独立服务，不 fork；只运行固定 Interpreter |
-| [VersityGW](https://github.com/versity/versitygw) | 本地和客户 VPC 的 S3 兼容对象存储 | 复用 Hive/Sharp Cell 的 POSIX backend 路线，不使用 MinIO |
-| [OpenAI Agents SDK for TypeScript](https://openai.github.io/openai-agents-js/) | 首个 Agent Runtime | npm 依赖，封装在自有 Runtime Adapter 后面 |
-| [`@openai/agents-extensions`](https://openai.github.io/openai-agents-js/extensions/ai-sdk/) | 把 AI SDK 模型接入 OpenAI Agents Runtime | MVP 复用旧分支已经验证的官方 `aisdk()` bridge |
-| [AG-UI](https://docs.ag-ui.com/) | Web 前端接收消息、任务状态、工具事件和人工确认的事件格式 | 采用协议和事件模型，不让它保存业务权威状态 |
-| [assistant-ui](https://www.assistant-ui.com/docs) | 小纬 Thread、Composer、附件、流式消息、工具状态和 HITL | 使用 `@assistant-ui/react` 与 `@assistant-ui/react-ag-ui`；不使用 Assistant Cloud，不保存业务权威状态 |
-| [Base UI](https://base-ui.com/react/overview/about) | 无样式、可访问的应用基础组件 | 通过 `@base-ui/react` 与 Tailwind CSS 4 建立 `geneway` 自有组件和 token |
-| [TanStack Table](https://tanstack.com/table/latest/docs/installation) | 异常、任务、Evidence 和 GearJob 工单的轻量 headless 表格逻辑 | 使用稳定版 `@tanstack/react-table`；DOM、样式、权限和服务端查询由 `geneway` 控制 |
-| [React Flow](https://reactflow.dev/) | Workflow 节点图、运行状态、版本差异和审批预览 | 使用 MIT 开源核心组件，自研节点和业务交互，不依赖 Pro 模板 |
-| [Casbin](https://casbin.org/) | MVP 的租户、角色和资源范围授权 | 封装在自有 Authorization Service 后面 |
-| [OpenTelemetry](https://opentelemetry.io/) | 日志、指标和调用链 | 统一观测出口；敏感内容先脱敏 |
-| PostgreSQL + Drizzle | 业务状态、版本、审批、事件索引 | Control Plane 的唯一业务数据库 |
-| React + Vite + Fastify + Zod | Web、API、合同校验 | 自研主工程基础栈 |
+| 项目 | 首次引入 Gate | 用途 | 采用方式 |
+| --- | --- | --- | --- |
+| PostgreSQL + Drizzle | Gate 0.1 | 业务状态、版本、审批、事件索引 | Control Plane 的唯一业务数据库 |
+| React + Vite + Fastify + Zod 4 | Gate 0.1 | Web、API、合同校验 | 自研主工程基础栈 |
+| [assistant-ui](https://www.assistant-ui.com/docs) | Gate 0.1 | 小纬 Thread、Composer、流式消息、工具状态和 HITL | 不使用 Assistant Cloud；Gate 0.1 不开放附件上传 |
+| [Base UI](https://base-ui.com/react/overview/about) | Gate 0.1 | 无样式、可访问的基础组件 | 通过 `@base-ui/react` 与 Tailwind CSS 4 建立自有组件和 token |
+| [React Flow](https://reactflow.dev/) | Gate 0.1 | 固定 Workflow 节点图与运行状态 | 使用 MIT 核心；Gate C 才增加动态 Diff 编辑能力 |
+| [Casbin](https://casbin.org/) | Gate 0.1 | tenant、角色和资源范围授权 | 封装在自有 Authorization Service 后面 |
+| [AG-UI](https://docs.ag-ui.com/) | Gate 0.1 | Web 前端事件投影 | 采用兼容事件模型，不保存业务权威 |
+| [TanStack Table](https://tanstack.com/table/latest/docs/installation) | Gate 0.2 | 异常、任务、Evidence 和工单表格逻辑 | 稳定版 headless table；服务端受控查询 |
+| [VersityGW](https://github.com/versity/versitygw) | Gate 0.2 | S3 兼容 Artifact 存储 | 复用 Hive/Sharp Cell POSIX backend，不使用 MinIO |
+| [OpenAI Agents SDK for TypeScript](https://openai.github.io/openai-agents-js/) | Gate A | 首个真实 Agent Runtime | npm 依赖，封装在 Runtime Adapter 后面 |
+| [`@openai/agents-extensions`](https://openai.github.io/openai-agents-js/extensions/ai-sdk/) | Gate A | AI SDK model bridge | 复用经审查的固定版本测试车道 |
+| [Hatchet](https://github.com/hatchet-dev/hatchet) | Gate B | 长任务排队、等待、重试和恢复 | 独立服务，不 fork；只托管同一 Interpreter |
+| [OpenTelemetry](https://opentelemetry.io/) | Gate G 前逐步引入 | 日志、指标和调用链 | Gate 0.1 先保留内部观测接口，正式 exporter 后置 |
 
 MVP 的真实模型测试复用旧分支的共享 Codex 订阅车道，但仍必须满足唯一 Model Gateway 出口：`@openai/agents` Runtime → model facade/RPC → 本机 Model Gateway provider plugin → 官方 `aisdk()` bridge → 已固定版本的第三方 `@openai-oauth/ai-sdk` / `@openai-oauth/local` → 一个具名开发者的 Codex 订阅。auth-file 只挂载在该本机 Gateway plugin，Runtime 和 Worker 不读取它。若旧 bridge 无法放到这一边界后，关闭 live dev lane，不设置旁路。它不是生产车道，且必须满足以下限制：
 
@@ -210,24 +212,24 @@ MVP 的真实模型测试复用旧分支的共享 Codex 订阅车道，但仍必
 
 ## 6. 分阶段实施
 
-### 阶段 0：安全归档并新建小写项目
+### Gate R：安全归档并新建小写项目（已关闭）
 
-完成旧仓库 bundle、bare mirror、分支、worktree、未跟踪文件和 GitHub 元数据归档；验证可以恢复后，把旧 GitHub 仓库和本地目录改为日期化归档名称，再创建：
+已完成旧仓库 bundle、bare mirror、分支、worktree、未跟踪文件和 GitHub 元数据归档，并完成实际恢复验证。当前产品基地为：
 
 ```text
 taotaosihao/geneway
 /home/gewu/work/geneway
 ```
 
-这一阶段涉及 GitHub 改名和本地目录移动，执行前需要单独授权。本方案本身不执行这些操作。
+Gate R 不再执行；验收和用户确认见 [`../migrations/gate-r-verification.md`](../migrations/gate-r-verification.md)。
 
-### 阶段 1：先复用，再做最小产品骨架
+### Gate 0.1/0.2：先做安全纵切，再补完整产品骨架
 
-迁移清单和 conformance harness 与产品纵切并行，不得成为长期前置。Gate 0.1 先搭建最小 TypeScript monorepo、PostgreSQL、服务端 trusted-local 身份、tenant isolation、最小 Authorization/delegated capability、Control Plane API、BusinessTask 事件账本、Zod 4 Workflow schema、Workflow Compiler/canonical hash、固定 HarnessVersion/ApprovalVersion、最小 EvidenceRef/来源 hash/访问检查/publish guard、WebChat 和普通 Worker Interpreter，完成一次安全的真实 served UI 任务。Gate 0.2 再补齐 VersityGW、完整 Claim–Evidence–Lineage、outbox/inbox 扩展、异常与待办、完整 React Flow/四路由、JSON Schema parity/property tests 与 UI 状态矩阵；不引入 TypeBox/Ajv 第二套 schema 体系。
+Gate 0.1 只使用预置、已批准的只读脱敏输入引用和服务端 fake Runtime，完成真实 Control Plane/Postgres 驱动的 served UI。用户可选择 auto、单专家或专家团，确认固定 Workflow 图，查看模拟进度、结果和最小内联来源；页面、事件和 Evidence 都必须显著标记模拟。Gate 0.1 不提供任意上传、Artifact 下载、报告文件、异常中心、TanStack Table、VersityGW 或真实模型。
 
-用户能向小纬提交一次 `solution.analysis.v1`，选择“小纬自动安排”、一个专家或一个专家团，看到流程图、进度、结果、证据并下载报告；还能用 fixture 看到一条设备异常和一条产能落后待办。
+Gate 0.2 再加入受鉴权上传、Artifact/VersityGW、报告下载、完整 Claim–Evidence–Lineage、inbox/恢复、异常 fixture、TanStack Table、四个完整路由、JSON Schema parity/property tests 与 UI 状态矩阵。
 
-先用模拟 Runtime，是为了先证明任务、事件、权限、证据和页面合同正确，再接真实模型。
+当前唯一可执行范围只到 Gate 0.1；本路线图不授权 Gate 0.2。
 
 ### 阶段 2：用共享 Codex 订阅完成真实 MVP
 
@@ -354,7 +356,7 @@ draft → shadow → internal → graduated
 - GearJob：参考制造业 ERP 的对象、表格密度和工作上下文，不复制 Frappe 页面。
 - Hive/Sharp Cell：UI 尚未正式对外定稿，只参考个别设备和现场交互，不作为 `geneway` 视觉标准。
 
-详细线框和页面状态见[界面设计说明](atlas-workflow/20260715-044-geneway-v19-reimplementation/ui-design.md)。
+详细线框和页面状态见[界面设计 ADR](atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md)。
 
 ## 9. 推荐仓库结构
 

@@ -4,12 +4,12 @@
 
 Before implementation, read:
 
-1. `doc/plans/atlas-workflow/20260715-044-geneway-v19-reimplementation/implementation-contract.final.md`
-2. `doc/plans/atlas-workflow/20260715-044-geneway-v19-reimplementation/spec.md`
+1. `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md`
+2. `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/spec.md`
 3. `doc/plans/2026-07-18-geneway-v19-technical-appendix.md`
-4. `doc/plans/atlas-workflow/20260715-044-geneway-v19-reimplementation/ui-design.md`
+4. `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md`
 
-The implementation contract is authoritative for scope and gates. Do not expand a gate merely because a later capability appears in the technical appendix.
+The implementation contract is the only executable scope authority. The spec is a pointer, and the technical appendix, UI ADR, and roadmap cannot grant additional scope.
 
 ## Core rules
 
@@ -24,6 +24,6 @@ The implementation contract is authoritative for scope and gates. Do not expand 
 - Reuse old code only by the file-level migration process in `doc/migrations/legacy-migration-manifest.md`.
 - Default product and implementation documents to Chinese.
 
-## Current authorized slice
+## Current authority slice
 
-Gate R has established this repository. The next implementation slice is Gate 0.1 only unless the user explicitly authorizes more.
+Gate R has established this repository. The current contract and SDD authority cover Gate 0.1 only. Contract readiness does not itself authorize product-code implementation; explicit user authorization is still required.

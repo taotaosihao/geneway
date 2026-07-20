@@ -1,6 +1,6 @@
 # geneway 界面设计说明
 
-状态：实施基线（`ADR-UI-001` 已锁定）
+状态：支持性 UI ADR（`ADR-UI-001` 已锁定；范围与验收权威以 `implementation-contract.final.md` 为准）
 
 目标：让制造业员工只面对一个通用数字员工“小纬”，同时能处理主动出现的设备、产能、质量和交付异常，并看得懂专家团、Workflow、审批、数据来源和结果。
 
@@ -30,7 +30,7 @@
 | Hive / Sharp Cell | 个别设备与现场交互参考 | UI 尚未正式对外定稿，不作为视觉基线 |
 | [React Flow](https://reactflow.dev/) | Workflow 节点、连线、分支、缩放、运行状态和 Diff 的基础组件 | 不采用付费 Pro 模板，不把图形状态变成第二份 Workflow 权威 |
 
-当前已经锁定实现底座、信息架构和交互线框，但具体高保真视觉仍要由真实组件原型决定，不以生成图作为实施 oracle。Gate 0 必须交付 `geneway` 自有 token、四个核心页面和真实浏览器验证，Hive/Sharp Cell 不能代替这项设计门禁。
+当前已经锁定实现底座、信息架构和交互线框，但具体高保真视觉仍要由真实组件原型决定，不以生成图作为实施 oracle。Gate 0.1 只交付一个真实小纬产品纵切；四个核心路由、异常中心和表格属于 Gate 0.2。Hive/Sharp Cell 不能代替任何设计门禁。
 
 ### 2.1 正式 UI 组合
 
@@ -40,7 +40,7 @@ React + Vite
   ├─ Base UI                   # 无样式可访问组件
   ├─ assistant-ui              # 小纬 Thread / Composer / Tool / HITL
   │    └─ @assistant-ui/react-ag-ui
-  └─ TanStack Table            # 轻量 headless 业务表格
+  └─ TanStack Table            # Gate 0.2 起用于轻量 headless 业务表格
 
 AG-UI compatible adapter              # Control Plane/Runtime 事件 → UI projection
 @xyflow/react                         # immutable WorkflowVersion → Workflow graph
@@ -48,9 +48,9 @@ AG-UI compatible adapter              # Control Plane/Runtime 事件 → UI proj
 
 `geneway` 自己拥有路由、应用壳、业务页、权限投影、任务状态、DOM 和 design token。Ant Design、Ant Design X、ProComponents、MUI、CopilotKit 和 Assistant Cloud 不进入 MVP 运行依赖。
 
-assistant-ui 只负责对话交互行为和 AG-UI 事件解析。页面刷新先读取 Control Plane 快照，再按 event cursor 续传；`showThinking=false`，不展示原始 reasoning/思维链。
+assistant-ui 只负责对话交互行为和 AG-UI 事件解析。页面刷新先读取 Control Plane 快照，再按 event cursor 续传；`showThinking=false`，不展示原始 reasoning/思维链。Gate 0.1 禁用附件上传，只能选择服务端预置、脱敏、只读的 fixture；附件能力在 Gate 0.2 另行开放。
 
-TanStack Table 使用稳定版并由 lockfile 固定，不采用 beta。它只负责排序、筛选、分页、选择和展开。所有页面使用同一 `EnterpriseTable` wrapper；数据范围、服务端查询、字段权限和导出授权仍由 Control Plane/Connector Gateway 强制执行。
+TanStack Table 从 Gate 0.2 起使用稳定版并由 lockfile 固定，不采用 beta。它只负责排序、筛选、分页、选择和展开。所有页面使用同一 `EnterpriseTable` wrapper；数据范围、服务端查询、字段权限和导出授权仍由 Control Plane/Connector Gateway 强制执行。
 
 ## 3. 信息架构
 
@@ -207,9 +207,9 @@ TanStack Table 使用稳定版并由 lockfile 固定，不采用 beta。它只�
 
 第一版“认领、标记已知、处理方案、监控”只改变 `geneway` 内部状态，不写回 GearJob。每条异常必须保存检测规则、阈值、原始对象、时间范围和 Evidence。
 
-Gate 0 的异常动作必须按下表实现，不能用看起来可点击的按钮冒充真实能力：
+Gate 0.2 的异常动作必须按下表实现，不能用看起来可点击的按钮冒充真实能力：
 
-| 动作 | Gate 0 行为 | 门禁 |
+| 动作 | Gate 0.2 行为 | 门禁 |
 | --- | --- | --- |
 | 查看详情、规则、Evidence | 真实可用 | 按 tenant/resource 鉴权，不泄露隐藏字段 |
 | 认领、标记已知 | 真实可用，只改变 `geneway` 内部状态 | 服务端授权、审计、幂等和重复回调测试 |
@@ -267,12 +267,12 @@ React Flow 不读取 TS 模板或 Agent 原始输出，不保存第二份节点/
 
 | Gate | Workflow UI 行为 |
 | --- | --- |
-| Gate 0 | 展示固定模板经 Compiler 生成的只读节点图；可查看节点和批准准确 hash，不开放自由编辑 |
+| Gate 0.1 | 展示固定模板经 Compiler 生成的只读节点图；可查看节点和批准准确 hash，不开放自由编辑 |
 | Gate A | 展示 `solution.analysis.v1` 与单工单六节点固定流程；由普通 Worker Interpreter 执行 |
 | Gate B | 图和审批体验不变，只增加排队、等待、恢复和多 Agent 子任务状态 |
 | Gate C | 才显示 Agent 生成草稿、WorkflowPatch、condition/parallel/wait、图形 Diff 和重新审批 |
 
-UI 组件可以从 Gate 0 起支持绘制条件、并行和等待节点，但 Gate C 前不得由用户或 Agent 创建这些动态节点；收到未开放 kind 时必须显示“当前门禁不支持”并禁止审批。
+UI 组件可以从 Gate 0.1 起支持绘制条件、并行和等待节点，但 Gate C 前不得由用户或 Agent 创建这些动态节点；收到未开放 kind 时必须显示“当前门禁不支持”并禁止审批。
 
 ### 对话内确认卡
 
@@ -454,23 +454,30 @@ GearJob 第一版不展示完整 ERP 页面，只展示一个用户有权查看�
 
 所有验收必须使用真实 HTTP 服务和真实浏览器；不能把 Gate 0、A、B、C 的能力合称“第一版”。
 
-### Gate 0：产品骨架
+### Gate 0.1：安全产品纵切
 
-1. Base UI、assistant-ui、TanStack Table DOM 和 React Flow 必须共用同一 `genewayTheme`；Ant Design、Ant Design X、ProComponents、MUI、CopilotKit 和 Assistant Cloud 不在 MVP lockfile；
-2. 真实 Vite HTTP 应用交付 Codex 式应用壳，并分开交付小纬对话、异常与待办、Workflow 审批、任务与证据四个路由，不把全部信息挤入同一页；
+1. Base UI、assistant-ui 和 React Flow 必须共用同一 `genewayTheme`；Ant Design、Ant Design X、ProComponents、MUI、CopilotKit、TanStack Table 和 Assistant Cloud 不在 Gate 0.1 lockfile；
+2. 真实 Vite HTTP 应用交付 Codex 式应用壳和一个小纬方案分析路由；Workflow 审批、运行进度、结果和 Evidence 可在该任务上下文中展开，不要求四路由；
 3. 所有对话只显示小纬，不出现可直接聊天的专家 Agent 身份；
 4. 新建对话，分别验证“小纬自动安排”、指定一个专家和指定一个专家团；自然语言点名与选择器结果一致；
-5. 使用脱敏 fixture 发起 `solution.analysis.v1`；
+5. 从服务端清单选择预置、脱敏、只读的 fixture 发起 `solution.analysis.v1`；不出现任意上传、附件下载或 Artifact 存储入口；
 6. TS 固定模板经 Compiler 生成 WorkflowVersion，React Flow 只读节点图显示同一 `id + hash`；
 7. 点开节点查看输入输出、专家、工具、权限、预算和 Evidence；
-8. 查看 fake Runtime 结论与 Evidence、下载报告，刷新后恢复同一状态；
+8. 查看服务端 fake Runtime 结论与内联 Evidence，刷新后恢复同一状态；fake、fixture、simulation 标签在任务、步骤、结果和证据处持续可见；
 9. SSE 断线重连不重复消息；
-10. 异常中心展示设备停机和产能落后 fixture、详情、规则、Evidence 和去重状态；真实异常分析动作标记为模拟或暂不可用；
-11. Playwright 在 1440×900、1280×800 和 768×1024 通过四页视觉回归、键盘导航和状态非颜色唯一表达验收；1440px 验证三栏，1280px 验证检查器收起，768px 验证左右区域改为 Drawer、focus trap/关闭后焦点恢复、Composer 可用、Workflow 可平移缩放且表格无页面级横向溢出；
-12. assistant-ui 刷新、SSE 断线和乱序事件后从 Control Plane 快照/游标恢复；TanStack Table 的筛选、排序和分页使用服务端受控参数，Gate 0/A 无导出入口；
-13. 四个核心路由至少覆盖 empty、403、5xx 后重试恢复和 SSE replay；状态矩阵中的其余状态进入对应组件的 contract/Playwright 测试；
-14. Playwright 断言消息作者集合始终只有 `{user, xiaowei}`；专家名只允许出现在路由摘要、Workflow 节点、进度和 Evidence 归因中，不出现专家头像、独立 Composer、DM 或聊天链接；
-15. 原始视觉证据写入 `/tmp/geneway-runs/<run-id>/ui/`，文件名固定为 `gate0-<conversation|exceptions|workflow|task>-<1440x900|1280x800|768x1024>.png`；Git 只保存视觉结论和 evidence index，不提交整套原始截图。
+10. Playwright 在 1440×900、1280×800 和 768×1024 验证键盘导航和状态非颜色唯一表达；1440px 验证三栏，1280px 验证检查器收起，768px 验证左右区域改为 Drawer、focus trap/关闭后焦点恢复、Composer 可用、Workflow 可平移缩放；
+11. assistant-ui 刷新、SSE 断线和乱序事件后从 Control Plane 快照/游标恢复；
+12. Playwright 断言消息作者集合始终只有 `{user, xiaowei}`；专家名只允许出现在路由摘要、Workflow 节点、进度和 Evidence 归因中，不出现专家头像、独立 Composer、DM 或聊天链接；
+13. 成功路径不允许用 `page.setContent` 或 route interception `fulfill` 主 HTML、JS/CSS bundle、Control Plane API；页面 task id 必须与 API、Postgres 事件、WorkflowVersion/hash、ApprovalVersion 和 SSE cursor 对得上；
+14. 原始视觉证据写入 `/tmp/geneway-runs/<run-id>/ui/`；Git 只保存视觉结论和 evidence index，不提交整套原始截图。
+
+### Gate 0.2：完整产品骨架
+
+1. 增加异常与待办、Workflow、任务与证据路由，形成四路由状态矩阵；
+2. 引入 TanStack Table 和统一 `EnterpriseTable`，验证服务端筛选、排序、分页和权限；
+3. 开放受控上传、Artifact/VersityGW、报告下载和完整 Lineage；
+4. 异常中心展示设备停机和产能落后 fixture、详情、规则、Evidence 和去重状态；真实分析仍必须明确标记模拟或暂不可用；
+5. 四个路由覆盖 empty、403、5xx 后重试恢复和 SSE replay，并执行独立视觉回归。
 
 ### Gate A：真实 MVP
 

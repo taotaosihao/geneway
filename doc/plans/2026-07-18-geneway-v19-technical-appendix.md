@@ -1,12 +1,12 @@
 # geneway 制造业数字员工平台 v19 技术实施附录
 
-状态：`execution-ready after user authorization`
+状态：`supporting-implementation-reference`
 
 日期：2026-07-18
 
-面向产品、研发和实施的短版说明见[精简实施方案](2026-07-18-geneway-v19-reimplementation.md)。本文件保留数据模型、接口、故障恢复、安全和迁移细节。
+文档角色：支持性技术参考。本文件保留数据模型、接口、故障恢复、安全和迁移细节，但不授予实施范围；任何内容与当前合同冲突时，以 [`atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md`](atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md) 为准。长期阶段见[非执行路线图](2026-07-18-geneway-v19-reimplementation.md)。
 
-Atlas 任务：`20260715-044-paperclip-agent-mvp`
+当前 Atlas authority：`20260720-010-geneway-gate-0-1`；旧任务 `20260715-044-paperclip-agent-mvp` 仅作历史来源。
 
 产品设计来源：[`doc/reference/制造业数字员工平台_内部能力内核细节终审与兼容实施方案_v19.md`](../reference/制造业数字员工平台_内部能力内核细节终审与兼容实施方案_v19.md)
 
@@ -27,7 +27,7 @@ GitHub 仓库：taotaosihao/geneway
 本地目录：/home/gewu/work/geneway
 ```
 
-当前大写目录和 GitHub 仓库允许归档，但归档不等于直接删除：必须先将现有 Paperclip fork 做成可验证归档，再把原 GitHub 仓库重命名为归档仓库、创建新的小写 `geneway`，最后在新的小写本地路径克隆新仓库。旧仓库不再是运行依赖，只保留历史 Spike、分支、Issue/PR 和迁移证据。
+Gate R 已于 2026-07-19 关闭。旧仓库已做可验证归档，新小写 `geneway` 已成为唯一产品基地；归档过程和恢复证据见 [`../migrations/gate-r-verification.md`](../migrations/gate-r-verification.md)。旧仓库不再是运行依赖，只保留历史 Spike、分支、Issue/PR 和迁移证据。
 
 正式架构：
 
@@ -400,7 +400,7 @@ Codex 只作为信息架构参考，不作为 UI 技术来源：
 - 左侧异常入口显示未处理数量和最高严重度，设备异常和产能落后不能只藏在聊天或表格中。
 - 中间区域按 `/conversations/new?capability=...`、`/conversations/:id`、`/exceptions`、`/tasks/:id`、`/workflows/:id` 切换，每个页面只有一个主任务；`/xiaowei` 仅作为导航别名，重定向到 canonical 新会话入口，Playwright 和审计统一记录 canonical route。
 - 右侧只展示当前选中对象；无选中时隐藏，窄屏改为 Drawer。
-- 底部 Composer 固定提供附件、`ExpertTarget`、工厂/车间范围和发送；用户可自动安排、指定专家或指定专家团。
+- 底部 Composer 提供 `ExpertTarget`、工厂/车间范围和发送；用户可自动安排、指定专家或指定专家团。附件入口从 Gate 0.2 起开放，Gate 0.1 只选择服务端预置脱敏输入。
 - Codex 的 File Diff、Terminal、Repository 分别映射为 Workflow/报告版本 Diff、Connector 调用摘要和制造业工作上下文，不向普通员工展示开发工具术语。
 
 #### geneway design token 起始值
@@ -434,16 +434,18 @@ assistant-ui 的 Markdown 渲染必须通过允许列表和链接策略；用户
 
 TanStack Table 使用当前稳定版并由 lockfile 固定，不采用 beta。它只提供排序、筛选、分页、选择和展开等 headless 状态。服务端查询参数、租户范围、字段权限和导出授权由 `geneway` 控制；不得一次取回宽表后在浏览器过滤。所有业务页面只能使用 `packages/enterprise-table`，不得各自拼一套表格样式。
 
-#### Gate 0 UI 门禁
+#### Gate 0.1 UI 门禁
 
-1. 在真实 Vite HTTP 应用中交付 Codex 式应用壳，以及小纬对话、异常与待办、Workflow 审批、任务与证据四个独立路由；不得把全部信息挤在一张 Dashboard。
-2. 同一 `genewayTheme` 同时作用于 Base UI wrappers、assistant-ui、TanStack Table DOM 和 React Flow 自定义节点。
+1. 在真实 Vite HTTP 应用中交付 Codex 式应用壳和一个小纬方案分析产品纵切；固定 Workflow 审批、运行进度、结果与 Evidence 在同一任务上下文中展开。
+2. 同一 `genewayTheme` 同时作用于 Base UI wrappers、assistant-ui 和 React Flow 自定义节点。
 3. Playwright 在 1440×900、1280×800 和 768×1024 完成关键页截图回归、键盘导航和非颜色单一状态识别。
-4. 1440px 宽度显示左中右三栏；1280px 下右侧检查器可收起；768px 使用 Drawer，并验证 focus trap/关闭后焦点恢复、Composer、Workflow 平移缩放和表格无页面级横向溢出。
+4. 1440px 宽度显示左中右三栏；1280px 下右侧检查器可收起；768px 使用 Drawer，并验证 focus trap/关闭后焦点恢复、Composer 和 Workflow 平移缩放。
 5. 所有对话只显示小纬；专家只出现在选择器、Workflow 和任务进度中。
 6. assistant-ui 刷新、SSE 断线和乱序事件后从 Control Plane 快照/游标恢复；不得形成第二会话权威。
 7. dependency scan 必须证明 Ant Design、Ant Design X、ProComponents、MUI、CopilotKit 和 Assistant Cloud 不在运行依赖。
-8. 四个核心路由和 `EnterpriseTable` 覆盖 loading、empty、filtered-empty、403、404、409、5xx/offline、stale data 和 recoverable failure；Gate 0/A 隐藏表格导出，首次开放时只允许服务端按同一授权查询生成。
+8. 成功路径的主 HTML、JS/CSS bundle 与 Control Plane API 不允许由浏览器拦截伪造；页面 task id 必须与 API、Postgres 事件、WorkflowVersion/hash、ApprovalVersion 和 SSE cursor 关联。
+
+四个核心路由、`EnterpriseTable`、异常中心、上传/Artifact 和完整页面状态矩阵属于 Gate 0.2，不能成为 Gate 0.1 的退出条件。
 
 ### 6.3 对象存储标准：复用 Hive / Sharp Cell 的 VersityGW 路线
 
@@ -469,7 +471,7 @@ geneway ObjectStorageService
 - 公有云可以把同一 adapter 指向经兼容测试的云 S3 服务；更换 backend 不改变 `s3://bucket/key` 权威引用和上层合同。
 - 不部署 MinIO，不引入 MinIO 专用 SDK，也不以 MinIO 行为作为测试 oracle。
 
-Gate 0 必须完成 bucket 创建/探测、put/get/head/delete、tenant key 隔离、hash 校验、服务重启持久化和对象缺失错误标准化；Gate G 前必须完成 Postgres + VersityGW 联合 backup/restore 演练。
+Gate 0.2 必须完成 bucket 创建/探测、put/get/head/delete、tenant key 隔离、hash 校验、服务重启持久化和对象缺失错误标准化；Gate G 前必须完成 Postgres + VersityGW 联合 backup/restore 演练。Gate 0.1 不启动 VersityGW，也不开放上传或 Artifact 下载。
 
 本标准的本地依据是 Hive 的 `versitygw` POSIX backend + boto3 实现，以及 Sharp Cell 的 `versitygw:v1.5.0` + `@aws-sdk/client-s3` 实现。`geneway` 为 TypeScript-first，因此优先复用 Sharp Cell 的接口形状和 AWS SDK 客户端模式，同时吸收 Hive 的 tenant prefix、hash 与联合备份约束。
 
@@ -726,8 +728,8 @@ Compiler 必须完成：
 5. data class、action level、resource scope、audience、egress、预算、deadline 和 approval policy 校验。
 6. condition 的穷尽/默认路径、parallel fan-out/fan-in、timeout、retry 和 compensation 约束校验；这些动态语义在 Gate C 前必须 fail closed。
 7. 把所有可变引用解析成不可变版本 ID，物化默认参数和有效权限上限。
-8. 输出 canonical JSON：记录 `schemaVersion`、`compilerVersion`、`canonicalizationVersion`，对象键稳定排序；非语义 node/edge 集合按稳定 ID 排序，语义数组保持原顺序。
-9. 对 canonical UTF-8 JSON 计算 SHA-256；该 hash 同时绑定审批、图形投影、Interpreter 和版本 Diff。
+8. 输出 RFC 8785/JCS canonical JSON：记录 `schemaVersion`、`compilerVersion`、`canonicalizationVersion`；Zod 必须先物化默认值并拒绝 `undefined`、`NaN`、`Infinity`、BigInt、函数和循环引用。仅在业务 schema 明确声明集合无序时，Compiler 才能按稳定 ID 排序；其余数组保持语义顺序。
+9. 对 canonical UTF-8 JSON 计算 SHA-256；使用跨进程 golden vectors 验证 Unicode、数值、对象键和数组顺序一致。该 hash 同时绑定审批、图形投影、Interpreter 和版本 Diff。
 
 Compiler 不执行 Workflow，不调用模型或 Connector，也不能修改已经创建的 WorkflowVersion。
 
@@ -946,7 +948,9 @@ task dispatch
 
 ## 8. 核心数据设计与分阶段迁移
 
-### 8.1 Gate 0/A 必须有的表
+### 8.1 Gate 0.1 最小表集
+
+只建立首个安全纵切直接使用的表；不以预建未来表制造完成度。
 
 ```text
 tenants
@@ -955,25 +959,43 @@ roles
 resource_scopes
 
 conversations
-conversation_members
 messages
 
 business_tasks
 business_task_events
+business_task_steps
 
-capability_definitions
 capability_versions
-capability_implementation_bindings
-
 harness_versions
-
 workflow_versions
-workflow_runs
-workflow_steps
-workflow_run_bindings
-
 approval_versions
 
+delegated_capabilities
+policy_decisions
+minimal_evidence_refs
+
+outbox_events
+idempotency_records
+```
+
+### 8.2 Gate 0.2 增加
+
+```text
+conversation_members
+claims
+evidence_items
+evidence_links
+lineage_records
+artifacts
+artifact_manifests
+inbox_events
+audit_events
+```
+
+### 8.3 Gate A 增加
+
+```text
+capability_implementation_bindings
 agent_definitions
 agent_versions
 expert_definitions
@@ -989,26 +1011,12 @@ connector_executions
 domain_objects
 external_object_mappings
 
-claims
-evidence_items
-evidence_links
-lineage_records
-artifacts
-
-policy_decisions
-delegated_capabilities
-audit_events
-
 model_routes
 model_capabilities
 model_invocations
-
-outbox_events
-inbox_events
-idempotency_records
 ```
 
-### 8.2 Gate C 增加
+### 8.4 Gate C 增加
 
 ```text
 workflow_drafts
@@ -1016,7 +1024,7 @@ workflow_draft_validations
 workflow_version_approvals
 ```
 
-### 8.3 Gate D 增加
+### 8.5 Gate D 增加
 
 ```text
 domain_relations
@@ -1029,7 +1037,7 @@ exception_rule_versions
 exception_task_bindings
 ```
 
-### 8.4 Gate E 增加
+### 8.6 Gate E 增加
 
 ```text
 external_identities
@@ -1039,7 +1047,7 @@ channel_outbox
 channel_projection_state
 ```
 
-### 8.5 Gate G/I 增加
+### 8.7 Gate G/I 增加
 
 ```text
 capability_release_policies
@@ -1052,7 +1060,7 @@ agent_trust_records
 federation_calls
 ```
 
-### 8.6 数据库不变量
+### 8.8 数据库不变量
 
 - 每个业务表含 `tenant_id`，外键同时验证 tenant 一致性；
 - immutable version 表禁止 update mutable columns；
@@ -1312,13 +1320,13 @@ context_resolve
 
 实施按能力门推进，不按日历日期承诺。任何能力不得绕过自己的前置门禁；Gate D 只依赖 Gate A，可与 Gate B/C 并行，避免动态 Workflow 阻塞制造业核心价值。
 
-### Gate R：旧 GeneWay 安全归档与小写 geneway 新建
+### Gate R：旧 GeneWay 安全归档与小写 geneway 新建（已关闭）
 
-#### 目标
+#### 历史目标
 
-在不丢失当前 Paperclip fork、longtask 分支、worktree 和 GitHub 元数据的前提下，把正式产品身份切换为小写 `geneway` 和全新 Git 历史。此 Gate 涉及 GitHub 仓库重命名/新建和本地目录移动，必须单独获得实施授权。
+在不丢失 Paperclip fork、longtask 分支、worktree 和 GitHub 元数据的前提下，把正式产品身份切换为小写 `geneway` 和全新 Git 历史。该目标已经完成，不再属于当前执行范围。
 
-#### 交付物
+#### 已完成交付物
 
 1. `legacy-repository-inventory.md`：remotes、refs、worktrees、LFS/submodule、dirty/untracked、GitHub Issue/PR/Release/Actions/branch-protection 清单；未跟踪文件另做逐文件 hash 和归档，因为 Git bundle 不包含它们。
 2. `git bundle --all`、bare mirror、sha256、未跟踪文件归档和从 bundle 产生的临时恢复 clone。
@@ -1326,7 +1334,7 @@ context_resolve
 4. 新的私有 `taotaosihao/geneway` 和 `/home/gewu/work/geneway` clone，初始分支保护、访问控制、secret inventory（不复制 secret 值）和 Paperclip dependency/remote negative scan。
 5. 新仓库中的 v19、主实施计划、最终实施合同、ADR 和迁移清单。
 
-#### 退出条件
+#### 已通过退出条件
 
 - `git bundle verify` 通过；临时 clone 能 checkout master 和两个 longtask 分支，HEAD 与 inventory 一致；
 - 旧 GitHub Issues/PR/Releases 和权限配置有可审计归档/导出；
@@ -1337,9 +1345,7 @@ context_resolve
 - 新旧仓库、目录和对象名称无歧义，旧目录未被删除；
 - 用户确认新仓库为后续唯一产品代码基地。
 
-#### 停止条件
-
-归档验证、GitHub 权限、名称占用、worktree 可达性、未跟踪内容归档或外部引用迁移任一不确定时，保持当前仓库不动并返回用户决策，不进入 Gate 0。切换必须在没有 Agent/开发进程占用当前仓库、且 shell 位于 `/home/gewu/work` 等中立目录时执行。
+完整结果、受阻的 GitHub 私有分支保护条件及用户确认见 [`../migrations/gate-r-verification.md`](../migrations/gate-r-verification.md)。本节只作历史验收说明，不得触发重新归档、改名或移动目录。
 
 ### Gate 0：合同、模拟器与第一个可操作切片
 
@@ -1352,14 +1358,16 @@ context_resolve
 Gate 0 分为两个可审计切片：
 
 - **Gate 0.1 安全产品纵切**：Postgres migration、仅 loopback 可用的服务端 trusted-local principal、tenant isolation、最小 Authorization/delegated capability、Zod fixed-v1/Workflow Compiler/canonical hash、固定 HarnessVersion/WorkflowVersion/ApprovalVersion、最小 EvidenceRef/来源 hash/可访问性与 publish guard、Conversation/BusinessTask/BusinessTaskEvent API、最小 outbox、普通 Worker Interpreter和真实 served WebChat。用户必须在页面完成一次任务提交、审批、执行、结果和内联 Evidence 查看；该切片结束仍无安全闭环的真实 API + UI 即停止。
-- **Gate 0.2 完整产品骨架**：JSON Schema export parity/property tests、完整 Claim–Evidence–Lineage、Artifact/VersityGW、outbox/inbox 扩展、异常 fixture、恢复、完整 React Flow 和四路由状态矩阵。准备性合同、scanner、fixture 和 conformance 可并行，但不能替代 Gate 0.1。
+- **Gate 0.2 完整产品骨架**：上传、Artifact/VersityGW、完整 Claim–Evidence–Lineage、outbox/inbox 扩展、异常 fixture、恢复、TanStack Table 和四路由状态矩阵。Gate 0.2 不属于当前实施合同。
+
+Gate 0.1 的代码顺序是“基础合同 → 单一纵切”，但它们共同属于一个 Gate，不能把基础合同交付冒充产品验收。
 
 1. pnpm monorepo、CI、版本锁、许可证/NOTICE、基础 Compose。
 2. `legacy-migration-manifest` 与复用 conformance harness：先把旧分支 Runtime/Provider、SSE cursor、outbox/inbox、Evidence、storage 和 channel 可靠性资产分类为“直接提取 / 改合同提取 / 不迁移”。
 3. Capability、Harness、Workflow、Runtime、Tool、Connector、Channel、Authorization、Evidence、Model Routing、Outbox contracts；`AuthorizationService` 在 Gate 0.1 实现 Postgres resource scopes + Casbin domain RBAC 和 delegated capability，不延后到 Gate D。
 4. Gate 0.1 完成 Zod 4 fixed-v1 WorkflowDraft/WorkflowVersion schema、`z.infer` 类型、Workflow Compiler、canonical JSON/hash、固定 HarnessVersion 和普通 Worker Interpreter；Gate 0.2 再完成版本化 JSON Schema wire artifact 与 fixture export-parity/property suite。HarnessPatch/WorkflowPatch schema 后置 Gate C，不引入 TypeBox/Ajv 或全图类型推导。
 5. 最小 Postgres schema 和 migrations，包括 append-only `business_task_events` 事件账本、固定 Workflow 的 `approval_versions` 和 step attempt/lease/fencing 字段。
-6. Fake Runtime、Fake Model Gateway、Document fixture Connector、制造业异常 fixture Connector、Fake Channel，以及 VersityGW ObjectStorage adapter。
+6. Gate 0.1 只实现服务端 Fake Runtime 和预置、脱敏、只读的方案分析 fixture；Fake Model Gateway、制造业异常 fixture、Fake Channel、上传和 VersityGW ObjectStorage adapter 后置。
 7. Control Plane API：Conversation、BusinessTask、Capability 查询、expert/team 查询、event stream、Evidence 查询。
 8. 真实 WebChat route：
 
@@ -1370,30 +1378,31 @@ http://localhost:3200/conversations/new?capability=solution.analysis.v1
 9. 第一个代码纵切：在真实 HTTP WebChat 向小纬提交任务 → 选择自动/专家/专家团 → 服务端身份/tenant/权限校验 → 创建 BusinessTask/BusinessTaskEvent → 解析固定 HarnessVersion → Compiler 固化 WorkflowVersion/hash → ApprovalVersion 绑定准确快照 → 普通 Worker Interpreter 调用 fake Runtime → UI 显示结果和内联 Evidence。完整 Lineage、Artifact/下载和报告在 Gate 0.2 补齐。
 10. Gate 0.1 完成 BusinessTask/Event/outbox 同事务的最小实现；Gate 0.2 补齐 inbox、跨服务投递和重放矩阵。
 11. ADR 与 migration manifest 模板；ADR-WF-001 必须落库。
-12. `geneway` 自有 UI token 与核心高保真页面：小纬对话、专家选择、异常与待办、Workflow 图、任务详情；Hive/Sharp Cell UI 不作为验收替代。
-13. React Flow 只读运行图和审批预览；设备停机与产能落后各一条 fixture 可进入异常中心并展示规则、Evidence 与去重状态，真实异常分析入口标记为模拟或暂不可用。
+12. Gate 0.1 只交付小纬对话、专家选择、Workflow 审批图、运行进度和结果/Evidence 视图；Hive/Sharp Cell UI 不作为验收替代。
+13. Gate 0.1 的 React Flow 只读图和审批预览必须来自同一份 WorkflowVersion；异常与待办、设备停机、产能落后和任务表格后置 Gate 0.2。
 14. OIDC 接入前仅允许 loopback trusted-local dev session；principal 由服务端配置/session 派生，客户端提交的 tenant/user 无效，非 loopback 启动或受保护请求 fail closed。
-15. Gate A GearJob preflight：只读确认现有单 Work Order endpoint、认证方式、DocType/object 权限判断点、资源范围、字段 allowlist、审计字段和脱敏样例；只读检查不修改 GearJob。
+15. GearJob preflight 属于 Gate A 的进入准备，不属于 Gate 0.1 交付或验收。
 
-#### 必须先写的 Contract tests
+#### Gate 0.1 必须先写的 Contract tests
 
 ```text
 Capability version immutability
 tenant isolation
 Workflow DSL reject list
-Zod → JSON Schema artifact export parity
 Compiler graph/ref/registry/policy validation
 canonical JSON/hash determinism
 TS template and structured Draft fixture produce identical WorkflowDraft wire shape
 Approval payload hash
 Runtime idempotency/cursor
 Evidence publish guard
-outbox/inbox duplicate delivery
+outbox duplicate delivery
 delegated capability expiry
 expert target capability/policy validation
-channel event dedup
-model gateway bypass negative test
+客户端 tenant/user 伪造与非 loopback fail-closed
+成功路径禁止浏览器拦截主 HTML/bundle/Control Plane API
 ```
+
+JSON Schema export parity/property tests、inbox、channel dedup、Model Gateway bypass 和 Object Storage conformance 在对应后续 Gate 才成为必需检查。
 
 #### 退出条件
 
@@ -1401,19 +1410,21 @@ model gateway bypass negative test
 - 客户界面只显示小纬；用户可指定一个专家或专家团，专家 Agent 仅显示为后台步骤和结构化结论；
 - 指定不可用或不允许的专家时 fail closed 并给出可选项，不静默替换、不提权；
 - Workflow 节点图由同一 DSL 生成，点击节点可查看输入输出、权限和 Evidence；
-- 异常中心两类 fixture 的状态、去重和任务绑定可操作；
 - 重复提交同一 idempotency key 不创建第二个 BusinessTask；
 - fake Runtime 断线后按 cursor 重放；
 - Claim 无 Evidence 时发布失败；
-- VersityGW 的 put/get/head/delete、tenant key 隔离和容器重启持久化通过；
+- 页面、任务、审批、WorkflowVersion/hash、数据库事件和 SSE cursor 可按同一 task id 关联；
+- 所有 fake 结果、fixture 和模拟步骤均有醒目标识，不得伪装成真实模型或真实 ERP/MES 输出；
 - production packages 不依赖 `@paperclipai/*`；
 - 新 `geneway` 仓库没有 Paperclip upstream remote、历史 commit 或运行依赖；
 - 新产品代码扫描不到 `companyId`、`issueId`、`pipelineCaseId`、`builder.*`，迁移文档/fixture allowlist 除外；
-- 所有 Gate 0 测试通过。
+- `pnpm verify:gate0.1` 在同一 run 覆盖产品流与安全负向检查并通过。
+
+Gate 0.2 另行验收上传、Artifact/VersityGW、异常中心、TanStack Table、完整 Lineage、inbox/跨服务恢复和四路由状态矩阵，不得反向扩大 Gate 0.1。
 
 #### 停止条件
 
-Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，没有真实 served UI 产品行为时停止并缩小范围。
+Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，没有真实 served UI 产品行为时停止并缩小范围。若成功路径通过浏览器 `route.fulfill` 等方式伪造主页面、bundle 或 Control Plane API，也视为未通过。
 
 ---
 
@@ -1710,9 +1721,9 @@ Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，�
 
 ## 11. 旧 GeneWay 仓库安全归档、小写 geneway 新建与迁移计划
 
-### 11.1 安全重建顺序
+### 11.1 已完成的安全重建顺序（历史记录）
 
-实际实施获得 GitHub 外部变更授权后，严格按以下顺序执行。任何验证失败都停止，不删除或覆盖当前目录：
+以下步骤已在 Gate R 完成，仅用于解释当前仓库来源，不再构成可执行指令：
 
 1. 记录当前 `/home/gewu/work/GeneWay` 的 remotes、全部 refs、worktrees、submodules、LFS、dirty/untracked 文件、GitHub Issue/PR/Release/Actions/branch protection 和旧测试结果；为每个 dirty/untracked 文件生成 hash，并单独复制到归档区。
 2. 记录旧分支 HEAD：
@@ -1730,7 +1741,7 @@ codex/longtask-agent-mvp-implementation
 8. 将 v19 来源、当前主计划、实施合同、迁移清单和必要 ADR 作为新仓库首批文档落库；旧源码只按迁移矩阵选择性移植。
 9. 生成 `legacy-spike-manifest.md`，列出旧 commit、包、许可证、测试、归档位置和迁移分类。旧分支不 rebase、不 squash、不 merge/cherry-pick 整体进入新产品。
 
-仓库重命名、新建、权限设置和本地目录移动都是实施动作；本轮计划不执行。若 GitHub 重命名会破坏组织策略、Actions secret 或外部引用，则先建立经验证的 archive remote/镜像，再由用户选择迁移窗口。
+实际结果和未满足的外部托管限制以 [`../migrations/gate-r-verification.md`](../migrations/gate-r-verification.md) 为准。任何后续人员不得根据本节再次移动、归档或重建仓库。
 
 ### 11.2 文件级迁移矩阵
 
@@ -1978,7 +1989,7 @@ Gate 聚合命令从 `pnpm verify:gate0.1` 开始；该命令必须在同一 run
 ### 14.2 测试金字塔
 
 1. Contract/unit：schema、状态机、policy、mapping、deterministic calculation。
-2. Integration：Postgres、Hatchet、Object Storage、Gateway、Runtime fake。
+2. Integration：Gate 0.1 为 Postgres、Control Plane API、普通 Worker Interpreter 和 Runtime fake；Hatchet、Object Storage、Model Gateway 在各自开放 Gate 加入。
 3. Conformance：每个 Model、Runtime、Channel、Connector Adapter 同一套套件。
 4. Fault：kill/restart、duplicate、out-of-order、timeout、stale approval、partial delivery。
 5. Security：tenant escape、resource scope、audience leak、prompt injection、egress、secret scan。
@@ -1993,19 +2004,31 @@ Gate 聚合命令从 `pnpm verify:gate0.1` 开始；该命令必须在同一 run
 http://localhost:3200/conversations/new?capability=solution.analysis.v1
 ```
 
-方案分析操作：
+#### Gate 0.1：方案分析安全产品纵切
 
 1. 打开真实 HTTP server 提供的页面。
-2. 确认聊天区只有小纬一个数字员工身份，再上传脱敏需求文档 fixture。
+2. 确认聊天区只有小纬一个数字员工身份，再从服务端提供的清单选择一个预置、脱敏、只读 fixture；当前 Gate 不上传任意文件。
 3. 依次验证“小纬自动安排”、指定方案专家、指定方案专家团；选择结果在任务卡回显，但聊天发言人仍只有小纬。
 4. 提交 `solution.analysis.v1`。
 5. 打开由 DSL 生成的 React Flow 节点图，点选节点查看权限、输入输出和 Evidence。
-6. 修改一个 Workflow 参数，确认图形 Diff 可见且旧审批失效。
-7. 批准精确版本，看到 BusinessTask、“小纬的专家团进度”和流式 Step 状态。
-8. 打开 Evidence drawer，检查至少一个 Claim 的来源链。
-9. 下载报告 Artifact。
-10. 刷新页面，图、状态和证据仍可恢复。
-11. 断开 SSE 后用 cursor 续传，不重复消息。
+6. 批准精确 WorkflowVersion/hash，看到 BusinessTask、“小纬的专家团进度”和流式 Step 状态。
+7. 打开 Evidence drawer，检查至少一个 Claim 与预置来源 hash。
+8. 确认结果、进度和 Evidence 均醒目标记为 simulation/fake，不能误认为真实模型或 ERP/MES 输出。
+9. 刷新页面，图、状态和证据仍可恢复。
+10. 断开 SSE 后用 cursor 续传，不重复消息。
+11. 使用页面 task id 对照 Control Plane API、Postgres 事件、WorkflowVersion/hash、ApprovalVersion 和 SSE cursor，确认属于同一任务。
+
+成功路径不得用 `page.setContent`，也不得用 Playwright/browser route interception `fulfill` 主 HTML、JS/CSS bundle 或 Control Plane API。仅允许拦截明确列入故障注入用例的外部依赖，并在证据中列出。
+
+#### Gate 0.2：上传、Artifact 与异常中心
+
+1. 上传脱敏文档并形成受控 Artifact。
+2. 下载报告 Artifact，校验 tenant key 和内容 hash。
+3. 打开 `/exceptions`，看到一条设备停机和一条产能进度落后 fixture。
+4. 重放同一检测事件，确认不生成第二条活动异常。
+5. 低权限用户访问不属于其资源范围的异常详情时返回拒绝，不泄露摘要或 Artifact。
+
+#### Gate A：GearJob 简单任务
 
 GearJob 简单任务操作：
 
@@ -2015,16 +2038,11 @@ GearJob 简单任务操作：
 4. 用无权限工单、未知工单、`qty=0` 和字段缺失 fixture 验证拒绝/缺失状态，不出现模型猜测。
 5. 重复请求相同 idempotency key，不重复创建 Task 或查询快照。
 
-异常中心操作：
+#### Gate C：动态 Draft/Patch
 
-1. 打开 `/exceptions`，看到一条设备停机和一条产能进度落后 fixture。
-2. 重放同一检测事件，确认不生成第二条活动异常。
-3. 对设备异常选择“让小纬分析”，看到设备、生产、质量专家作为后台步骤运行。
-4. 小纬返回事实、影响、未知项、建议和 Evidence；专家不作为独立聊天成员发言。
-5. 将异常推进到监控中并刷新页面，状态和任务绑定保持一致。
-6. 低权限用户访问不属于其资源范围的异常详情时返回拒绝，不泄露摘要或 Artifact。
-
-不得用 `page.setContent`、伪造 HTML、拦截主文档/JS/CSS bundle 或 build-only 证明替代 served UI 验收。
+1. Agent 生成结构化 WorkflowDraft/WorkflowPatch，不生成或执行 TypeScript。
+2. 修改一个执行相关参数后，Compiler 生成新 WorkflowVersion/hash。
+3. UI 显示图形和语义 Diff，旧审批失效；重新批准后才能执行。
 
 ### 14.4 证据保存
 
@@ -2051,8 +2069,8 @@ phase-review-report.md
 
 ```mermaid
 flowchart LR
-  A0["归档旧 GeneWay 并新建 geneway"] --> F0["冻结旧分支与迁移清单"]
-  F0 --> G0["Gate 0 复用 conformance + 首个纵切"]
+  A0["Gate R 已完成：归档旧 GeneWay 并新建 geneway"] --> F0["冻结旧分支与迁移清单"]
+  F0 --> G0["Gate 0.1 安全产品纵切"]
   G0 --> GA["Gate A 订阅 MVP + 单工单查询"]
   GA --> GB["Gate B Hatchet + 固定多 Agent"]
   GB --> GC["Gate C 动态 Workflow + 重新审批"]
@@ -2069,12 +2087,12 @@ flowchart LR
 
 | 工作流 | 最早开始 | 不能越过的门 |
 | --- | --- | --- |
-| WebChat | Gate 0 | 必须与首个纵切同时交付 |
-| OpenAI Runtime + Codex 订阅 dev profile 迁移 | Gate 0 合同冻结后 | Gate A 前完成；必须串行、可信本机、fail closed |
-| Model Gateway | Gate 0 合同冻结后 | Gate A 前完成 |
-| Hatchet spike | Gate 0 后 | 不得阻塞 Gate A 单 Runtime闭环；Gate B 才成为必需 |
+| WebChat | Gate 0.1 | 必须与首个纵切同时交付 |
+| OpenAI Runtime + Codex 订阅 dev profile 迁移 | Gate 0.1 关闭后 | Gate A 前完成；必须串行、可信本机、fail closed |
+| Model Gateway | Gate 0.1 关闭后 | Gate A 前完成 |
+| Hatchet spike | Gate 0.1 后 | 不得阻塞 Gate A 单 Runtime闭环；Gate B 才成为必需 |
 | 飞书 Adapter 迁移 | Channel contract 冻结后 | Gate E 前不得进入主链路 |
-| GearJob 单 Work Order mapping | Gate 0 合同冻结后 | Gate A 只开放一个受控只读 action |
+| GearJob 单 Work Order mapping | Gate 0.1 关闭后 | Gate A 只开放一个受控只读 action |
 | Context Graph / GearJob 高级 mapping | Gate A 后可并行 | Gate D 才开放多对象、异常和日报 |
 | Claude Adapter | Runtime conformance 冻结后 | Gate F 才影响产品路由 |
 | AgentTeams/A2A | Gate G 后 | 不能提前成为运行依赖 |
@@ -2217,21 +2235,11 @@ AgentTeams、DeerFlow、AgentScope、LangBot 不进入默认安装清单。
 
 ---
 
-## 19. 实施开始前的授权清单
+## 19. 当前授权边界
 
-本计划完成后，真正开工前只需一次明确授权，确认以下动作：
+Gate R 已完成，不得根据本文再次归档、移动或重建仓库。当前修订只授权实施文档和权威合同收敛，不授权产品代码实现。
 
-1. 将旧 GitHub `taotaosihao/GeneWay` 重命名为归档仓库，并在 bundle/bare mirror 恢复验证后创建新的 `taotaosihao/geneway`；
-2. 将旧本地目录移动为日期化归档目录，并在 `/home/gewu/work/geneway` 克隆新的产品仓库；
-3. 产品名、仓库名和代码身份统一使用小写 `geneway`，不创建临时产品名；
-4. 采用本计划的 TypeScript-first 技术基线和 VersityGW 对象存储基线，不使用 MinIO；
-5. 冻结旧 longtask 分支，不合并、不删除；
-6. 先执行 Gate 0；Gate A 使用旧分支已验证的共享 Codex 订阅测试车道完成 `solution.analysis.v1` 和 GearJob 单工单查询，再通过 Gate D 扩展异常助理和生产日报；
-7. 允许按迁移矩阵读取并选择性移植旧代码，优先提取 runtime/provider、可靠事件和测试资产，不整包 cherry-pick；
-8. 共享订阅由具名 owner 维护，只允许可信本机、单 active run；不得把 token 复制进新仓库、数据库、S3、日志或客户部署；
-9. 用户可以指定专家/专家团，但选择不扩大权限，客户渠道仍只显示小纬；
-10. 不接其他真实 secret、模型、MES 或渠道，直到对应 Gate 获得独立授权；
-11. 本地实现完成后的提交、推送、建 PR、部署仍分别遵循独立授权。
+下一次如获明确实现授权，只能执行 [`atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md`](atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md) 定义的 Gate 0.1。Gate 0.2、Gate A 及以后各 Gate 必须各自形成可审计合同并另行授权。提交、推送、建 PR、部署和跨仓修改仍分别遵循独立权限边界。
 
 ---
 
@@ -2286,7 +2294,7 @@ Gate H 专家协作和 Gate I 外部 Agent 联邦属于后续扩展，不阻塞�
 | 依据 | 用途 |
 | --- | --- |
 | `doc/reference/制造业数字员工平台_内部能力内核细节终审与兼容实施方案_v19.md` | 产品内核、Capability、Workflow、Approval、Evidence 与兼容路线权威来源 |
-| 当前旧 origin `git@github.com:taotaosihao/GeneWay.git` 和旧本地 `/home/gewu/work/GeneWay` | 确认它们是待归档的 Paperclip fork；新 canonical identity 为小写 `geneway` |
+| Gate R 归档记录中的旧 origin `git@github.com:taotaosihao/GeneWay.git` 和旧本地 `/home/gewu/work/GeneWay` | 记录已归档 Paperclip fork 的历史身份；当前 canonical identity 为小写 `geneway` |
 | `/home/gewu/work/hive/docker-compose.yml` | 确认 Hive 部署 VersityGW POSIX backend、独立 data/versioning/IAM 路径与 `:7070` S3 endpoint |
 | `/home/gewu/work/hive/backend/app/services/object_storage.py` | 确认 Hive 使用 boto3 S3 contract、path-style、tenant prefix、sha256 与 bucket lifecycle |
 | `/home/gewu/work/sharp-cell/docker-compose.yml` | 确认 Sharp Cell 使用固定 `ghcr.io/versity/versitygw:v1.5.0`、POSIX backend 和 `FMS_S3_*` 配置集合 |

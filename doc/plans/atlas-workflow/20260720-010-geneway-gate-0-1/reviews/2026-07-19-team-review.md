@@ -1,5 +1,7 @@
 # 2026-07-19 实施合同 Team Review
 
+> 历史审计记录：本文件审查的是旧任务 `20260715-044-paperclip-agent-mvp` revision 7。其 `GO/P0/P1=0` 结论已被 2026-07-20 按更新版 `clarify/team` 规则进行的复审取代，不再表示当前合同 ready，也不授予 Gate 0.1 实施权限。当前唯一合同见 [`../implementation-contract.final.md`](../implementation-contract.final.md)。
+
 任务：`20260715-044-paperclip-agent-mvp`
 
 ## 结论
@@ -58,7 +60,7 @@ revision 7 合同为 196 行，较修订前减少字段级重复；新增条款�
 ```bash
 node "$ATLAS_WORKFLOW_PLUGIN_ROOT/scripts/codex-implementation-contract-lint" \
   --strict \
-  --file doc/plans/atlas-workflow/20260715-044-geneway-v19-reimplementation/implementation-contract.final.md
+  --file doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md
 
 ~/.codex/workflow/bin/codex-workflow ready \
   20260715-044-paperclip-agent-mvp \

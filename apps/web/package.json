@@ -1,0 +1,27 @@
+{
+  "name": "@geneway/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "^0.14.27",
+    "@base-ui/react": "^1.6.0",
+    "@geneway/contracts": "workspace:*",
+    "@geneway/ui": "workspace:*",
+    "@xyflow/react": "^12.11.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.14",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^6.0.3",
+    "typescript": "^5.9.2",
+    "vite": "^8.1.5"
+  }
+}

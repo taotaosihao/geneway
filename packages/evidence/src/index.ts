@@ -3,10 +3,14 @@ import { z } from 'zod';
 import { GenewayError, simulationEnvelopeSchema } from '@geneway/contracts';
 
 export const FIXTURE_EXCERPT = '系统需支持生产工单全过程跟踪，并对质量检验批次提供可追溯记录。';
+export const FIXTURE_REF = 'fixture:solution-analysis:v1' as const;
+export const FIXTURE_VERSION = 1 as const;
+export const FIXTURE_SOURCE_ID = `${FIXTURE_REF}#requirements` as const;
 export const POSITIVE_CLAIM_TEXT = '当前材料明确要求生产工单跟踪和质量追溯';
 export const UNSUPPORTED_CLAIM_TEXT = '当前材料要求直接控制设备';
 
 export const sha256Text = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex');
+export const FIXTURE_CONTENT_HASH = sha256Text(FIXTURE_EXCERPT);
 
 export const evidenceCandidateSchema = z.object({
   id: z.string().min(1),

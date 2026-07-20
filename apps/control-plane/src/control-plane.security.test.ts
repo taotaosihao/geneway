@@ -3,6 +3,7 @@ import path from 'node:path';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { SIMULATION_ENVELOPE, type Principal } from '@geneway/contracts';
 import { FakeRuntime } from '@geneway/runtime';
+import { sha256Text } from '@geneway/evidence';
 import { createSolutionAnalysisDraft, compileWorkflow } from '@geneway/workflow';
 import { createControlPlane, type ControlPlane } from './index.js';
 
@@ -81,6 +82,27 @@ describe('Gate 0.1 security boundaries', () => {
     const workflow = await controlPlane.repository.getWorkflow(principal, created.workflowVersionId);
     await expect(controlPlane.repository.startTask(principal.tenantId, created.taskId, workflow)).rejects.toMatchObject({ code: 'APPROVAL_EXPIRED' });
     await expect(controlPlane.repository.getTask(principal, created.taskId)).resolves.toMatchObject({ status: 'approved' });
+  });
+
+  it('rejects evidence that is self-consistent but does not match the approved fixture snapshot', async () => {
+    const created = await createTask();
+    const principal = { tenantId: 'tenant_local', userId: 'user_local', trust: 'trusted-local' } as const;
+    const output = new FakeRuntime().executeStep('evidence_verify', {
+      tenantId: principal.tenantId,
+      businessTaskId: created.taskId,
+      fixtureRef: 'fixture:solution-analysis:v1',
+    });
+    expect(output.evidence).toBeDefined();
+    const mismatchedExcerpt = '这段内容自身 hash 正确，但并不属于任务批准的固定 fixture。';
+    const mismatchedEvidence = {
+      ...output.evidence!,
+      sourceExcerpt: mismatchedExcerpt,
+      sourceHash: sha256Text(mismatchedExcerpt),
+    };
+    await expect(controlPlane.repository.publishEvidenceAndClaims(principal.tenantId, created.taskId, mismatchedEvidence, output.claims ?? []))
+      .rejects.toMatchObject({ code: 'EVIDENCE_FIXTURE_SNAPSHOT_MISMATCH' });
+    const stored = await controlPlane.repository.pool.query('SELECT 1 FROM minimal_evidence_refs WHERE tenant_id=$1 AND business_task_id=$2', [principal.tenantId, created.taskId]);
+    expect(stored.rowCount).toBe(0);
   });
 
   it('validates the final simulation result before mutating authority state', async () => {

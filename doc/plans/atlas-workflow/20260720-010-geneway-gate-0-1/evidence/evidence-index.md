@@ -1,13 +1,15 @@
 # geneway Gate 0.1 证据索引
 
-当前为合同修订阶段，尚无 Gate 0.1 产品通过证据。
+更新时间：2026-07-21（Asia/Shanghai）
 
-## 已有前置证据
+本目录只保存可复核的精简摘要。最新整门运行的 Playwright JSON 和原始制品位于 `/tmp/geneway-runs/gate-0.1-1784576455020-2373368/`，不进入 Git。每次 E2E 都使用唯一 `GENEWAY_RUN_ID`；失败时截图、视频和 trace 也写入对应 run 目录。
 
-- Gate R 已关闭：[`../../../../migrations/gate-r-verification.md`](../../../../migrations/gate-r-verification.md)
-- 旧 revision 7 review：[`../reviews/2026-07-19-team-review.md`](../reviews/2026-07-19-team-review.md)，仅为历史审计，原 `GO/P0/P1=0` 结论已被 2026-07-20 新规则复审取代。
-- 新 authority brief：`$CODEX_WORKFLOW_ROOT/artifacts/20260720-010-geneway-gate-0-1/team/sdd/slices/gate-0-1/brief.json`
+- `gate-0.1-contract.txt`：合同与 authority slice 对齐摘要。
+- `gate-0.1-quality-summary.md`：lint、类型、单测和构建。
+- `gate-0.1-safety-summary.md`：真实 Postgres、安全和 simulation 门禁。
+- `gate-0.1-workflow-summary.md`：Schema、Compiler、canonical hash 和七节点图。
+- `gate-0.1-ui-summary.md`：真实 served UI 与 Playwright 用户流。
+- `gate-0.1-api-ui-correlation.md`：Browser/API/Postgres 实体关联。
+- `gate-0.1-phase-review.md`：统一门禁结论和剩余边界。
 
-## 后续证据规则
-
-Gate 0.1 产品证据只有在实施获得授权并真实运行后生成。原始日志、Playwright trace/video/HAR、API dump 和数据库 dump 默认放在 `/tmp/geneway-runs/<run-id>/`，Git 只保留最终 gate checklist、phase review 和精简 evidence index。
+前置 Gate R 证据仍位于 [`../../../../migrations/gate-r-verification.md`](../../../../migrations/gate-r-verification.md)。

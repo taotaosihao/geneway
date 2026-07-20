@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { GenewayError, SIMULATION_ENVELOPE } from '@geneway/contracts';
-import { FIXTURE_EXCERPT, POSITIVE_CLAIM_TEXT, UNSUPPORTED_CLAIM_TEXT, sha256Text, type ClaimCandidate, type EvidenceCandidate } from '@geneway/evidence';
+import { FIXTURE_CONTENT_HASH, FIXTURE_EXCERPT, FIXTURE_SOURCE_ID, POSITIVE_CLAIM_TEXT, UNSUPPORTED_CLAIM_TEXT, type ClaimCandidate, type EvidenceCandidate } from '@geneway/evidence';
 
 export type FakeRuntimeContext = Readonly<{ tenantId: string; businessTaskId: string; fixtureRef: 'fixture:solution-analysis:v1' }>;
 export type FakeStepOutput = Readonly<{
@@ -29,9 +29,9 @@ export class FakeRuntime {
         const evidence: EvidenceCandidate = {
           id: `evidence_${randomUUID()}`,
           ...base,
-          sourceId: 'fixture:solution-analysis:v1#requirements',
+          sourceId: FIXTURE_SOURCE_ID,
           sourceExcerpt: FIXTURE_EXCERPT,
-          sourceHash: sha256Text(FIXTURE_EXCERPT),
+          sourceHash: FIXTURE_CONTENT_HASH,
           resourceScope: 'fixture:solution-analysis:v1',
           dataClass: 'C1',
           accessible: true,

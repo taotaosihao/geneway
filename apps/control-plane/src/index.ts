@@ -1,9 +1,10 @@
 import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { assertTrustedOrigin, deriveTrustedLocalPrincipal } from '@geneway/authorization';
-import { createTaskInputSchema, isGenewayError, type Principal } from '@geneway/contracts';
+import { deriveTrustedLocalPrincipal } from '@geneway/authorization';
+import { createTaskInputSchema, GenewayError, isGenewayError, type Principal } from '@geneway/contracts';
 import { WorkflowInterpreter } from '@geneway/worker';
+import { FIXTURE_CONTENT_HASH, FIXTURE_EXCERPT, FIXTURE_REF, FIXTURE_VERSION } from '@geneway/evidence';
 import { ControlPlaneRepository } from './repository.js';
 
 declare module 'fastify' {
@@ -17,17 +18,19 @@ const idempotencyKey = (request: FastifyRequest): string => {
   return typeof value === 'string' ? value : '';
 };
 
-const requireMutationOrigin = (request: FastifyRequest): void => {
+const requireMutationOrigin = (request: FastifyRequest, allowedOrigins: ReadonlySet<string>): void => {
   if (request.method !== 'GET' && request.method !== 'HEAD' && request.method !== 'OPTIONS') {
-    assertTrustedOrigin(request.headers.origin);
+    const origin = request.headers.origin;
+    if (origin !== undefined && !allowedOrigins.has(origin)) throw new GenewayError('ORIGIN_NOT_ALLOWED', 'Cross-origin writes are not allowed', 403);
   }
 };
 
 export type ControlPlane = Readonly<{ app: FastifyInstance; repository: ControlPlaneRepository }>;
 
-export async function createControlPlane(options: Readonly<{ databaseUrl: string; logger?: boolean }>): Promise<ControlPlane> {
+export async function createControlPlane(options: Readonly<{ databaseUrl: string; logger?: boolean; allowedOrigins?: readonly string[] }>): Promise<ControlPlane> {
   const repository = new ControlPlaneRepository(options.databaseUrl);
   await repository.ensureSystemSeed();
+  const allowedOrigins = new Set(options.allowedOrigins ?? ['http://localhost:3200', 'http://127.0.0.1:3200']);
   const app = Fastify({ logger: options.logger ?? false, trustProxy: false, bodyLimit: 64 * 1024 });
   app.decorateRequest('principal', {
     getter(this: FastifyRequest) {
@@ -35,14 +38,14 @@ export async function createControlPlane(options: Readonly<{ databaseUrl: string
     },
   });
   await app.register(cors, {
-    origin: ['http://localhost:3200', 'http://127.0.0.1:3200'],
+    origin: [...allowedOrigins],
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['content-type', 'idempotency-key'],
   });
 
   app.addHook('onRequest', (request, _reply, done) => {
     void request.principal;
-    requireMutationOrigin(request);
+    requireMutationOrigin(request, allowedOrigins);
     done();
   });
 
@@ -85,9 +88,21 @@ export async function createControlPlane(options: Readonly<{ databaseUrl: string
 
   app.get('/api/capabilities/:id', async (request, reply) => {
     const params = z.object({ id: z.string() }).parse(request.params);
-    if (params.id !== 'solution.analysis.v1') return reply.status(404).send({ error: { code: 'CAPABILITY_NOT_FOUND' } });
+    if (params.id !== 'solution.analysis.v1') return reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'Capability is not open in Gate 0.1' } });
     return { id: params.id, version: 1, workflowNodeCount: 7, fixtureRef: 'fixture:solution-analysis:v1', simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false };
   });
+
+  app.get('/api/fixtures/solution-analysis-v1', () => ({
+    ref: FIXTURE_REF,
+    version: FIXTURE_VERSION,
+    name: '脱敏制造执行需求说明',
+    description: '预置只读材料，用于验证方案分析、质量追溯与证据引用。',
+    excerpt: FIXTURE_EXCERPT,
+    contentHash: FIXTURE_CONTENT_HASH,
+    simulation: true,
+    runtimeMode: 'fake',
+    businessDecisionAllowed: false,
+  }));
 
   app.get('/api/experts', async (request, reply) => {
     const query = z.object({ capabilityId: z.string() }).parse(request.query);
@@ -149,13 +164,15 @@ export async function createControlPlane(options: Readonly<{ databaseUrl: string
     return repository.executeIdempotently(request.principal, params.id, idempotencyKey(request), async () => {
       const task = await repository.getTask(request.principal, params.id);
       const workflow = await repository.getWorkflow(request.principal, task.workflowVersion.id);
-      await new WorkflowInterpreter(repository).execute({
+      await repository.startTask(request.principal.tenantId, params.id, workflow);
+      void new WorkflowInterpreter(repository, undefined, 30).execute({
         tenantId: request.principal.tenantId,
         taskId: params.id,
         fixtureRef: 'fixture:solution-analysis:v1',
         workflow,
-      });
-      return { taskId: params.id, status: 'completed' };
+        alreadyStarted: true,
+      }).catch((error: unknown) => app.log.error(error));
+      return { taskId: params.id, status: 'accepted' };
     });
   });
 

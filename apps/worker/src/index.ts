@@ -18,6 +18,7 @@ export class WorkflowInterpreter {
   constructor(
     private readonly port: InterpreterControlPort,
     private readonly runtime = new FakeRuntime(),
+    private readonly stepPacingMs = 0,
   ) {}
 
   async execute(input: Readonly<{
@@ -25,11 +26,14 @@ export class WorkflowInterpreter {
     taskId: string;
     fixtureRef: 'fixture:solution-analysis:v1';
     workflow: CompiledWorkflowVersion;
+    alreadyStarted?: boolean;
   }>): Promise<void> {
-    let ownsExecution = false;
+    let ownsExecution = input.alreadyStarted === true;
     try {
-      await this.port.startTask(input.tenantId, input.taskId, input.workflow);
-      ownsExecution = true;
+      if (!ownsExecution) {
+        await this.port.startTask(input.tenantId, input.taskId, input.workflow);
+        ownsExecution = true;
+      }
       const summaries: string[] = [];
       for (const node of input.workflow.payload.nodes) {
         const attemptId = `attempt_${randomUUID()}`;
@@ -44,6 +48,7 @@ export class WorkflowInterpreter {
         }
         await this.port.completeStep(input.tenantId, input.taskId, node.id, lease, output);
         summaries.push(output.summary);
+        if (this.stepPacingMs > 0) await new Promise((resolve) => setTimeout(resolve, this.stepPacingMs));
       }
       await this.port.completeTask(input.tenantId, input.taskId, {
         kind: 'completed',

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import pg, { type PoolClient } from 'pg';
 import { authorize, delegatedCapabilitySchema, type DelegatedCapability } from '@geneway/authorization';
 import { GenewayError, SIMULATION_ENVELOPE, taskResultSchema, taskSnapshotSchema, type CreateTaskInput, type Principal, type TaskSnapshot } from '@geneway/contracts';
-import { assertPublishableClaim, claimCandidateSchema, verifyEvidence, type ClaimCandidate, type EvidenceCandidate } from '@geneway/evidence';
+import { FIXTURE_CONTENT_HASH, FIXTURE_EXCERPT, FIXTURE_REF, FIXTURE_SOURCE_ID, FIXTURE_VERSION, assertPublishableClaim, claimCandidateSchema, verifyEvidence, type ClaimCandidate, type EvidenceCandidate } from '@geneway/evidence';
 import type { InterpreterControlPort, StepLease } from '@geneway/worker';
 import {
   SOLUTION_CAPABILITY_VERSION_ID,
@@ -49,7 +49,7 @@ type ApprovalRow = {
 };
 
 export type CreatedTask = Readonly<{ taskId: string; approvalId: string; workflowVersionId: string; workflowHash: string }>;
-export type ExecutionResponse = Readonly<{ taskId: string; status: 'completed' }>;
+export type ExecutionResponse = Readonly<{ taskId: string; status: 'accepted' | 'completed' }>;
 
 const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
 
@@ -118,7 +118,13 @@ export class ControlPlaneRepository implements InterpreterControlPort {
       const taskId = id('task');
       const approvalId = id('approval');
       const delegatedId = id('capability');
-      const inputSnapshot = { fixtureRef: input.fixtureRef, fixtureVersion: 1, fixtureHash: hashCanonical({ fixtureRef: input.fixtureRef, version: 1 }) };
+      const inputSnapshot = {
+        fixtureRef: FIXTURE_REF,
+        fixtureVersion: FIXTURE_VERSION,
+        fixtureSourceId: FIXTURE_SOURCE_ID,
+        fixtureExcerpt: FIXTURE_EXCERPT,
+        fixtureContentHash: FIXTURE_CONTENT_HASH,
+      };
       const permissionScope = { actions: ['R0', 'R1', 'A1'], resourceScopes: [input.fixtureRef], dataClasses: ['C0', 'C1'] };
       const audienceScope = { kind: 'private-conversation', ids: [`conversation:${input.conversationId}`] };
       const budget = { maxRuntimeMs: 30_000, maxModelCost: 0, modelCallsAllowed: false };
@@ -356,6 +362,12 @@ export class ControlPlaneRepository implements InterpreterControlPort {
 
       if (evidence !== undefined) {
         verifyEvidence(evidence, tenantId, taskId, new Set(capability.resourceScopes));
+        const snapshot = task.input_snapshot;
+        if (snapshot.fixtureRef !== FIXTURE_REF || snapshot.fixtureVersion !== FIXTURE_VERSION
+          || snapshot.fixtureSourceId !== evidence.sourceId || snapshot.fixtureExcerpt !== evidence.sourceExcerpt
+          || snapshot.fixtureContentHash !== evidence.sourceHash) {
+          throw new GenewayError('EVIDENCE_FIXTURE_SNAPSHOT_MISMATCH', 'Evidence does not match the approved fixed fixture snapshot', 409);
+        }
         await client.query(`INSERT INTO minimal_evidence_refs
           (tenant_id,id,business_task_id,source_id,source_excerpt,source_hash,resource_scope,data_class,accessible,
            simulation,runtime_mode,business_decision_allowed)

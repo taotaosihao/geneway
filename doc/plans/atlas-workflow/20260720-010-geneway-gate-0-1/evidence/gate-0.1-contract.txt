@@ -1,0 +1,13 @@
+geneway Gate 0.1 contract alignment
+checked_at=2026-07-21 Asia/Shanghai
+contract=implementation-contract.final.md
+contract_status=final
+contract_semantics_version=2
+task_id=20260720-010-geneway-gate-0-1
+authority_slice=gate-0-1
+authority_base_sha=f842119874da88b4f74c8e7eb03f45766ef29b7f
+served_vertical_base_sha=42f5ae3
+repository=/home/gewu/work/geneway
+browser_entrypoint=http://127.0.0.1:<auto-free-port>/conversations/new?capability=solution.analysis.v1
+scope_result=owned paths only; no doc/reference, GearJob, archive, Hatchet, provider, connector, upload, download or abnormal-center implementation
+note=E2E allocates unique run ids and free Control Plane/Web ports; the final contract and authority brief were read directly before implementation

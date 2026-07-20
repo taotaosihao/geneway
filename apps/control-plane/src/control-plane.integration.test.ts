@@ -52,8 +52,13 @@ describe('Control Plane + Postgres + Interpreter integration', () => {
     const created = await createApprovedTask(mode);
     const executed = await controlPlane.app.inject({ method: 'POST', url: `/api/business-tasks/${created.taskId}/execute`, headers: headers(`execute-${mode}-000001`) });
     expect(executed.statusCode, executed.body).toBe(200);
+    expect(executed.json()).toEqual({ taskId: created.taskId, status: 'accepted' });
 
-    const snapshotResponse = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${created.taskId}` });
+    let snapshotResponse = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${created.taskId}` });
+    for (let attempt = 0; attempt < 100 && snapshotResponse.json<{ status: string }>().status !== 'completed'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      snapshotResponse = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${created.taskId}` });
+    }
     expect(snapshotResponse.statusCode, snapshotResponse.body).toBe(200);
     const snapshot = snapshotResponse.json<{
       id: string; status: string; workflowVersion: { id: string; hash: string }; approval: { status: string };

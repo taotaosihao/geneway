@@ -268,11 +268,11 @@ React Flow 不读取 TS 模板或 Agent 原始输出，不保存第二份节点/
 | Gate | Workflow UI 行为 |
 | --- | --- |
 | Gate 0.1 | 展示固定模板经 Compiler 生成的只读节点图；可查看节点和批准准确 hash，不开放自由编辑 |
-| Gate A | 展示 `solution.analysis.v1` 与单工单六节点固定流程；由普通 Worker Interpreter 执行 |
+| Gate A | 保留 Gate 0.1 的 `solution.analysis.v1` 图与交互，新增单工单六节点固定流程并切换真实 Runtime |
 | Gate B | 图和审批体验不变，只增加排队、等待、恢复和多 Agent 子任务状态 |
 | Gate C | 才显示 Agent 生成草稿、WorkflowPatch、condition/parallel/wait、图形 Diff 和重新审批 |
 
-UI 组件可以从 Gate 0.1 起支持绘制条件、并行和等待节点，但 Gate C 前不得由用户或 Agent 创建这些动态节点；收到未开放 kind 时必须显示“当前门禁不支持”并禁止审批。
+Gate 0.1 不实现条件、并行和等待节点的创建或绘制；Gate C 开放对应 feature set 后再增加。收到未开放 kind 时必须显示“当前门禁不支持”并禁止审批。
 
 ### 对话内确认卡
 
@@ -283,9 +283,9 @@ UI 组件可以从 Gate 0.1 起支持绘制条件、并行和等待节点，但 
 │ 目标：分析客户 MES 建设需求                │
 │ 参与：需求分析、方案设计、结果验证          │
 │ 路由：用户指定“方案专家团”                  │
-│ 数据：已上传 3 个文件，最高 C1              │
+│ 数据：预置脱敏材料 SOL-FIXTURE-01，最高 C1  │
 │ 动作：R1，只分析，不写入业务系统             │
-│ 流程：[打开节点图，共 6 个节点、1 个审批点] │
+│ 流程：[打开节点图，共 7 个节点、1 个审批点] │
 │ 预计：8–15 分钟                             │
 │ 预算：不超过 ¥12                            │
 │                                            │
@@ -342,7 +342,7 @@ UI 组件可以从 Gate 0.1 起支持绘制条件、并行和等待节点，但 
 
 ```text
 ┌──────────────────────────────────────────────────────────┐
-│ TASK-2026-0018  客户 MES 方案分析   [已完成] [下载报告] │
+│ TASK-2026-0018  客户 MES 方案分析   [已完成]             │
 ├──────────────────┬───────────────────────────────────────┤
 │ 步骤时间线       │ 选中的步骤                           │
 │                  │                                       │
@@ -360,7 +360,7 @@ UI 组件可以从 Gate 0.1 起支持绘制条件、并行和等待节点，但 
 
 页面同时提供“Workflow 图”和“步骤时间线”两种视图，两者都来自同一个不可变 `WorkflowVersion` 和运行事件，不能各存一份流程状态。页面支持按步骤、Agent、Evidence 类型和时间筛选。错误步骤提供“补充信息”“重试”“取消”或“转人工”，不能只有技术错误码。
 
-## 9. 工单进度卡（MVP 真实业务）
+## 9. 工单进度卡（Gate A 真实业务）
 
 GearJob 第一版不展示完整 ERP 页面，只展示一个用户有权查看的 Work Order：
 
@@ -450,28 +450,22 @@ GearJob 第一版不展示完整 ERP 页面，只展示一个用户有权查看�
 - 每个核心页面只有一个主任务：小纬对话、异常处理、Workflow 审批、任务证据分页展示，不再合并成一个超载 Dashboard。
 - Gate 0/A 不显示业务表格导出入口。首次开放导出时，由服务端按当前 tenant、resource scope、field mask、filter 和 sort 重新生成并在下载前再次鉴权；前端不得导出缓存 rows。跨租户、禁字段、权限撤销和筛选后行列一致性必须有负面测试。
 
-## 13. 分门禁界面验收
+## 13. 分门禁界面设计验证参考
 
-所有验收必须使用真实 HTTP 服务和真实浏览器；不能把 Gate 0、A、B、C 的能力合称“第一版”。
+本节是支持性设计参考，不新增合同 acceptance 或退出条件。Gate 0.1 的必需验收仅来自最终合同的 `AC-PRODUCT-*`、`AC-WORKFLOW-*`、`AC-SAFETY-*` 和 `AC-SIMULATION-*`；后续 Gate 需另建 authority slice 和合同。真实浏览器验证仍应避免把 Gate 0、A、B、C 的能力合称“第一版”。
 
 ### Gate 0.1：安全产品纵切
 
-1. Base UI、assistant-ui 和 React Flow 必须共用同一 `genewayTheme`；Ant Design、Ant Design X、ProComponents、MUI、CopilotKit、TanStack Table 和 Assistant Cloud 不在 Gate 0.1 lockfile；
-2. 真实 Vite HTTP 应用交付 Codex 式应用壳和一个小纬方案分析路由；Workflow 审批、运行进度、结果和 Evidence 可在该任务上下文中展开，不要求四路由；
-3. 所有对话只显示小纬，不出现可直接聊天的专家 Agent 身份；
-4. 新建对话，分别验证“小纬自动安排”、指定一个专家和指定一个专家团；自然语言点名与选择器结果一致；
-5. 从服务端清单选择预置、脱敏、只读的 fixture 发起 `solution.analysis.v1`；不出现任意上传、附件下载或 Artifact 存储入口；
-6. TS 固定模板经 Compiler 生成 WorkflowVersion，React Flow 只读节点图显示同一 `id + hash`；
-7. 点开节点查看输入输出、专家、工具、权限、预算和 Evidence；
-8. 查看服务端 fake Runtime 结论与内联 Evidence，刷新后恢复同一状态；fake、fixture、simulation 标签在任务、步骤、结果和证据处持续可见；
-9. SSE 断线重连不重复消息；
-10. Playwright 在 1440×900、1280×800 和 768×1024 验证键盘导航和状态非颜色唯一表达；1440px 验证三栏，1280px 验证检查器收起，768px 验证左右区域改为 Drawer、focus trap/关闭后焦点恢复、Composer 可用、Workflow 可平移缩放；
-11. assistant-ui 刷新、SSE 断线和乱序事件后从 Control Plane 快照/游标恢复；
-12. Playwright 断言消息作者集合始终只有 `{user, xiaowei}`；专家名只允许出现在路由摘要、Workflow 节点、进度和 Evidence 归因中，不出现专家头像、独立 Composer、DM 或聊天链接；
-13. 成功路径不允许用 `page.setContent` 或 route interception `fulfill` 主 HTML、JS/CSS bundle、Control Plane API；页面 task id 必须与 API、Postgres 事件、WorkflowVersion/hash、ApprovalVersion 和 SSE cursor 对得上；
-14. 原始视觉证据写入 `/tmp/geneway-runs/<run-id>/ui/`；Git 只保存视觉结论和 evidence index，不提交整套原始截图。
+| 合同引用 | 设计投影 |
+| --- | --- |
+| `AC-PRODUCT-01/02` | 一个小纬路由；auto、单专家、专家团；固定脱敏 fixture；七节点只读 Workflow；正向 Claim/Evidence 与无证据拒绝；真实 HTTP 与浏览器外实体关联 |
+| `AC-WORKFLOW-01/02` | React Flow、确认卡、运行进度均读取同一 WorkflowVersion；确认卡展示 ApprovalSubject 摘要，不提供自由编辑 |
+| `AC-SAFETY-01/02/03` | 越权或未开放能力使用禁用/拒绝态；不展示上传、下载、真实 provider/connector 或动态节点入口 |
+| `AC-SIMULATION-01` | 任务、步骤、结果和 Evidence 持续显示 fake/simulation/不可用于业务决策 |
 
-### Gate 0.2：完整产品骨架
+非阻塞设计建议：优先验证 1440×900 桌面布局，并确保键盘可完成主流程、状态不只依赖颜色；更多 viewport、Drawer/focus trap 和完整视觉回归在 Gate 0.2 设计合同中确定。原始视觉证据写入 `/tmp/geneway-runs/<run-id>/ui/`，Git 只保存结论和索引。
+
+### Gate 0.2：完整产品骨架（后续设计，不授权当前实施）
 
 1. 增加异常与待办、Workflow、任务与证据路由，形成四路由状态矩阵；
 2. 引入 TanStack Table 和统一 `EnterpriseTable`，验证服务端筛选、排序、分页和权限；
@@ -479,7 +473,7 @@ GearJob 第一版不展示完整 ERP 页面，只展示一个用户有权查看�
 4. 异常中心展示设备停机和产能落后 fixture、详情、规则、Evidence 和去重状态；真实分析仍必须明确标记模拟或暂不可用；
 5. 四个路由覆盖 empty、403、5xx 后重试恢复和 SSE replay，并执行独立视觉回归。
 
-### Gate A：真实 MVP
+### Gate A：真实 MVP（后续设计，不授权当前实施）
 
 1. `solution.analysis.v1` 在相同固定图中切换到真实 OpenAI Runtime，不改变 WorkflowVersion wire contract；
 2. 使用 `production.work-order-status.v1` 查询一个 GearJob 工单，看到六节点流程、状态、计划/已产数量、确定性进度、更新时间和 Evidence；

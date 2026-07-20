@@ -4,12 +4,10 @@
 
 Before implementation, read:
 
-1. `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md`
-2. `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/spec.md`
-3. `doc/plans/2026-07-18-geneway-v19-technical-appendix.md`
-4. `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md`
+1. `/home/gewu/.codex/workflow/artifacts/20260720-010-geneway-gate-0-1/team/sdd/slices/gate-0-1/brief.md`
+2. `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md`
 
-The implementation contract is the only executable scope authority. The spec is a pointer, and the technical appendix, UI ADR, and roadmap cannot grant additional scope.
+The authority brief defines the stable Goal refs and the implementation contract is the only executable scope body. Read the technical appendix, UI ADR, roadmap, and spec pointer only when the current implementation question needs them; they cannot add acceptance, exit conditions, or implementation scope.
 
 ## Core rules
 

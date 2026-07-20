@@ -754,7 +754,7 @@ DSL v1 不提供通用循环。需要集合处理时使用注册的 deterministi
 | --- | --- |
 | Gate 0.1 | Zod 4 fixed-v1 schema、Compiler 基线、canonical JSON/hash、固定 Workflow/Harness API、最小只读 React Flow 投影、普通 Worker Interpreter + Fake Runtime |
 | Gate 0.2 | JSON Schema wire artifact、fixture export parity/property tests、完整只读 React Flow 投影和四路由状态矩阵 |
-| Gate A | 用 TS 对象模板实现 `solution.analysis.v1` 固定流程和 `production.work-order-status.v1` 六节点流程；同一 Compiler 固化；普通 Worker Interpreter 执行 |
+| Gate A | 保持 Gate 0.1 的 `solution.analysis.v1` 固定模板与 wire contract，切换到真实 OpenAI Runtime；新增 `production.work-order-status.v1` 六节点模板、Model Gateway 与 GearJob 只读闭环 |
 | Gate B | 不改 DSL、WorkflowVersion、审批或 UI；仅把同一个 Interpreter 托管到 Hatchet，增加 durable wait/retry/recovery 和多 Agent child task |
 | Gate C | Agent 结构化 HarnessDraft/Patch 与 WorkflowDraft/Patch、condition/parallel/wait、图形 Diff、重新审批；仍由同一 Compiler 和 Interpreter 处理 |
 
@@ -966,12 +966,14 @@ business_task_events
 business_task_steps
 
 capability_versions
+expert_catalog_versions
 harness_versions
 workflow_versions
 approval_versions
 
 delegated_capabilities
 policy_decisions
+result_claims
 minimal_evidence_refs
 
 outbox_events
@@ -1065,14 +1067,17 @@ federation_calls
 - 每个业务表含 `tenant_id`，外键同时验证 tenant 一致性；
 - immutable version 表禁止 update mutable columns；
 - `(tenant_id, idempotency_key, operation)` 唯一；
+- 幂等记录同时保存规范化请求摘要和原响应：同 operation/key/摘要返回原结果，同 key 不同摘要返回冲突；
 - `(agent_task_id, sequence)` 和 `(agent_task_id, cursor)` 唯一；
 - `(tenant_id, business_task_id, sequence)` 唯一；BusinessTaskEvent 是 append-only 权威事件账本，包含 event/schema/aggregate version、correlation/causation、payload ref 和 occurred_at；
-- BusinessTask/Workflow/Approval/Artifact 状态变化、对应 BusinessTaskEvent 和 outbox 必须在同一事务写入；SSE cursor 指向该事件账本，不指向 Runtime 私有游标或 outbox；
+- BusinessTask/Workflow/Approval/result Claim 状态变化、对应 BusinessTaskEvent 和 outbox 必须在同一事务写入；SSE cursor 指向该事件账本，不指向 Runtime 私有游标或 outbox；
+- 快照 API 在同一只读事务返回 aggregate version 与 event watermark；续传读取 `(watermark, ...]`，按稳定 event id 去重并逐次校验 tenant/task；
 - `(consumer, event_id)` inbox 唯一；
 - active workflow binding 使用 partial unique constraint；
 - Approval terminal transition 使用决策时重新授权和 compare-and-set；
 - Workflow Step claim 记录 `attempt_id`、`lease_until` 和单调 `fencing_token`；过期 attempt 的 completion/checkpoint/result 被拒绝，Connector effect 使用稳定 `effect_id`；
-- `BusinessTask.expert_target` 必须引用同 tenant 的 immutable expert/team version，且属于 Capability allowlist；
+- Gate 0.1 的 `BusinessTask.expert_target` 必须引用同 tenant 的 immutable `expert_catalog_versions` 条目并属于 Capability allowlist；Gate A 的真实 Agent binding 仍引用不可变 Agent/Expert version；
+- `result_claims` 是 Gate 0.1 最小发布权威：只有同 tenant、来源 hash 有效且当前 principal 可访问的 EvidenceRef 才能与 Claim 原子绑定并发布；Runtime/SSE/UI 只提交候选或读取投影；
 - Artifact/Evidence metadata 与 object storage key 同 tenant；
 - `business_exceptions` 以 `(tenant_id, source_system, exception_type, source_object_ref, detection_window)` 或等价 dedup key 防止轮询重复建单；
 - 删除使用 retention workflow，不允许业务 API 直接级联删除证据链。
@@ -1101,7 +1106,7 @@ document_ingest
 → contradiction_check
 → solution_design
 → evidence_verify
-→ human_review
+→ result_quality_check
 → report_publish
 ```
 
@@ -1357,17 +1362,17 @@ context_resolve
 
 Gate 0 分为两个可审计切片：
 
-- **Gate 0.1 安全产品纵切**：Postgres migration、仅 loopback 可用的服务端 trusted-local principal、tenant isolation、最小 Authorization/delegated capability、Zod fixed-v1/Workflow Compiler/canonical hash、固定 HarnessVersion/WorkflowVersion/ApprovalVersion、最小 EvidenceRef/来源 hash/可访问性与 publish guard、Conversation/BusinessTask/BusinessTaskEvent API、最小 outbox、普通 Worker Interpreter和真实 served WebChat。用户必须在页面完成一次任务提交、审批、执行、结果和内联 Evidence 查看；该切片结束仍无安全闭环的真实 API + UI 即停止。
+- **Gate 0.1 安全产品纵切**：Postgres migration、仅 loopback 可用的服务端 trusted-local principal、tenant isolation、最小 Authorization/delegated capability、Zod fixed-v1/Workflow Compiler/canonical hash、固定 ExpertCatalogVersion/HarnessVersion/WorkflowVersion、完整执行语义的 ApprovalSubject/ApprovalVersion、最小 result Claim/EvidenceRef publish guard、Conversation/BusinessTask/BusinessTaskEvent API、最小 outbox、普通 Worker Interpreter和真实 served WebChat。用户必须在页面完成一次任务提交、审批、执行、正向 Claim/Evidence 与无证据拒绝查看；该切片结束仍无安全闭环的真实 API + UI 即停止。
 - **Gate 0.2 完整产品骨架**：上传、Artifact/VersityGW、完整 Claim–Evidence–Lineage、outbox/inbox 扩展、异常 fixture、恢复、TanStack Table 和四路由状态矩阵。Gate 0.2 不属于当前实施合同。
 
 Gate 0.1 的代码顺序是“基础合同 → 单一纵切”，但它们共同属于一个 Gate，不能把基础合同交付冒充产品验收。
 
 1. pnpm monorepo、CI、版本锁、许可证/NOTICE、基础 Compose。
 2. `legacy-migration-manifest` 与复用 conformance harness：先把旧分支 Runtime/Provider、SSE cursor、outbox/inbox、Evidence、storage 和 channel 可靠性资产分类为“直接提取 / 改合同提取 / 不迁移”。
-3. Capability、Harness、Workflow、Runtime、Tool、Connector、Channel、Authorization、Evidence、Model Routing、Outbox contracts；`AuthorizationService` 在 Gate 0.1 实现 Postgres resource scopes + Casbin domain RBAC 和 delegated capability，不延后到 Gate D。
+3. Gate 0.1 只建立 Capability、ExpertCatalog、Harness、Workflow、Runtime、Authorization、Evidence 和 Outbox 的当前纵切合同；不预建 Tool、Connector、Channel 或 Model Gateway 产品接口。`AuthorizationService` 实现 Postgres resource scopes + Casbin domain RBAC 和 delegated capability，不延后到 Gate D。
 4. Gate 0.1 完成 Zod 4 fixed-v1 WorkflowDraft/WorkflowVersion schema、`z.infer` 类型、Workflow Compiler、canonical JSON/hash、固定 HarnessVersion 和普通 Worker Interpreter；Gate 0.2 再完成版本化 JSON Schema wire artifact 与 fixture export-parity/property suite。HarnessPatch/WorkflowPatch schema 后置 Gate C，不引入 TypeBox/Ajv 或全图类型推导。
 5. 最小 Postgres schema 和 migrations，包括 append-only `business_task_events` 事件账本、固定 Workflow 的 `approval_versions` 和 step attempt/lease/fencing 字段。
-6. Gate 0.1 只实现服务端 Fake Runtime 和预置、脱敏、只读的方案分析 fixture；Fake Model Gateway、制造业异常 fixture、Fake Channel、上传和 VersityGW ObjectStorage adapter 后置。
+6. Gate 0.1 只实现服务端 Fake Runtime 和版本固定、脱敏、只读的方案分析 fixture；fixture 必须包含“生产工单跟踪和质量追溯”正向 Claim/Evidence oracle，以及“直接控制设备”无 Evidence 不发布 oracle。Fake Model Gateway、制造业异常 fixture、Fake Channel、上传和 VersityGW ObjectStorage adapter 后置。
 7. Control Plane API：Conversation、BusinessTask、Capability 查询、expert/team 查询、event stream、Evidence 查询。
 8. 真实 WebChat route：
 
@@ -1375,7 +1380,7 @@ Gate 0.1 的代码顺序是“基础合同 → 单一纵切”，但它们共同
 http://localhost:3200/conversations/new?capability=solution.analysis.v1
 ```
 
-9. 第一个代码纵切：在真实 HTTP WebChat 向小纬提交任务 → 选择自动/专家/专家团 → 服务端身份/tenant/权限校验 → 创建 BusinessTask/BusinessTaskEvent → 解析固定 HarnessVersion → Compiler 固化 WorkflowVersion/hash → ApprovalVersion 绑定准确快照 → 普通 Worker Interpreter 调用 fake Runtime → UI 显示结果和内联 Evidence。完整 Lineage、Artifact/下载和报告在 Gate 0.2 补齐。
+9. 第一个代码纵切：在真实 HTTP WebChat 向小纬提交任务 → 选择自动/专家/专家团 → 服务端身份/tenant/权限校验 → 从 ExpertCatalogVersion 解析固定 HarnessVersion → 创建 BusinessTask/BusinessTaskEvent → Compiler 固化 `solution.analysis.v1` 七节点 WorkflowVersion/hash → ApprovalVersion 绑定完整 ApprovalSubject digest → 普通 Worker Interpreter 调用 fake Runtime → Control Plane 原子发布 result Claim/Evidence → UI 显示投影。完整 Lineage、Artifact/下载和报告在 Gate 0.2 补齐。
 10. Gate 0.1 完成 BusinessTask/Event/outbox 同事务的最小实现；Gate 0.2 补齐 inbox、跨服务投递和重放矩阵。
 11. ADR 与 migration manifest 模板；ADR-WF-001 必须落库。
 12. Gate 0.1 只交付小纬对话、专家选择、Workflow 审批图、运行进度和结果/Evidence 视图；Hive/Sharp Cell UI 不作为验收替代。
@@ -1402,7 +1407,7 @@ expert target capability/policy validation
 成功路径禁止浏览器拦截主 HTML/bundle/Control Plane API
 ```
 
-JSON Schema export parity/property tests、inbox、channel dedup、Model Gateway bypass 和 Object Storage conformance 在对应后续 Gate 才成为必需检查。
+JSON Schema export parity/property tests、inbox、channel dedup、真实 Model/Tool/Connector Gateway bypass 和 Object Storage conformance 在对应后续 Gate 才成为必需检查。Gate 0.1 只验证没有这些路由、凭证和开放出网执行面，未开放 kind 结构化拒绝。
 
 #### 退出条件
 
@@ -1436,7 +1441,7 @@ Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，�
 
 #### 进入条件
 
-- Gate 0 GearJob preflight 已锁定单 Work Order endpoint、认证方式、对象权限判断点、字段 allowlist 和审计字段；
+- Gate A 开始前另行完成并验收 GearJob preflight，锁定单 Work Order endpoint、认证方式、对象权限判断点、字段 allowlist 和审计字段；该 preflight 不是 Gate 0.1 交付或退出条件；
 - 推荐模式是专用 read-only service identity 调用最小 facade，并携带 Control Plane 签名的 server-derived user/resource context，由 facade 执行单对象权限和字段白名单；
 - 若现有 GearJob API 无法满足且需要新增 facade，必须取得独立跨仓修改授权，在 GearJob 仓库单独测试和提交；未获授权时 Gate A 停留在 contract/fake 验证，不得扩大 service credential 或改用数据库直连。
 
@@ -1445,9 +1450,9 @@ Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，�
 1. 从旧分支提取 OpenAI Agents SDK worker、provider conformance、结构化输出、budget/cancel、fault 和 Evidence 测试，删除 Paperclip/Builder 合同。
 2. `codex_subscription_dev` model profile：固定依赖、隔离 auth-file、单账号、串行队列、quota/retryNotBefore 和 secret redaction。
 3. Model Gateway 合同与 OpenAI Agents Runtime Adapter；订阅 dev profile 和未来正式 API profile 使用相同上层 Runtime 合同，但证据分开。
-4. ExpertDefinition / ExpertTeam / ExpertTarget resolver 和 UI 选择器。
+4. 将 Gate 0.1 的 ExpertCatalog 条目绑定到真实 immutable Agent/Expert versions，保持既有 ExpertTarget resolver、wire contract 和 UI 选择器。
 5. Document ingestion：MIME/扩展名双重 allowlist、大小与压缩/递归嵌套限制、恶意文件扫描、PDF/Office 隔离解析、hash、data class、retention；解析文本保持 `untrusted_text`，禁止原始 HTML/script 渲染。
-6. `solution.analysis.v1` Zod schema、TS 对象模板、固定 WorkflowVersion 和 release policy。
+6. `solution.analysis.v1` 保持 Gate 0.1 的 Zod schema、TS 对象模板和固定 WorkflowVersion，只切换真实 Runtime并增加 release policy。
 7. GearJob 最小只读 ConnectorAction、Work Order resource mapping、`production.work-order-status.v1` 六节点 TS 对象模板、固定 WorkflowVersion 和 UI 卡片。
 8. Gate 0 的同一 Workflow Compiler 与普通 Worker Interpreter 接入真实 Runtime；不引入 Hatchet，也不允许 Agent 生成 WorkflowDraft。
 9. Claim/Evidence/Lineage publish guard。
@@ -1984,7 +1989,7 @@ pnpm test:e2e
 pnpm build
 ```
 
-Gate 聚合命令从 `pnpm verify:gate0.1` 开始；该命令必须在同一 run 同时覆盖真实 served UI 和 Gate 0.1 的 tenant/principal/delegated capability/Approval hash/事件幂等/Evidence publish guard/Gateway bypass 负向检查，不能把安全门推迟到 `verify:gate0`。
+Gate 聚合命令从 `pnpm verify:gate0.1` 开始；该命令必须在同一 run 同时覆盖真实 served UI 和 Gate 0.1 的 tenant/principal/delegated capability/ApprovalSubject/事件幂等/Evidence publish guard/fake Runtime isolation/未开放 kind/无 provider 或 connector route、credential、开放出网执行面负向检查，不能把安全门推迟到其他命令。真实 Gateway bypass conformance 在首次引入对应 Gateway 的 Gate 执行。
 
 ### 14.2 测试金字塔
 

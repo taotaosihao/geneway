@@ -1,0 +1,26 @@
+{
+  "name": "@geneway/control-plane",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "@geneway/authorization": "workspace:*",
+    "@geneway/contracts": "workspace:*",
+    "@geneway/evidence": "workspace:*",
+    "@geneway/runtime": "workspace:*",
+    "@geneway/worker": "workspace:*",
+    "@geneway/workflow": "workspace:*",
+    "fastify": "^5.5.0",
+    "pg": "^8.16.3",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": { "@types/pg": "^8.15.5", "vitest": "^3.2.4" }
+}

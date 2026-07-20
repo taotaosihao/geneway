@@ -1,0 +1,40 @@
+{
+  "name": "geneway",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "lint": "eslint -c scripts/eslint.config.mjs . --max-warnings=0",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run --exclude '**/*.integration.test.ts' --exclude '**/*.security.test.ts'",
+    "test:contracts": "vitest run packages --exclude '**/*.integration.test.ts' --exclude '**/*.security.test.ts'",
+    "test:integration": "bash scripts/with-postgres.sh vitest run apps/control-plane/src/control-plane.integration.test.ts",
+    "test:security": "bash scripts/with-postgres.sh vitest run apps/control-plane/src/control-plane.security.test.ts",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "dev:control-plane": "pnpm --filter @geneway/control-plane dev",
+    "verify:foundation": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:integration && pnpm test:security && pnpm build",
+    "verify:gate0.1": "pnpm verify:foundation && pnpm test:e2e -- --project=gate0.1",
+    "test:e2e": "node scripts/not-open.mjs 'Gate 0.1b served UI has not been implemented yet'"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "fastify": "^5.5.0",
+    "json-canonicalize": "^2.0.0",
+    "pg": "^8.16.3",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@types/node": "^24.5.2",
+    "@types/pg": "^8.15.5",
+    "eslint": "^9.36.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.44.1",
+    "vitest": "^3.2.4"
+  }
+}

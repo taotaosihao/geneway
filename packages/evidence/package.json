@@ -1,0 +1,10 @@
+{
+  "name": "@geneway/evidence",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "build": "tsc -b", "typecheck": "tsc -b --pretty false" },
+  "dependencies": { "@geneway/contracts": "workspace:*", "zod": "^4.1.11" },
+  "devDependencies": { "vitest": "^3.2.4" }
+}

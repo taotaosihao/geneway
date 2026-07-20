@@ -24,7 +24,7 @@ product_ui_not_applicable_reason:
 - `G0.1-AUTHORITY`：Control Plane Postgres 是 Conversation、BusinessTask、BusinessTaskEvent、ExpertCatalogVersion、HarnessVersion、WorkflowVersion、ApprovalVersion、业务 Step、最小 Claim 和 EvidenceRef 的唯一权威；UI、Worker、Runtime 和事件流只读取或提交受控命令，不保存第二份权威。
 - `G0.1-WORKFLOW`：`solution.analysis.v1` 的固定七节点 TS 对象模板只产生 `WorkflowDraft` JSON；Zod 4 是唯一结构 Schema；Compiler 产出不可变 RFC 8785/JCS canonical `WorkflowVersion` JSON、`canonicalizationVersion` 和 SHA-256 hash；审批、React Flow 和 Interpreter 使用同一个 `id + hash`。
 - `G0.1-SAFETY`：真实产品纵切与 tenant 隔离、服务端派生的 loopback trusted-local principal、最小资源授权、delegated capability、完整 ApprovalSubject digest、事件幂等和 Evidence publish guard 同门完成；Gate 0.1 不存在真实 provider/connector 路由、凭证或开放出网执行面，所有未开放 kind 均 fail closed。
-- `G0.1-SIMULATION`：Gate 0.1 只使用服务端 fake Runtime 和预置脱敏输入引用。页面、事件和 Evidence 显著标记 `simulation=true`、`runtimeMode=fake`、`businessDecisionAllowed=false`，不得暗示已调用真实模型、GearJob 或真实专家。
+- `G0.1-SIMULATION`：Gate 0.1 只使用服务端 fake Runtime 和预置脱敏输入引用。BusinessTask、BusinessTaskEvent、业务 Step、最终结果/Claim、Evidence 及 UI/API 投影必须一致、可机器判定地得到 `simulation=true`、`runtimeMode=fake`、`businessDecisionAllowed=false`；允许从权威父实体无歧义派生，不要求每张表机械重复字段。任何缺失或冲突均不得发布结果或通过 Gate，且不得暗示已调用真实模型、GearJob 或真实专家。
 
 ### Non-goals
 
@@ -40,6 +40,7 @@ product_ui_not_applicable_reason:
 - `apps/control-plane/`、`apps/web/`、`apps/worker/`
 - `packages/contracts/`、`packages/authorization/`、`packages/workflow/`、`packages/runtime/`、`packages/evidence/`、`packages/ui/`
 - `db/`、`migrations/`、`scripts/`、workspace manifests 与 Gate 0.1 验证配置
+- `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/evidence/`，仅保存本 Gate 的小型验收摘要和索引
 
 ### User-visible behavior
 
@@ -76,6 +77,14 @@ Gate R 已于 2026-07-19 关闭；`taotaosihao/geneway` 与 `/home/gewu/work/gen
 - First-code rule: 首个切片可以使用 fixture 和 fake Runtime，但必须改变真实产品、API、数据库或工作流行为；文档、scanner fixture 和证据包本身不算产品代码。
 - Safety rule: 纵切不得先以无授权、无 tenant、无审批或无 Evidence guard 的方式通过，再在后续补安全。
 
+### Internal slice map
+
+| Slice | Base / head rule | Owned paths | Required checks and exit oracle | Conclusion |
+| --- | --- | --- | --- | --- |
+| `0.1a foundation` | base 为 authority brief 的 `base_sha`；head 为通过独立 review 的 foundation 逻辑提交 | authority brief 中与 Control Plane、Worker、contracts/authorization/workflow/runtime/evidence、DB/migrations/scripts/manifests 相关的最小子集及 Gate evidence 摘要目录，不扩大总 owned paths | `pnpm test:contracts && pnpm test:integration && pnpm test:security` 加 schema/compiler/canonical suite；必须用真实 Postgres + Control Plane API + 普通 Interpreter/fake Runtime 探针证明 Approval、幂等、simulation、Claim/Evidence guard 可组合，不以组件存在代替集成 | 仅可声明 foundation ready，不能声明 Gate 0.1 通过 |
+| `0.1b vertical` | base 必须是已批准的 `0.1a` head；head 为通过独立 review 的 served UI vertical 逻辑提交 | authority brief 中与 `apps/web`、Control Plane/Worker、`packages/ui` 及纵切依赖相关的最小子集及 Gate evidence 摘要目录，不扩大总 owned paths | `pnpm test:e2e -- --project=gate0.1` 加浏览器外 correlation；页面 task id 必须关联 API/Postgres、Workflow hash、Approval、SSE cursor 和一致 simulation 语义，并覆盖正向 Claim–Evidence 与无证据不发布 | 仅可声明 vertical ready，不能声明 Gate 0.1 通过 |
+| `Gate 0.1` | base 为已批准的 `0.1b` head；最终 head 为完整门禁通过的逻辑提交 | 不超出 authority brief | `pnpm verify:gate0.1` 聚合 V-2 至 V-6，任何子项失败均非零 | 唯一允许的产品 Gate 通过结论 |
+
 ## Product/UI Acceptance Gate
 
 - first_operable_user_flow: 在 `/conversations/new?capability=solution.analysis.v1` 完成预置材料选择、三种专家路由、固定 Workflow 图确认、批准、执行、结果与内联来源查看；不包含文件上传、报告下载或异常中心。
@@ -95,12 +104,12 @@ Gate R 已于 2026-07-19 关闭；`taotaosihao/geneway` 与 `/home/gewu/work/gen
 | AC-PRODUCT-01 | 真实 HTTP 页面只显示 `{user, xiaowei}`，支持 auto/单专家/专家团，完成固定 fixture、七节点图确认、批准、执行、带来源正向 Claim 与无来源不发布的首个可操作流程 | yes | Playwright served-UI e2e + author-set/Claim–Evidence assertions | goal:G0.1-PRODUCT |
 | AC-PRODUCT-02 | 成功路径主文档、bundle 和 Control Plane API 未被浏览器 fulfill；browser task id 与 API/DB、Workflow id/hash、Approval 和 SSE cursor 指向同一实体链 | yes | browser network record + API/DB correlation test | goal:G0.1-PRODUCT |
 | AC-AUTHORITY-01 | Conversation、BusinessTask、事件、ExpertCatalog/Harness/Workflow、Approval、Step、最小 Claim 和 EvidenceRef 仅由 Control Plane Postgres 权威持久化；同 operation/key 的同语义请求返回原结果，不同语义冲突失败；过期 attempt、重复、乱序和重放不重复推进 | yes | DB constraints + transaction/idempotency/fencing/replay tests | goal:G0.1-AUTHORITY |
-| AC-WORKFLOW-01 | TS 模板、Zod 4、Compiler、RFC 8785/JCS、`canonicalizationVersion` 和 golden vectors 产出唯一 WorkflowVersion/hash；拒绝代码、URL、未知引用、非有限数值和提权字段 | yes | schema/compiler/canonical golden-vector tests | goal:G0.1-WORKFLOW |
+| AC-WORKFLOW-01 | TS 模板只输出 plain `WorkflowDraft` JSON；Zod 4、Compiler、RFC 8785/JCS、`canonicalizationVersion` 和 golden vectors 产出唯一 WorkflowVersion/hash；拒绝代码、URL、未知引用、非有限数值和提权字段；production code 不引入 TypeBox、Ajv 或第二套 Workflow validator | yes | schema/compiler/canonical golden-vector tests + 复用既有 dependency/import check | goal:G0.1-WORKFLOW |
 | AC-WORKFLOW-02 | React Flow、ApprovalVersion、Interpreter 和页面显示使用同一 WorkflowVersion `id + hash`；ApprovalSubject digest 还绑定任务、输入快照、resolved expert/harness、权限/受众/预算和模拟标记，任一执行语义变化使旧批准失效 | yes | projection/hash/approval-subject/CAS tests + Playwright | goal:G0.1-WORKFLOW |
 | AC-SAFETY-01 | 服务仅允许 loopback 启动，代理头不能改变可信来源，principal/tenant 由服务端会话派生且客户端身份字段无效，浏览器写操作不能被跨站触发；跨租户、过期 capability、伪造身份、越权 Evidence 和未开放 Runtime/Tool/Connector kind 全部 fail closed | yes | authorization/session/cross-origin/security negative tests | goal:G0.1-SAFETY |
 | AC-SAFETY-02 | 关键 Claim 仅由 Control Plane 权威记录，并只有在最小 EvidenceRef 可访问、来源 hash 和 tenant scope 有效时与事件原子发布；Runtime、SSE 和 UI 不能直接发布；Gate 0.1 不创建上传或下载接口 | yes | publish/access/transaction/API-route negative tests | goal:G0.1-SAFETY |
 | AC-SAFETY-03 | fake Runtime 不持有真实 provider/connector 凭证或开放调用路由，不接受任意 URL/网络工具，未开放 kind 返回结构化 `NOT_OPEN`；真实 Gateway bypass conformance 不在 Gate 0.1 冒充完成 | yes | dependency/route/secret scan + controlled network/registry negative tests | goal:G0.1-SAFETY |
-| AC-SIMULATION-01 | UI、BusinessTaskEvent 和 Evidence 同时声明模拟状态；不得出现“已调用真实模型、GearJob 或真实专家”的误导性文本，且输出不可用于正式业务决策 | yes | contract tests + Playwright simulation assertions | goal:G0.1-SIMULATION |
+| AC-SIMULATION-01 | BusinessTask、BusinessTaskEvent、业务 Step、最终结果/Claim、Evidence 及 UI/API 投影必须一致、可无歧义派生并同时声明 `simulation=true`、`runtimeMode=fake`、`businessDecisionAllowed=false`；任一缺失或冲突时不得发布结果或通过 Gate，不得出现“已调用真实模型、GearJob 或真实专家”的误导性文本 | yes | contract tests + API/DB correlation + Playwright simulation assertions | goal:G0.1-SIMULATION |
 | AC-MIGRATION-01 | 复用项只从已归档 commit/bundle 按文件迁移，记录 source SHA/path、许可证、去除的 Paperclip 耦合和新测试；无 `@paperclipai/*` 运行依赖或 Paperclip upstream | yes | migration manifest + dependency/remote scan | goal:G0.1-AUTHORITY |
 | AC-GATE-01 | `pnpm verify:gate0.1` 聚合真实 Gate 0.1 检查；任何未来 Gate 占位命令均非零返回 `NOT_OPEN`，不得形成假通过证据 | yes | package script contract + exit-code tests | goal:G0.1-AUTHORITY |
 
@@ -108,17 +117,17 @@ Gate R 已于 2026-07-19 关闭；`taotaosihao/geneway` 与 `/home/gewu/work/gen
 
 | Row | Target | Command or action | Expected result | Phase conclusion evidence |
 | --- | --- | --- | --- | --- |
-| V-1 | SDD authority 与合同 | `codex-team-validate-json --type brief ...`；`codex-implementation-contract-lint --strict --new-authoring --authority-slice ...` | task id、Goal refs、semantics v2 和 authority slice 一致 | `evidence/gate-0.1-contract.txt` |
-| V-2 | 基础质量 | `pnpm lint && pnpm typecheck && pnpm test && pnpm build` | 全部退出 0 | `evidence/gate-0.1-quality-summary.md` |
-| V-3 | 权威与安全 | `pnpm test:contracts && pnpm test:integration && pnpm test:security` | DB 单权威、授权、ApprovalSubject、Claim/Evidence、fake Runtime 隔离和未开放 kind 负向测试通过 | `evidence/gate-0.1-safety-summary.md` |
-| V-4 | Workflow | 运行 schema/compiler/canonical golden-vector suite | 同输入跨进程得到同 hash；非法 Draft fail closed | `evidence/gate-0.1-workflow-summary.md` |
-| V-5 | Served UI | `pnpm test:e2e -- --project=gate0.1` | 真实页面完成首个流程，只有小纬，正向 Claim/Evidence 与无证据拒绝均符合固定 oracle，模拟标记明确 | `evidence/gate-0.1-ui-summary.md` |
-| V-6 | API-backed UI | 浏览器外探针用页面实际 task id 核对 API、Postgres、Workflow hash、ApprovalSubject/ApprovalVersion 和 SSE watermark/cursor；phase review 检查成功路径 spec、helper、global setup、config 与响应替代设施 | 成功路径主页面、bundle 和 Control Plane API 未被 `setContent`、`fulfill`、Service Worker 或等价代理替代，实体链一致 | `evidence/gate-0.1-api-ui-correlation.md` |
-| V-7 | 总门禁 | `pnpm verify:gate0.1` | V-2 至 V-6 任一失败时非零；全部通过才返回 0 | `evidence/gate-0.1-phase-review.md` |
+| V-1 | SDD authority 与合同 | `codex-team-validate-json --type brief ...`；`codex-implementation-contract-lint --strict --new-authoring --authority-slice ...` | task id、Goal refs、semantics v2 和 authority slice 一致 | `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/evidence/gate-0.1-contract.txt` |
+| V-2 | 基础质量 | `pnpm lint && pnpm typecheck && pnpm test && pnpm build` | 全部退出 0 | `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/evidence/gate-0.1-quality-summary.md` |
+| V-3 | 权威与安全 | `pnpm test:contracts && pnpm test:integration && pnpm test:security` | DB 单权威、授权、ApprovalSubject、Claim/Evidence、fake Runtime 隔离和未开放 kind 负向测试通过；同一 task id 的 Task/Event/Step/Result/Claim/Evidence simulation 语义一致且缺失或冲突时失败 | `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/evidence/gate-0.1-safety-summary.md` |
+| V-4 | Workflow | 运行 schema/compiler/canonical golden-vector suite，并复用既有 dependency/import check | 同输入跨进程得到同 hash；非法 Draft fail closed；production code 无 TypeBox、Ajv 或第二套 Workflow validator | `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/evidence/gate-0.1-workflow-summary.md` |
+| V-5 | Served UI | `pnpm test:e2e -- --project=gate0.1` | 真实页面完成首个流程，只有小纬，正向 Claim/Evidence 与无证据拒绝均符合固定 oracle；页面、任务、步骤、结果和来源的模拟语义明确一致 | `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/evidence/gate-0.1-ui-summary.md` |
+| V-6 | API-backed UI | 浏览器外探针用页面实际 task id 核对 API、Postgres、Workflow hash、ApprovalSubject/ApprovalVersion、SSE watermark/cursor 及 Task/Event/Step/Result/Claim/Evidence 的 simulation 语义；phase review 检查成功路径 spec、helper、global setup、config 与响应替代设施 | 成功路径主页面、bundle 和 Control Plane API 未被 `setContent`、`fulfill`、Service Worker 或等价代理替代；实体链和模拟语义一致，任一缺失或冲突时失败 | `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/evidence/gate-0.1-api-ui-correlation.md` |
+| V-7 | 总门禁 | `pnpm verify:gate0.1` | V-2 至 V-6 任一失败时非零；全部通过才返回 0 | `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/evidence/gate-0.1-phase-review.md` |
 
 ## Evidence Budget
 
-- Git 只保存 Gate 0.1 的 `gate-checklist.md`、`phase-review.md`、`evidence-index.md` 与必要的最终摘要，目标不超过 10 个文件和 1 MB。
+- Git 只在 `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/evidence/` 保存 Gate 0.1 的 `gate-checklist.md`、`phase-review.md`、`evidence-index.md` 与必要的最终摘要，目标不超过 10 个文件和 1 MB；其他位置不得创建平行 evidence 目录。
 - Playwright JSON、trace、video、HAR、完整日志、API dump、数据库 dump、端口状态和失败重试输出写入 `/tmp/geneway-runs/<run-id>/`。
 - 浏览器截图只能补充说明，不能单独证明 API、数据库、权限、审批或业务状态。
 

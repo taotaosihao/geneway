@@ -32,7 +32,7 @@ product_ui_not_applicable_reason:
 ### Non-goals
 
 - 不支持 PDF、Word、Excel、PowerPoint、图片 OCR、压缩包、富文本 HTML 或任意格式解析；Gate 0.2A 只支持受控 UTF-8 `.txt`/`.md`。
-- 不调用共享 Codex 订阅、OpenAI Agents SDK、Claude、GearJob、真实模型或真实工业 Connector；继续使用 Gate 0.1 的服务端 fake Runtime 和模拟标记。
+- 产品运行与产品验收路径不调用共享 Codex 订阅、OpenAI Agents SDK、Claude、GearJob、真实模型或真实工业 Connector；继续使用 Gate 0.1 的服务端 fake Runtime 和模拟标记。开发阶段受控使用 Kimi Code CLI 的例外只受下文 `Kimi frontend implementation lane` 约束，不进入产品部署、产品数据流或 Gate 成功证据。
 - 不实现知识库、KnowledgeDocumentSnapshot、切块、Embedding、向量检索、Business Capability Matrix 或检索 UI。
 - 不实现真实设备异常、产能落后、生产日报、异常中心、任务中心、TanStack Table 或四类真实业务入口；这些属于后续 Gate 0.2B/A/F。
 - 不引入 Hatchet，不开放动态 WorkflowDraft/WorkflowPatch、条件、并行、等待、运行中改图或 TS 动态代码执行。
@@ -115,13 +115,23 @@ document_ingest
 - first_code_slice_kind: product
 - first_code_owner: `role:gate-0.2a-implementation-owner`；用户授权实施时必须解析为具名负责人。
 - first_code_verification: `pnpm test:e2e -- --project=gate0.2a-storage-thin` 加浏览器外 API/Postgres/S3 三方 correlation；成功路径不得 mock/fulfill 上传、下载、Control Plane 或 S3 adapter。
-- frontend_implementation_executor_preference: `Kimi Code CLI`；优先交付 `apps/web/**`、`packages/ui/**` 和 UI-specific Playwright specs/fixtures 的前端实现。Kimi lane 只能修改明确授权的 UI-owned paths；对 API、DB、storage、authorization、Worker/Runtime 的需求只可提案，仍由主控制器或相应所有者实现。
-- frontend_implementation_executor_fallback: 每次实施前运行 `kimi --version && kimi doctor`；CLI 不可用、配置无效或无法产生可用的范围内 diff 时，记录真实失败后才可回退主 Codex，不得静默换执行器。当前环境已验证 `kimi 0.27.0` 且 `kimi doctor` 通过；该版本只是当前可用性证据，不形成产品锁定。
+- frontend_implementation_executor_preference: `Kimi Code CLI`；在 `role:gate-0.2a-implementation-owner` 负责的 First Code Slice 内优先承担受控前端实现 lane。Kimi 不是 slice owner，不能独立提交、合并或宣布 ready；主控制器负责冻结交接契约、整合前后端、独立验证并形成唯一逻辑提交。
+- frontend_implementation_executor_fallback: 每次 Kimi-eligible frontend dispatch 都必须真实尝试并记录 Kimi lane；成功结果只有依次完成预检、隔离执行、candidate patch、patch admission、真实工作树应用和独立验证后才可接受。任一失败只需先写入 receipt 即可由主控制器接管，不要求不存在的后续阶段；不得用口头“不可用/无可用 diff”静默替换执行器，也不得把 Codex 修复后的结果记成纯 Kimi 产出。
 - allowed_contract_gate_only_until: 本合同、SDD v2 authority slice 和 strict new-authoring lint 完成；获授权实施后，首个逻辑结果必须改变真实 served 产品/API/Postgres/VersityGW 行为，不能只提交 migration、adapter 单测、scanner 或文档。
 - stop_if_no_code_by_phase: Gate 0.2A.1 storage vertical 首个逻辑提交
 - gate_parallelization_or_deferral_plan: `0.2A.1 storage vertical → 0.2A.2 delivery/evidence vertical → 0.2A.3 recovery hardening` 串行收敛。每个内部 slice 只可声明自身 ready；只有统一 `pnpm verify:gate0.2a` 通过才可关闭产品 Gate。知识、异常、真实 Runtime、Hatchet、动态 Workflow、渠道和外部 Agent 全部后置。
 - First-code rule: 允许先实现最小 S3 adapter、ingest intent 和 migration，但同一首个逻辑提交必须包含真实 served UI 上传/下载行为及其验证，不能先积累无用户价值的横向基础设施。
 - Safety rule: 上传纵切必须与 tenant、principal、resource scope、大小/类型/hash、S3 凭证隔离和审计同门完成，不能先开放无保护上传再补安全。
+
+### Kimi frontend implementation lane
+
+- **交接先于编码**：主控制器在 dispatch 中固定前端交接包，引用已落地的 Zod public wire schema、endpoint、状态/错误矩阵及稳定 UI selector。Kimi 只能消费这些权威输入，不得在 Web 层平行定义 schema、伪造 API 或自行放宽错误语义；发现缺口时返回 `dependency_request`，由对应所有者修订后重新派发。
+- **逐任务最小写权限**：每次 dispatch 生成精确的 tracked-file allowlist；默认只允许 `apps/web/src/**`、`packages/ui/src/**` 及同目录非权威 unit/component/interaction tests。package manifest、lockfile、构建配置、CI、根脚本、API/contracts/DB/storage/authorization/Worker/Runtime、合同、Evidence、固定 fixture/hash/profile oracle、Playwright project/config、`gate0.2a-success`/`gate0.2a-negative`、真实性扫描和 `verify:gate0.2a` 均不归 Kimi；所需修改只能提案给主控制器或独立 validation owner。
+- **隔离运行**：Kimi 只在从已批准 base SHA 生成的干净、可丢弃、去密 workspace 中运行；workspace 不含 untracked/ignored 文件、客户材料、运行产物或其他仓库，`.git` 不可写，不挂载 Docker socket、SSH agent、Kube config、S3/DB 数据卷或 `/tmp/geneway-runs`。环境变量使用 allowlist，只保留 Kimi provider 所需项；网络只允许已批准 provider endpoint 和必要 loopback。无法机械满足文件、进程或出网边界时，本 lane 预检失败并由主控制器接管，不能把提示词或 hook 冒充隔离。
+- **调用模式**：dispatch 前冻结 expected CLI version/digest 及批准的 provider/model alias；每次运行记录并 exact-match `command -v kimi`、`kimi --version`、可执行文件/package digest 和 `kimi doctor`，版本或 digest 漂移为 `unreviewed_version`，provider/model 不匹配为 `preflight_failed`。`doctor` 只证明配置可解析，不证明 provider/model 可用。始终只允许 fresh interactive manual-permission session，由主控制器逐项批准写文件和 Shell；无论是否存在 sandbox，都禁止 `-p/--prompt`、`--auto`、`-y/--yolo` 及别名、`--session`、`--continue`、`--add-dir`、server/web/acp/export、provider/login、upgrade/update，以及 stage/commit/branch/push/reset/clean、安装依赖和任何外部系统变更。sandbox 是第二层强制边界，不得扩大权限；自动发现的 skill/hook 也不得充当权限边界，只能使用本次明确审查的隔离配置。
+- **开发数据出域**：运行记录固定 provider、model alias、endpoint/region、base SHA、read/write scope、egress policy 和调用模式，但不记录 secret。只允许向 Kimi 提供 allowlist 内已跟踪源码、权威交接包的必要摘录及合同明确的合成 fixture；禁止客户/tenant 数据、实际上传物、Artifact/Evidence 内容、`.env*`、日志、trace、HAR、dump、备份、截图、用户目录或其他仓库内容。session/log 放在 Git 外隔离目录，禁止 export、分享或作为产品 Gate Evidence。
+- **patch admission 与独立验收**：Kimi 结束后主控制器确认 base/HEAD 未变、index 未暂存、全部 tracked/untracked/ignored 变化均在 allowlist，且无新依赖、lockfile/postinstall、CDN/远程资源、telemetry、生产外部 URL、symlink、binary、executable bit 或禁止的 Git/外部动作；随后生成 patch SHA。任何越界都使整个 lane 失败，不能只丢弃越界部分后接受其余改动。只有通过 admission 的 patch 才可由主控制器应用到真实工作树，并在干净依赖环境独立运行 diff/secret/dependency/remote-URL scan、UI typecheck/build/tests 和合同既定 served UI 真实性验收；Kimi 不拥有 Gate oracle。
+- **可判定结果与接管**：Git 外小型 `frontend-executor.json` receipt 至少记录 requested/actual/repair executor、base SHA、expected/actual CLI version/digest、provider/model alias、调用模式、allowlist、changed paths、patch SHA、验证结果、outcome 和 fallback reason，不保存 prompt、session 或 secret。执行成功产生 candidate patch 时直接进入 admission，不提前赋予最终 outcome；最终 outcome 仅为 `accepted | preflight_failed | unreviewed_version | execution_failed | timeout | interrupted | dependency_blocked | scope_violation | no_effective_diff | validation_failed`。`preflight_failed | unreviewed_version | execution_failed | timeout | interrupted | dependency_blocked` 在 receipt 落盘后即可接管，其中 `dependency_blocked` 必须先补齐交接包再重新 dispatch；`scope_violation | no_effective_diff | validation_failed` 是候选结果拒绝/修复而非执行后端不可用，只有 admission 与独立验证均通过才记为 `accepted`。实际版本和 doctor 结果属于当次 receipt，不固化为合同事实。
 
 ### Internal slice map
 
@@ -267,7 +277,7 @@ admin、online app、reconciler/delete、backup/restore 和 Worker command 必�
 | AC-RELIABILITY-02 | Worker 只提交 attempt candidate；Control Plane terminal publish 与 cancel 使用互斥 CAS。取消后迟到 progress/candidate/completion/publish 被拒绝，刷新与 SSE 重连显示同一 canceled 状态 | yes | cancel-vs-publish/reconnect Playwright + DB assertions | goal:G0.2A-RELIABILITY |
 | AC-SAFETY-01 | multipart parts/fields、request/raw-byte 上限、扩展名/MIME、安全文本 predicate、增量 UTF-8、文件名和全部 UI/header sinks 都 fail closed；Markdown/HTML 不执行，非法流不留下 ready/泄漏对象 | yes | fixed upload corpus + served UI XSS/network tests | goal:G0.2A-SAFETY |
 | AC-SAFETY-02 | 所有路径使用同一 policy evaluator 逐次检查 server-derived tenant/principal/root resource scope/C1/private audience/expiry/retention/current time；跨 principal/tenant、过期或越权访问均不泄露 metadata/hash/body并留下拒绝审计 | yes | real-HTTP dual-principal/tenant authorization tests | goal:G0.2A-SAFETY |
-| AC-SAFETY-03 | 只有 authority-pinned raw hash/profile 可创建 fake 任务；其他合法文档仅存储/下载且无 outbox/Worker/业务结果；无真实模型、GearJob、知识、Connector、Hatchet、MinIO 或外部网络执行路径 | yes | independent oracle/profile/registry/route/dependency/secret/network scans | goal:G0.2A-SAFETY |
+| AC-SAFETY-03 | 只有 authority-pinned raw hash/profile 可创建 fake 任务；其他合法文档仅存储/下载且无 outbox/Worker/业务结果；产品运行与验收路径无真实模型、GearJob、知识、Connector、Hatchet、MinIO 或外部网络执行路径；开发用 Kimi 例外不得进入产品进程、数据或 Gate oracle | yes | independent oracle/profile/registry/route/dependency/secret/network scans | goal:G0.2A-SAFETY |
 | AC-GATE-01 | `pnpm verify:gate0.2a` 直接聚合质量、合同、storage、安全、integration、required fault cases、success/negative served UI 和可执行备份恢复；禁止 skip/手工 summary 作为通过输入，任一失败时非零 | yes | aggregate script contract + exit-code/required-case tests | goal:G0.2A-AUTHORITY |
 
 ## Real Validation Plan
@@ -318,11 +328,11 @@ V-6 的 required fault case IDs 固定为：`after_intent_commit_before_s3_put`�
 - 报告 Artifact 是本 Gate 固定模板的模拟交付物，不等于真实报告 Agent。文件名、MIME、hash、lineage 和下载权限必须与原始 Artifact 使用同一 contract。
 - Gate 0.2A 不建立复杂 UI 表格。Evidence 适合抽屉/详情区，Artifact 使用轻量列表；后续任务中心如确有二维数据再按独立合同选择轻量 table。
 - 可以复用 Gate 0.1 代码和经审查的 Sharp Cell/Hive 设计模式；不得为“统一架构”重写已通过的 Workflow、Approval、授权、UI shell 或 Runtime。
-- Kimi Code CLI 只是开发时编码执行器，不是 geneway 产品 Runtime、仓库依赖或 Gate 成功证据。主控制器必须审查其 diff，禁止向其提供 `.env`、密钥、客户文档或 Gate 外路径；最终结论仍以真实 served UI、Playwright、API/DB/S3/Worker correlation 和 `pnpm verify:gate0.2a` 为准。
+- Kimi Code CLI 只是开发时编码执行器，不是 geneway 产品 Runtime、仓库依赖或 Gate 成功证据；其完整边界以 `Kimi frontend implementation lane` 为准。最终结论仍由主控制器根据真实 served UI、独立 Playwright oracle、API/DB/S3/Worker correlation 和 `pnpm verify:gate0.2a` 给出。
 
 ## Failure And Stop Conditions
 
-- 如果实现需要 PDF/Office/OCR/压缩包解析、知识索引/检索、真实模型、共享 Codex、GearJob、异常中心、Hatchet、动态 Workflow、渠道、A2A、外部 Agent 或制造业写操作，停止并返回范围决策，不在 Gate 0.2A 内吸收。
+- 如果产品实现或运行路径需要 PDF/Office/OCR/压缩包解析、知识索引/检索、真实模型、共享 Codex、GearJob、异常中心、Hatchet、动态 Workflow、渠道、A2A、外部 Agent 或制造业写操作，停止并返回范围决策，不在 Gate 0.2A 内吸收；受控开发执行器不改变这条产品边界。
 - 如果必须使用 MinIO、让浏览器/Runtime持有 S3 凭证、绕过 Control Plane 下载，或让 S3 metadata 成为业务权威，停止实施。
 - 如果只能以浏览器 fulfill、S3 mock、进程内 fake queue、静态截图或数据库 seed 冒充成功路径，Gate 0.2A 失败。
 - 如果对象存储无法证明 create-only，S3 与 DB 部分失败没有确定恢复状态，Evidence/Lineage 无法回溯，或无 Evidence Claim 仍可发布，Gate 0.2A 失败。

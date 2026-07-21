@@ -10,7 +10,7 @@
 
 产品设计来源：[`doc/reference/制造业数字员工平台_内部能力内核细节终审与兼容实施方案_v19.md`](../reference/制造业数字员工平台_内部能力内核细节终审与兼容实施方案_v19.md)
 
-v19 后已接受的长期决定见 [`doc/adr/`](../adr/README.md)。其中 ADR-017～019 是后续 Gate 的 durable decision 输入；Gate 0.1 仅实现 ADR-019 所述固定线性基线，其余未来能力均不因接受 ADR 而获得实施授权。
+v19 后已接受的长期决定见 [`doc/adr/`](../adr/README.md)。其中 ADR-017～020 是后续 Gate 的 durable decision 输入；Gate 0.1 仅实现 ADR-019 所述固定线性基线，其余未来能力均不因接受 ADR 而获得实施授权。知识权威源/快照/索引/查询链与 `Business Capability Matrix` 的长期语义以 [ADR-020](../adr/adr-020-hybrid-knowledge-and-business-capability-matrix.md) 为准，当前均为 `NOT_OPEN`。
 
 StaffDeck 其余可借鉴行为与测试题保存在[借鉴候选目录](../reference/staffdeck-adoption-candidate-catalog.md)。该目录是 `candidate_recorded` 外部参考，不是 accepted ADR、实施合同或当前能力。
 

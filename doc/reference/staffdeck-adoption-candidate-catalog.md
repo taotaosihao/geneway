@@ -41,6 +41,7 @@ authority_effect: 本目录不授予产品代码实施、Gate 扩围、StaffDeck
 | [ADR-017](../adr/adr-017-controlled-ephemeral-orchestration-code.md) | 受控临时编码、Tool Broker、逐次授权与明确拒绝 General Skill runner |
 | [ADR-018](../adr/adr-018-human-confirmation-for-external-side-effects.md) | 外部副作用的 immutable ActionVersion、可信确认、再授权、幂等和对账 |
 | [ADR-019](../adr/adr-019-authoritative-three-layer-sop-state-machines.md) | 状态机 SOP、三层权威、固定 Interpreter、并行/等待/恢复与 StaffDeck 净室边界 |
+| [ADR-020](../adr/adr-020-hybrid-knowledge-and-business-capability-matrix.md) | 权威知识源快照/索引/查询/Evidence 链、Business Capability Matrix 只读投影与知识/技能边界 |
 
 ## 候选总览与优先级
 
@@ -51,14 +52,14 @@ authority_effect: 本目录不授予产品代码实施、Gate 扩围、StaffDeck
 | `SD-CAND-001` | Claim/Evidence 来源 chips 与详情抽屉 | 最高 | Gate 0.2 | `candidate_recorded` | 绑定 Claim–Evidence–Lineage；不能复用 StaffDeck `evidence_pack` 合同 |
 | `SD-CAND-002` | 执行记录“摘要 + 展开详情” | 高 | Gate 0.2 | `candidate_recorded` | 只投影 Control Plane 正式事件；不显示 reasoning/code/secrets |
 | `SD-CAND-003` | refresh/reconnect/cancel/乱序恢复 UX | 高 | Gate 0.2/B | `candidate_recorded` | 保留 snapshot watermark、stable sequence、CAS/fencing；不复用 StaffDeck cursor |
-| `SD-CAND-004` | 文档结构导航与分层检索 | 高 | Gate 0.2/A | `candidate_recorded` | immutable snapshot、trust/taint、query snapshot、Evidence/Lineage |
+| `SD-CAND-004` | 文档结构导航与分层检索 | 高 | Gate 0.2/A | 权威/版本/证据边界已提升至 ADR-020；导航与检索 UX 仍为 `candidate_recorded` | immutable snapshot、trust/taint、query snapshot、Evidence/Lineage |
 | `SD-CAND-005` | Draft → 编辑 → 新版本 → 确认卡 | 高 | Gate C | `candidate_recorded`，权威语义已受 ADR-018/019 约束 | 每次编辑重新 Compiler/hash/Approval；不原位修改 |
-| `SD-CAND-006` | 版本分支、Diff、同步、promotion、rollback UX | 中高 | Gate C/G | `candidate_recorded` | immutable version + eval + approval + audit |
+| `SD-CAND-006` | 版本分支、Diff、同步、promotion、rollback UX | 中高 | Gate C/G | 权威修改链已受 ADR-020 约束；具体 UX 仍为 `candidate_recorded` | immutable version + eval + approval + audit |
 | `SD-CAND-007` | Model Gateway 输出预算与 provider 诊断 | 中高 | Gate A | `candidate_recorded` | 只能位于强制 Model Gateway 内，禁止业务模块直连 provider |
 | `SD-CAND-008` | 人工接管待办与恢复体验 | 中 | Gate B/后续 | `candidate_recorded`，状态权威已受 ADR-019 约束 | 小纬仍是客户作者；actor audit + CAS/fencing/idempotency |
 | `SD-CAND-009` | 定时任务草案、时区、misfire、concurrency | 中 | Gate D/独立后续 Gate | `candidate_recorded` | 每次唤醒进入 BusinessTask；定时不等于自动写授权 |
 | `SD-CAND-010` | 按版本反馈、work record 与 Eval 运营 | 中 | Gate G | `candidate_recorded` | 反馈只是 Eval 输入，不能单独决定 Graduation |
-| `SD-CAND-011` | Tool/Capability Registry 查找、绑定、启停和 probe UX | 低到中 | Gate A/C | `candidate_recorded`，执行边界已受 ADR-017 约束 | Registry 只含受审版本和 policy metadata；所有执行经 Gateway |
+| `SD-CAND-011` | Tool/Capability Registry 查找、绑定、启停和 probe UX | 低到中 | Gate A/C | `candidate_recorded`；执行与投影边界已受 ADR-017/020 约束 | Registry 只含受审版本和 policy metadata；所有执行经 Gateway |
 
 ## 第一组：建议优先评估的产品投影
 
@@ -142,6 +143,8 @@ StaffDeck 行为参考：
 
 ### SD-CAND-004：结构感知知识导航与分层检索
 
+其中“外部权威源 + 受控快照/索引/查询版本”“retrieval hit 不自动等于 Evidence”“Business Capability Matrix 只读投影”等长期权威语义已经提升为 [ADR-020](../adr/adr-020-hybrid-knowledge-and-business-capability-matrix.md)。以下 concept 层级、导航交互、预算呈现、摄取 UI 和具体实现仍是待后续 Gate 评估的候选，不因 ADR accepted 而获得实施授权。
+
 #### 值得借鉴的行为
 
 - concept → document → bucket → section → chunk 的逐层缩小；
@@ -182,6 +185,8 @@ StaffDeck 行为参考：
 不得复用 StaffDeck ScheduledTask 数据模型或把 Gate 0.1 当前整体审批误报为该完整卡片已经实现。
 
 ### SD-CAND-006：版本分支、Diff、同步、promotion 与 rollback UX
+
+ADR-020 已接受“矩阵修改必须回到 Draft、新版本、Diff、校验、审批/promotion，矩阵只重新投影”的权威语义。以下 StaffDeck 风格的分支、同步、版本详情和运营交互仍为候选，不代表对应管理能力已经开放。
 
 可借 StaffDeck `synced/diverged`、本地版本、版本详情、从基线同步、发布和回滚的管理员心智模型。geneway 目标映射为：
 
@@ -252,6 +257,8 @@ StaffDeck 行为参考：`frontend-enterprise/src/pages/chat/components/Schedule
 
 ### SD-CAND-011：Tool/Capability Registry 管理 UX
 
+Registry 的执行边界继续以 ADR-017 为准，`Business Capability Matrix` 的只读投影和修改链以 ADR-020 为准。以下查找、启停、probe 和版本详情属于未来管理 UX 候选；它们不能创建新的执行权威或隐式启用未授权对象。
+
 可借“查找、绑定、启停、probe、结构化错误、copy-on-write、版本详情和使用状态”的管理体验。
 
 geneway Registry 只能登记受审、版本固定的 Capability/Tool/Handler/Connector metadata 与 policy；所有执行仍经 Model/Tool/Connector Gateway 和逐次授权。明确禁止：
@@ -287,8 +294,8 @@ StaffDeck 行为参考：`backend/app/tools/tool_executor.py`、`backend/app/age
 
 | 候选包 | 包含 | 价值主线 | 前置与停止条件 |
 | --- | --- | --- | --- |
-| Gate 0.2 证据/执行投影包 | `001`、`002`、`003`、`004` | 来源可发现、过程可理解、断线可恢复、文档结构可导航 | 必须新建 Gate 0.2 authority；不能把 StaffDeck UI 复制进来或反向扩大 Gate 0.1 |
-| Gate A Gateway 体验包 | `004` 的检索后端、`007`、`011` | 真实模型/只读工具的诊断、预算、Registry 管理 | Model/Tool/Connector Gateway 与逐次授权先成为真实强制边界 |
+| Gate 0.2 证据/执行投影包 | `001`、`002`、`003`、`004` 的候选 UX | 来源可发现、过程可理解、断线可恢复、文档结构可导航 | 必须新建 Gate 0.2 authority 并吸收 ADR-020；不能把 StaffDeck UI 复制进来或反向扩大 Gate 0.1 |
+| Gate A Gateway 体验包 | `004` 的候选检索实现、`007`、`011` | 真实模型/只读工具的诊断、预算、Registry 管理 | 必须吸收 ADR-020；Model/Tool/Connector Gateway 与逐次授权先成为真实强制边界 |
 | Gate B durable 协作包 | `003` 的 durable 部分、`008` | 恢复、人工接管、跨 Worker 可靠性 | Control Plane/WorkflowVersion 权威不变；必须具备 CAS/fencing/outbox/inbox |
 | Gate C authoring/版本包 | `005`、`006`、`011` 的绑定 UX | Draft、Diff、审批、promotion、rollback | 动态 Draft/Patch、Compiler/Registry/SafeExpression 获独立授权 |
 | Gate D 定时业务包 | `009` | 时区、misfire、occurrence、并发 | 不隐式开放写动作；日报/异常 Capability 与真实只读 Evidence 先验收 |
@@ -313,7 +320,7 @@ StaffDeck 行为参考：`backend/app/tools/tool_executor.py`、`backend/app/age
 13. 复制 3k～6k 行页面/Hook 的组织方式；
 14. 在许可证路径未澄清前复制任何 StaffDeck 源码、测试、SVG/PNG、CSS recipe 或其他视觉资产。
 
-与 SOP、临时编码和外部写动作有关的更强约束，以 ADR-017～019 为准。
+与 SOP、临时编码、外部写动作、知识权威链和业务能力矩阵有关的更强约束，以 ADR-017～020 为准。
 
 ## 净室转译流程
 

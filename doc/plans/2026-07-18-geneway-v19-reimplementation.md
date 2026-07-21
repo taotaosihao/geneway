@@ -99,6 +99,8 @@ flowchart TB
 | Artifact | 报告、附件、数据快照等可下载文件 |
 | Connector | 访问 MES、ERP、QMS 等系统的受控适配器 |
 
+知识能力采用“外部权威源 + geneway 受控快照、索引、查询快照与 Evidence”的长期架构；内部 `Business Capability Matrix` 只投影精确版本的 Capability、Expert/Agent、Harness、Tool/Connector、Workflow、Knowledge、Model/Policy 和 Eval，不成为第二份执行或权限权威。完整不变量见 [ADR-020](../adr/adr-020-hybrid-knowledge-and-business-capability-matrix.md)。该决定不把知识库或矩阵加入当前 Gate 0.1，也不授予后续 Gate 实施范围。
+
 ### 动态 Harness 和动态 Workflow
 
 - 动态 Harness：根据任务选择不同的 Agent、工具、模型、记忆、检查方式和成本上限。

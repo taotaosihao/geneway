@@ -6,7 +6,7 @@
 
 文档角色：**非执行路线图**。本文件说明长期产品与阶段关系，不授予任何 Gate 的实施权限，也不能覆盖当前合同。
 
-详细技术约束见[技术实施附录](2026-07-18-geneway-v19-technical-appendix.md)，唯一可执行范围见[Gate 0.1 最终实施合同](atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md)，界面细节见[界面设计 ADR](atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md)。后续 Gate 必须由用户另行授权并建立新的 authority slice。
+详细技术约束见[技术实施附录](2026-07-18-geneway-v19-technical-appendix.md)，Gate 0.1 的最终实施边界见[最终实施合同](atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md)，界面细节见[界面设计 ADR](atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md)，v19 后确认的长期决定见[架构决策索引](../adr/README.md)。后续 Gate 必须由用户另行授权并建立新的 authority slice；accepted ADR 不等于已实现或已开放。
 
 ## 1. 一句话目标
 

@@ -10,6 +10,8 @@
 
 产品设计来源：[`doc/reference/制造业数字员工平台_内部能力内核细节终审与兼容实施方案_v19.md`](../reference/制造业数字员工平台_内部能力内核细节终审与兼容实施方案_v19.md)
 
+v19 后已接受、但尚未获得实施授权的长期决定见 [`doc/adr/`](../adr/README.md)。其中 ADR-017/018 是后续 Gate 的 durable decision 输入，不是当前已实现能力。
+
 本计划取代此前“基于 Paperclip 的多 Agent 长任务 MVP”作为后续实施路线。旧分支不删除、不重写，保留为历史 Spike 和选择性迁移来源。
 
 ---
@@ -2242,9 +2244,11 @@ AgentTeams、DeerFlow、AgentScope、LangBot 不进入默认安装清单。
 
 ## 19. 当前授权边界
 
-Gate R 已完成，不得根据本文再次归档、移动或重建仓库。当前修订只授权实施文档和权威合同收敛，不授权产品代码实现。
+Gate R 与 Gate 0.1 已完成，不得根据本文再次归档、移动或重建仓库，也不得把后续决定反向加入 Gate 0.1 的验收范围。Gate 0.1 的当前事实仍是：固定 `solution.analysis.v1`、预置只读脱敏输入、整体 `WorkflowVersion` 审批、普通 Interpreter 和服务端 fake Runtime；所有真实写 Connector、D1/W1/W2/W3、临时编码沙箱及工单确认表单均未开放，未开放能力保持 `NOT_OPEN`。
 
-下一次如获明确实现授权，只能执行 [`atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md`](atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md) 定义的 Gate 0.1。Gate 0.2、Gate A 及以后各 Gate 必须各自形成可审计合同并另行授权。提交、推送、建 PR、部署和跨仓修改仍分别遵循独立权限边界。
+2026-07-21 接受的 [ADR-017](../adr/adr-017-controlled-ephemeral-orchestration-code.md) 与 [ADR-018](../adr/adr-018-human-confirmation-for-external-side-effects.md) 只冻结后续 Gate 的长期边界与推荐顺序，不授权产品代码实现，也不能被描述成 Gate 0.1 已有能力。
+
+Gate 0.2、Gate A 及以后各 Gate 必须各自形成新的 authority slice、可审计合同并获得用户明确授权。提交、推送、建 PR、部署和跨仓修改仍分别遵循独立权限边界。
 
 ---
 

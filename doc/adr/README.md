@@ -19,6 +19,10 @@
 | [ADR-018](adr-018-human-confirmation-for-external-side-effects.md) | 任何外部业务副作用默认绑定不可变 ActionVersion 并由用户确认 | accepted | 真实写 Connector 与 D1/W1/W2/W3 均 `NOT_OPEN` | 首个申请开放外部写动作的后续 Gate 必须完整吸收，不得拆除确认或再授权链路 |
 | [ADR-019](adr-019-authoritative-three-layer-sop-state-machines.md) | 状态机驱动 SOP 采用三层权威与固定 Interpreter 迁移 | accepted | Gate 0.1 只有固定线性基线；动态条件、真正并行、durable wait/人机恢复和 Agent 生成的动态 Workflow 均 `NOT_OPEN` | Gate B/C 或独立后续 Gate；StaffDeck 仅作行为/测试参考并默认净室重实现 |
 
+## 外部参考与候选目录
+
+- [StaffDeck 借鉴候选目录](../reference/staffdeck-adoption-candidate-catalog.md)：保存 ADR-017～019 之外值得在未来 Gate 重新评估的产品、可靠性、知识与运营模式。目录状态为 `candidate_recorded`，不是 accepted ADR，也不授予实施或代码/资产复制权限。
+
 ## 当前 Gate 0.1 快照
 
 截至 2026-07-21，Gate 0.1 的实际产品能力是固定 `solution.analysis.v1`、预置只读脱敏输入、不可变 `WorkflowVersion`、整体 Workflow 审批、普通 Interpreter 和服务端 fake Runtime。它已经具备固定七节点的最小线性状态机与 step attempt/lease/fencing，但不具备动态条件、真正并行或 durable wait。所有结果保持 `simulation=true`、`runtimeMode=fake`、`businessDecisionAllowed=false`。

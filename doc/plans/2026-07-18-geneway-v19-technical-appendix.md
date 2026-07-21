@@ -12,6 +12,8 @@
 
 v19 后已接受的长期决定见 [`doc/adr/`](../adr/README.md)。其中 ADR-017～019 是后续 Gate 的 durable decision 输入；Gate 0.1 仅实现 ADR-019 所述固定线性基线，其余未来能力均不因接受 ADR 而获得实施授权。
 
+StaffDeck 其余可借鉴行为与测试题保存在[借鉴候选目录](../reference/staffdeck-adoption-candidate-catalog.md)。该目录是 `candidate_recorded` 外部参考，不是 accepted ADR、实施合同或当前能力。
+
 本计划取代此前“基于 Paperclip 的多 Agent 长任务 MVP”作为后续实施路线。旧分支不删除、不重写，保留为历史 Spike 和选择性迁移来源。
 
 ---

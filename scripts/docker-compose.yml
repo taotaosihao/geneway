@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: geneway
       POSTGRES_DB: geneway_test
     ports:
-      - "127.0.0.1:55433:5432"
+      - "127.0.0.1:${GENEWAY_POSTGRES_PORT:-55433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U geneway -d geneway_test"]
       interval: 1s
@@ -14,3 +14,98 @@ services:
       retries: 30
     tmpfs:
       - /var/lib/postgresql/data
+
+  versitygw:
+    image: ghcr.io/versity/versitygw@sha256:7d56e0a6c246f00e2385ba4fe84065981959be1d822648f88a155c82e0e0652d
+    environment:
+      VGW_BACKEND: posix
+      VGW_BACKEND_ARG: /data
+      VGW_PORT: :7070
+      VGW_ADMIN_PORT: :7071
+      VGW_HEALTH: /health
+      VGW_IAM_DIR: /iam
+      VGW_VERSIONING_DIR: /versions
+      ROOT_ACCESS_KEY_ID: ${GENEWAY_S3_ADMIN_ACCESS_KEY_ID:?GENEWAY_S3_ADMIN_ACCESS_KEY_ID is required}
+      ROOT_SECRET_ACCESS_KEY: ${GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY:?GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY is required}
+      VGW_QUIET: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:7070/health"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /data
+      - /iam
+      - /versions
+    networks:
+      - storage
+
+  storage-adapter:
+    image: node@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
+    working_dir: /workspace
+    command: ["./node_modules/.bin/tsx", "scripts/storage-adapter.ts"]
+    environment:
+      GENEWAY_STORAGE_ADAPTER_PORT: "7400"
+      GENEWAY_STORAGE_ADAPTER_HOST: 0.0.0.0
+      GENEWAY_STORAGE_ADAPTER_TOKEN: ${GENEWAY_STORAGE_ADAPTER_TOKEN:?GENEWAY_STORAGE_ADAPTER_TOKEN is required}
+      GENEWAY_STORAGE_ALLOWED_PREFIX: ${GENEWAY_STORAGE_ALLOWED_PREFIX:?GENEWAY_STORAGE_ALLOWED_PREFIX is required}
+      GENEWAY_S3_ENDPOINT: http://versitygw:7070
+      GENEWAY_S3_REGION: ${GENEWAY_S3_REGION:-us-east-1}
+      GENEWAY_S3_BUCKET: ${GENEWAY_S3_BUCKET:?GENEWAY_S3_BUCKET is required}
+      GENEWAY_S3_APP_ACCESS_KEY_ID: ${GENEWAY_S3_APP_ACCESS_KEY_ID:?GENEWAY_S3_APP_ACCESS_KEY_ID is required}
+      GENEWAY_S3_APP_SECRET_ACCESS_KEY: ${GENEWAY_S3_APP_SECRET_ACCESS_KEY:?GENEWAY_S3_APP_SECRET_ACCESS_KEY is required}
+    ports:
+      - "127.0.0.1:${GENEWAY_STORAGE_ADAPTER_PORT:?GENEWAY_STORAGE_ADAPTER_PORT is required}:7400"
+    volumes:
+      - ..:/workspace:ro
+    depends_on:
+      versitygw:
+        condition: service_healthy
+    networks:
+      - storage
+      - default
+
+  storage-oracle:
+    image: node@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
+    working_dir: /workspace
+    command: ["node", "-e", "setInterval(() => {}, 2147483647)"]
+    environment:
+      GENEWAY_S3_ENDPOINT: http://versitygw:7070
+      GENEWAY_S3_REGION: ${GENEWAY_S3_REGION:-us-east-1}
+      GENEWAY_S3_BUCKET: ${GENEWAY_S3_BUCKET:?GENEWAY_S3_BUCKET is required}
+      GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID: ${GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID:?GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID is required}
+      GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY: ${GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY:?GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY is required}
+    volumes:
+      - ..:/workspace:ro
+    depends_on:
+      versitygw:
+        condition: service_healthy
+    networks:
+      - storage
+
+  storage-provisioner:
+    image: node@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
+    working_dir: /workspace
+    command: ["node", "-e", "process.exit(0)"]
+    environment:
+      GENEWAY_S3_ENDPOINT: http://versitygw:7070
+      GENEWAY_S3_REGION: ${GENEWAY_S3_REGION:-us-east-1}
+      GENEWAY_S3_BUCKET: ${GENEWAY_S3_BUCKET:?GENEWAY_S3_BUCKET is required}
+      GENEWAY_S3_ADMIN_ACCESS_KEY_ID: ${GENEWAY_S3_ADMIN_ACCESS_KEY_ID:?GENEWAY_S3_ADMIN_ACCESS_KEY_ID is required}
+      GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY: ${GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY:?GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY is required}
+      GENEWAY_S3_APP_ACCESS_KEY_ID: ${GENEWAY_S3_APP_ACCESS_KEY_ID:?GENEWAY_S3_APP_ACCESS_KEY_ID is required}
+      GENEWAY_S3_APP_SECRET_ACCESS_KEY: ${GENEWAY_S3_APP_SECRET_ACCESS_KEY:?GENEWAY_S3_APP_SECRET_ACCESS_KEY is required}
+      GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID: ${GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID:?GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID is required}
+      GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY: ${GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY:?GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY is required}
+    volumes:
+      - ..:/workspace:ro
+    depends_on:
+      versitygw:
+        condition: service_healthy
+    networks:
+      - storage
+
+networks:
+  default: {}
+  storage:
+    internal: true

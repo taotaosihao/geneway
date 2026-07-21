@@ -6,7 +6,9 @@
     { "path": "../../packages/contracts" },
     { "path": "../../packages/authorization" },
     { "path": "../../packages/evidence" },
+    { "path": "../../packages/ingestion" },
     { "path": "../../packages/runtime" },
+    { "path": "../../packages/storage" },
     { "path": "../../packages/workflow" },
     { "path": "../worker" }
   ]

@@ -73,6 +73,7 @@ export class ControlPlaneRepository implements InterpreterControlPort {
 
   async resetForTest(): Promise<void> {
     await this.pool.query(`TRUNCATE TABLE
+      audit_events, document_snapshots, artifact_states, artifact_manifests, artifacts, artifact_ingest_intents,
       idempotency_records, outbox_events, result_claims, minimal_evidence_refs, policy_decisions,
       delegated_capabilities, approval_versions, business_task_steps, business_task_events,
       business_tasks, workflow_versions, harness_versions, expert_catalog_versions,

@@ -2,7 +2,7 @@ import { AssistantRuntimeProvider, ComposerPrimitive, type AppendMessage, type T
 import { Dialog } from '@base-ui/react/dialog';
 import { Background, Controls, ReactFlow, type Edge, type Node } from '@xyflow/react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ExpertTarget, TaskSnapshot } from '@geneway/contracts';
+import type { DocumentSnapshotProjection, ExpertTarget, TaskSnapshot } from '@geneway/contracts';
 import { SimulationNotice, TaskProgress } from '@geneway/ui';
 import { api, type Approval, type Conversation, type Fixture, type Workflow } from './api.js';
 
@@ -16,6 +16,20 @@ const ROUTES: readonly Readonly<{ value: string; label: string; target: ExpertTa
   { value: 'expert.solution.architect', label: '方案专家', target: { mode: 'expert', expertId: 'expert.solution.architect' } },
   { value: 'team.solution.core', label: '方案专家团', target: { mode: 'team', teamId: 'team.solution.core' } },
 ];
+
+let conversationBootstrap: Promise<Conversation> | undefined;
+
+async function ensureConversation(): Promise<Conversation> {
+  const storedId = localStorage.getItem('geneway.conversationId');
+  if (storedId !== null) {
+    try { return await api.getConversation(storedId); } catch { localStorage.removeItem('geneway.conversationId'); }
+  }
+  conversationBootstrap ??= api.createConversation().then(async ({ id }) => {
+    localStorage.setItem('geneway.conversationId', id);
+    return api.getConversation(id);
+  }).finally(() => { conversationBootstrap = undefined; });
+  return conversationBootstrap;
+}
 
 function textOfAppendMessage(message: AppendMessage): string {
   return message.content.filter((part) => part.type === 'text').map((part) => part.text).join('\n').trim();
@@ -35,10 +49,28 @@ export function App() {
   const [workflow, setWorkflow] = useState<Workflow>();
   const [approval, setApproval] = useState<Approval>();
   const [fixture, setFixture] = useState<Fixture>();
+  const [documentSnapshots, setDocumentSnapshots] = useState<readonly DocumentSnapshotProjection[]>([]);
+  const [snapshotReadUnavailable, setSnapshotReadUnavailable] = useState(false);
   const [cursor, setCursor] = useState(0);
   const [working, setWorking] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string>();
   const [workflowOpen, setWorkflowOpen] = useState(true);
+
+  const loadDocumentSnapshots = useCallback(async (conversationId: string) => {
+    try {
+      const listed = await api.getDocumentSnapshots(conversationId);
+      setDocumentSnapshots(listed.documentSnapshots);
+      setSnapshotReadUnavailable(false);
+    } catch (cause) {
+      if (cause instanceof Error && cause.message.startsWith('ARTIFACT_NOT_FOUND:')) {
+        setDocumentSnapshots([]);
+        setSnapshotReadUnavailable(true);
+        return;
+      }
+      throw cause;
+    }
+  }, []);
 
   const recover = useCallback(async (taskId: string, knownCursor: number) => {
     let snapshot = await api.getTask(taskId);
@@ -55,6 +87,7 @@ export function App() {
       : snapshot.expertTarget.mode === 'team' ? snapshot.expertTarget.teamId : 'auto';
     setRoute(restoredRoute);
     setTask(snapshot); setConversation(conversationSnapshot); setWorkflow(workflowVersion); setApproval(approvalVersion); setCursor(nextCursor);
+    localStorage.setItem('geneway.conversationId', snapshot.conversationId);
     localStorage.setItem('geneway.gate01.taskId', taskId);
     localStorage.setItem('geneway.gate01.cursor', String(nextCursor));
     return { snapshot, cursor: nextCursor };
@@ -64,26 +97,47 @@ export function App() {
     if (!capabilityOpen) return;
     void api.getFixture().then(setFixture).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
     const taskId = localStorage.getItem('geneway.gate01.taskId');
-    if (taskId === null) return;
-    const saved = Number(localStorage.getItem('geneway.gate01.cursor') ?? 0);
-    void recover(taskId, Number.isSafeInteger(saved) ? saved : 0).catch(() => {
-      localStorage.removeItem('geneway.gate01.taskId');
-      localStorage.removeItem('geneway.gate01.cursor');
-    });
-  }, [capabilityOpen, recover]);
+    if (taskId !== null) {
+      const saved = Number(localStorage.getItem('geneway.gate01.cursor') ?? 0);
+      void recover(taskId, Number.isSafeInteger(saved) ? saved : 0).then(async ({ snapshot }) => {
+        await loadDocumentSnapshots(snapshot.conversationId);
+      }).catch(() => {
+        localStorage.removeItem('geneway.gate01.taskId');
+        localStorage.removeItem('geneway.gate01.cursor');
+      });
+      return;
+    }
+    void ensureConversation().then(async (current) => {
+      setConversation(current);
+      await loadDocumentSnapshots(current.id);
+    }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+  }, [capabilityOpen, loadDocumentSnapshots, recover]);
+
+  const uploadArtifact = useCallback(async (file: File) => {
+    setUploading(true); setError(undefined);
+    try {
+      const current = conversation ?? await ensureConversation();
+      setConversation(current);
+      await api.uploadArtifact(current.id, file);
+      await loadDocumentSnapshots(current.id);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setUploading(false); }
+  }, [conversation, loadDocumentSnapshots]);
 
   const create = useCallback(async (body: string) => {
     if (!capabilityOpen) throw new Error('NOT_OPEN: Capability is not open in Gate 0.1');
     setWorking(true); setError(undefined);
     try {
-      const conversationId = conversation?.id ?? (await api.createConversation()).id;
+      const current = conversation ?? await ensureConversation();
+      setConversation(current);
+      const conversationId = current.id;
       await api.addMessage(conversationId, body || '请分析预置的脱敏方案材料');
       const target = ROUTES.find((item) => item.value === route)?.target ?? { mode: 'auto' as const };
       const created = await api.createTask(conversationId, target);
       await recover(created.taskId, 0);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setWorking(false); }
-  }, [capabilityOpen, conversation?.id, recover, route]);
+  }, [capabilityOpen, conversation, recover, route]);
 
   const runtime = useExternalStoreRuntime({
     messages: conversation?.messages ?? [],
@@ -146,10 +200,32 @@ export function App() {
       <section className="conversation-pane">
         <header className="topbar"><div><h1>小纬</h1><p>通用数字员工 · 由小纬统一组织专家能力</p></div><SimulationNotice /></header>
         <div className="thread" data-testid="message-thread">
-          {conversation === undefined && <section className="welcome-empty" data-testid="welcome-empty"><div className="avatar">纬</div><div><b>你好，我是小纬</b><p>选择预置材料和专家路线后，我会先展示固定 Workflow，获得你的批准才执行。</p></div></section>}
+          {(conversation?.messages.length ?? 0) === 0 && <section className="welcome-empty" data-testid="welcome-empty"><div className="avatar">纬</div><div><b>你好，我是小纬</b><p>你可以上传只读材料，或选择预置材料和专家路线。任何 Workflow 都会先展示并等待批准。</p></div></section>}
           {conversation?.messages.map((message) => <article className={`message ${message.author}`} key={message.id} data-author={message.author}>
             <div className="avatar">{message.author === 'xiaowei' ? '纬' : '你'}</div><div><b>{message.author === 'xiaowei' ? '小纬' : '你'}</b><p>{message.body}</p></div>
           </article>)}
+          <section className="upload-card" data-testid="artifact-upload-card">
+            <div><span className="eyebrow">私有材料库 · Gate 0.2A.1</span><h2>上传分析材料</h2><p>仅接收不超过 1 MiB 的 UTF-8 .txt / .md。本阶段只保存和校验，不会创建任务。</p></div>
+            <label className={`upload-action${uploading ? ' disabled' : ''}`}>
+              {uploading ? '正在校验…' : '选择文件'}
+              <input data-testid="artifact-upload-input" aria-label="上传分析材料" type="file" accept=".txt,text/plain,.md,text/markdown" disabled={uploading} onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file !== undefined) void uploadArtifact(file);
+                event.target.value = '';
+              }} />
+            </label>
+          </section>
+          {snapshotReadUnavailable && <section className="artifact-card artifact-card-unavailable" data-testid="artifact-unavailable-card">
+            <div className="artifact-title"><div><span className="eyebrow">安全降级</span><h2>材料对象不可用或完整性异常</h2></div><span className="integrity-badge integrity-badge-error">不可用</span></div>
+            <p>已隐藏材料名称、标识和摘要。下载与模拟任务均已禁用，请等待管理员完成存储对账。</p>
+          </section>}
+          {documentSnapshots.map((projection) => { const snapshot = projection.documentSnapshot; return <section className="artifact-card" key={snapshot.id} data-testid="artifact-card"
+            data-artifact-id={snapshot.artifactId} data-manifest-id={snapshot.manifestId} data-snapshot-id={snapshot.id} data-content-sha256={snapshot.contentSha256}>
+            <div className="artifact-title"><div><span className="eyebrow">已校验 · 私有 · C1 · untrusted_text</span><h2>{snapshot.displayName}</h2></div><span className="integrity-badge">完整性已验证</span></div>
+            <dl className="artifact-facts"><div><dt>大小</dt><dd data-testid="artifact-size">{snapshot.sizeBytes} bytes</dd></div><div><dt>类型</dt><dd>{snapshot.mediaType}</dd></div><div><dt>Snapshot</dt><dd>{snapshot.id}</dd></div></dl>
+            <code className="artifact-hash" data-testid="artifact-hash">sha256:{snapshot.contentSha256}</code>
+            <div className="artifact-actions"><a data-testid="artifact-download" href={projection.downloadUrl}>下载原件</a><span data-testid="artifact-eligibility">{projection.executionEligibility.eligible ? '材料已匹配演示 Profile · 任务入口将在下一纵切开放' : '材料已保存 · 暂未匹配可执行 Profile'}</span></div>
+          </section>; })}
           <section className="fixture-card" data-testid="fixture-card"><span className="eyebrow">已选择 · 预置 · 只读 · 脱敏</span><h2>{fixture?.name ?? '正在读取预置材料…'}</h2><p>{fixture?.description ?? '只从 Control Plane 读取版本固定的模拟材料。'}</p>{fixture !== undefined && <small>fixture v{fixture.version} · {fixture.ref}</small>}</section>
           {task !== undefined && <section className="task-card" data-testid="task-card" data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}>
             <div className="task-title"><div><span className="eyebrow">小纬任务 · simulation=true</span><h2>方案分析流程</h2></div><span className={`status status-${task.status}`}>{task.status}</span></div>
@@ -166,14 +242,14 @@ export function App() {
           {error !== undefined && <div className="error" role="alert">{error}</div>}
         </div>
         <div className="composer-zone">
-          <div className="composer-tools"><label>专家路线<select aria-label="专家路线" value={route} disabled={task !== undefined || working} onChange={(event) => setRoute(event.target.value)}>{ROUTES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><span>仅使用预置材料 · 不支持上传</span></div>
+          <div className="composer-tools"><label>专家路线<select aria-label="专家路线" value={route} disabled={task !== undefined || working} onChange={(event) => setRoute(event.target.value)}>{ROUTES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><span>可上传私有文本材料 · 执行前仍需审批</span></div>
           <ComposerPrimitive.Root className="composer"><ComposerPrimitive.Input aria-label="给小纬发消息" placeholder="请小纬分析这份脱敏材料…" disabled={task !== undefined || working} /><ComposerPrimitive.Send className="send" disabled={task !== undefined || working}>{working ? '处理中' : '发送'}</ComposerPrimitive.Send></ComposerPrimitive.Root>
         </div>
       </section>
 
       <aside className="inspector">
         <div className="inspector-head"><span>任务检查器</span><button onClick={() => setWorkflowOpen((value) => !value)}>{workflowOpen ? '收起' : '展开'}</button></div>
-        {task === undefined ? <div className="empty-inspector"><span>◇</span><p>发送问题后，这里会显示 Workflow、审批、证据和安全边界。</p></div> : <>
+        {task === undefined && snapshotReadUnavailable ? <div className="snapshot-inspector" data-testid="snapshot-unavailable-inspector"><span className="eyebrow">材料权威状态</span><h2>对象不可用 / 完整性异常</h2><p>敏感元数据已隐藏，下载与执行已禁用。</p></div> : task === undefined && documentSnapshots.length === 0 ? <div className="empty-inspector"><span>◇</span><p>上传材料或发送问题后，这里会显示存储校验、Workflow、审批、证据和安全边界。</p></div> : task === undefined ? <div className="snapshot-inspector" data-testid="snapshot-inspector"><span className="eyebrow">材料权威状态</span><h2>{documentSnapshots.length} 份已校验材料</h2>{documentSnapshots.map(({ documentSnapshot: snapshot, artifactState }) => <dl className="facts" key={snapshot.id}><div><dt>Artifact</dt><dd>{snapshot.artifactId}</dd></div><div><dt>Manifest</dt><dd>{snapshot.manifestId}</dd></div><div><dt>Snapshot</dt><dd>{snapshot.id}</dd></div><div><dt>Integrity</dt><dd>{artifactState.integrity}</dd></div></dl>)}</div> : <>
           <dl className="facts"><div><dt>Task</dt><dd data-testid="task-id">{task.id}</dd></div><div><dt>Approval</dt><dd data-testid="approval-id">{task.approval.id}</dd></div><div><dt>状态</dt><dd>{task.status}</dd></div><div><dt>事件游标</dt><dd data-testid="sse-cursor">{cursor}</dd></div></dl>
           <SimulationNotice />
           <Dialog.Root open={workflowOpen} onOpenChange={setWorkflowOpen}><Dialog.Trigger className="secondary">打开流程图</Dialog.Trigger><Dialog.Portal><Dialog.Backdrop className="dialog-backdrop" /><Dialog.Popup className="workflow-dialog"><Dialog.Title>固定 Workflow</Dialog.Title><Dialog.Description>只读图来自 Control Plane 中不可变 WorkflowVersion；审批与 Interpreter 使用同一 id + hash。</Dialog.Description><div className="workflow-meta"><code data-testid="workflow-id">{workflow?.id}</code><code data-testid="workflow-hash">{workflow?.hash}</code></div><div className="flow-wrap" data-testid="workflow-graph"><ReactFlow nodes={graph.nodes} edges={graph.edges} fitView nodesDraggable={false} nodesConnectable={false} elementsSelectable><Background /><Controls showInteractive={false} /></ReactFlow></div><Dialog.Close className="primary">关闭</Dialog.Close></Dialog.Popup></Dialog.Portal></Dialog.Root>

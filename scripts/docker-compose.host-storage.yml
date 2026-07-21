@@ -1,0 +1,7 @@
+services:
+  versitygw:
+    ports:
+      - "127.0.0.1:${GENEWAY_S3_PORT:?GENEWAY_S3_PORT is required}:7070"
+    networks:
+      - storage
+      - default

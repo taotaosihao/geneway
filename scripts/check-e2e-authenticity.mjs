@@ -40,7 +40,7 @@ while (queue.length > 0) {
   const source = await readFile(file, 'utf8');
   for (const [pattern, label] of forbidden) {
     if (pattern.test(source)) {
-      console.error(`Gate 0.1 served UI test is not authentic: ${label} in ${path.relative(process.cwd(), file)}`);
+      console.error(`geneway served UI test is not authentic: ${label} in ${path.relative(process.cwd(), file)}`);
       process.exit(1);
     }
   }
@@ -51,4 +51,4 @@ while (queue.length > 0) {
   }
 }
 
-console.log(`Gate 0.1 authenticity scan passed across ${checked.size} Playwright config/spec/helper files and their local import closure.`);
+console.log(`geneway authenticity scan passed across ${checked.size} Playwright config/spec/helper files and their local import closure.`);

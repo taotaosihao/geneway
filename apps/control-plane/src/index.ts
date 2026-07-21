@@ -3,9 +3,19 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import { z } from 'zod';
 import { deriveTrustedLocalPrincipal } from '@geneway/authorization';
 import { createTaskInputSchema, GenewayError, isGenewayError, type Principal } from '@geneway/contracts';
+import {
+  MAX_MULTIPART_ENVELOPE_BYTES,
+  MAX_RAW_UPLOAD_BYTES,
+  parseSingleMultipartUpload,
+  validateTextUpload,
+  type SingleMultipartUpload,
+} from '@geneway/ingestion';
+import { createObjectStorageFromEnv, type ObjectStorage } from '@geneway/storage';
 import { WorkflowInterpreter } from '@geneway/worker';
 import { FIXTURE_CONTENT_HASH, FIXTURE_EXCERPT, FIXTURE_REF, FIXTURE_VERSION } from '@geneway/evidence';
 import { ControlPlaneRepository } from './repository.js';
+import { ArtifactRepository } from './artifact-repository.js';
+import { ArtifactService } from './artifact-service.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -25,17 +35,46 @@ const requireMutationOrigin = (request: FastifyRequest, allowedOrigins: Readonly
   }
 };
 
-export type ControlPlane = Readonly<{ app: FastifyInstance; repository: ControlPlaneRepository }>;
+export type PrincipalResolver = (request: FastifyRequest) => Principal;
+export type ControlPlane = Readonly<{
+  app: FastifyInstance;
+  repository: ControlPlaneRepository;
+  artifactRepository: ArtifactRepository;
+  artifactService: ArtifactService | null;
+}>;
 
-export async function createControlPlane(options: Readonly<{ databaseUrl: string; logger?: boolean; allowedOrigins?: readonly string[] }>): Promise<ControlPlane> {
+export async function createControlPlane(options: Readonly<{
+  databaseUrl: string;
+  logger?: boolean;
+  allowedOrigins?: readonly string[];
+  objectStorage?: ObjectStorage | null;
+  principalResolver?: PrincipalResolver;
+}>): Promise<ControlPlane> {
   const repository = new ControlPlaneRepository(options.databaseUrl);
+  const artifactRepository = new ArtifactRepository(repository.pool);
+  const objectStorage = options.objectStorage === undefined ? createObjectStorageFromEnv() : options.objectStorage;
+  const artifactService = objectStorage === null ? null : new ArtifactService(artifactRepository, objectStorage);
   await repository.ensureSystemSeed();
   const allowedOrigins = new Set(options.allowedOrigins ?? ['http://localhost:3200', 'http://127.0.0.1:3200']);
-  const app = Fastify({ logger: options.logger ?? false, trustProxy: false, bodyLimit: 64 * 1024 });
+  const app = Fastify({ logger: options.logger ?? false, trustProxy: false, bodyLimit: MAX_MULTIPART_ENVELOPE_BYTES });
+  const resolvePrincipal = options.principalResolver ?? ((request: FastifyRequest) => deriveTrustedLocalPrincipal(request.ip));
   app.decorateRequest('principal', {
     getter(this: FastifyRequest) {
-      return deriveTrustedLocalPrincipal(this.ip);
+      return resolvePrincipal(this);
     },
+  });
+  app.addContentTypeParser('multipart/form-data', (request, payload, done) => {
+    const contentType = request.headers['content-type'];
+    if (typeof contentType !== 'string') {
+      done(new GenewayError('MULTIPART_REQUIRED', 'Upload must use multipart/form-data', 415));
+      return;
+    }
+    void parseSingleMultipartUpload({
+      stream: payload,
+      headers: { ...request.headers, 'content-type': contentType },
+      maximumEnvelopeBytes: MAX_MULTIPART_ENVELOPE_BYTES,
+      maximumFileBytes: MAX_RAW_UPLOAD_BYTES,
+    }).then((body) => done(null, body), done);
   });
   await app.register(cors, {
     origin: [...allowedOrigins],
@@ -49,13 +88,68 @@ export async function createControlPlane(options: Readonly<{ databaseUrl: string
     done();
   });
 
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler(async (error, request, reply) => {
+    const route = request.routeOptions.url;
+    const params = request.params as Readonly<{ id?: unknown }> | undefined;
+    const resourceId = typeof params?.id === 'string' && params.id.length <= 200 ? params.id : 'unknown';
+    const artifactOperation = route === '/api/conversations/:id/uploads'
+      ? { operation: 'upload', resourceType: 'conversation', resourceId }
+      : route === '/api/artifacts/:id/download'
+        ? { operation: 'download', resourceType: 'artifact', resourceId }
+        : null;
+    const fastifyError = error as Error & Readonly<{ code?: string; statusCode?: number }>;
+    const normalized = isGenewayError(error)
+      ? { code: error.code, message: error.message, statusCode: error.statusCode, details: error.details ?? null }
+      : error instanceof z.ZodError
+        ? { code: 'INVALID_INPUT', message: 'Request does not match the contract', statusCode: 400, details: { issues: error.issues } }
+        : fastifyError.code === 'FST_ERR_CTP_BODY_TOO_LARGE'
+          ? { code: 'UPLOAD_ENVELOPE_TOO_LARGE', message: 'Multipart request exceeds the maximum envelope size', statusCode: 413, details: null }
+          : fastifyError.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE'
+            ? { code: 'MULTIPART_REQUIRED', message: 'Upload must use multipart/form-data', statusCode: 415, details: null }
+            : { code: 'INTERNAL_ERROR', message: 'Unexpected server error', statusCode: 500, details: null };
+    if (artifactOperation !== null) {
+      try {
+        let auditPrincipal: Principal | null = null;
+        try {
+          auditPrincipal = request.principal;
+        } catch {
+          // An unauthenticated request has no trusted principal to attribute in the tenant audit ledger.
+        }
+        if (auditPrincipal === null) throw new GenewayError('AUDIT_PRINCIPAL_UNAVAILABLE', 'No trusted principal is available for audit attribution', 401);
+        const auditReasonCode = artifactOperation.operation === 'download' && normalized.code === 'ARTIFACT_NOT_FOUND'
+          ? 'ARTIFACT_NOT_FOUND_OR_FORBIDDEN'
+          : normalized.code;
+        await artifactRepository.recordAudit(
+          auditPrincipal,
+          `artifact.${artifactOperation.operation}.${normalized.statusCode >= 500 ? 'failed' : 'denied'}`,
+          artifactOperation.resourceType,
+          artifactOperation.resourceId,
+          normalized.statusCode >= 500 ? 'failed' : 'denied',
+          auditReasonCode,
+          { requestId: request.id },
+        );
+      } catch (auditError) {
+        if (isGenewayError(auditError) && auditError.code === 'AUDIT_PRINCIPAL_UNAVAILABLE') {
+          if (isGenewayError(error)) {
+            void reply.status(error.statusCode).send({ error: { code: error.code, message: error.message, details: error.details ?? null } });
+            return;
+          }
+        }
+        app.log.error(auditError);
+        void reply.status(500).send({ error: { code: 'AUDIT_WRITE_FAILED', message: 'The request could not be audited' } });
+        return;
+      }
+    }
     if (isGenewayError(error)) {
       void reply.status(error.statusCode).send({ error: { code: error.code, message: error.message, details: error.details ?? null } });
       return;
     }
     if (error instanceof z.ZodError) {
       void reply.status(400).send({ error: { code: 'INVALID_INPUT', message: 'Request does not match the contract', issues: error.issues } });
+      return;
+    }
+    if (normalized.code !== 'INTERNAL_ERROR') {
+      void reply.status(normalized.statusCode).send({ error: { code: normalized.code, message: normalized.message, details: normalized.details } });
       return;
     }
     app.log.error(error);
@@ -79,6 +173,29 @@ export async function createControlPlane(options: Readonly<{ databaseUrl: string
   app.get('/api/conversations/:id', async (request) => {
     const params = z.object({ id: z.string().min(1) }).parse(request.params);
     return repository.getConversation(request.principal, params.id);
+  });
+
+  app.post('/api/conversations/:id/uploads', async (request, reply) => {
+    const params = z.object({ id: z.string().min(1) }).parse(request.params);
+    if (artifactService === null) throw new GenewayError('STORAGE_NOT_CONFIGURED', 'Artifact storage is not configured', 503);
+    const contentType = request.headers['content-type'];
+    if (typeof contentType !== 'string' || !contentType.toLowerCase().startsWith('multipart/form-data')) {
+      throw new GenewayError('MULTIPART_REQUIRED', 'Upload must use multipart/form-data', 415);
+    }
+    const uploaded = request.body as SingleMultipartUpload;
+    const result = await artifactService.ingest({
+      principal: request.principal,
+      conversationId: params.id,
+      idempotencyKey: idempotencyKey(request),
+      upload: validateTextUpload(uploaded),
+    });
+    return reply.status(201).send(result);
+  });
+
+  app.get('/api/conversations/:id/document-snapshots', async (request) => {
+    const params = z.object({ id: z.string().min(1) }).parse(request.params);
+    if (artifactService === null) throw new GenewayError('STORAGE_NOT_CONFIGURED', 'Artifact storage is not configured', 503);
+    return { documentSnapshots: await artifactService.listSnapshots(request.principal, params.id) };
   });
 
   app.get('/api/capabilities', () => ([{
@@ -186,14 +303,28 @@ export async function createControlPlane(options: Readonly<{ databaseUrl: string
     return repository.getEvidence(request.principal, params.id);
   });
 
+  app.get('/api/artifacts/:id/download', async (request, reply) => {
+    const params = z.object({ id: z.string().min(1) }).parse(request.params);
+    if (artifactService === null) throw new GenewayError('STORAGE_NOT_CONFIGURED', 'Artifact storage is not configured', 503);
+    const result = await artifactService.download(request.principal, params.id);
+    const fallbackName = result.artifact.mediaType === 'text/markdown' ? 'document.md' : 'document.txt';
+    reply.header('content-type', result.artifact.mediaType);
+    reply.header('content-length', String(result.bytes.byteLength));
+    reply.header('content-disposition', `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodeURIComponent(result.artifact.displayName)}`);
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('cache-control', 'private, no-store');
+    return reply.send(Buffer.from(result.bytes));
+  });
+
   const notOpen = async (_request: FastifyRequest, reply: FastifyReply) => reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'This capability is not open in Gate 0.1' } });
   app.post('/api/uploads', notOpen);
-  app.get('/api/artifacts/:id/download', notOpen);
   app.get('/api/business-exceptions', notOpen);
   app.all('/api/runtime/:kind', notOpen);
 
   app.addHook('onClose', async () => repository.close());
-  return { app, repository };
+  return { app, repository, artifactRepository, artifactService };
 }
 
 export { ControlPlaneRepository } from './repository.js';
+export { ArtifactRepository } from './artifact-repository.js';
+export { ArtifactService } from './artifact-service.js';

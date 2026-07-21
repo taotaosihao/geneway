@@ -48,11 +48,14 @@ describe('Gate 0.1 security boundaries', () => {
     const crossOrigin = await controlPlane.app.inject({ method: 'POST', url: '/api/conversations', headers: { origin: 'https://evil.example', 'idempotency-key': 'cross-origin-0001' } });
     expect(crossOrigin.statusCode).toBe(403);
     expect(crossOrigin.json()).toMatchObject({ error: { code: 'ORIGIN_NOT_ALLOWED' } });
-    for (const [method, url] of [['POST', '/api/uploads'], ['GET', '/api/artifacts/a/download'], ['GET', '/api/business-exceptions'], ['POST', '/api/runtime/openai']] as const) {
+    for (const [method, url] of [['POST', '/api/uploads'], ['GET', '/api/business-exceptions'], ['POST', '/api/runtime/openai']] as const) {
       const response = await controlPlane.app.inject({ method, url, headers: allowedHeaders });
       expect(response.statusCode, `${method} ${url}`).toBe(422);
       expect(response.json()).toMatchObject({ error: { code: 'NOT_OPEN' } });
     }
+    const unknownArtifact = await controlPlane.app.inject({ method: 'GET', url: '/api/artifacts/a/download', headers: allowedHeaders });
+    expect(unknownArtifact.statusCode).toBe(404);
+    expect(unknownArtifact.json()).toMatchObject({ error: { code: 'ARTIFACT_NOT_FOUND' } });
   });
 
   it('enforces tenant scope for task, approval and evidence reads', async () => {

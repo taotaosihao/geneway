@@ -1,4 +1,12 @@
-import { taskSnapshotSchema, type ExpertTarget, type TaskSnapshot } from '@geneway/contracts';
+import {
+  artifactIngestResponseSchema,
+  documentSnapshotListSchema,
+  taskSnapshotSchema,
+  type ArtifactIngestResponse,
+  type DocumentSnapshotList,
+  type ExpertTarget,
+  type TaskSnapshot,
+} from '@geneway/contracts';
 
 export type CreatedTask = Readonly<{
   taskId: string;
@@ -53,6 +61,15 @@ export const api = {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('message') }, body: JSON.stringify({ body }),
   }),
   getConversation: (conversationId: string) => request<Conversation>(`/api/conversations/${conversationId}`),
+  uploadArtifact: async (conversationId: string, file: File): Promise<ArtifactIngestResponse> => {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    return artifactIngestResponseSchema.parse(await request(`/api/conversations/${conversationId}/uploads`, {
+      method: 'POST', headers: { 'idempotency-key': key('artifact') }, body: form,
+    }));
+  },
+  getDocumentSnapshots: async (conversationId: string): Promise<DocumentSnapshotList> =>
+    documentSnapshotListSchema.parse(await request(`/api/conversations/${conversationId}/document-snapshots`)),
   createTask: (conversationId: string, expertTarget: ExpertTarget) => request<CreatedTask>('/api/business-tasks', {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('task') }, body: JSON.stringify({
       conversationId, capabilityId: 'solution.analysis.v1', fixtureRef: 'fixture:solution-analysis:v1', expertTarget,

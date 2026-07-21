@@ -637,14 +637,16 @@ type ExpertTarget =
 Harness 是一次任务采用的执行组合，不是新的业务权威。`HarnessVersion` 不可变，至少固定：
 
 ```text
-AgentVersion / ResolvedExpertTarget
+每个角色的 AgentVersion / ResolvedExpertTarget
+每个角色的 ModelPolicyVersion / AgentRuntimeAdapterVersion / 模型原生 Harness 配置版本
 ToolVersion set
-ModelPolicyVersion
 MemoryPolicyVersion / ContextPolicyVersion
 VerifierPolicyVersion
 BudgetPolicyVersion
 termination / retry policy
 ```
+
+Planner、专业 Agent、Verifier 等角色长期保留，不因单一模型能力提升而合并。不同角色可以绑定不同模型；每个模型优先与其厂商原生 Agent Runtime/Harness 成套绑定，不要求为了表面统一而压平为同一个通用 Runtime/Harness。客户只允许使用私有模型时，所有角色只能解析到客户允许的私有模型及其对应 Agent Runtime/Harness，不要求公有模型 fallback。
 
 Capability Resolver 根据 Capability、调用者、资源范围、数据等级和部署环境，从 Registry 中选择允许的 HarnessVersion；实际选择写入 BusinessTask、WorkflowVersion canonical payload/hash、Audit 和回放记录。子 Agent 或替代 Agent 的有效权限只能取父任务 capability、目标 Agent 上限与 Tool policy 的交集。
 
@@ -1116,7 +1118,7 @@ document_ingest
 
 #### 角色/实现
 
-Gate A 单 Runtime 可先由一个 agent implementation 完成多个结构化步骤；Gate B 再拆为：
+Gate A 可以先由一个 Runtime 承载多个已经登记的逻辑角色，但不合并角色合同；Gate B 可把这些角色绑定到不同模型及其各自原生 Agent Runtime/Harness：
 
 ```text
 Document Analyst
@@ -1643,23 +1645,25 @@ Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，�
 
 ---
 
-### Gate F：第二 Runtime 与可替换性
+### Gate F：多模型原生 Runtime/Harness 与可替换性
 
 #### 目标
 
-接入 Claude Agent Adapter，证明 Capability 不绑定 OpenAI Runtime。
+接入 Claude 模型及其原生 Agent Runtime/Harness，证明 Planner、专业 Agent、Verifier 等不同角色可以绑定不同的模型原生执行组合；客户只允许私有模型时，同一机制只使用客户允许的私有模型及其对应 Agent Runtime/Harness。
 
 #### 交付物
 
-1. Claude Adapter 与 conformance suite。
+1. Claude 模型及其原生 Agent Runtime/Harness 组合 Adapter 与 conformance suite。
 2. 受限容器：任务 Workspace、默认无宿主写、默认无公网、显式 egress allowlist。
 3. Claude permission/session/checkpoint 到平台 contract 的映射。
-4. 同一 `solution.analysis.v1` 的 OpenAI/Claude shadow eval。
-5. Runtime selection policy 和 rollback。
+4. 同一 `solution.analysis.v1` 中不同角色的 OpenAI/Claude 原生执行组合 shadow eval。
+5. 逐角色模型、Agent Runtime/Harness selection policy 和 rollback。
 
 #### 退出条件
 
-- 两个 Adapter 通过相同 Runtime contract；
+- 各模型原生 Agent Runtime/Harness Adapter 通过相同平台 Runtime contract，同时保留各自原生执行能力；
+- Planner、专业 Agent、Verifier 等角色可以分别绑定不同模型及其原生 Agent Runtime/Harness；
+- 仅允许私有模型的客户配置不会解析或 fallback 到公有模型；
 - Capability API/UI/Workflow 无 Runtime 特判；
 - Claude SDK permission 不能代替 ApprovalVersion；
 - Runtime 切换只影响新 task/binding revision，不修改历史 run；

@@ -104,6 +104,9 @@ flowchart TB
 ### 动态 Harness 和动态 Workflow
 
 - 动态 Harness：根据任务选择不同的 Agent、工具、模型、记忆、检查方式和成本上限。
+- Planner、专业 Agent、Verifier 等角色长期保留，不因单一模型能力提升而合并；不同角色可以绑定不同模型，利用各模型不同的擅长方向。
+- 不同模型优先与其厂商原生 Agent Runtime/Harness 成套绑定，以保留该模型在 Agent 执行上的原生效果；平台不要求把所有模型压平到同一个通用 Runtime/Harness 实现。
+- 客户只允许使用私有模型时，各角色绑定客户允许的私有模型及其对应 Agent Runtime/Harness，不要求公有模型作为兜底。
 - 专家路由：默认由小纬选择；用户也可指定一个专家或一个已登记专家团。系统只在当前 Capability、权限和可用性范围内满足该选择。
 - 动态 Workflow：Agent 可以生成结构化流程草稿，但必须通过校验并由人确认后才能执行。
 - 批准后形成不可修改的 `WorkflowVersion`。运行中如需增加步骤或改变参数，必须生成新版本并重新审批。
@@ -257,7 +260,7 @@ Gate C 再允许 Agent 生成结构化 `HarnessDraft` / `HarnessPatch` 和 `Work
 
 ### 阶段 5：多渠道和第二 Runtime
 
-先接飞书，再复用统一 Channel Contract 接企业微信和小程序；接入 Claude Agent SDK，证明同一 Capability 可以更换 Runtime，而不改变用户合同、权限和证据格式。
+先接飞书，再复用统一 Channel Contract 接企业微信和小程序；接入 Claude 模型及其原生 Agent Runtime/Harness，证明不同角色可以绑定不同的模型原生执行组合，而不改变 Capability、权限和证据合同。客户只允许使用私有模型时，同一绑定机制只解析到客户允许的私有模型及其对应 Agent Runtime/Harness。
 
 ### 阶段 6：内部试点和能力毕业
 
@@ -293,7 +296,7 @@ draft → shadow → internal → graduated
 | C：动态 Harness、流程与审批门 | Agent 只能生成 HarnessDraft/Patch 与 WorkflowDraft/Patch JSON；Agent/Tool/Model/Memory/Verifier/Budget 选择、条件、并行、等待、引用和版本解析由 Compiler 校验；未批准版本绝不执行；变化显示 Diff 并使旧审批失效；Agent 不能生成 TS 或新增权限 | 不开放动态 Harness/流程，只保留已注册固定版本；不得宣称内部平台完成 |
 | D：制造业扩展门 | 在单工单查询已经通过的基础上，设备异常和产能落后可进入待办；日报、租户隔离、数据字典、确定性指标、缺失提示和审计全部通过 | 保留简单工单查询，不进入高级场景试点 |
 | E：渠道门 | Web 与飞书共享同一任务；消息去重；群聊受众过滤有效 | 不接企微和小程序 |
-| F：多 Runtime 门 | OpenAI 与 Claude 可互换，Capability、权限和证据合同不变 | 保持单 Runtime，不强行推广 |
+| F：多模型原生 Runtime/Harness 门 | Planner、专业 Agent、Verifier 等角色可分别绑定不同模型及其原生 Agent Runtime/Harness；客户仅允许私有模型时只使用获准的私有组合；Capability、权限和证据合同不变 | 保持已经通过验证的模型原生执行组合，不强行增加未通过验证的组合 |
 | G：毕业门 | 回归、安全、提示注入、成本、SLA、Postgres + S3 联合恢复全部通过 | 保持 shadow/internal，不对外开放 |
 
 平台级硬门禁：

@@ -115,6 +115,8 @@ document_ingest
 - first_code_slice_kind: product
 - first_code_owner: `role:gate-0.2a-implementation-owner`；用户授权实施时必须解析为具名负责人。
 - first_code_verification: `pnpm test:e2e -- --project=gate0.2a-storage-thin` 加浏览器外 API/Postgres/S3 三方 correlation；成功路径不得 mock/fulfill 上传、下载、Control Plane 或 S3 adapter。
+- frontend_implementation_executor_preference: `Kimi Code CLI`；优先交付 `apps/web/**`、`packages/ui/**` 和 UI-specific Playwright specs/fixtures 的前端实现。Kimi lane 只能修改明确授权的 UI-owned paths；对 API、DB、storage、authorization、Worker/Runtime 的需求只可提案，仍由主控制器或相应所有者实现。
+- frontend_implementation_executor_fallback: 每次实施前运行 `kimi --version && kimi doctor`；CLI 不可用、配置无效或无法产生可用的范围内 diff 时，记录真实失败后才可回退主 Codex，不得静默换执行器。当前环境已验证 `kimi 0.27.0` 且 `kimi doctor` 通过；该版本只是当前可用性证据，不形成产品锁定。
 - allowed_contract_gate_only_until: 本合同、SDD v2 authority slice 和 strict new-authoring lint 完成；获授权实施后，首个逻辑结果必须改变真实 served 产品/API/Postgres/VersityGW 行为，不能只提交 migration、adapter 单测、scanner 或文档。
 - stop_if_no_code_by_phase: Gate 0.2A.1 storage vertical 首个逻辑提交
 - gate_parallelization_or_deferral_plan: `0.2A.1 storage vertical → 0.2A.2 delivery/evidence vertical → 0.2A.3 recovery hardening` 串行收敛。每个内部 slice 只可声明自身 ready；只有统一 `pnpm verify:gate0.2a` 通过才可关闭产品 Gate。知识、异常、真实 Runtime、Hatchet、动态 Workflow、渠道和外部 Agent 全部后置。
@@ -316,6 +318,7 @@ V-6 的 required fault case IDs 固定为：`after_intent_commit_before_s3_put`�
 - 报告 Artifact 是本 Gate 固定模板的模拟交付物，不等于真实报告 Agent。文件名、MIME、hash、lineage 和下载权限必须与原始 Artifact 使用同一 contract。
 - Gate 0.2A 不建立复杂 UI 表格。Evidence 适合抽屉/详情区，Artifact 使用轻量列表；后续任务中心如确有二维数据再按独立合同选择轻量 table。
 - 可以复用 Gate 0.1 代码和经审查的 Sharp Cell/Hive 设计模式；不得为“统一架构”重写已通过的 Workflow、Approval、授权、UI shell 或 Runtime。
+- Kimi Code CLI 只是开发时编码执行器，不是 geneway 产品 Runtime、仓库依赖或 Gate 成功证据。主控制器必须审查其 diff，禁止向其提供 `.env`、密钥、客户文档或 Gate 外路径；最终结论仍以真实 served UI、Playwright、API/DB/S3/Worker correlation 和 `pnpm verify:gate0.2a` 为准。
 
 ## Failure And Stop Conditions
 

@@ -1,8 +1,24 @@
 import { expect, test, type Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import pg from 'pg';
 
 const DATABASE_URL = process.env.DATABASE_URL ?? 'postgres://geneway:geneway@127.0.0.1:55433/geneway_test';
 const CONTROL_PLANE_URL = `http://127.0.0.1:${process.env.GENEWAY_CONTROL_PLANE_PORT ?? '3100'}`;
+const DOCUMENT_FIXTURE_PATH = path.resolve(process.cwd(), 'scripts/fixtures/gate0.2a/solution-analysis-demo-v2.txt');
+
+async function uploadAndSelectDocument(page: Page): Promise<void> {
+  const fixture = await readFile(DOCUMENT_FIXTURE_PATH);
+  await page.getByTestId('artifact-upload-input').setInputFiles({
+    name: 'solution-analysis-demo-v2.txt',
+    mimeType: 'text/plain',
+    buffer: fixture,
+  });
+  const card = page.getByTestId('artifact-card').filter({ hasText: 'solution-analysis-demo-v2.txt' });
+  await expect(card.getByTestId('artifact-eligibility')).toContainText('可用于模拟分析');
+  await card.getByRole('button', { name: '选择用于分析' }).click();
+  await expect(card.getByRole('button', { name: '已选择用于本次任务' })).toBeVisible();
+}
 
 async function assertThreeColumnLayout(page: Page) {
   const boxes = await Promise.all(['.sidebar', '.conversation-pane', '.inspector'].map(async (selector) => page.locator(selector).boundingBox()));
@@ -41,8 +57,9 @@ test('小纬完成真实 served UI 方案分析纵切并保持权威实体关联
   await expect(page.getByLabel('制造业状态入口')).toContainText('产能进度落后');
   for (const button of await page.getByLabel('制造业状态入口').getByRole('button').all()) await expect(button).toBeDisabled();
 
+  await uploadAndSelectDocument(page);
   await page.getByLabel('专家路线').selectOption('team.solution.core');
-  await page.getByLabel('给小纬发消息').fill('请小纬组织方案专家团分析这份预置脱敏材料');
+  await page.getByLabel('给小纬发消息').fill('请小纬组织方案专家团分析已选择的脱敏材料');
   await page.getByRole('button', { name: '发送' }).click();
 
   const card = page.getByTestId('task-card');
@@ -90,7 +107,7 @@ test('小纬完成真实 served UI 方案分析纵切并保持权威实体关联
   expect(executeResponse).toEqual({ taskId, status: 'accepted' });
   expect([...observedProgress].some((value) => value > 0 && value < 7)).toBeTruthy();
   await expect(page.getByTestId('published-claim')).toContainText('当前材料明确要求生产工单跟踪和质量追溯');
-  await expect(page.getByTestId('published-claim')).toContainText('来源片段');
+  await expect(page.getByTestId('published-claim')).toContainText('已绑定 Evidence');
   await expect(page.getByTestId('rejected-claim')).toContainText('当前材料要求直接控制设备');
   await expect(page.getByTestId('rejected-claim')).toContainText('未发布');
   await expect(card).toContainText('已完成 7 / 7 个步骤');
@@ -102,7 +119,7 @@ test('小纬完成真实 served UI 方案分析纵切并保持权威实体关联
     id: string; conversationId: string; status: string; workflowVersion: { id: string; hash: string }; approval: { id: string; status: string; subjectDigest: string };
     expertTarget: { mode: string; teamId?: string }; eventWatermark: number; simulation: boolean; runtimeMode: string; businessDecisionAllowed: boolean;
     steps: readonly { status: string }[]; result: { simulation: boolean; runtimeMode: string; businessDecisionAllowed: boolean };
-    claims: readonly { text: string; status: string }[]; evidence: readonly { sourceHash: string }[];
+    claims: readonly { text: string; status: string }[]; evidence: readonly { excerptSha256: string }[];
   };
   expect(snapshot).toMatchObject({ id: taskId, status: 'completed', workflowVersion: { id: workflowId, hash: workflowHash }, expertTarget: { mode: 'team', teamId: 'team.solution.core' }, simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false });
   expect(snapshot.result).toMatchObject({ simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false });
@@ -126,7 +143,7 @@ test('小纬完成真实 served UI 方案分析纵切并保持权威实体关联
   expect(approval.subject).toEqual(expect.objectContaining({ workflowVersionId: workflowId, workflowHash }));
   expect(events.events.length).toBeGreaterThan(10);
   expect(events.events.every((event) => event.simulation && event.runtime_mode === 'fake' && event.business_decision_allowed === false)).toBeTruthy();
-  expect(events.events.at(-1)?.cursor).toBe(snapshot.eventWatermark);
+  expect(Math.max(...events.events.map((event) => event.cursor))).toBe(snapshot.eventWatermark);
 
   const conversationResponse = await request.get(`${CONTROL_PLANE_URL}/api/conversations/${snapshot.conversationId}`);
   const authorityConversation = await conversationResponse.json() as { messages: readonly { author: string; body: string }[] };
@@ -142,9 +159,9 @@ test('小纬完成真实 served UI 方案分析纵切并保持权威实体关联
       published_claims: string; rejected_claims: string; evidence_count: string; simulation: boolean; runtime_mode: string; business_decision_allowed: boolean;
     }>(`SELECT t.id,t.workflow_version_id,t.workflow_hash,a.status approval_status,
       (SELECT max(cursor)::text FROM business_task_events e WHERE e.tenant_id=t.tenant_id AND e.business_task_id=t.id) max_cursor,
-      (SELECT count(*)::text FROM result_claims c WHERE c.tenant_id=t.tenant_id AND c.business_task_id=t.id AND c.status='published') published_claims,
-      (SELECT count(*)::text FROM result_claims c WHERE c.tenant_id=t.tenant_id AND c.business_task_id=t.id AND c.status='rejected') rejected_claims,
-      (SELECT count(*)::text FROM minimal_evidence_refs r WHERE r.tenant_id=t.tenant_id AND r.business_task_id=t.id) evidence_count,
+      (SELECT count(*)::text FROM claims c WHERE c.tenant_id=t.tenant_id AND c.business_task_id=t.id AND c.status='published') published_claims,
+      (SELECT count(*)::text FROM claims c WHERE c.tenant_id=t.tenant_id AND c.business_task_id=t.id AND c.status='rejected') rejected_claims,
+      (SELECT count(*)::text FROM evidence_items r WHERE r.tenant_id=t.tenant_id AND r.business_task_id=t.id) evidence_count,
       t.simulation,t.runtime_mode,t.business_decision_allowed
       FROM business_tasks t JOIN approval_versions a ON a.tenant_id=t.tenant_id AND a.business_task_id=t.id
       WHERE t.tenant_id='tenant_local' AND t.id=$1`, [taskId]);
@@ -172,6 +189,7 @@ for (const route of [
 ] as const) {
   test(`${route.label} 路由通过真实 served UI 创建权威任务`, async ({ page, request }) => {
     await page.goto('/conversations/new?capability=solution.analysis.v1');
+    await uploadAndSelectDocument(page);
     await page.getByLabel('专家路线').selectOption(route.option);
     await page.getByLabel('给小纬发消息').fill(`验证 ${route.label} 路由`);
     await page.getByRole('button', { name: '发送' }).click();

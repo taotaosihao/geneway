@@ -1,9 +1,12 @@
 import {
   artifactIngestResponseSchema,
   documentSnapshotListSchema,
+  evidenceProjectionSchema,
   taskSnapshotSchema,
   type ArtifactIngestResponse,
+  type CreateTaskInput,
   type DocumentSnapshotList,
+  type EvidenceProjection,
   type ExpertTarget,
   type TaskSnapshot,
 } from '@geneway/contracts';
@@ -38,11 +41,6 @@ export type Approval = Readonly<{
   status: string;
 }>;
 
-export type Fixture = Readonly<{
-  ref: 'fixture:solution-analysis:v1'; version: number; name: string; description: string; excerpt: string;
-  simulation: true; runtimeMode: 'fake'; businessDecisionAllowed: false;
-}>;
-
 const key = (prefix: string): string => `${prefix}-${crypto.randomUUID()}`;
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -53,7 +51,6 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  getFixture: () => request<Fixture>('/api/fixtures/solution-analysis-v1'),
   createConversation: () => request<{ id: string }>('/api/conversations', {
     method: 'POST', headers: { 'idempotency-key': key('conversation') },
   }),
@@ -70,12 +67,19 @@ export const api = {
   },
   getDocumentSnapshots: async (conversationId: string): Promise<DocumentSnapshotList> =>
     documentSnapshotListSchema.parse(await request(`/api/conversations/${conversationId}/document-snapshots`)),
-  createTask: (conversationId: string, expertTarget: ExpertTarget) => request<CreatedTask>('/api/business-tasks', {
-    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('task') }, body: JSON.stringify({
-      conversationId, capabilityId: 'solution.analysis.v1', fixtureRef: 'fixture:solution-analysis:v1', expertTarget,
-    }),
-  }),
+  createTask: (conversationId: string, documentSnapshotId: string, expertTarget: ExpertTarget) => {
+    const input: CreateTaskInput = {
+      conversationId,
+      capabilityId: 'solution.analysis.v1',
+      inputRef: { kind: 'document_snapshot', documentSnapshotId },
+      expertTarget,
+    };
+    return request<CreatedTask>('/api/business-tasks', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('task') }, body: JSON.stringify(input),
+    });
+  },
   getTask: async (taskId: string): Promise<TaskSnapshot> => taskSnapshotSchema.parse(await request(`/api/business-tasks/${taskId}`)),
+  getEvidence: async (evidenceId: string): Promise<EvidenceProjection> => evidenceProjectionSchema.parse(await request(`/api/evidence/${evidenceId}`)),
   getWorkflow: (id: string) => request<Workflow>(`/api/workflow-versions/${id}`),
   getApproval: (id: string) => request<Approval>(`/api/approvals/${id}`),
   approve: (id: string) => request<{ approvalId: string; status: string }>(`/api/approvals/${id}/decisions`, {

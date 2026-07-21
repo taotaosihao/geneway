@@ -12,7 +12,7 @@
     "typecheck": "pnpm exec tsc -b packages/contracts/tsconfig.json packages/authorization/tsconfig.json packages/evidence/tsconfig.json packages/ingestion/tsconfig.json packages/runtime/tsconfig.json packages/storage/tsconfig.json packages/ui/tsconfig.json packages/workflow/tsconfig.json apps/control-plane/tsconfig.json apps/web/tsconfig.json apps/worker/tsconfig.json --force --pretty false",
     "test": "vitest run --exclude '**/*.integration.test.ts' --exclude '**/*.security.test.ts' --exclude 'scripts/e2e/**'",
     "test:contracts": "vitest run packages --exclude '**/*.integration.test.ts' --exclude '**/*.security.test.ts'",
-    "test:integration": "bash scripts/with-postgres.sh vitest run apps/control-plane/src/control-plane.integration.test.ts",
+    "test:integration": "env GENEWAY_MANAGED_TEST_INFRA=0 DATABASE_URL=postgres://forbidden:forbidden@192.0.2.1/forbidden GENEWAY_S3_ENDPOINT=http://192.0.2.1:9 bash scripts/with-storage.sh vitest run --no-file-parallelism apps/control-plane/src/gate0.2a-migration.integration.test.ts apps/control-plane/src/control-plane.integration.test.ts",
     "test:security": "env GENEWAY_MANAGED_TEST_INFRA=0 DATABASE_URL=postgres://forbidden:forbidden@192.0.2.1/forbidden GENEWAY_S3_ENDPOINT=http://192.0.2.1:9 GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY=ambient-canary GENEWAY_S3_APP_SECRET_ACCESS_KEY=ambient-canary GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY=ambient-canary bash scripts/with-storage.sh vitest run --no-file-parallelism apps/control-plane/src/control-plane.security.test.ts apps/control-plane/src/artifact.security.test.ts",
     "test:storage": "env GENEWAY_MANAGED_TEST_INFRA=0 DATABASE_URL=postgres://forbidden:forbidden@192.0.2.1/forbidden GENEWAY_S3_ENDPOINT=http://192.0.2.1:9 GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY=ambient-canary GENEWAY_S3_APP_SECRET_ACCESS_KEY=ambient-canary GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY=ambient-canary bash scripts/with-storage.sh vitest run packages/storage apps/control-plane/src/artifact.storage.integration.test.ts",
     "db:migrate": "tsx scripts/migrate.ts",
@@ -20,6 +20,7 @@
     "verify:foundation": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:integration && pnpm test:security && pnpm build",
     "verify:gate0.1": "pnpm verify:foundation && pnpm test:e2e -- --project=gate0.1",
     "verify:gate0.2a.1": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:integration && pnpm test:storage && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate0.1 && pnpm test:e2e -- --project=gate0.2a-storage-thin",
+    "verify:gate0.2a.2": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:integration && pnpm test:storage && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate0.1 && pnpm test:e2e -- --project=gate0.2a-storage-thin && pnpm test:e2e -- --project=gate0.2a-evidence",
     "test:e2e": "node scripts/check-e2e-authenticity.mjs && node scripts/run-e2e.mjs",
     "dev:web": "pnpm --filter @geneway/web dev"
   },

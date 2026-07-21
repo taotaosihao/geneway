@@ -36,7 +36,7 @@ function storageOracle(action: 'get' | 'delete', key: string): Readonly<{ bytesB
 test('served UI uploads, verifies, recovers and downloads one private source artifact', async ({ page, request }) => {
   for (const role of ['browser', 'control-plane', 'vite'] as const) {
     const receipt = JSON.parse(await readFile(`/tmp/geneway-runs/${runId}/process-boundaries/${role}.json`, 'utf8')) as unknown;
-    expect(receipt).toEqual({ role, checked: true, forbiddenNamesPresent: [] });
+    expect(receipt).toEqual(expect.objectContaining({ role, checked: true, forbiddenNamesPresent: [] }));
   }
   const fixture = await readFile(fixturePath);
   expect(fixture).toHaveLength(180);
@@ -50,10 +50,10 @@ test('served UI uploads, verifies, recovers and downloads one private source art
 
   const card = page.getByTestId('artifact-card');
   await expect(card).toHaveCount(1);
-  await expect(card).toContainText('完整性已验证');
+  await expect(card).toContainText('已校验');
   await expect(page.getByTestId('artifact-size')).toHaveText('180 bytes');
   await expect(page.getByTestId('artifact-hash')).toHaveText(`sha256:${expectedHash}`);
-  await expect(page.getByTestId('artifact-eligibility')).toContainText('任务入口将在下一纵切开放');
+  await expect(page.getByTestId('artifact-eligibility')).toContainText('可用于模拟分析');
   await expect(page.getByTestId('task-card')).toHaveCount(0);
 
   const ids = await card.evaluate((element) => ({

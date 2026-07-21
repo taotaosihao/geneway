@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 
 async function findAvailablePort(excludedPorts = new Set()) {
@@ -33,10 +35,15 @@ const webPort = await allocatePort();
 const postgresPort = await allocatePort();
 const s3Port = await allocatePort();
 const storageAdapterPort = await allocatePort();
+const workerHealthPort = await allocatePort();
 const composeRunId = runId.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 const composeProjectName = `geneway-e2e-${composeRunId}`;
 const databaseUrl = `postgres://geneway:geneway@127.0.0.1:${postgresPort}/geneway_test`;
 const s3Endpoint = `http://127.0.0.1:${s3Port}`;
+const workerAuthorityDirectory = mkdtempSync('/tmp/gw-uds-');
+const workerSocketPath = `${workerAuthorityDirectory}/worker.sock`;
+const workerTokenFile = `${workerAuthorityDirectory}/token`;
+const workerInstanceId = `e2e-worker-${process.pid}-${Date.now()}`;
 const baseEnvironment = {
   PATH: process.env.PATH ?? '/usr/bin:/bin',
   HOME: process.env.HOME ?? '/tmp',
@@ -46,42 +53,125 @@ const baseEnvironment = {
   ...(process.env.CI === undefined ? {} : { CI: process.env.CI }),
   ...(process.env.PLAYWRIGHT_BROWSERS_PATH === undefined ? {} : { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH }),
 };
-const result = spawnSync('pnpm', ['exec', 'playwright', 'test', '-c', 'scripts/playwright.config.ts', ...forwarded], {
-  cwd: new URL('..', import.meta.url),
-  env: {
-    ...baseEnvironment,
-    GENEWAY_RUN_ID: runId,
-    GENEWAY_CONTROL_PLANE_PORT: controlPlanePort,
-    GENEWAY_WEB_PORT: webPort,
-    GENEWAY_POSTGRES_PORT: postgresPort,
-    GENEWAY_S3_PORT: s3Port,
-    GENEWAY_STORAGE_ADAPTER_PORT: storageAdapterPort,
-    GENEWAY_MANAGED_TEST_INFRA: '1',
-    DATABASE_URL: databaseUrl,
-    GENEWAY_E2E_DATABASE_URL: databaseUrl,
-    GENEWAY_S3_ENDPOINT: s3Endpoint,
-    COMPOSE_PROJECT_NAME: composeProjectName,
-  },
-  stdio: 'inherit',
-});
-for (const [resource, listArguments, removeArguments] of [
-  ['container', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${composeProjectName}`], ['rm', '-f']],
-  ['volume', ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${composeProjectName}`], ['volume', 'rm', '-f']],
-  ['network', ['network', 'ls', '-q', '--filter', `label=com.docker.compose.project=${composeProjectName}`], ['network', 'rm']],
-]) {
-  const listed = spawnSync('docker', listArguments, { encoding: 'utf8' });
-  if (listed.status !== 0) {
-    console.error(`unable to list disposable ${resource} resources: ${listed.stderr}`);
-    process.exit(1);
-  }
-  const identifiers = listed.stdout.trim().split(/\s+/u).filter(Boolean);
-  if (identifiers.length > 0) {
-    const removed = spawnSync('docker', [...removeArguments, ...identifiers], { encoding: 'utf8' });
-    if (removed.status !== 0) {
-      console.error(`unable to remove disposable ${resource} resources: ${removed.stderr}`);
-      process.exit(1);
-    }
+
+function processIdentityMatches(pid, procStartTicks) {
+  try {
+    const raw = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    const closingParenthesis = raw.lastIndexOf(')');
+    if (closingParenthesis < 1) return false;
+    return raw.slice(closingParenthesis + 1).trim().split(/\s+/u)[19] === procStartTicks;
+  } catch {
+    return false;
   }
 }
+
+async function waitForProcessExit(pid, procStartTicks, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (processIdentityMatches(pid, procStartTicks) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !processIdentityMatches(pid, procStartTicks);
+}
+
+let result;
+let cleanupFailed = false;
+try {
+  writeFileSync(workerTokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
+  chmodSync(workerTokenFile, 0o600);
+  if ((statSync(workerTokenFile).mode & 0o777) !== 0o600 || Buffer.byteLength(workerSocketPath, 'utf8') > 100) {
+    throw new Error('E2E Worker authority did not satisfy the 0600 token or short UDS boundary');
+  }
+  result = spawnSync('pnpm', ['exec', 'playwright', 'test', '-c', 'scripts/playwright.config.ts', ...forwarded], {
+    cwd: new URL('..', import.meta.url),
+    env: {
+      ...baseEnvironment,
+      GENEWAY_RUN_ID: runId,
+      GENEWAY_CONTROL_PLANE_PORT: controlPlanePort,
+      GENEWAY_WEB_PORT: webPort,
+      GENEWAY_POSTGRES_PORT: postgresPort,
+      GENEWAY_S3_PORT: s3Port,
+      GENEWAY_STORAGE_ADAPTER_PORT: storageAdapterPort,
+      GENEWAY_WORKER_HEALTH_PORT: workerHealthPort,
+      GENEWAY_WORKER_SOCKET_PATH: workerSocketPath,
+      GENEWAY_WORKER_TOKEN_FILE: workerTokenFile,
+      GENEWAY_WORKER_INSTANCE_ID: workerInstanceId,
+      GENEWAY_MANAGED_TEST_INFRA: '1',
+      DATABASE_URL: databaseUrl,
+      GENEWAY_E2E_DATABASE_URL: databaseUrl,
+      GENEWAY_S3_ENDPOINT: s3Endpoint,
+      COMPOSE_PROJECT_NAME: composeProjectName,
+    },
+    stdio: 'inherit',
+  });
+} finally {
+  const workerReceiptPath = `/tmp/geneway-runs/${runId}/process-boundaries/worker.json`;
+  let workerReceiptFound = false;
+  let workerExited = true;
+  let workerPid;
+  let workerProcStartTicks;
+  try {
+    const receipt = JSON.parse(readFileSync(workerReceiptPath, 'utf8'));
+    workerReceiptFound = receipt.role === 'worker'
+      && receipt.phase === 'ready'
+      && receipt.ready === true
+      && receipt.workerInstanceId === workerInstanceId
+      && Number.isSafeInteger(receipt.pid)
+      && typeof receipt.procStartTicks === 'string';
+    if (workerReceiptFound) {
+      workerPid = receipt.pid;
+      workerProcStartTicks = receipt.procStartTicks;
+      workerExited = await waitForProcessExit(workerPid, workerProcStartTicks, 2_000);
+      if (!workerExited && processIdentityMatches(workerPid, workerProcStartTicks)) {
+        process.kill(workerPid, 'SIGTERM');
+        workerExited = await waitForProcessExit(workerPid, workerProcStartTicks, 2_000);
+      }
+      if (!workerExited && processIdentityMatches(workerPid, workerProcStartTicks)) {
+        process.kill(workerPid, 'SIGKILL');
+        workerExited = await waitForProcessExit(workerPid, workerProcStartTicks, 2_000);
+      }
+    }
+  } catch (error) {
+    if (result?.status === 0) console.error(`unable to verify Worker process receipt: ${String(error)}`);
+    workerExited = false;
+  }
+  if (result?.status === 0 && (!workerReceiptFound || !workerExited)) cleanupFailed = true;
+
+  for (const [resource, listArguments, removeArguments] of [
+    ['container', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${composeProjectName}`], ['rm', '-f']],
+    ['volume', ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${composeProjectName}`], ['volume', 'rm', '-f']],
+    ['network', ['network', 'ls', '-q', '--filter', `label=com.docker.compose.project=${composeProjectName}`], ['network', 'rm']],
+  ]) {
+    const listed = spawnSync('docker', listArguments, { encoding: 'utf8' });
+    if (listed.status !== 0) {
+      console.error(`unable to list disposable ${resource} resources: ${listed.stderr}`);
+      cleanupFailed = true;
+      continue;
+    }
+    const identifiers = listed.stdout.trim().split(/\s+/u).filter(Boolean);
+    if (identifiers.length > 0) {
+      const removed = spawnSync('docker', [...removeArguments, ...identifiers], { encoding: 'utf8' });
+      if (removed.status !== 0) {
+        console.error(`unable to remove disposable ${resource} resources: ${removed.stderr}`);
+        cleanupFailed = true;
+      }
+    }
+  }
+  const socketRemovedByControlPlane = !existsSync(workerSocketPath);
+  if (!workerAuthorityDirectory.startsWith('/tmp/gw-uds-')) throw new Error('Refusing to clean an unexpected Worker authority directory');
+  rmSync(workerAuthorityDirectory, { recursive: true, force: true });
+  const authorityCleaned = !existsSync(workerTokenFile) && !existsSync(workerSocketPath) && !existsSync(workerAuthorityDirectory);
+  mkdirSync(`/tmp/geneway-runs/${runId}`, { recursive: true });
+  writeFileSync(`/tmp/geneway-runs/${runId}/worker-authority-cleanup.json`, `${JSON.stringify({
+    workerReceiptFound,
+    workerPid: workerPid ?? null,
+    workerProcStartTicks: workerProcStartTicks ?? null,
+    workerExited,
+    authorityCleaned,
+    tokenRemoved: !existsSync(workerTokenFile),
+    socketRemoved: !existsSync(workerSocketPath),
+    socketRemovedByControlPlane,
+  })}\n`, { mode: 0o600 });
+  if (!authorityCleaned) cleanupFailed = true;
+}
 console.log(`geneway served-test artifacts: /tmp/geneway-runs/${runId}/`);
-process.exit(result.status ?? 1);
+process.exit(cleanupFailed ? 1 : (result?.status ?? 1));

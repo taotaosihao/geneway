@@ -26,7 +26,7 @@ export function assertArtifactMetadataAllowed(input: Readonly<{
   if (audience?.kind !== 'private-conversation' || audience.conversationId !== artifact.conversationId) {
     throw new GenewayError('ARTIFACT_POLICY_DENIED', 'Artifact audience is not allowed', 403);
   }
-  if (artifact.resourceScope !== `artifact:${artifact.id}`) {
+  if (artifact.resourceScope !== `artifact:${artifact.rootArtifactId}`) {
     throw new GenewayError('ARTIFACT_POLICY_DENIED', 'Artifact resource scope is invalid', 403);
   }
 }

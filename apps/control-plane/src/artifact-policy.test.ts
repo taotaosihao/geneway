@@ -7,6 +7,9 @@ const principal: Principal = { tenantId: 'tenant_local', userId: 'user_local', t
 const artifact: AuthorizedArtifact = {
   tenantId: principal.tenantId,
   id: 'artifact_1',
+  kind: 'source_document',
+  businessTaskId: null,
+  rootArtifactId: 'artifact_1',
   conversationId: 'conversation_1',
   ownerUserId: principal.userId,
   displayName: 'source.txt',

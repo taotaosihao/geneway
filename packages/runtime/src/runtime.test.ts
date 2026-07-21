@@ -4,9 +4,11 @@ import { FakeRuntime } from './index.js';
 
 describe('server fake runtime', () => {
   it('produces the fixed candidates without a provider route', () => {
-    const result = new FakeRuntime().executeStep('evidence_verify', { tenantId: 'tenant_local', businessTaskId: 'task_1', fixtureRef: 'fixture:solution-analysis:v1' });
+    const result = new FakeRuntime().executeStep('evidence_verify', {
+      inputRef: { kind: 'fixture', fixtureRef: 'fixture:solution-analysis:v1', fixtureVersion: 1 },
+    });
     expect(result.claims).toHaveLength(2);
-    expect(result.evidence?.runtimeMode).toBe('fake');
+    expect(result.evidence).toMatchObject({ kind: 'legacy_fixture', sourceId: 'fixture:solution-analysis:v1#requirements' });
   });
   it('fails closed for unopened runtime kinds', () => {
     try {
@@ -16,6 +18,8 @@ describe('server fake runtime', () => {
       expect(error).toBeInstanceOf(GenewayError);
       expect((error as GenewayError).code).toBe('NOT_OPEN');
     }
-    expect(() => new FakeRuntime().executeStep('wait', { tenantId: 'tenant_local', businessTaskId: 'task_1', fixtureRef: 'fixture:solution-analysis:v1' })).toThrow(/not open/);
+    expect(() => new FakeRuntime().executeStep('wait', {
+      inputRef: { kind: 'fixture', fixtureRef: 'fixture:solution-analysis:v1', fixtureVersion: 1 },
+    })).toThrow(/not open/);
   });
 });

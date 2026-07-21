@@ -22,12 +22,55 @@ export const expertTargetSchema = z.discriminatedUnion('mode', [
 
 export type ExpertTarget = z.infer<typeof expertTargetSchema>;
 
-export const createTaskInputSchema = z.object({
+export const taskInputRefSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('fixture'),
+    fixtureRef: z.literal('fixture:solution-analysis:v1'),
+  }).strict(),
+  z.object({
+    kind: z.literal('document_snapshot'),
+    documentSnapshotId: z.string().min(1),
+  }).strict(),
+]);
+
+export type TaskInputRef = z.infer<typeof taskInputRefSchema>;
+
+export const resolvedTaskInputRefSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('fixture'),
+    fixtureRef: z.literal('fixture:solution-analysis:v1'),
+    fixtureVersion: z.literal(1),
+  }).strict(),
+  z.object({
+    kind: z.literal('document_snapshot'),
+    documentSnapshotId: z.string().min(1),
+    artifactId: z.string().min(1),
+    manifestId: z.string().min(1),
+    contentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    simulationProfile: z.literal('solution-analysis-demo/v2'),
+    profileRegistryVersion: z.literal('gate0.2a-profile-registry/1'),
+    resourceScope: z.string().min(1),
+    dataClass: z.literal('C1'),
+    audience: z.string().startsWith('conversation:'),
+  }).strict(),
+]);
+
+export type ResolvedTaskInputRef = z.infer<typeof resolvedTaskInputRefSchema>;
+
+const normalizedCreateTaskInputSchema = z.object({
   conversationId: z.string().min(1),
   capabilityId: z.literal('solution.analysis.v1'),
-  fixtureRef: z.literal('fixture:solution-analysis:v1'),
+  inputRef: taskInputRefSchema,
   expertTarget: expertTargetSchema,
 }).strict();
+
+export const createTaskInputSchema = z.preprocess((raw) => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return raw;
+  const input = raw as Readonly<Record<string, unknown>>;
+  if (input.inputRef !== undefined || input.fixtureRef !== 'fixture:solution-analysis:v1') return raw;
+  const rest = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'fixtureRef'));
+  return { ...rest, inputRef: { kind: 'fixture', fixtureRef: 'fixture:solution-analysis:v1' } };
+}, normalizedCreateTaskInputSchema);
 
 export type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
 
@@ -54,10 +97,71 @@ export const taskResultSchema = z.discriminatedUnion('kind', [
 
 export type TaskResult = z.infer<typeof taskResultSchema>;
 
+export const evidenceSourceSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('legacy_fixture'),
+    fixtureRef: z.literal('fixture:solution-analysis:v1'),
+    fixtureVersion: z.literal(1),
+    sourceId: z.string().min(1),
+    excerptSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict(),
+  z.object({
+    kind: z.literal('document_snapshot'),
+    documentSnapshotId: z.string().min(1),
+    artifactId: z.string().min(1),
+    startByte: z.number().int().nonnegative(),
+    endByteExclusive: z.number().int().positive(),
+    snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    excerptSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    extractionVersion: z.literal('raw-utf8-byte-range/1'),
+  }).strict(),
+]);
+
+export type EvidenceSource = z.infer<typeof evidenceSourceSchema>;
+
+export const evidenceProjectionSchema = z.object({
+  id: z.string().min(1),
+  source: evidenceSourceSchema,
+  excerpt: z.string().min(1).nullable(),
+  excerptSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  resourceScope: z.string().min(1),
+  dataClass: z.literal('C1'),
+  audience: z.string().startsWith('conversation:'),
+  lineageRecordIds: z.array(z.string().min(1)),
+}).strict();
+
+export type EvidenceProjection = z.infer<typeof evidenceProjectionSchema>;
+
+export const taskArtifactProjectionSchema = z.object({
+  id: z.string().min(1),
+  manifestId: z.string().min(1),
+  kind: z.enum(['source_document', 'simulation_report']),
+  displayName: z.string().min(1),
+  mediaType: z.enum(['text/plain', 'text/markdown']),
+  sizeBytes: z.number().int().positive().max(1_048_576),
+  contentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  downloadUrl: z.string().startsWith('/api/artifacts/'),
+  lineageRecordIds: z.array(z.string().min(1)),
+}).strict();
+
+export type TaskArtifactProjection = z.infer<typeof taskArtifactProjectionSchema>;
+
+export const lineageProjectionSchema = z.object({
+  id: z.string().min(1),
+  fromKind: z.string().min(1),
+  fromId: z.string().min(1),
+  toKind: z.string().min(1),
+  toId: z.string().min(1),
+  relation: z.string().min(1),
+}).strict();
+
+export type LineageProjection = z.infer<typeof lineageProjectionSchema>;
+
 export const taskSnapshotSchema = z.object({
   id: z.string(),
   conversationId: z.string(),
   status: z.string(),
+  inputRef: resolvedTaskInputRefSchema,
   workflowVersion: z.object({ id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   approval: z.object({ id: z.string(), version: z.number().int().positive(), status: z.string(), subjectDigest: z.string() }).strict(),
   expertTarget: expertTargetSchema,
@@ -70,11 +174,10 @@ export const taskSnapshotSchema = z.object({
     rejectionCode: z.string().nullable(),
   }).strict()),
   evidence: z.array(z.object({
-    id: z.string(),
-    sourceId: z.string(),
-    excerpt: z.string(),
-    sourceHash: z.string(),
+    ...evidenceProjectionSchema.shape,
   }).strict()),
+  artifacts: z.array(taskArtifactProjectionSchema),
+  lineage: z.array(lineageProjectionSchema),
   result: taskResultSchema.nullable(),
   aggregateVersion: z.number().int().positive(),
   eventWatermark: z.number().int().nonnegative(),
@@ -162,6 +265,184 @@ export const documentSnapshotListSchema = z.object({
 }).strict();
 
 export type DocumentSnapshotList = z.infer<typeof documentSnapshotListSchema>;
+
+export const executionLeaseSchema = z.object({
+  eventId: z.string().min(1),
+  deliveryId: z.string().min(1),
+  attemptId: z.string().min(1),
+  fencingToken: z.number().int().positive(),
+}).strict();
+
+export type ExecutionLease = z.infer<typeof executionLeaseSchema>;
+
+export const workerDeliverySchema = z.object({
+  tenantId: z.string().min(1),
+  taskId: z.string().min(1),
+  consumer: z.literal('gate0.2a-worker'),
+  deploymentId: z.literal('gate0.2a-local'),
+  workerInstanceId: z.string().min(1),
+  lease: executionLeaseSchema,
+  inputRef: resolvedTaskInputRefSchema,
+  workflow: z.object({
+    id: z.string().min(1),
+    hash: z.string().regex(/^[a-f0-9]{64}$/),
+    canonicalizationVersion: z.literal('RFC8785/JCS-1'),
+    canonicalPayload: z.unknown(),
+  }).strict(),
+}).strict();
+
+export type WorkerDelivery = z.infer<typeof workerDeliverySchema>;
+
+const workerProtocolFields = {
+  protocolVersion: z.literal('gate0.2a-worker-command/1'),
+  workerInstanceId: z.string().min(1).max(200),
+} as const;
+
+const workerExecutionFields = {
+  ...workerProtocolFields,
+  deliveryId: z.string().min(1),
+  eventId: z.string().min(1),
+  attemptId: z.string().min(1),
+  fencingToken: z.number().int().positive(),
+} as const;
+
+export const workerCommandSchema = z.discriminatedUnion('command', [
+  z.object({
+    command: z.literal('session'),
+    ...workerProtocolFields,
+    consumer: z.literal('gate0.2a-worker'),
+    deploymentId: z.literal('gate0.2a-local'),
+  }).strict(),
+  z.object({
+    command: z.literal('claim_delivery'),
+    ...workerProtocolFields,
+    consumer: z.literal('gate0.2a-worker'),
+    deploymentId: z.literal('gate0.2a-local'),
+  }).strict(),
+  z.object({ command: z.literal('read_input'), ...workerExecutionFields }).strict(),
+  z.object({
+    command: z.literal('claim_step'),
+    ...workerExecutionFields,
+    stepId: z.string().min(1),
+    stepAttemptId: z.string().min(1),
+    idempotencyKey: z.string().min(8).max(200),
+  }).strict(),
+  z.object({
+    command: z.literal('complete_step'),
+    ...workerExecutionFields,
+    stepId: z.string().min(1),
+    stepAttemptId: z.string().min(1),
+    stepFencingToken: z.number().int().positive(),
+    output: z.unknown(),
+    idempotencyKey: z.string().min(8).max(200),
+  }).strict(),
+  z.object({
+    command: z.literal('submit_candidate'),
+    ...workerExecutionFields,
+    candidate: z.lazy(() => attemptOutputCandidatePayloadSchema),
+    idempotencyKey: z.string().min(8).max(200),
+  }).strict(),
+  z.object({
+    command: z.literal('fail_delivery'),
+    ...workerExecutionFields,
+    code: z.string().min(1).max(100),
+    message: z.string().min(1).max(2_000),
+    idempotencyKey: z.string().min(8).max(200),
+  }).strict(),
+]);
+
+export type WorkerCommand = z.infer<typeof workerCommandSchema>;
+
+export const workerInputContentSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('fixture'),
+    inputRef: z.object({
+      kind: z.literal('fixture'),
+      fixtureRef: z.literal('fixture:solution-analysis:v1'),
+      fixtureVersion: z.literal(1),
+    }).strict(),
+  }).strict(),
+  z.object({
+    kind: z.literal('document_snapshot'),
+    inputRef: z.object({
+      kind: z.literal('document_snapshot'),
+      documentSnapshotId: z.string().min(1),
+      artifactId: z.string().min(1),
+      manifestId: z.string().min(1),
+      contentSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      simulationProfile: z.literal('solution-analysis-demo/v2'),
+      profileRegistryVersion: z.literal('gate0.2a-profile-registry/1'),
+      resourceScope: z.string().min(1),
+      dataClass: z.literal('C1'),
+      audience: z.string().startsWith('conversation:'),
+    }).strict(),
+    bytesBase64: z.string().min(1),
+  }).strict(),
+]);
+
+export type WorkerInputContent = z.infer<typeof workerInputContentSchema>;
+
+export const documentEvidenceLocatorCandidateSchema = z.object({
+  kind: z.literal('document_snapshot'),
+  candidateKey: z.string().min(1).max(100),
+  documentSnapshotId: z.string().min(1),
+  startByte: z.number().int().nonnegative(),
+  endByteExclusive: z.number().int().positive(),
+}).strict();
+
+export const legacyEvidenceLocatorCandidateSchema = z.object({
+  kind: z.literal('legacy_fixture'),
+  candidateKey: z.string().min(1).max(100),
+  fixtureRef: z.literal('fixture:solution-analysis:v1'),
+  fixtureVersion: z.literal(1),
+  sourceId: z.string().min(1),
+}).strict();
+
+export const evidenceLocatorCandidateSchema = z.discriminatedUnion('kind', [
+  documentEvidenceLocatorCandidateSchema,
+  legacyEvidenceLocatorCandidateSchema,
+]);
+
+export type EvidenceLocatorCandidate = z.infer<typeof evidenceLocatorCandidateSchema>;
+
+export const claimOutputCandidateSchema = z.object({
+  candidateKey: z.string().min(1).max(100),
+  text: z.string().min(1).max(2_000),
+  evidenceCandidateKey: z.string().min(1).max(100).nullable(),
+}).strict();
+
+export type ClaimOutputCandidate = z.infer<typeof claimOutputCandidateSchema>;
+
+export const attemptOutputCandidatePayloadSchema = z.object({
+  evidence: z.array(evidenceLocatorCandidateSchema).max(8),
+  claims: z.array(claimOutputCandidateSchema).min(1).max(16),
+  result: taskResultSchema,
+}).strict();
+
+export type AttemptOutputCandidatePayload = z.infer<typeof attemptOutputCandidatePayloadSchema>;
+
+export const workerCommandResponseSchema = z.discriminatedUnion('command', [
+  z.object({ command: z.literal('session'), ok: z.literal(true), result: z.object({ authenticated: z.literal(true) }).strict() }).strict(),
+  z.object({ command: z.literal('claim_delivery'), ok: z.literal(true), result: workerDeliverySchema.nullable() }).strict(),
+  z.object({ command: z.literal('read_input'), ok: z.literal(true), result: workerInputContentSchema }).strict(),
+  z.object({
+    command: z.literal('claim_step'),
+    ok: z.literal(true),
+    result: z.object({ stepAttemptId: z.string().min(1), fencingToken: z.number().int().positive() }).strict(),
+  }).strict(),
+  z.object({ command: z.literal('complete_step'), ok: z.literal(true), result: z.object({ accepted: z.literal(true) }).strict() }).strict(),
+  z.object({ command: z.literal('submit_candidate'), ok: z.literal(true), result: z.object({ accepted: z.literal(true) }).strict() }).strict(),
+  z.object({ command: z.literal('fail_delivery'), ok: z.literal(true), result: z.object({ accepted: z.literal(true) }).strict() }).strict(),
+]);
+
+export type WorkerCommandResponse = z.infer<typeof workerCommandResponseSchema>;
+
+export const createTaskInputJsonSchema = z.toJSONSchema(createTaskInputSchema);
+export const taskSnapshotJsonSchema = z.toJSONSchema(taskSnapshotSchema);
+export const workerDeliveryJsonSchema = z.toJSONSchema(workerDeliverySchema);
+export const workerCommandJsonSchema = z.toJSONSchema(workerCommandSchema);
+export const workerCommandResponseJsonSchema = z.toJSONSchema(workerCommandResponseSchema);
+export const attemptOutputCandidatePayloadJsonSchema = z.toJSONSchema(attemptOutputCandidatePayloadSchema);
 
 export class GenewayError extends Error {
   constructor(

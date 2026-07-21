@@ -78,15 +78,9 @@ importers:
       '@geneway/ingestion':
         specifier: workspace:*
         version: link:../../packages/ingestion
-      '@geneway/runtime':
-        specifier: workspace:*
-        version: link:../../packages/runtime
       '@geneway/storage':
         specifier: workspace:*
         version: link:../../packages/storage
-      '@geneway/worker':
-        specifier: workspace:*
-        version: link:../worker
       '@geneway/workflow':
         specifier: workspace:*
         version: link:../../packages/workflow

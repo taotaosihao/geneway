@@ -2,7 +2,7 @@ import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { deriveTrustedLocalPrincipal } from '@geneway/authorization';
-import { createTaskInputSchema, GenewayError, isGenewayError, type Principal } from '@geneway/contracts';
+import { createTaskInputSchema, evidenceProjectionSchema, GenewayError, isGenewayError, type Principal } from '@geneway/contracts';
 import {
   MAX_MULTIPART_ENVELOPE_BYTES,
   MAX_RAW_UPLOAD_BYTES,
@@ -11,8 +11,13 @@ import {
   type SingleMultipartUpload,
 } from '@geneway/ingestion';
 import { createObjectStorageFromEnv, type ObjectStorage } from '@geneway/storage';
-import { WorkflowInterpreter } from '@geneway/worker';
-import { FIXTURE_CONTENT_HASH, FIXTURE_EXCERPT, FIXTURE_REF, FIXTURE_VERSION } from '@geneway/evidence';
+import {
+  FIXTURE_CONTENT_HASH,
+  FIXTURE_EXCERPT,
+  FIXTURE_REF,
+  FIXTURE_VERSION,
+  extractVerifiedDocumentEvidence,
+} from '@geneway/evidence';
 import { ControlPlaneRepository } from './repository.js';
 import { ArtifactRepository } from './artifact-repository.js';
 import { ArtifactService } from './artifact-service.js';
@@ -278,19 +283,7 @@ export async function createControlPlane(options: Readonly<{
 
   app.post('/api/business-tasks/:id/execute', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
-    return repository.executeIdempotently(request.principal, params.id, idempotencyKey(request), async () => {
-      const task = await repository.getTask(request.principal, params.id);
-      const workflow = await repository.getWorkflow(request.principal, task.workflowVersion.id);
-      await repository.startTask(request.principal.tenantId, params.id, workflow);
-      void new WorkflowInterpreter(repository, undefined, 30).execute({
-        tenantId: request.principal.tenantId,
-        taskId: params.id,
-        fixtureRef: 'fixture:solution-analysis:v1',
-        workflow,
-        alreadyStarted: true,
-      }).catch((error: unknown) => app.log.error(error));
-      return { taskId: params.id, status: 'accepted' };
-    });
+    return repository.enqueueExecution(request.principal, params.id, idempotencyKey(request));
   });
 
   app.get('/api/claims/:id', async (request) => {
@@ -300,7 +293,46 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/evidence/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
-    return repository.getEvidence(request.principal, params.id);
+    const raw = await repository.getEvidenceMetadata(request.principal, params.id);
+    const source = raw.source as Readonly<Record<string, unknown>>;
+    let excerpt: string;
+    if (source.kind === 'legacy_fixture') {
+      if (source.fixtureRef !== FIXTURE_REF || source.fixtureVersion !== FIXTURE_VERSION
+        || source.sourceId !== `${FIXTURE_REF}#requirements` || source.excerptSha256 !== FIXTURE_CONTENT_HASH) {
+        throw new GenewayError('EVIDENCE_SOURCE_INVALID', 'Legacy Evidence source is invalid', 409);
+      }
+      excerpt = FIXTURE_EXCERPT;
+    } else if (source.kind === 'document_snapshot') {
+      if (artifactService === null) throw new GenewayError('STORAGE_NOT_CONFIGURED', 'Artifact storage is not configured', 503);
+      const artifactId = z.string().min(1).parse(source.artifactId);
+      const downloaded = await artifactService.download(request.principal, artifactId);
+      const verified = extractVerifiedDocumentEvidence({
+        rawBytes: downloaded.bytes,
+        snapshotSha256: z.string().regex(/^[a-f0-9]{64}$/).parse(source.snapshotSha256),
+        startByte: z.number().int().nonnegative().parse(source.startByte),
+        endByteExclusive: z.number().int().positive().parse(source.endByteExclusive),
+      });
+      if (verified.excerptSha256 !== raw.excerpt_sha256 || verified.excerpt !== raw.source_excerpt) {
+        throw new GenewayError('EVIDENCE_INTEGRITY_FAILED', 'Evidence no longer matches its immutable source', 409);
+      }
+      excerpt = verified.excerpt;
+    } else {
+      throw new GenewayError('EVIDENCE_SOURCE_INVALID', 'Evidence source is not supported', 409);
+    }
+    const lineage = await repository.pool.query<{ id: string }>(`SELECT id FROM lineage_records
+      WHERE tenant_id=$1 AND business_task_id=$2 AND (from_id=$3 OR to_id=$3) ORDER BY created_at,id`, [
+      request.principal.tenantId, raw.business_task_id, params.id,
+    ]);
+    return evidenceProjectionSchema.parse({
+      id: raw.id,
+      source,
+      excerpt,
+      excerptSha256: raw.excerpt_sha256,
+      resourceScope: raw.resource_scope,
+      dataClass: raw.data_class,
+      audience: raw.audience,
+      lineageRecordIds: lineage.rows.map((row) => row.id),
+    });
   });
 
   app.get('/api/artifacts/:id/download', async (request, reply) => {
@@ -328,3 +360,4 @@ export async function createControlPlane(options: Readonly<{
 export { ControlPlaneRepository } from './repository.js';
 export { ArtifactRepository } from './artifact-repository.js';
 export { ArtifactService } from './artifact-service.js';
+export { createWorkerCommandApp, WorkerCommandService } from './worker-command-server.js';

@@ -4,7 +4,13 @@
   "private": true,
   "type": "module",
   "exports": { ".": "./src/index.ts" },
-  "scripts": { "build": "tsc -b", "typecheck": "tsc -b --pretty false" },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "pnpm exec tsx src/main.ts",
+    "start": "node dist/main.js",
+    "test": "pnpm exec vitest run src",
+    "typecheck": "tsc -b --pretty false"
+  },
   "dependencies": {
     "@geneway/contracts": "workspace:*",
     "@geneway/evidence": "workspace:*",

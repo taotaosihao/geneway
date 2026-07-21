@@ -119,6 +119,23 @@ export function createSolutionAnalysisDraft(): WorkflowDraft {
   };
 }
 
+export function createSolutionAnalysisDocumentDraft(resourceScope: string): WorkflowDraft {
+  const draft = createSolutionAnalysisDraft();
+  return workflowDraftSchema.parse({
+    ...draft,
+    nodes: draft.nodes.map((node) => node.id === 'document_ingest'
+      ? {
+          id: node.id,
+          kind: 'deterministic',
+          handlerVersion: 'document-snapshot-reader/1',
+          inputRefs: ['workflow.input.documentSnapshotId'],
+          outputSchemaId: node.outputSchemaId,
+        }
+      : node),
+    permissionCeiling: { ...draft.permissionCeiling, resourceScopes: [resourceScope] },
+  });
+}
+
 function assertJsonSafe(value: unknown, seen = new Set<object>(), path = '$'): void {
   if (value === undefined || typeof value === 'function' || typeof value === 'bigint' || typeof value === 'symbol') {
     throw new GenewayError('WORKFLOW_UNSAFE_VALUE', `Workflow contains an unsafe value at ${path}`);
@@ -179,7 +196,7 @@ function assertGraph(draft: WorkflowDraft): void {
   const preceding = new Set<string>();
   for (const node of draft.nodes) {
     for (const ref of node.inputRefs) {
-      if (ref === 'workflow.input.fixtureRef') continue;
+      if (ref === 'workflow.input.fixtureRef' || ref === 'workflow.input.documentSnapshotId') continue;
       const match = /^step\.([a-z][a-z0-9_]*)\.output$/.exec(ref);
       if (match === null || match[1] === undefined || !preceding.has(match[1])) {
         throw new GenewayError('WORKFLOW_UNKNOWN_INPUT_REF', `Node ${node.id} has an unknown or forward input reference: ${ref}`);
@@ -208,7 +225,7 @@ function assertRegistry(draft: WorkflowDraft, registry: WorkflowRegistry): void 
 export const GATE_0_1_WORKFLOW_REGISTRY: WorkflowRegistry = Object.freeze({
   capabilityVersionIds: new Set([SOLUTION_CAPABILITY_VERSION_ID]),
   harnessVersionIds: new Set([SOLUTION_HARNESS_VERSION_ID]),
-  deterministicHandlers: new Set(['fixture-reader/1', 'simulation-publisher/1']),
+  deterministicHandlers: new Set(['fixture-reader/1', 'document-snapshot-reader/1', 'simulation-publisher/1']),
   verificationPolicies: new Set(['claim-evidence-minimum/1', 'simulation-quality/1']),
 });
 

@@ -83,6 +83,9 @@ type IntentRow = {
 export type AuthorizedArtifact = Readonly<{
   tenantId: string;
   id: string;
+  kind: 'source_document' | 'simulation_report';
+  businessTaskId: string | null;
+  rootArtifactId: string;
   conversationId: string;
   ownerUserId: string;
   displayName: string;
@@ -90,7 +93,7 @@ export type AuthorizedArtifact = Readonly<{
   sizeBytes: number;
   contentSha256: string;
   manifestId: string;
-  documentSnapshotId: string;
+  documentSnapshotId: string | null;
   storageBucket: string;
   storageKey: string;
   availability: string;
@@ -248,10 +251,12 @@ export class ArtifactRepository {
       }
 
       await client.query(`INSERT INTO artifacts
-        (tenant_id,id,conversation_id,owner_user_id,kind,display_name,media_type,size_bytes,content_sha256)
-        VALUES ($1,$2,$3,$4,'source_document',$5,$6,$7,$8)`, [
+        (tenant_id,id,conversation_id,owner_user_id,kind,display_name,media_type,size_bytes,content_sha256,
+         root_artifact_id,data_class,audience,resource_scope)
+        VALUES ($1,$2,$3,$4,'source_document',$5,$6,$7,$8,$2,'C1',$9,$10)`, [
         principal.tenantId, current.artifactId, current.conversationId, principal.userId, current.displayName,
         current.mediaType, current.sizeBytes, current.contentSha256,
+        { kind: 'private-conversation', conversationId: current.conversationId }, `artifact:${current.artifactId}`,
       ]);
       await client.query(`INSERT INTO artifact_manifests
         (tenant_id,id,artifact_id,storage_bucket,storage_key,display_name,media_type,size_bytes,content_sha256,retention_policy)
@@ -317,6 +322,9 @@ export class ArtifactRepository {
           artifact: {
             tenantId: principal.tenantId,
             id: String(row.artifact_id),
+            kind: 'source_document',
+            businessTaskId: null,
+            rootArtifactId: String(row.artifact_id),
             conversationId: String(row.conversation_id),
             ownerUserId: String(row.owner_user_id),
             displayName: String(row.display_name),
@@ -345,6 +353,9 @@ export class ArtifactRepository {
   async getAuthorizedArtifact(principal: Principal, artifactId: string): Promise<AuthorizedArtifact> {
     const result = await this.pool.query<{
       id: string;
+      kind: 'source_document' | 'simulation_report';
+      business_task_id: string | null;
+      root_artifact_id: string;
       conversation_id: string;
       owner_user_id: string;
       display_name: string;
@@ -352,7 +363,7 @@ export class ArtifactRepository {
       size_bytes: string;
       content_sha256: string;
       manifest_id: string;
-      document_snapshot_id: string;
+      document_snapshot_id: string | null;
       storage_bucket: string;
       storage_key: string;
       availability: string;
@@ -364,15 +375,48 @@ export class ArtifactRepository {
       data_class: string;
       audience: unknown;
       resource_scope: string;
-    }>(`SELECT a.id,a.conversation_id,a.owner_user_id,a.display_name,a.media_type,a.size_bytes,a.content_sha256,
+    }>(`SELECT a.id,a.kind,a.business_task_id,a.root_artifact_id,a.conversation_id,a.owner_user_id,
+      a.display_name,a.media_type,a.size_bytes,a.content_sha256,
       m.id manifest_id,m.storage_bucket,m.storage_key,s.availability,s.integrity,s.state_version,
       s.retention_status,s.retention_expires_at,s.reconcile_status,
-      d.id document_snapshot_id,d.data_class,d.audience,d.resource_scope
+      d.id document_snapshot_id,a.data_class,a.audience,a.resource_scope
       FROM artifacts a JOIN artifact_manifests m ON m.tenant_id=a.tenant_id AND m.artifact_id=a.id
       JOIN artifact_states s ON s.tenant_id=a.tenant_id AND s.artifact_id=a.id
-      JOIN document_snapshots d ON d.tenant_id=a.tenant_id AND d.artifact_id=a.id
+      LEFT JOIN document_snapshots d ON d.tenant_id=a.tenant_id AND d.artifact_id=a.id
       JOIN conversations c ON c.tenant_id=a.tenant_id AND c.id=a.conversation_id
-      WHERE a.tenant_id=$1 AND a.id=$2 AND a.owner_user_id=$3 AND c.user_id=$3`, [principal.tenantId, artifactId, principal.userId]);
+      LEFT JOIN business_tasks task ON task.tenant_id=a.tenant_id AND task.id=a.business_task_id
+      LEFT JOIN artifacts root ON root.tenant_id=a.tenant_id AND root.id=a.root_artifact_id
+      LEFT JOIN artifact_states root_state ON root_state.tenant_id=root.tenant_id AND root_state.artifact_id=root.id
+      LEFT JOIN document_snapshots root_snapshot ON root_snapshot.tenant_id=root.tenant_id AND root_snapshot.artifact_id=root.id
+      WHERE a.tenant_id=$1 AND a.id=$2 AND a.owner_user_id=$3 AND c.user_id=$3
+        AND (a.kind='source_document' OR (
+          a.kind='simulation_report'
+          AND task.id IS NOT NULL AND task.requester_id=$3 AND task.conversation_id=a.conversation_id
+          AND root.id IS NOT NULL AND root.owner_user_id=$3 AND root.conversation_id=a.conversation_id
+          AND root_snapshot.id=task.input_snapshot->>'documentSnapshotId'
+          AND root_snapshot.artifact_id=task.input_snapshot->>'artifactId'
+          AND root_snapshot.manifest_id=task.input_snapshot->>'manifestId'
+          AND root_snapshot.content_sha256=task.input_snapshot->>'contentSha256'
+          AND root_snapshot.simulation_profile=task.input_snapshot->>'simulationProfile'
+          AND root_snapshot.profile_registry_version=task.input_snapshot->>'profileRegistryVersion'
+          AND root_snapshot.resource_scope=task.input_snapshot->>'resourceScope'
+          AND root_snapshot.data_class=task.input_snapshot->>'dataClass'
+          AND ('conversation:' || root_snapshot.conversation_id)=task.input_snapshot->>'audience'
+          AND root_snapshot.resource_scope='artifact:' || root.id
+          AND root_snapshot.data_class='C1'
+          AND root_snapshot.audience=jsonb_build_object('kind','private-conversation','conversationId',a.conversation_id)
+          AND task.permission_scope=jsonb_build_object(
+            'actions',jsonb_build_array('R0','R1','A1'),
+            'resourceScopes',jsonb_build_array(root_snapshot.resource_scope),
+            'dataClasses',jsonb_build_array('C0','C1'))
+          AND task.audience_scope=jsonb_build_object(
+            'kind','private-conversation','ids',jsonb_build_array('conversation:' || a.conversation_id))
+          AND a.resource_scope=root_snapshot.resource_scope AND a.data_class='C1'
+          AND a.audience=jsonb_build_object('kind','private-conversation','conversationId',a.conversation_id)
+          AND root_state.availability='active' AND root_state.integrity='verified'
+          AND root_state.retention_status='active' AND root_state.retention_expires_at>now()
+          AND root_state.reconcile_status='in_sync'
+        ))`, [principal.tenantId, artifactId, principal.userId]);
     const row = result.rows[0];
     if (row === undefined) {
       throw new GenewayError('ARTIFACT_NOT_FOUND', 'Artifact was not found', 404);
@@ -381,6 +425,9 @@ export class ArtifactRepository {
     return {
       tenantId: principal.tenantId,
       id: row.id,
+      kind: row.kind,
+      businessTaskId: row.business_task_id,
+      rootArtifactId: row.root_artifact_id,
       conversationId: row.conversation_id,
       ownerUserId: row.owner_user_id,
       displayName: row.display_name,

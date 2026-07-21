@@ -1,13 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import pg, { type PoolClient } from 'pg';
-import { authorize, delegatedCapabilitySchema, type DelegatedCapability } from '@geneway/authorization';
-import { GenewayError, SIMULATION_ENVELOPE, taskResultSchema, taskSnapshotSchema, type CreateTaskInput, type Principal, type TaskSnapshot } from '@geneway/contracts';
-import { FIXTURE_CONTENT_HASH, FIXTURE_EXCERPT, FIXTURE_REF, FIXTURE_SOURCE_ID, FIXTURE_VERSION, assertPublishableClaim, claimCandidateSchema, verifyEvidence, type ClaimCandidate, type EvidenceCandidate } from '@geneway/evidence';
-import type { InterpreterControlPort, StepLease } from '@geneway/worker';
+import {
+  GenewayError,
+  SIMULATION_ENVELOPE,
+  isGenewayError,
+  resolvedTaskInputRefSchema,
+  taskSnapshotSchema,
+  type CreateTaskInput,
+  type Principal,
+  type ResolvedTaskInputRef,
+  type TaskSnapshot,
+} from '@geneway/contracts';
+import {
+  FIXTURE_REF,
+  FIXTURE_VERSION,
+} from '@geneway/evidence';
 import {
   SOLUTION_CAPABILITY_VERSION_ID,
   SOLUTION_HARNESS_VERSION_ID,
   compileWorkflow,
+  createSolutionAnalysisDocumentDraft,
   createSolutionAnalysisDraft,
   hashCanonical,
   readStoredWorkflowVersion,
@@ -15,9 +27,45 @@ import {
 } from '@geneway/workflow';
 
 const { Pool } = pg;
+const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
 
 type JsonObject = Readonly<Record<string, unknown>>;
+export type ApprovalSubjectInput = Readonly<{
+  taskId: string;
+  requesterId: string;
+  inputSnapshot: ResolvedTaskInputRef;
+  expertTarget: JsonObject;
+  expertCatalogVersionId: string;
+  harnessVersionId: string;
+  workflowVersionId: string;
+  workflowHash: string;
+  permissionScope: JsonObject;
+  audienceScope: JsonObject;
+  budget: JsonObject;
+}>;
+
+export function buildApprovalSubject(input: ApprovalSubjectInput): JsonObject {
+  return {
+    kind: 'workflow-execution',
+    subjectType: 'business-task',
+    subjectId: input.taskId,
+    subjectVersion: 1,
+    requesterId: input.requesterId,
+    resolvedInputRef: input.inputSnapshot,
+    resolvedExpertTarget: input.expertTarget,
+    expertCatalogVersionId: input.expertCatalogVersionId,
+    harnessVersionId: input.harnessVersionId,
+    workflowVersionId: input.workflowVersionId,
+    workflowHash: input.workflowHash,
+    permissionScope: input.permissionScope,
+    audienceScope: input.audienceScope,
+    budget: input.budget,
+    ...SIMULATION_ENVELOPE,
+  };
+}
+
 type TaskRow = {
+  tenant_id: string;
   id: string;
   conversation_id: string;
   status: string;
@@ -37,23 +85,40 @@ type TaskRow = {
   business_decision_allowed: boolean;
   aggregate_version: string;
   result: unknown;
+  execution_version: string;
+  current_execution_attempt_id: string | null;
+  execution_fencing_token: string;
 };
 
 type ApprovalRow = {
   id: string;
+  business_task_id: string;
   version: number;
   subject: JsonObject;
   subject_digest: string;
   status: string;
+  requester_id: string;
   expires_at: Date;
 };
 
-export type CreatedTask = Readonly<{ taskId: string; approvalId: string; workflowVersionId: string; workflowHash: string }>;
+export type CreatedTask = Readonly<{
+  taskId: string;
+  approvalId: string;
+  workflowVersionId: string;
+  workflowHash: string;
+}>;
+
 export type ExecutionResponse = Readonly<{ taskId: string; status: 'accepted' | 'completed' }>;
 
-const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
+function normalizeStoredInput(value: JsonObject): ResolvedTaskInputRef {
+  if (value.kind === 'fixture' || value.kind === 'document_snapshot') return resolvedTaskInputRefSchema.parse(value);
+  if (value.fixtureRef === FIXTURE_REF) {
+    return { kind: 'fixture', fixtureRef: FIXTURE_REF, fixtureVersion: FIXTURE_VERSION };
+  }
+  throw new GenewayError('TASK_INPUT_INVALID', 'Stored task input does not match a supported immutable input reference', 500);
+}
 
-export class ControlPlaneRepository implements InterpreterControlPort {
+export class ControlPlaneRepository {
   readonly pool: pg.Pool;
 
   constructor(connectionString: string) {
@@ -65,35 +130,36 @@ export class ControlPlaneRepository implements InterpreterControlPort {
   }
 
   async ensureSystemSeed(): Promise<void> {
-    await this.pool.query("INSERT INTO tenants (id, name) VALUES ('tenant_local', '本机演示租户') ON CONFLICT DO NOTHING");
-    await this.pool.query("INSERT INTO users (tenant_id, id, display_name) VALUES ('tenant_local', 'user_local', '本机用户') ON CONFLICT DO NOTHING");
-    await this.pool.query("INSERT INTO roles (tenant_id, user_id, role) VALUES ('tenant_local', 'user_local', 'solution_reviewer') ON CONFLICT DO NOTHING");
-    await this.pool.query("INSERT INTO resource_scopes (tenant_id, user_id, resource_scope) VALUES ('tenant_local', 'user_local', 'fixture:solution-analysis:v1') ON CONFLICT DO NOTHING");
+    await this.pool.query("INSERT INTO tenants (id,name) VALUES ('tenant_local','本机演示租户') ON CONFLICT DO NOTHING");
+    await this.pool.query("INSERT INTO users (tenant_id,id,display_name) VALUES ('tenant_local','user_local','本机用户') ON CONFLICT DO NOTHING");
+    await this.pool.query("INSERT INTO roles (tenant_id,user_id,role) VALUES ('tenant_local','user_local','solution_reviewer') ON CONFLICT DO NOTHING");
+    await this.pool.query("INSERT INTO resource_scopes (tenant_id,user_id,resource_scope) VALUES ('tenant_local','user_local','fixture:solution-analysis:v1') ON CONFLICT DO NOTHING");
   }
 
   async resetForTest(): Promise<void> {
     await this.pool.query(`TRUNCATE TABLE
-      audit_events, document_snapshots, artifact_states, artifact_manifests, artifacts, artifact_ingest_intents,
-      idempotency_records, outbox_events, result_claims, minimal_evidence_refs, policy_decisions,
-      delegated_capabilities, approval_versions, business_task_steps, business_task_events,
-      business_tasks, workflow_versions, harness_versions, expert_catalog_versions,
-      capability_versions, messages, conversations, resource_scopes, roles, users, tenants
+      report_publish_intents,lineage_records,evidence_links,evidence_items,claims,worker_command_receipts,attempt_output_candidates,
+      inbox_events,outbox_deliveries,execution_attempts,
+      audit_events,document_snapshots,artifact_states,artifact_manifests,artifacts,artifact_ingest_intents,
+      idempotency_records,outbox_events,result_claims,minimal_evidence_refs,policy_decisions,
+      delegated_capabilities,approval_versions,business_task_steps,business_task_events,
+      business_tasks,workflow_versions,harness_versions,expert_catalog_versions,
+      capability_versions,messages,conversations,resource_scopes,roles,users,tenants
       RESTART IDENTITY CASCADE`);
     await this.ensureSystemSeed();
   }
 
   async createConversation(principal: Principal, idempotencyKey: string): Promise<{ id: string }> {
-    return this.withTransaction(async (client) => this.idempotent(client, principal.tenantId, 'conversation.create', idempotencyKey, {}, async () => {
+    return this.withTransaction((client) => this.idempotent(client, principal, 'conversation.create', idempotencyKey, {}, async () => {
       const conversationId = id('conversation');
-      await client.query('INSERT INTO conversations (tenant_id, id, user_id) VALUES ($1, $2, $3)', [principal.tenantId, conversationId, principal.userId]);
+      await client.query('INSERT INTO conversations (tenant_id,id,user_id) VALUES ($1,$2,$3)', [principal.tenantId, conversationId, principal.userId]);
       return { id: conversationId };
     }));
   }
 
   async addUserMessage(principal: Principal, conversationId: string, body: string, idempotencyKey: string): Promise<{ id: string }> {
-    return this.withTransaction(async (client) => this.idempotent(client, principal.tenantId, 'conversation.message.create', idempotencyKey, { conversationId, body }, async () => {
-      const conversation = await client.query('SELECT 1 FROM conversations WHERE tenant_id=$1 AND id=$2 AND user_id=$3', [principal.tenantId, conversationId, principal.userId]);
-      if (conversation.rowCount !== 1) throw new GenewayError('CONVERSATION_NOT_FOUND', 'Conversation was not found in this tenant', 404);
+    return this.withTransaction((client) => this.idempotent(client, principal, 'conversation.message.create', idempotencyKey, { conversationId, body }, async () => {
+      await this.assertConversationOwned(client, principal, conversationId);
       const messageId = id('message');
       await client.query("INSERT INTO messages (tenant_id,id,conversation_id,author,body) VALUES ($1,$2,$3,'user',$4)", [principal.tenantId, messageId, conversationId, body]);
       return { id: messageId };
@@ -102,68 +168,81 @@ export class ControlPlaneRepository implements InterpreterControlPort {
 
   async getConversation(principal: Principal, conversationId: string): Promise<JsonObject> {
     const conversation = await this.pool.query('SELECT id,created_at FROM conversations WHERE tenant_id=$1 AND id=$2 AND user_id=$3', [principal.tenantId, conversationId, principal.userId]);
-    const row = conversation.rows[0] as Record<string, unknown> | undefined;
-    if (row === undefined) throw new GenewayError('CONVERSATION_NOT_FOUND', 'Conversation was not found in this tenant', 404);
+    const row = conversation.rows[0] as JsonObject | undefined;
+    if (row === undefined) throw new GenewayError('CONVERSATION_NOT_FOUND', 'Conversation was not found', 404);
     const messages = await this.pool.query('SELECT id,author,body,created_at FROM messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at,id', [principal.tenantId, conversationId]);
     return { ...row, messages: messages.rows };
   }
 
   async createTask(principal: Principal, input: CreateTaskInput, idempotencyKey: string): Promise<CreatedTask> {
-    const workflow = compileWorkflow(createSolutionAnalysisDraft());
-    return this.withTransaction(async (client) => this.idempotent(client, principal.tenantId, 'business-task.create', idempotencyKey, input, async () => {
-      const conversation = await client.query('SELECT 1 FROM conversations WHERE tenant_id = $1 AND id = $2 AND user_id = $3', [principal.tenantId, input.conversationId, principal.userId]);
-      if (conversation.rowCount !== 1) throw new GenewayError('CONVERSATION_NOT_FOUND', 'Conversation was not found in this tenant', 404);
-
+    return this.withTransaction((client) => this.idempotent(client, principal, 'business-task.create', idempotencyKey, input, async () => {
+      await this.assertConversationOwned(client, principal, input.conversationId);
+      const resolvedInput = await this.resolveInput(client, principal, input);
+      const workflow = resolvedInput.kind === 'fixture'
+        ? compileWorkflow(createSolutionAnalysisDraft())
+        : compileWorkflow(createSolutionAnalysisDocumentDraft(resolvedInput.resourceScope));
       const versions = await this.ensureVersions(client, principal.tenantId, workflow);
       const resolvedExpert = this.resolveExpertTarget(input.expertTarget);
       const taskId = id('task');
       const approvalId = id('approval');
-      const delegatedId = id('capability');
-      const inputSnapshot = {
-        fixtureRef: FIXTURE_REF,
-        fixtureVersion: FIXTURE_VERSION,
-        fixtureSourceId: FIXTURE_SOURCE_ID,
-        fixtureExcerpt: FIXTURE_EXCERPT,
-        fixtureContentHash: FIXTURE_CONTENT_HASH,
-      };
-      const permissionScope = { actions: ['R0', 'R1', 'A1'], resourceScopes: [input.fixtureRef], dataClasses: ['C0', 'C1'] };
+      const resourceScope = resolvedInput.kind === 'fixture' ? resolvedInput.fixtureRef : resolvedInput.resourceScope;
+      const permissionScope = { actions: ['R0', 'R1', 'A1'], resourceScopes: [resourceScope], dataClasses: ['C0', 'C1'] };
       const audienceScope = { kind: 'private-conversation', ids: [`conversation:${input.conversationId}`] };
       const budget = { maxRuntimeMs: 30_000, maxModelCost: 0, modelCallsAllowed: false };
+      const expertTarget = { requested: input.expertTarget, resolved: resolvedExpert };
 
       await client.query(`INSERT INTO business_tasks
-        (tenant_id, id, conversation_id, capability_version_id, expert_catalog_version_id, harness_version_id,
-         workflow_version_id, workflow_hash, requester_id, status, input_snapshot, expert_target,
-         permission_scope, audience_scope, budget, simulation, runtime_mode, business_decision_allowed)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'awaiting_approval',$10,$11,$12,$13,$14,true,'fake',false)`,
-      [principal.tenantId, taskId, input.conversationId, SOLUTION_CAPABILITY_VERSION_ID, versions.expertCatalogVersionId,
-        SOLUTION_HARNESS_VERSION_ID, workflow.id, workflow.hash, principal.userId, inputSnapshot,
-        { requested: input.expertTarget, resolved: resolvedExpert }, permissionScope, audienceScope, budget]);
+        (tenant_id,id,conversation_id,capability_version_id,expert_catalog_version_id,harness_version_id,
+         workflow_version_id,workflow_hash,requester_id,status,input_snapshot,expert_target,
+         permission_scope,audience_scope,budget,simulation,runtime_mode,business_decision_allowed)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'awaiting_approval',$10,$11,$12,$13,$14,true,'fake',false)`, [
+        principal.tenantId, taskId, input.conversationId, SOLUTION_CAPABILITY_VERSION_ID,
+        versions.expertCatalogVersionId, SOLUTION_HARNESS_VERSION_ID, workflow.id, workflow.hash,
+        principal.userId, resolvedInput, expertTarget, permissionScope, audienceScope, budget,
+      ]);
 
       for (const node of workflow.payload.nodes) {
         await client.query(`INSERT INTO business_task_steps
-          (tenant_id, business_task_id, step_id, status, simulation, runtime_mode, business_decision_allowed)
+          (tenant_id,business_task_id,step_id,status,simulation,runtime_mode,business_decision_allowed)
           VALUES ($1,$2,$3,'queued',true,'fake',false)`, [principal.tenantId, taskId, node.id]);
       }
 
-      const subject = this.buildApprovalSubject({
-        taskId, requesterId: principal.userId, inputSnapshot, expertTarget: { requested: input.expertTarget, resolved: resolvedExpert },
-        expertCatalogVersionId: versions.expertCatalogVersionId, harnessVersionId: SOLUTION_HARNESS_VERSION_ID,
-        workflowVersionId: workflow.id, workflowHash: workflow.hash, permissionScope, audienceScope, budget,
+      const subject = buildApprovalSubject({
+        taskId,
+        requesterId: principal.userId,
+        inputSnapshot: resolvedInput,
+        expertTarget,
+        expertCatalogVersionId: versions.expertCatalogVersionId,
+        harnessVersionId: SOLUTION_HARNESS_VERSION_ID,
+        workflowVersionId: workflow.id,
+        workflowHash: workflow.hash,
+        permissionScope,
+        audienceScope,
+        budget,
       });
       const subjectDigest = hashCanonical(subject);
       await client.query(`INSERT INTO approval_versions
         (tenant_id,id,business_task_id,version,subject,subject_digest,status,requester_id,approver_policy_version,expires_at)
-        VALUES ($1,$2,$3,1,$4,$5,'pending',$6,'trusted-local-readonly/1',now() + interval '15 minutes')`,
+        VALUES ($1,$2,$3,1,$4,$5,'pending',$6,'trusted-local-readonly/1',now()+interval '15 minutes')`,
       [principal.tenantId, approvalId, taskId, subject, subjectDigest, principal.userId]);
-
       await client.query(`INSERT INTO delegated_capabilities
         (tenant_id,id,business_task_id,principal_id,allowed_actions,resource_scopes,audience_scope,expires_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,now() + interval '15 minutes')`,
-      [principal.tenantId, delegatedId, taskId, principal.userId, JSON.stringify(['R0', 'R1', 'A1']), JSON.stringify([input.fixtureRef]), JSON.stringify([`conversation:${input.conversationId}`])]);
-      await client.query(`INSERT INTO policy_decisions (tenant_id,id,business_task_id,allow,reason_codes)
-        VALUES ($1,$2,$3,true,$4)`, [principal.tenantId, id('policy'), taskId, JSON.stringify(['TRUSTED_LOCAL', 'FIXTURE_SCOPE_ALLOWED', 'ACTION_CEILING_A1'])]);
-      await this.appendEvent(client, principal.tenantId, taskId, 'business_task.created', { approvalId, workflowVersionId: workflow.id, workflowHash: workflow.hash });
+        VALUES ($1,$2,$3,$4,$5,$6,$7,now()+interval '15 minutes')`, [
+        principal.tenantId, id('capability'), taskId, principal.userId,
+        JSON.stringify(['R0', 'R1', 'A1']), JSON.stringify([resourceScope]), JSON.stringify([`conversation:${input.conversationId}`]),
+      ]);
+      await client.query('INSERT INTO policy_decisions (tenant_id,id,business_task_id,allow,reason_codes) VALUES ($1,$2,$3,true,$4)', [
+        principal.tenantId, id('policy'), taskId,
+        JSON.stringify(['TRUSTED_LOCAL', resolvedInput.kind === 'fixture' ? 'FIXTURE_SCOPE_ALLOWED' : 'DOCUMENT_SNAPSHOT_SCOPE_ALLOWED', 'ACTION_CEILING_A1']),
+      ]);
+      await this.appendEvent(client, principal.tenantId, taskId, 'business_task.created', {
+        approvalId,
+        workflowVersionId: workflow.id,
+        workflowHash: workflow.hash,
+      });
       return { taskId, approvalId, workflowVersionId: workflow.id, workflowHash: workflow.hash };
+    }, async (response) => {
+      await this.requireReadableTask(client, principal, response.taskId);
     }));
   }
 
@@ -171,29 +250,105 @@ export class ControlPlaneRepository implements InterpreterControlPort {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-      const taskResult = await client.query<TaskRow>('SELECT * FROM business_tasks WHERE tenant_id = $1 AND id = $2', [principal.tenantId, taskId]);
-      const task = taskResult.rows[0];
-      if (task === undefined) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found in this tenant', 404);
+      const task = await this.requireReadableTask(client, principal, taskId);
+      const inputRef = normalizeStoredInput(task.input_snapshot);
       const approvalResult = await client.query<ApprovalRow>('SELECT * FROM approval_versions WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY version DESC LIMIT 1', [principal.tenantId, taskId]);
-      const stepResult = await client.query<{ step_id: string; status: string; output: unknown }>('SELECT step_id,status,output FROM business_task_steps WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY step_id', [principal.tenantId, taskId]);
-      const claimResult = await client.query<{ id: string; text: string; status: 'published' | 'rejected'; evidence_ref_id: string | null; rejection_code: string | null }>('SELECT id,text,status,evidence_ref_id,rejection_code FROM result_claims WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY created_at,id', [principal.tenantId, taskId]);
-      const evidenceResult = await client.query<{ id: string; source_id: string; source_excerpt: string; source_hash: string }>('SELECT id,source_id,source_excerpt,source_hash FROM minimal_evidence_refs WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY created_at,id', [principal.tenantId, taskId]);
-      const watermarkResult = await client.query<{ watermark: string }>('SELECT coalesce(max(cursor),0)::text AS watermark FROM business_task_events WHERE tenant_id=$1 AND business_task_id=$2', [principal.tenantId, taskId]);
       const approval = approvalResult.rows[0];
       if (approval === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Task has no approval version', 500);
+      const steps = await client.query<{ step_id: string; status: string; output: unknown }>('SELECT step_id,status,output FROM business_task_steps WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY step_id', [principal.tenantId, taskId]);
+      const claims = await client.query<{ id: string; text: string; status: 'published' | 'rejected'; rejection_code: string | null; evidence_id: string | null }>(`SELECT c.id,c.text,c.status,c.rejection_code,l.evidence_id
+        FROM claims c
+        LEFT JOIN evidence_links l ON l.tenant_id=c.tenant_id AND l.claim_id=c.id AND l.relation='supports'
+        LEFT JOIN evidence_items linked_evidence ON linked_evidence.tenant_id=l.tenant_id AND linked_evidence.id=l.evidence_id
+        WHERE c.tenant_id=$1 AND c.business_task_id=$2
+          AND (c.status='rejected' OR (
+            linked_evidence.accessible
+            AND (linked_evidence.source_kind='legacy_fixture' OR EXISTS (
+              SELECT 1 FROM document_snapshots current_snapshot
+              JOIN artifact_states current_state ON current_state.tenant_id=current_snapshot.tenant_id AND current_state.artifact_id=current_snapshot.artifact_id
+              WHERE current_snapshot.tenant_id=linked_evidence.tenant_id
+                AND current_snapshot.id=linked_evidence.source->>'documentSnapshotId'
+                AND current_snapshot.artifact_id=linked_evidence.source->>'artifactId'
+                AND current_snapshot.content_sha256=linked_evidence.source->>'snapshotSha256'
+                AND current_snapshot.resource_scope=linked_evidence.resource_scope
+                AND current_snapshot.data_class=linked_evidence.data_class
+                AND linked_evidence.audience='conversation:' || current_snapshot.conversation_id
+                AND current_state.availability='active' AND current_state.integrity='verified'
+                AND current_state.retention_status='active' AND current_state.retention_expires_at>now()
+                AND current_state.reconcile_status='in_sync'
+            ))
+          ))
+        ORDER BY c.created_at,c.id`, [principal.tenantId, taskId]);
+      const evidence = await client.query<{ id: string; source: unknown; excerpt_sha256: string; resource_scope: string; data_class: 'C1'; audience: string; lineage_ids: string[] }>(`SELECT e.id,e.source,e.excerpt_sha256,e.resource_scope,e.data_class,e.audience,
+        coalesce(array_agg(l.id ORDER BY l.created_at,l.id) FILTER (WHERE l.id IS NOT NULL),'{}') lineage_ids
+        FROM evidence_items e LEFT JOIN lineage_records l ON l.tenant_id=e.tenant_id AND l.business_task_id=e.business_task_id
+          AND (l.from_id=e.id OR l.to_id=e.id)
+        WHERE e.tenant_id=$1 AND e.business_task_id=$2 AND e.accessible
+          AND (e.source_kind='legacy_fixture' OR EXISTS (
+            SELECT 1 FROM document_snapshots current_snapshot
+            JOIN artifact_states current_state ON current_state.tenant_id=current_snapshot.tenant_id AND current_state.artifact_id=current_snapshot.artifact_id
+            WHERE current_snapshot.tenant_id=e.tenant_id
+              AND current_snapshot.id=e.source->>'documentSnapshotId'
+              AND current_snapshot.artifact_id=e.source->>'artifactId'
+              AND current_snapshot.content_sha256=e.source->>'snapshotSha256'
+              AND current_snapshot.resource_scope=e.resource_scope
+              AND current_snapshot.data_class=e.data_class
+              AND e.audience='conversation:' || current_snapshot.conversation_id
+              AND current_state.availability='active' AND current_state.integrity='verified'
+              AND current_state.retention_status='active' AND current_state.retention_expires_at>now()
+              AND current_state.reconcile_status='in_sync'
+          ))
+        GROUP BY e.id,e.source,e.excerpt_sha256,e.resource_scope,e.data_class,e.audience
+        ORDER BY min(e.created_at),e.id`, [principal.tenantId, taskId]);
+      const sourceArtifactId = inputRef.kind === 'document_snapshot' ? inputRef.artifactId : null;
+      const artifacts = await client.query<{ id: string; manifest_id: string; kind: 'source_document' | 'simulation_report'; display_name: string; media_type: 'text/plain' | 'text/markdown'; size_bytes: string; content_sha256: string; lineage_ids: string[] }>(`SELECT a.id,m.id manifest_id,a.kind,a.display_name,a.media_type,a.size_bytes::text,a.content_sha256,
+        coalesce(array_agg(l.id ORDER BY l.created_at,l.id) FILTER (WHERE l.id IS NOT NULL),'{}') lineage_ids
+        FROM artifacts a JOIN artifact_manifests m ON m.tenant_id=a.tenant_id AND m.artifact_id=a.id
+        JOIN artifact_states artifact_state ON artifact_state.tenant_id=a.tenant_id AND artifact_state.artifact_id=a.id
+        LEFT JOIN lineage_records l ON l.tenant_id=a.tenant_id AND l.business_task_id=$2 AND (l.from_id=a.id OR l.to_id=a.id)
+        WHERE a.tenant_id=$1 AND (a.business_task_id=$2 OR a.id=$3)
+          AND artifact_state.availability='active' AND artifact_state.integrity='verified'
+          AND artifact_state.retention_status='active' AND artifact_state.retention_expires_at>now()
+          AND artifact_state.reconcile_status='in_sync'
+        GROUP BY a.id,m.id,a.kind,a.display_name,a.media_type,a.size_bytes,a.content_sha256
+        ORDER BY min(a.created_at),a.id`, [principal.tenantId, taskId, sourceArtifactId]);
+      const lineage = await client.query<{ id: string; from_kind: string; from_id: string; to_kind: string; to_id: string; relation: string }>('SELECT id,from_kind,from_id,to_kind,to_id,relation FROM lineage_records WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY created_at,id', [principal.tenantId, taskId]);
+      const watermark = await client.query<{ watermark: string }>('SELECT coalesce(max(cursor),0)::text watermark FROM business_task_events WHERE tenant_id=$1 AND business_task_id=$2', [principal.tenantId, taskId]);
       const snapshot = taskSnapshotSchema.parse({
         id: task.id,
         conversationId: task.conversation_id,
         status: task.status,
+        inputRef,
         workflowVersion: { id: task.workflow_version_id, hash: task.workflow_hash },
         approval: { id: approval.id, version: approval.version, status: approval.status, subjectDigest: approval.subject_digest },
-        expertTarget: (task.expert_target.requested ?? task.expert_target),
-        steps: stepResult.rows.map((row) => ({ id: row.step_id, status: row.status, output: row.output })),
-        claims: claimResult.rows.map((row) => ({ id: row.id, text: row.text, status: row.status, evidenceRefId: row.evidence_ref_id, rejectionCode: row.rejection_code })),
-        evidence: evidenceResult.rows.map((row) => ({ id: row.id, sourceId: row.source_id, excerpt: row.source_excerpt, sourceHash: row.source_hash })),
+        expertTarget: task.expert_target.requested ?? task.expert_target,
+        steps: steps.rows.map((row) => ({ id: row.step_id, status: row.status, output: row.output })),
+        claims: claims.rows.map((row) => ({ id: row.id, text: row.text, status: row.status, evidenceRefId: row.evidence_id, rejectionCode: row.rejection_code })),
+        evidence: evidence.rows.map((row) => ({
+          id: row.id,
+          source: row.source,
+          excerpt: null,
+          excerptSha256: row.excerpt_sha256,
+          resourceScope: row.resource_scope,
+          dataClass: row.data_class,
+          audience: row.audience,
+          lineageRecordIds: row.lineage_ids,
+        })),
+        artifacts: artifacts.rows.map((row) => ({
+          id: row.id,
+          manifestId: row.manifest_id,
+          kind: row.kind,
+          displayName: row.display_name,
+          mediaType: row.media_type,
+          sizeBytes: Number(row.size_bytes),
+          contentSha256: row.content_sha256,
+          downloadUrl: `/api/artifacts/${row.id}/download`,
+          lineageRecordIds: row.lineage_ids,
+        })),
+        lineage: lineage.rows.map((row) => ({ id: row.id, fromKind: row.from_kind, fromId: row.from_id, toKind: row.to_kind, toId: row.to_id, relation: row.relation })),
         result: task.result,
         aggregateVersion: Number(task.aggregate_version),
-        eventWatermark: Number(watermarkResult.rows[0]?.watermark ?? 0),
+        eventWatermark: Number(watermark.rows[0]?.watermark ?? 0),
         simulation: task.simulation,
         runtimeMode: task.runtime_mode,
         businessDecisionAllowed: task.business_decision_allowed,
@@ -209,240 +364,254 @@ export class ControlPlaneRepository implements InterpreterControlPort {
   }
 
   async getEvents(principal: Principal, taskId: string, afterCursor: number): Promise<readonly JsonObject[]> {
-    const visible = await this.pool.query('SELECT 1 FROM business_tasks WHERE tenant_id=$1 AND id=$2', [principal.tenantId, taskId]);
-    if (visible.rowCount !== 1) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found in this tenant', 404);
-    const result = await this.pool.query(`SELECT cursor::text,id,business_task_id,sequence::text,event_type,payload,
-      simulation,runtime_mode,business_decision_allowed,occurred_at
-      FROM business_task_events WHERE tenant_id=$1 AND business_task_id=$2 AND cursor>$3 ORDER BY business_task_events.cursor`,
-    [principal.tenantId, taskId, afterCursor]);
-    return result.rows.map((row: Record<string, unknown>) => ({ ...row, cursor: Number(row.cursor), sequence: Number(row.sequence) }));
+    return this.withTransaction(async (client) => {
+      await this.requireReadableTask(client, principal, taskId);
+      const result = await client.query(`SELECT cursor::text,id,business_task_id,sequence::text,event_type,payload,
+        simulation,runtime_mode,business_decision_allowed,occurred_at
+        FROM business_task_events WHERE tenant_id=$1 AND business_task_id=$2 AND cursor>$3 ORDER BY cursor`, [principal.tenantId, taskId, afterCursor]);
+      return result.rows.map((row: Record<string, unknown>) => ({ ...row, cursor: Number(row.cursor), sequence: Number(row.sequence) }));
+    });
   }
 
   async decideApproval(principal: Principal, approvalId: string, decision: 'approved' | 'rejected', idempotencyKey: string): Promise<{ approvalId: string; status: string }> {
-    return this.withTransaction(async (client) => this.idempotent(client, principal.tenantId, 'approval.decide', idempotencyKey, { approvalId, decision }, async () => {
-      const result = await client.query<ApprovalRow & { business_task_id: string }>('SELECT * FROM approval_versions WHERE tenant_id=$1 AND id=$2 FOR UPDATE', [principal.tenantId, approvalId]);
+    return this.withTransaction((client) => this.idempotent(client, principal, 'approval.decide', idempotencyKey, { approvalId, decision }, async () => {
+      const result = await client.query<ApprovalRow>(`SELECT a.* FROM approval_versions a
+        JOIN business_tasks t ON t.tenant_id=a.tenant_id AND t.id=a.business_task_id
+        WHERE a.tenant_id=$1 AND a.id=$2 AND t.requester_id=$3 FOR UPDATE OF a,t`, [principal.tenantId, approvalId, principal.userId]);
       const approval = result.rows[0];
-      if (approval === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Approval was not found in this tenant', 404);
+      if (approval === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Approval was not found', 404);
+      const task = await this.requireTask(client, principal.tenantId, approval.business_task_id, principal.userId);
+      await this.assertApprovalSubjectAuthority(client, approval, task);
+      if (approval.expires_at.getTime() <= Date.now()) throw new GenewayError('APPROVAL_EXPIRED', 'Approval has expired', 409);
       if (approval.status !== 'pending') {
         if (approval.status === decision) return { approvalId, status: decision };
         throw new GenewayError('APPROVAL_TERMINAL', 'Approval is already terminal', 409);
       }
-      if (approval.expires_at.getTime() <= Date.now()) throw new GenewayError('APPROVAL_EXPIRED', 'Approval has expired', 409);
-      const task = await this.requireTask(client, principal.tenantId, approval.business_task_id);
-      const currentSubject = this.subjectFromTask(task, approval.business_task_id);
-      if (hashCanonical(currentSubject) !== approval.subject_digest) throw new GenewayError('APPROVAL_SUBJECT_CHANGED', 'Execution semantics changed; create a new approval version', 409);
       const updated = await client.query(`UPDATE approval_versions SET status=$3,decision_by=$4,decision_at=now()
         WHERE tenant_id=$1 AND id=$2 AND status='pending'`, [principal.tenantId, approvalId, decision, principal.userId]);
       if (updated.rowCount !== 1) throw new GenewayError('APPROVAL_CAS_CONFLICT', 'Approval decision lost a compare-and-set race', 409);
       await client.query('UPDATE business_tasks SET status=$3,updated_at=now() WHERE tenant_id=$1 AND id=$2', [principal.tenantId, approval.business_task_id, decision === 'approved' ? 'approved' : 'rejected']);
       await this.appendEvent(client, principal.tenantId, approval.business_task_id, 'approval.decided', { approvalId, decision });
       return { approvalId, status: decision };
+    }, async (response) => {
+      const result = await client.query<ApprovalRow>('SELECT * FROM approval_versions WHERE tenant_id=$1 AND id=$2 FOR UPDATE', [
+        principal.tenantId, response.approvalId,
+      ]);
+      const approval = result.rows[0];
+      if (approval === undefined || approval.status !== response.status) {
+        throw new GenewayError('APPROVAL_REPLAY_INVALID', 'Stored approval decision is no longer current', 409);
+      }
+      if (approval.expires_at.getTime() <= Date.now()) throw new GenewayError('APPROVAL_EXPIRED', 'Approval has expired', 409);
+      const task = await this.requireTask(client, principal.tenantId, approval.business_task_id, principal.userId);
+      await this.assertApprovalSubjectAuthority(client, approval, task);
     }));
   }
 
   async getApproval(principal: Principal, approvalId: string): Promise<JsonObject> {
-    const result = await this.pool.query('SELECT id,business_task_id,version,subject,subject_digest,status,expires_at FROM approval_versions WHERE tenant_id=$1 AND id=$2', [principal.tenantId, approvalId]);
-    const row = result.rows[0] as Record<string, unknown> | undefined;
-    if (row === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Approval was not found in this tenant', 404);
-    return row;
+    return this.withTransaction(async (client) => {
+      const result = await client.query<{
+        id: string;
+        business_task_id: string;
+        version: number;
+        subject: JsonObject;
+        subject_digest: string;
+        status: string;
+        expires_at: Date;
+      }>(`SELECT a.id,a.business_task_id,a.version,a.subject,a.subject_digest,a.status,a.expires_at
+        FROM approval_versions a JOIN business_tasks t ON t.tenant_id=a.tenant_id AND t.id=a.business_task_id
+        WHERE a.tenant_id=$1 AND a.id=$2 AND t.requester_id=$3`, [principal.tenantId, approvalId, principal.userId]);
+      const row = result.rows[0];
+      if (row === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Approval was not found', 404);
+      await this.requireReadableTask(client, principal, row.business_task_id);
+      return {
+        id: row.id,
+        business_task_id: row.business_task_id,
+        version: row.version,
+        subject: row.subject,
+        subject_digest: row.subject_digest,
+        status: row.status,
+        expires_at: row.expires_at,
+      };
+    });
   }
 
   async getWorkflow(principal: Principal, workflowId: string): Promise<CompiledWorkflowVersion> {
-    const result = await this.pool.query<{ id: string; workflow_hash: string; canonicalization_version: 'RFC8785/JCS-1'; canonical_json: unknown }>('SELECT * FROM workflow_versions WHERE tenant_id=$1 AND id=$2', [principal.tenantId, workflowId]);
-    const row = result.rows[0];
-    if (row === undefined) throw new GenewayError('WORKFLOW_NOT_FOUND', 'Workflow was not found in this tenant', 404);
-    return readStoredWorkflowVersion({
-      id: row.id,
-      hash: row.workflow_hash,
-      canonicalizationVersion: row.canonicalization_version,
-      canonicalPayload: row.canonical_json,
-    });
-  }
-
-  async executeIdempotently(principal: Principal, taskId: string, idempotencyKey: string, effect: () => Promise<ExecutionResponse>): Promise<ExecutionResponse> {
-    if (idempotencyKey.length < 8 || idempotencyKey.length > 200) throw new GenewayError('IDEMPOTENCY_KEY_REQUIRED', 'A stable idempotency key of 8-200 characters is required', 400);
-    const operation = 'business-task.execute';
-    const digest = hashCanonical({ taskId });
-    const taskLockKey = `business-task.execute:${taskId}`;
-    const idempotencyLockKey = `${operation}:${idempotencyKey}`;
-    const client = await this.pool.connect();
-    let taskLockHeld = false;
-    let idempotencyLockHeld = false;
-    try {
-      await client.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2))', [principal.tenantId, taskLockKey]);
-      taskLockHeld = true;
-      await client.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2))', [principal.tenantId, idempotencyLockKey]);
-      idempotencyLockHeld = true;
-      const existing = await client.query<{ request_digest: string; response: ExecutionResponse }>('SELECT request_digest,response FROM idempotency_records WHERE tenant_id=$1 AND operation=$2 AND idempotency_key=$3', [principal.tenantId, operation, idempotencyKey]);
-      const row = existing.rows[0];
-      if (row !== undefined) {
-        if (row.request_digest !== digest) throw new GenewayError('IDEMPOTENCY_CONFLICT', 'The idempotency key was already used for different semantics', 409);
-        return row.response;
-      }
-      const taskResult = await client.query<{ status: string }>('SELECT status FROM business_tasks WHERE tenant_id=$1 AND id=$2', [principal.tenantId, taskId]);
-      const task = taskResult.rows[0];
-      if (task === undefined) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found in this tenant', 404);
-      if (task.status === 'completed') {
-        const completed: ExecutionResponse = { taskId, status: 'completed' };
-        await client.query('INSERT INTO idempotency_records (tenant_id,operation,idempotency_key,request_digest,response) VALUES ($1,$2,$3,$4,$5)', [principal.tenantId, operation, idempotencyKey, digest, completed]);
-        return completed;
-      }
-      if (task.status !== 'approved') throw new GenewayError('TASK_EXECUTION_NOT_READY', `Task cannot be executed from state ${task.status}`, 409);
-      const response = await effect();
-      await client.query('INSERT INTO idempotency_records (tenant_id,operation,idempotency_key,request_digest,response) VALUES ($1,$2,$3,$4,$5)', [principal.tenantId, operation, idempotencyKey, digest, response]);
-      return response;
-    } finally {
-      if (idempotencyLockHeld) await client.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2))', [principal.tenantId, idempotencyLockKey]);
-      if (taskLockHeld) await client.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2))', [principal.tenantId, taskLockKey]);
-      client.release();
-    }
-  }
-
-  async startTask(tenantId: string, taskId: string, workflow: CompiledWorkflowVersion): Promise<void> {
-    await this.withTransaction(async (client) => {
-      const task = await this.requireTask(client, tenantId, taskId);
-      if (task.workflow_version_id !== workflow.id || task.workflow_hash !== workflow.hash) throw new GenewayError('WORKFLOW_BINDING_MISMATCH', 'Interpreter received a different workflow version', 409);
-      const approval = await client.query<ApprovalRow>('SELECT * FROM approval_versions WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY version DESC LIMIT 1 FOR UPDATE', [tenantId, taskId]);
-      const row = approval.rows[0];
-      if (row === undefined || row.status !== 'approved') throw new GenewayError('APPROVAL_REQUIRED', 'Task requires an approved immutable subject', 409);
-      if (row.expires_at.getTime() <= Date.now()) throw new GenewayError('APPROVAL_EXPIRED', 'Approved execution authority has expired', 409);
-      if (hashCanonical(this.subjectFromTask(task, taskId)) !== row.subject_digest) throw new GenewayError('APPROVAL_SUBJECT_CHANGED', 'Approved subject no longer matches task semantics', 409);
-      const update = await client.query("UPDATE business_tasks SET status='running',updated_at=now() WHERE tenant_id=$1 AND id=$2 AND status='approved'", [tenantId, taskId]);
-      if (update.rowCount !== 1) throw new GenewayError('TASK_STATE_CONFLICT', 'Task is not ready to start', 409);
-      await this.appendEvent(client, tenantId, taskId, 'workflow.run_started', { workflowVersionId: workflow.id, workflowHash: workflow.hash });
-    });
-  }
-
-  async claimStep(tenantId: string, taskId: string, stepId: string, attemptId: string): Promise<StepLease> {
     return this.withTransaction(async (client) => {
-      const fixedOrder = ['document_ingest', 'requirement_extract', 'contradiction_check', 'solution_design', 'evidence_verify', 'result_quality_check', 'report_publish'];
-      const stepIndex = fixedOrder.indexOf(stepId);
-      if (stepIndex < 0) throw new GenewayError('NOT_OPEN', `Step is not open in Gate 0.1: ${stepId}`, 422);
-      const predecessor = fixedOrder[stepIndex - 1];
-      if (predecessor !== undefined) {
-        const predecessorResult = await client.query("SELECT 1 FROM business_task_steps WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3 AND status='completed'", [tenantId, taskId, predecessor]);
-        if (predecessorResult.rowCount !== 1) throw new GenewayError('STEP_DEPENDENCY_NOT_READY', `Predecessor ${predecessor} is not complete`, 409);
+      const candidates = await client.query<{ id: string }>('SELECT id FROM business_tasks WHERE tenant_id=$1 AND workflow_version_id=$2 AND requester_id=$3 ORDER BY created_at,id', [
+        principal.tenantId, workflowId, principal.userId,
+      ]);
+      let readable = false;
+      for (const candidate of candidates.rows) {
+        try {
+          await this.requireReadableTask(client, principal, candidate.id);
+          readable = true;
+          break;
+        } catch (error) {
+          if (!isGenewayError(error) || !['DOCUMENT_SNAPSHOT_NOT_READY', 'TASK_POLICY_CONTEXT_INVALID'].includes(error.code)) throw error;
+        }
       }
-      const result = await client.query<{ fencing_token: string }>(`UPDATE business_task_steps SET status='running',attempt_id=$4,
-        fencing_token=fencing_token+1,lease_until=now()+interval '1 minute',updated_at=now()
-        WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3 AND status='queued'
-        RETURNING fencing_token::text`, [tenantId, taskId, stepId, attemptId]);
+      if (!readable) throw new GenewayError('WORKFLOW_NOT_FOUND', 'Workflow was not found', 404);
+      const result = await client.query<{ id: string; workflow_hash: string; canonicalization_version: 'RFC8785/JCS-1'; canonical_json: unknown }>('SELECT * FROM workflow_versions WHERE tenant_id=$1 AND id=$2', [principal.tenantId, workflowId]);
       const row = result.rows[0];
-      if (row === undefined) throw new GenewayError('STEP_CLAIM_CONFLICT', `Step ${stepId} cannot be claimed`, 409);
-      await this.appendEvent(client, tenantId, taskId, 'workflow.step_started', { stepId, attemptId, fencingToken: Number(row.fencing_token) });
-      return { attemptId, fencingToken: Number(row.fencing_token) };
+      if (row === undefined) throw new GenewayError('WORKFLOW_NOT_FOUND', 'Workflow was not found', 404);
+      return readStoredWorkflowVersion({ id: row.id, hash: row.workflow_hash, canonicalizationVersion: row.canonicalization_version, canonicalPayload: row.canonical_json });
     });
   }
 
-  async completeStep(tenantId: string, taskId: string, stepId: string, lease: StepLease, output: unknown): Promise<void> {
-    await this.withTransaction(async (client) => {
-      const result = await client.query(`UPDATE business_task_steps SET status='completed',output=$6,updated_at=now()
-        WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3 AND status='running'
-          AND attempt_id=$4 AND fencing_token=$5 AND lease_until>now()`,
-      [tenantId, taskId, stepId, lease.attemptId, lease.fencingToken, output]);
-      if (result.rowCount !== 1) throw new GenewayError('STALE_STEP_COMPLETION', `Stale completion rejected for ${stepId}`, 409);
-      await this.appendEvent(client, tenantId, taskId, 'workflow.step_completed', { stepId, attemptId: lease.attemptId, fencingToken: lease.fencingToken });
-    });
-  }
-
-  async publishEvidenceAndClaims(tenantId: string, taskId: string, evidence: EvidenceCandidate | undefined, claims: readonly ClaimCandidate[]): Promise<void> {
-    await this.withTransaction(async (client) => {
-      const task = await this.requireTask(client, tenantId, taskId);
-      const capabilityResult = await client.query('SELECT * FROM delegated_capabilities WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY expires_at DESC LIMIT 1', [tenantId, taskId]);
-      const rawCapability = capabilityResult.rows[0] as Record<string, unknown> | undefined;
-      if (rawCapability === undefined) throw new GenewayError('CAPABILITY_NOT_FOUND', 'No delegated capability is bound to the task', 403);
-      const capability: DelegatedCapability = delegatedCapabilitySchema.parse({
-        id: rawCapability.id, tenantId: rawCapability.tenant_id, businessTaskId: rawCapability.business_task_id,
-        principalId: rawCapability.principal_id, allowedActions: rawCapability.allowed_actions,
-        resourceScopes: rawCapability.resource_scopes, audienceScope: rawCapability.audience_scope, expiresAt: rawCapability.expires_at,
+  async enqueueExecution(principal: Principal, taskId: string, idempotencyKey: string): Promise<ExecutionResponse> {
+    return this.withTransaction((client) => this.idempotent(client, principal, 'business-task.execute', idempotencyKey, { taskId }, async () => {
+      const task = await this.requireTask(client, principal.tenantId, taskId, principal.userId);
+      await this.assertApprovedExecutionAuthority(client, task);
+      if (task.status === 'completed') return { taskId, status: 'completed' as const };
+      if (task.status === 'queued' || task.status === 'running') return { taskId, status: 'accepted' as const };
+      if (task.status !== 'approved') throw new GenewayError('TASK_EXECUTION_NOT_READY', `Task cannot be executed from state ${task.status}`, 409);
+      const updated = await client.query(`UPDATE business_tasks SET status='queued',execution_version=execution_version+1,updated_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND status='approved'`, [principal.tenantId, taskId, principal.userId]);
+      if (updated.rowCount !== 1) throw new GenewayError('TASK_STATE_CONFLICT', 'Task is not ready to queue', 409);
+      await this.appendEvent(client, principal.tenantId, taskId, 'workflow.execute.requested', {
+        workflowVersionId: task.workflow_version_id,
+        workflowHash: task.workflow_hash,
       });
-      authorize({
-        principal: { tenantId, userId: task.requester_id, trust: 'trusted-local' }, capability,
-        businessTaskId: taskId, action: 'R1', resourceScope: 'fixture:solution-analysis:v1', audience: `conversation:${task.conversation_id}`,
-      });
-
-      if (evidence !== undefined) {
-        verifyEvidence(evidence, tenantId, taskId, new Set(capability.resourceScopes));
-        const snapshot = task.input_snapshot;
-        if (snapshot.fixtureRef !== FIXTURE_REF || snapshot.fixtureVersion !== FIXTURE_VERSION
-          || snapshot.fixtureSourceId !== evidence.sourceId || snapshot.fixtureExcerpt !== evidence.sourceExcerpt
-          || snapshot.fixtureContentHash !== evidence.sourceHash) {
-          throw new GenewayError('EVIDENCE_FIXTURE_SNAPSHOT_MISMATCH', 'Evidence does not match the approved fixed fixture snapshot', 409);
-        }
-        await client.query(`INSERT INTO minimal_evidence_refs
-          (tenant_id,id,business_task_id,source_id,source_excerpt,source_hash,resource_scope,data_class,accessible,
-           simulation,runtime_mode,business_decision_allowed)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,true,'fake',false)`,
-        [tenantId, evidence.id, taskId, evidence.sourceId, evidence.sourceExcerpt, evidence.sourceHash, evidence.resourceScope, evidence.dataClass, evidence.accessible]);
-      }
-
-      for (const claim of claims) {
-        claimCandidateSchema.parse(claim);
-        if (claim.evidenceRefId === null) {
-          await client.query(`INSERT INTO result_claims
-            (tenant_id,id,business_task_id,text,status,evidence_ref_id,rejection_code,simulation,runtime_mode,business_decision_allowed)
-            VALUES ($1,$2,$3,$4,'rejected',null,'CLAIM_EVIDENCE_REQUIRED',true,'fake',false)`, [tenantId, claim.id, taskId, claim.text]);
-        } else {
-          const validEvidence = assertPublishableClaim(claim, evidence);
-          await client.query(`INSERT INTO result_claims
-            (tenant_id,id,business_task_id,text,status,evidence_ref_id,rejection_code,simulation,runtime_mode,business_decision_allowed)
-            VALUES ($1,$2,$3,$4,'published',$5,null,true,'fake',false)`, [tenantId, claim.id, taskId, claim.text, validEvidence.id]);
-        }
-      }
-      await this.appendEvent(client, tenantId, taskId, 'claim.created', { published: claims.filter((claim) => claim.evidenceRefId !== null).length, rejected: claims.filter((claim) => claim.evidenceRefId === null).length });
-    });
-  }
-
-  async completeTask(tenantId: string, taskId: string, result: unknown): Promise<void> {
-    const parsedResult = taskResultSchema.parse(result);
-    if (parsedResult.kind !== 'completed') throw new GenewayError('INVALID_COMPLETION_RESULT', 'Task completion requires a completed result envelope', 422);
-    await this.withTransaction(async (client) => {
-      const incomplete = await client.query("SELECT 1 FROM business_task_steps WHERE tenant_id=$1 AND business_task_id=$2 AND status<>'completed' LIMIT 1", [tenantId, taskId]);
-      const published = await client.query("SELECT 1 FROM result_claims WHERE tenant_id=$1 AND business_task_id=$2 AND status='published' LIMIT 1", [tenantId, taskId]);
-      if (incomplete.rowCount !== 0 || published.rowCount !== 1) throw new GenewayError('RESULT_PUBLISH_GUARD', 'Task cannot complete without all steps and at least one evidenced claim', 409);
-      const update = await client.query("UPDATE business_tasks SET status='completed',result=$3,updated_at=now() WHERE tenant_id=$1 AND id=$2 AND status='running'", [tenantId, taskId, parsedResult]);
-      if (update.rowCount !== 1) throw new GenewayError('TASK_STATE_CONFLICT', 'Task cannot complete from its current state', 409);
-      const task = await this.requireTask(client, tenantId, taskId);
-      await client.query("INSERT INTO messages (tenant_id,id,conversation_id,author,body) VALUES ($1,$2,$3,'xiaowei',$4)", [tenantId, id('message'), task.conversation_id, '小纬已完成模拟方案分析。结果仅供演示，不能用于业务决策。']);
-      await this.appendEvent(client, tenantId, taskId, 'business_task.completed', { result: parsedResult });
-    });
-  }
-
-  async failTask(tenantId: string, taskId: string, code: string, message: string): Promise<void> {
-    const failedResult = taskResultSchema.parse({ kind: 'failed', code, message, ...SIMULATION_ENVELOPE });
-    await this.withTransaction(async (client) => {
-      const update = await client.query("UPDATE business_tasks SET status='failed',result=$3,updated_at=now() WHERE tenant_id=$1 AND id=$2 AND status NOT IN ('completed','failed','rejected')", [tenantId, taskId, failedResult]);
-      if (update.rowCount === 1) await this.appendEvent(client, tenantId, taskId, 'business_task.failed', { code, message });
-    });
+      return { taskId, status: 'accepted' as const };
+    }, async (response) => {
+      const task = await this.requireTask(client, principal.tenantId, response.taskId, principal.userId);
+      await this.assertApprovedExecutionAuthority(client, task);
+    }));
   }
 
   async getClaim(principal: Principal, claimId: string): Promise<JsonObject> {
-    const result = await this.pool.query('SELECT * FROM result_claims WHERE tenant_id=$1 AND id=$2', [principal.tenantId, claimId]);
-    const row = result.rows[0] as JsonObject | undefined;
-    if (row === undefined) throw new GenewayError('CLAIM_NOT_FOUND', 'Claim was not found in this tenant', 404);
-    return row;
+    return this.withTransaction(async (client) => {
+      const result = await client.query(`SELECT c.* FROM claims c JOIN business_tasks t
+      ON t.tenant_id=c.tenant_id AND t.id=c.business_task_id
+      LEFT JOIN evidence_links l ON l.tenant_id=c.tenant_id AND l.claim_id=c.id AND l.relation='supports'
+      LEFT JOIN evidence_items e ON e.tenant_id=l.tenant_id AND e.id=l.evidence_id
+      WHERE c.tenant_id=$1 AND c.id=$2 AND t.requester_id=$3
+        AND (c.status='rejected' OR (e.accessible AND (e.source_kind='legacy_fixture' OR EXISTS (
+          SELECT 1 FROM document_snapshots current_snapshot
+          JOIN artifact_states current_state ON current_state.tenant_id=current_snapshot.tenant_id AND current_state.artifact_id=current_snapshot.artifact_id
+          WHERE current_snapshot.tenant_id=e.tenant_id
+            AND current_snapshot.id=e.source->>'documentSnapshotId'
+            AND current_snapshot.artifact_id=e.source->>'artifactId'
+            AND current_snapshot.content_sha256=e.source->>'snapshotSha256'
+            AND current_state.availability='active' AND current_state.integrity='verified'
+            AND current_state.retention_status='active' AND current_state.retention_expires_at>now()
+            AND current_state.reconcile_status='in_sync'
+        ))))`, [principal.tenantId, claimId, principal.userId]);
+      const row = result.rows[0] as (JsonObject & Readonly<{ business_task_id: string }>) | undefined;
+      if (row === undefined) throw new GenewayError('CLAIM_NOT_FOUND', 'Claim was not found', 404);
+      await this.requireReadableTask(client, principal, row.business_task_id);
+      return row;
+    });
   }
 
-  async getEvidence(principal: Principal, evidenceId: string): Promise<JsonObject> {
-    const result = await this.pool.query('SELECT * FROM minimal_evidence_refs WHERE tenant_id=$1 AND id=$2 AND accessible=true', [principal.tenantId, evidenceId]);
-    const row = result.rows[0] as JsonObject | undefined;
-    if (row === undefined) throw new GenewayError('EVIDENCE_NOT_FOUND', 'Evidence was not found or is inaccessible in this tenant', 404);
-    return row;
+  async getEvidenceMetadata(principal: Principal, evidenceId: string): Promise<JsonObject> {
+    return this.withTransaction(async (client) => {
+      const result = await client.query(`SELECT e.* FROM evidence_items e JOIN business_tasks t
+      ON t.tenant_id=e.tenant_id AND t.id=e.business_task_id
+      WHERE e.tenant_id=$1 AND e.id=$2 AND e.accessible AND t.requester_id=$3
+        AND (e.source_kind='legacy_fixture' OR EXISTS (
+          SELECT 1 FROM document_snapshots current_snapshot
+          JOIN artifact_states current_state ON current_state.tenant_id=current_snapshot.tenant_id AND current_state.artifact_id=current_snapshot.artifact_id
+          WHERE current_snapshot.tenant_id=e.tenant_id
+            AND current_snapshot.id=e.source->>'documentSnapshotId'
+            AND current_snapshot.artifact_id=e.source->>'artifactId'
+            AND current_snapshot.content_sha256=e.source->>'snapshotSha256'
+            AND current_snapshot.resource_scope=e.resource_scope
+            AND current_snapshot.data_class=e.data_class
+            AND e.audience='conversation:' || current_snapshot.conversation_id
+            AND current_state.availability='active' AND current_state.integrity='verified'
+            AND current_state.retention_status='active' AND current_state.retention_expires_at>now()
+            AND current_state.reconcile_status='in_sync'
+        ))`, [principal.tenantId, evidenceId, principal.userId]);
+      const row = result.rows[0] as (JsonObject & Readonly<{ business_task_id: string }>) | undefined;
+      if (row === undefined) throw new GenewayError('EVIDENCE_NOT_FOUND', 'Evidence was not found', 404);
+      await this.requireReadableTask(client, principal, row.business_task_id);
+      return row;
+    });
+  }
+
+  private async resolveInput(client: PoolClient, principal: Principal, input: CreateTaskInput): Promise<ResolvedTaskInputRef> {
+    if (input.inputRef.kind === 'fixture') return { kind: 'fixture', fixtureRef: FIXTURE_REF, fixtureVersion: FIXTURE_VERSION };
+    const result = await client.query<{
+      id: string;
+      artifact_id: string;
+      manifest_id: string;
+      content_sha256: string;
+      simulation_profile: 'solution-analysis-demo/v2' | null;
+      profile_registry_version: 'gate0.2a-profile-registry/1';
+      resource_scope: string;
+      data_class: 'C1';
+      conversation_id: string;
+      audience: unknown;
+      availability: string;
+      integrity: string;
+      retention_status: string;
+      retention_expires_at: Date;
+      reconcile_status: string;
+    }>(`SELECT d.*,s.availability,s.integrity,s.retention_status,s.retention_expires_at,s.reconcile_status
+      FROM document_snapshots d JOIN artifacts a ON a.tenant_id=d.tenant_id AND a.id=d.artifact_id
+      JOIN artifact_states s ON s.tenant_id=d.tenant_id AND s.artifact_id=d.artifact_id
+      WHERE d.tenant_id=$1 AND d.id=$2 AND d.conversation_id=$3 AND d.created_by=$4 AND a.owner_user_id=$4 FOR SHARE`, [
+      principal.tenantId, input.inputRef.documentSnapshotId, input.conversationId, principal.userId,
+    ]);
+    const row = result.rows[0];
+    if (row === undefined) throw new GenewayError('DOCUMENT_SNAPSHOT_NOT_FOUND', 'Document snapshot was not found', 404);
+    if (row.simulation_profile !== 'solution-analysis-demo/v2') {
+      throw new GenewayError('NOT_OPEN_FOR_SIMULATION_PROFILE', 'This document is stored but is not open for the current simulation profile', 422);
+    }
+    if (row.profile_registry_version !== 'gate0.2a-profile-registry/1') throw new GenewayError('SIMULATION_PROFILE_VERSION_MISMATCH', 'Document profile registry version is not supported', 409);
+    if (row.availability !== 'active' || row.integrity !== 'verified' || row.retention_status !== 'active'
+      || row.retention_expires_at.getTime() <= Date.now() || row.reconcile_status !== 'in_sync') {
+      throw new GenewayError('DOCUMENT_SNAPSHOT_NOT_READY', 'Document snapshot is not currently eligible for execution', 409);
+    }
+    const audience = row.audience as Readonly<{ kind?: unknown; conversationId?: unknown }>;
+    if (row.data_class !== 'C1' || row.resource_scope !== `artifact:${row.artifact_id}`
+      || audience.kind !== 'private-conversation' || audience.conversationId !== row.conversation_id) {
+      throw new GenewayError('DOCUMENT_SNAPSHOT_POLICY_DENIED', 'Document snapshot policy metadata is invalid', 403);
+    }
+    return resolvedTaskInputRefSchema.parse({
+      kind: 'document_snapshot',
+      documentSnapshotId: row.id,
+      artifactId: row.artifact_id,
+      manifestId: row.manifest_id,
+      contentSha256: row.content_sha256,
+      simulationProfile: row.simulation_profile,
+      profileRegistryVersion: row.profile_registry_version,
+      resourceScope: row.resource_scope,
+      dataClass: row.data_class,
+      audience: `conversation:${row.conversation_id}`,
+    });
+  }
+
+  private async assertDocumentInputReady(client: PoolClient, principal: Principal, input: ResolvedTaskInputRef): Promise<void> {
+    if (input.kind !== 'document_snapshot') return;
+    const result = await client.query(`SELECT 1 FROM document_snapshots d
+      JOIN artifacts a ON a.tenant_id=d.tenant_id AND a.id=d.artifact_id
+      JOIN artifact_states s ON s.tenant_id=d.tenant_id AND s.artifact_id=d.artifact_id
+      WHERE d.tenant_id=$1 AND d.id=$2 AND d.created_by=$3 AND a.owner_user_id=$3
+        AND d.artifact_id=$4 AND d.manifest_id=$5 AND d.content_sha256=$6
+        AND d.simulation_profile=$7 AND d.profile_registry_version=$8 AND d.resource_scope=$9
+        AND d.data_class=$10 AND ('conversation:' || d.conversation_id)=$11
+        AND d.audience=jsonb_build_object('kind','private-conversation','conversationId',d.conversation_id)
+        AND s.availability='active' AND s.integrity='verified' AND s.retention_status='active'
+        AND s.retention_expires_at>now() AND s.reconcile_status='in_sync'`, [
+      principal.tenantId, input.documentSnapshotId, principal.userId, input.artifactId, input.manifestId,
+      input.contentSha256, input.simulationProfile, input.profileRegistryVersion, input.resourceScope,
+      input.dataClass, input.audience,
+    ]);
+    if (result.rowCount !== 1) throw new GenewayError('DOCUMENT_SNAPSHOT_NOT_READY', 'Approved document snapshot is no longer execution-ready', 409);
   }
 
   private async ensureVersions(client: PoolClient, tenantId: string, workflow: CompiledWorkflowVersion): Promise<{ expertCatalogVersionId: string }> {
     const expertCatalogVersionId = 'expert_catalog_solution_v1_1';
     await client.query(`INSERT INTO capability_versions (tenant_id,id,capability_id,version,spec)
       VALUES ($1,$2,'solution.analysis.v1',1,$3) ON CONFLICT DO NOTHING`, [tenantId, SOLUTION_CAPABILITY_VERSION_ID, { allowedExpertIds: ['expert.solution.architect'], allowedTeamIds: ['team.solution.core'], actionCeiling: 'A1' }]);
-    await client.query(`INSERT INTO expert_catalog_versions (tenant_id,id,version,catalog)
-      VALUES ($1,$2,1,$3) ON CONFLICT DO NOTHING`, [tenantId, expertCatalogVersionId, {
+    await client.query('INSERT INTO expert_catalog_versions (tenant_id,id,version,catalog) VALUES ($1,$2,1,$3) ON CONFLICT DO NOTHING', [tenantId, expertCatalogVersionId, {
       experts: [{ id: 'expert.solution.architect', name: '方案专家', healthy: true }],
       teams: [{ id: 'team.solution.core', name: '方案专家团', expertIds: ['expert.solution.architect'], healthy: true }],
     }]);
-    await client.query(`INSERT INTO harness_versions (tenant_id,id,capability_version_id,version,spec)
-      VALUES ($1,$2,$3,1,$4) ON CONFLICT DO NOTHING`, [tenantId, SOLUTION_HARNESS_VERSION_ID, SOLUTION_CAPABILITY_VERSION_ID, { runtime: 'fake', verifier: 'claim-evidence-minimum/1', maxSteps: 7 }]);
-    await client.query(`INSERT INTO workflow_versions (tenant_id,id,workflow_hash,canonicalization_version,canonical_json)
-      VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, [tenantId, workflow.id, workflow.hash, workflow.canonicalizationVersion, JSON.parse(workflow.canonicalJson) as unknown]);
+    await client.query('INSERT INTO harness_versions (tenant_id,id,capability_version_id,version,spec) VALUES ($1,$2,$3,1,$4) ON CONFLICT DO NOTHING', [tenantId, SOLUTION_HARNESS_VERSION_ID, SOLUTION_CAPABILITY_VERSION_ID, { runtime: 'fake', verifier: 'claim-evidence-minimum/1', maxSteps: 7 }]);
+    await client.query('INSERT INTO workflow_versions (tenant_id,id,workflow_hash,canonicalization_version,canonical_json) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING', [tenantId, workflow.id, workflow.hash, workflow.canonicalizationVersion, JSON.parse(workflow.canonicalJson) as unknown]);
     return { expertCatalogVersionId };
   }
 
@@ -450,42 +619,107 @@ export class ControlPlaneRepository implements InterpreterControlPort {
     if (target.mode === 'auto') return { mode: 'expert', expertId: 'expert.solution.architect', resolution: 'automatic' };
     if (target.mode === 'expert' && target.expertId === 'expert.solution.architect') return { ...target, resolution: 'explicit' };
     if (target.mode === 'team' && target.teamId === 'team.solution.core') return { ...target, resolution: 'explicit' };
-    throw new GenewayError('EXPERT_NOT_ALLOWED', 'Expert or expert team is missing, unhealthy, or outside the capability allowlist', 422);
-  }
-
-  private buildApprovalSubject(input: Readonly<{
-    taskId: string; requesterId: string; inputSnapshot: JsonObject; expertTarget: JsonObject;
-    expertCatalogVersionId: string; harnessVersionId: string; workflowVersionId: string; workflowHash: string;
-    permissionScope: JsonObject; audienceScope: JsonObject; budget: JsonObject;
-  }>): JsonObject {
-    return {
-      kind: 'workflow-execution', subjectType: 'business-task', subjectId: input.taskId, subjectVersion: 1,
-      requesterId: input.requesterId, inputSnapshot: input.inputSnapshot, resolvedExpertTarget: input.expertTarget,
-      expertCatalogVersionId: input.expertCatalogVersionId, harnessVersionId: input.harnessVersionId,
-      workflowVersionId: input.workflowVersionId, workflowHash: input.workflowHash,
-      permissionScope: input.permissionScope, audienceScope: input.audienceScope, budget: input.budget,
-      simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false,
-    };
+    throw new GenewayError('EXPERT_NOT_ALLOWED', 'Expert or expert team is outside the capability allowlist', 422);
   }
 
   private subjectFromTask(task: TaskRow, taskId: string): JsonObject {
-    return this.buildApprovalSubject({
-      taskId, requesterId: task.requester_id, inputSnapshot: task.input_snapshot,
-      expertTarget: task.expert_target, expertCatalogVersionId: task.expert_catalog_version_id,
-      harnessVersionId: task.harness_version_id, workflowVersionId: task.workflow_version_id,
-      workflowHash: task.workflow_hash, permissionScope: task.permission_scope,
-      audienceScope: task.audience_scope, budget: task.budget,
+    return buildApprovalSubject({
+      taskId,
+      requesterId: task.requester_id,
+      inputSnapshot: normalizeStoredInput(task.input_snapshot),
+      expertTarget: task.expert_target,
+      expertCatalogVersionId: task.expert_catalog_version_id,
+      harnessVersionId: task.harness_version_id,
+      workflowVersionId: task.workflow_version_id,
+      workflowHash: task.workflow_hash,
+      permissionScope: task.permission_scope,
+      audienceScope: task.audience_scope,
+      budget: task.budget,
     });
   }
 
-  private async requireTask(client: PoolClient, tenantId: string, taskId: string): Promise<TaskRow> {
-    const result = await client.query<TaskRow>('SELECT * FROM business_tasks WHERE tenant_id=$1 AND id=$2 FOR UPDATE', [tenantId, taskId]);
+  private async assertConversationOwned(client: PoolClient, principal: Principal, conversationId: string): Promise<void> {
+    const result = await client.query('SELECT 1 FROM conversations WHERE tenant_id=$1 AND id=$2 AND user_id=$3', [principal.tenantId, conversationId, principal.userId]);
+    if (result.rowCount !== 1) throw new GenewayError('CONVERSATION_NOT_FOUND', 'Conversation was not found', 404);
+  }
+
+  private async requireTask(client: PoolClient, tenantId: string, taskId: string, requesterId?: string): Promise<TaskRow> {
+    const result = await client.query<TaskRow>(`SELECT * FROM business_tasks WHERE tenant_id=$1 AND id=$2
+      AND ($3::text IS NULL OR requester_id=$3) FOR UPDATE`, [tenantId, taskId, requesterId ?? null]);
     const task = result.rows[0];
-    if (task === undefined) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found in this tenant', 404);
+    if (task === undefined) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found', 404);
     return task;
   }
 
-  private async appendEvent(client: PoolClient, tenantId: string, taskId: string, eventType: string, payload: unknown): Promise<void> {
+  private async requireReadableTask(client: PoolClient, principal: Principal, taskId: string): Promise<TaskRow> {
+    const result = await client.query<TaskRow>('SELECT * FROM business_tasks WHERE tenant_id=$1 AND id=$2 AND requester_id=$3', [
+      principal.tenantId, taskId, principal.userId,
+    ]);
+    const task = result.rows[0];
+    if (task === undefined) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found', 404);
+    const inputRef = normalizeStoredInput(task.input_snapshot);
+    const resourceScope = inputRef.kind === 'fixture' ? inputRef.fixtureRef : inputRef.resourceScope;
+    const expectedPermissionScope = { actions: ['R0', 'R1', 'A1'], resourceScopes: [resourceScope], dataClasses: ['C0', 'C1'] };
+    const expectedAudienceScope = { kind: 'private-conversation', ids: [`conversation:${task.conversation_id}`] };
+    if (hashCanonical(task.permission_scope) !== hashCanonical(expectedPermissionScope)
+      || hashCanonical(task.audience_scope) !== hashCanonical(expectedAudienceScope)
+      || (inputRef.kind === 'document_snapshot' && inputRef.audience !== `conversation:${task.conversation_id}`)) {
+      throw new GenewayError('TASK_POLICY_CONTEXT_INVALID', 'Task policy context no longer matches its immutable input', 403);
+    }
+    if (inputRef.kind === 'document_snapshot') await this.assertDocumentInputReady(client, principal, inputRef);
+    return task;
+  }
+
+  private async assertDelegatedCapability(client: PoolClient, task: TaskRow): Promise<void> {
+    const result = await client.query<{
+      principal_id: string;
+      allowed_actions: unknown;
+      resource_scopes: unknown;
+      audience_scope: unknown;
+      expires_at: Date;
+    }>('SELECT principal_id,allowed_actions,resource_scopes,audience_scope,expires_at FROM delegated_capabilities WHERE tenant_id=$1 AND business_task_id=$2 FOR SHARE', [
+      task.tenant_id,
+      task.id,
+    ]);
+    const row = result.rows[0];
+    const permissionScope = task.permission_scope as Readonly<{ actions?: unknown; resourceScopes?: unknown }>;
+    const audienceScope = task.audience_scope as Readonly<{ ids?: unknown }>;
+    if (row === undefined || result.rowCount !== 1 || row.principal_id !== task.requester_id || row.expires_at.getTime() <= Date.now()
+      || hashCanonical(row.allowed_actions) !== hashCanonical(permissionScope.actions)
+      || hashCanonical(row.resource_scopes) !== hashCanonical(permissionScope.resourceScopes)
+      || hashCanonical(row.audience_scope) !== hashCanonical(audienceScope.ids)) {
+      throw new GenewayError('DELEGATED_CAPABILITY_INVALID', 'Task delegated capability is missing, expired, or no longer matches task scope', 409);
+    }
+  }
+
+  private async assertApprovalSubjectAuthority(client: PoolClient, approval: ApprovalRow, task: TaskRow): Promise<void> {
+    if (approval.business_task_id !== task.id || approval.requester_id !== task.requester_id) {
+      throw new GenewayError('APPROVAL_SUBJECT_CHANGED', 'Approval no longer belongs to the current task authority', 409);
+    }
+    if (hashCanonical(approval.subject) !== approval.subject_digest
+      || hashCanonical(this.subjectFromTask(task, task.id)) !== approval.subject_digest) {
+      throw new GenewayError('APPROVAL_SUBJECT_CHANGED', 'Approved subject no longer matches task semantics', 409);
+    }
+    await this.assertDelegatedCapability(client, task);
+    const inputRef = normalizeStoredInput(task.input_snapshot);
+    if (inputRef.kind === 'document_snapshot') {
+      await this.assertDocumentInputReady(client, { tenantId: task.tenant_id, userId: task.requester_id, trust: 'trusted-local' }, inputRef);
+    }
+  }
+
+  private async assertApprovedExecutionAuthority(client: PoolClient, task: TaskRow): Promise<ApprovalRow> {
+    const result = await client.query<ApprovalRow>('SELECT * FROM approval_versions WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY version DESC LIMIT 1 FOR UPDATE', [
+      task.tenant_id,
+      task.id,
+    ]);
+    const approval = result.rows[0];
+    if (approval === undefined || approval.status !== 'approved') throw new GenewayError('APPROVAL_REQUIRED', 'Task requires an approved immutable subject', 409);
+    if (approval.expires_at.getTime() <= Date.now()) throw new GenewayError('APPROVAL_EXPIRED', 'Approved execution authority has expired', 409);
+    await this.assertApprovalSubjectAuthority(client, approval, task);
+    return approval;
+  }
+
+  private async appendEvent(client: PoolClient, tenantId: string, taskId: string, eventType: string, payload: unknown): Promise<string> {
     const taskUpdate = await client.query<{ aggregate_version: string }>('UPDATE business_tasks SET aggregate_version=aggregate_version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 RETURNING aggregate_version::text', [tenantId, taskId]);
     const aggregateVersion = Number(taskUpdate.rows[0]?.aggregate_version);
     if (!Number.isSafeInteger(aggregateVersion)) throw new GenewayError('TASK_NOT_FOUND', 'Cannot append event for missing task', 404);
@@ -496,22 +730,31 @@ export class ControlPlaneRepository implements InterpreterControlPort {
     await client.query(`INSERT INTO business_task_events
       (tenant_id,id,business_task_id,sequence,event_type,aggregate_version,correlation_id,payload,simulation,runtime_mode,business_decision_allowed)
       VALUES ($1,$2,$3,$4,$5,$6,$3,$7,true,'fake',false)`, [tenantId, eventId, taskId, sequence, eventType, aggregateVersion, eventPayload]);
-    await client.query(`INSERT INTO outbox_events (tenant_id,id,business_task_id,event_id,event_type,payload)
-      VALUES ($1,$2,$3,$4,$5,$6)`, [tenantId, id('outbox'), taskId, eventId, eventType, eventPayload]);
+    await client.query('INSERT INTO outbox_events (tenant_id,id,business_task_id,event_id,event_type,payload) VALUES ($1,$2,$3,$4,$5,$6)', [tenantId, id('outbox'), taskId, eventId, eventType, eventPayload]);
+    return eventId;
   }
 
-  private async idempotent<T extends JsonObject>(client: PoolClient, tenantId: string, operation: string, key: string, request: unknown, effect: () => Promise<T>): Promise<T> {
+  private async idempotent<T extends JsonObject>(
+    client: PoolClient,
+    principal: Principal,
+    operation: string,
+    key: string,
+    request: unknown,
+    effect: () => Promise<T>,
+    onReplay?: (response: T) => Promise<void>,
+  ): Promise<T> {
     if (key.length < 8 || key.length > 200) throw new GenewayError('IDEMPOTENCY_KEY_REQUIRED', 'A stable idempotency key of 8-200 characters is required', 400);
-    const digest = hashCanonical(request);
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))', [tenantId, `${operation}:${key}`]);
-    const existing = await client.query<{ request_digest: string; response: T }>('SELECT request_digest,response FROM idempotency_records WHERE tenant_id=$1 AND operation=$2 AND idempotency_key=$3', [tenantId, operation, key]);
+    const requestDigest = hashCanonical(request);
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))', [principal.tenantId, `${principal.userId}:${operation}:${key}`]);
+    const existing = await client.query<{ request_digest: string; response: T }>('SELECT request_digest,response FROM idempotency_records WHERE tenant_id=$1 AND principal_id=$2 AND operation=$3 AND idempotency_key=$4', [principal.tenantId, principal.userId, operation, key]);
     const row = existing.rows[0];
     if (row !== undefined) {
-      if (row.request_digest !== digest) throw new GenewayError('IDEMPOTENCY_CONFLICT', 'The idempotency key was already used for different semantics', 409);
+      if (row.request_digest !== requestDigest) throw new GenewayError('IDEMPOTENCY_CONFLICT', 'Idempotency key was already used for different semantics', 409);
+      await onReplay?.(row.response);
       return row.response;
     }
     const response = await effect();
-    await client.query('INSERT INTO idempotency_records (tenant_id,operation,idempotency_key,request_digest,response) VALUES ($1,$2,$3,$4,$5)', [tenantId, operation, key, digest, response]);
+    await client.query('INSERT INTO idempotency_records (tenant_id,principal_id,operation,idempotency_key,request_digest,response) VALUES ($1,$2,$3,$4,$5,$6)', [principal.tenantId, principal.userId, operation, key, requestDigest, response]);
     return response;
   }
 

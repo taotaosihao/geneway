@@ -131,6 +131,7 @@ describe('Gate 0.2A Control Plane delivery and Evidence integration', () => {
       const claimCommand = { command: 'claim_step', ...base, stepId: node.id, stepAttemptId, idempotencyKey: `claim-${index}-00000001` } as const;
       const step = await sendWorker(claimCommand);
       if (step.command !== 'claim_step') throw new Error('Unexpected claim-step response');
+      if (step.result.state !== 'claimed') throw new Error('Expected a new step lease');
       expect(await sendWorker(claimCommand)).toEqual(step);
       const summary = `已完成 ${node.id}`;
       stepSummaries.push(summary);

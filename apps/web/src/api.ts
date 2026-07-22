@@ -88,6 +88,9 @@ export const api = {
   execute: (taskId: string) => request<{ taskId: string; status: string }>(`/api/business-tasks/${taskId}/execute`, {
     method: 'POST', headers: { 'idempotency-key': key('execute') },
   }),
+  cancelTask: (taskId: string) => request<{ taskId: string; status: 'canceled' }>(`/api/business-tasks/${taskId}/cancel`, {
+    method: 'POST', headers: { 'idempotency-key': key('cancel') },
+  }),
   events: async (taskId: string, afterCursor: number) => {
     const response = await fetch(`/api/business-tasks/${taskId}/events?afterCursor=${String(afterCursor)}`, { headers: { accept: 'text/event-stream' } });
     if (!response.ok) throw new Error(`EVENT_STREAM_FAILED: ${response.statusText}`);

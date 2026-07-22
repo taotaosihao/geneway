@@ -1,11 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import {
   S3ObjectStorage,
   StorageObjectAlreadyExistsError,
   StorageObjectNotFoundError,
   StorageObjectTooLargeError,
+  isCanonicalArtifactObjectKey,
 } from '@geneway/storage';
 
 const port = Number(process.env.GENEWAY_STORAGE_ADAPTER_PORT ?? 57071);
@@ -21,9 +22,12 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535 || !['127.0.0.1', '0.0.
   || endpoint === undefined || bucket === undefined || accessKeyId === undefined || secretAccessKey === undefined) {
   throw new Error('Storage adapter environment is incomplete');
 }
+const authorizationToken: string = token;
 
 const storage = new S3ObjectStorage({ endpoint, bucket, accessKeyId, secretAccessKey, region: process.env.GENEWAY_S3_REGION ?? 'us-east-1' });
-const keySchema = z.string().min(1).max(512).refine((value) => value.startsWith(allowedPrefix) && !value.includes('..') && !value.includes('\\'), 'Key is outside the allowed prefix');
+const keySchema = z.string().min(1).max(512).refine(
+  (value) => isCanonicalArtifactObjectKey(value, allowedPrefix), 'Key is outside the allowed prefix',
+);
 const putSchema = z.object({
   key: keySchema,
   bytesBase64: z.string().max(1_500_000),
@@ -37,7 +41,7 @@ function authorized(request: IncomingMessage): boolean {
   const value = request.headers.authorization;
   if (typeof value !== 'string' || !value.startsWith('Bearer ')) return false;
   const actual = Buffer.from(value.slice(7));
-  const expected = Buffer.from(token);
+  const expected = Buffer.from(authorizationToken);
   return actual.byteLength === expected.byteLength && timingSafeEqual(actual, expected);
 }
 
@@ -81,7 +85,10 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
     if (request.url === '/v1/objects/put-create-only') {
       const input = putSchema.parse(body);
       const bytes = new Uint8Array(Buffer.from(input.bytesBase64, 'base64'));
-      if (bytes.byteLength > 1_048_576) throw new Error('REQUEST_TOO_LARGE');
+      if (bytes.byteLength > 1_048_576 || Buffer.from(bytes).toString('base64') !== input.bytesBase64
+        || createHash('sha256').update(bytes).digest('hex') !== input.contentSha256) {
+        throw new Error('INVALID_OBJECT_IDENTITY');
+      }
       send(response, 200, await storage.putCreateOnly({ key: input.key, bytes, contentType: input.contentType, contentSha256: input.contentSha256 }));
       return;
     }
@@ -110,7 +117,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       send(response, 413, { error: { code: 'STORAGE_OBJECT_TOO_LARGE', message: 'Object exceeds the read limit' } });
       return;
     }
-    if (error instanceof z.ZodError || (error instanceof Error && error.message === 'REQUEST_TOO_LARGE')) {
+    if (error instanceof z.ZodError || (error instanceof Error
+      && ['REQUEST_TOO_LARGE', 'INVALID_OBJECT_IDENTITY'].includes(error.message))) {
       send(response, 400, { error: { code: 'INVALID_STORAGE_REQUEST', message: 'Storage request is invalid' } });
       return;
     }

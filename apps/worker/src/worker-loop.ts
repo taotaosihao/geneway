@@ -9,7 +9,7 @@ import {
   readStoredWorkflowVersion,
 } from '@geneway/workflow';
 import type { WorkerCommandClient } from './command-client.js';
-import { WorkflowInterpreter } from './interpreter.js';
+import { WorkflowInterpreter, type ClaimedStepHook } from './interpreter.js';
 
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
@@ -17,7 +17,29 @@ export type WorkerLoopOptions = Readonly<{
   signal?: AbortSignal;
   pollIntervalMs?: number;
   onReady?: () => void | Promise<void>;
+  stepPacingMs?: number;
+  onDeliveryAbandoned?: (delivery: WorkerDelivery, error: GenewayError) => void | Promise<void>;
+  onAfterDeliveryClaim?: (delivery: WorkerDelivery) => Promise<void>;
+  onBeforeCompleteStep?: (delivery: WorkerDelivery, step: Parameters<ClaimedStepHook>[0]) => Promise<void>;
 }>;
+
+const AUTHORITY_LOSS_CODES = new Set([
+  'BACKUP_BARRIER_ACTIVE',
+  'WORKER_COMMAND_OUTCOME_UNCERTAIN',
+  'STALE_EXECUTION_ATTEMPT',
+  'STALE_OR_UNAUTHORIZED_WORKER_COMMAND',
+  'STALE_STEP_COMPLETION',
+  'TASK_TERMINAL_CONFLICT',
+  'TERMINAL_PUBLISH_CAS_CONFLICT',
+  'REPORT_INTENT_CONFLICT',
+  'REPORT_PUBLISH_CAS_CONFLICT',
+  'LEASE_RENEWAL_CONFLICT',
+  'WORKER_INBOX_CAS_CONFLICT',
+]);
+
+function asAuthorityLoss(error: unknown): GenewayError | null {
+  return error instanceof GenewayError && AUTHORITY_LOSS_CODES.has(error.code) ? error : null;
+}
 
 function isAborted(signal?: AbortSignal): boolean {
   return signal?.aborted === true;
@@ -51,7 +73,12 @@ function assertInputMatchesDelivery(delivery: WorkerDelivery, input: WorkerInput
   }
 }
 
-export async function executeDelivery(client: WorkerCommandClient, delivery: WorkerDelivery): Promise<void> {
+export async function executeDelivery(
+  client: WorkerCommandClient,
+  delivery: WorkerDelivery,
+  stepPacingMs = 0,
+  onBeforeCompleteStep?: WorkerLoopOptions['onBeforeCompleteStep'],
+): Promise<void> {
   const port = client.bind(delivery);
   let interpreterStarted = false;
   try {
@@ -63,17 +90,22 @@ export async function executeDelivery(client: WorkerCommandClient, delivery: Wor
       inputRef: input.inputRef,
       ...(input.kind === 'document_snapshot' ? { inputBytes: decodeDocumentBytes(input) } : {}),
     };
-    const interpreter = new WorkflowInterpreter(port);
+    const interpreter = new WorkflowInterpreter(port, undefined, stepPacingMs, onBeforeCompleteStep === undefined
+      ? undefined
+      : (step) => onBeforeCompleteStep(delivery, step));
     interpreterStarted = true;
     await interpreter.execute(executionInput);
   } catch (error) {
     if (!interpreterStarted) {
+      if (asAuthorityLoss(error) !== null) throw error;
       const message = error instanceof Error ? error.message : 'Worker delivery validation failed';
       try {
         await port.fail('DELIVERY_VALIDATION_FAILED', message);
       } catch (failureError) {
+        if (asAuthorityLoss(failureError) !== null) throw failureError;
         throw new AggregateError([error, failureError], 'Delivery validation failed and the failure could not be reported');
       }
+      return;
     }
     throw error;
   }
@@ -84,14 +116,32 @@ export async function runWorkerLoop(client: WorkerCommandClient, options: Worker
   if (!Number.isInteger(pollIntervalMs) || pollIntervalMs < 10 || pollIntervalMs > 10_000) {
     throw new GenewayError('WORKER_POLL_INTERVAL_INVALID', 'Worker poll interval is invalid');
   }
+  const stepPacingMs = options.stepPacingMs ?? 0;
+  if (!Number.isInteger(stepPacingMs) || stepPacingMs < 0 || stepPacingMs > 2_000) {
+    throw new GenewayError('WORKER_STEP_DELAY_INVALID', 'Worker step pacing is invalid');
+  }
 
   await client.authenticate(options.signal);
   if (isAborted(options.signal)) return;
   await options.onReady?.();
   while (!isAborted(options.signal)) {
-    const delivery = await client.claimDelivery(options.signal);
+    let delivery: WorkerDelivery | null;
+    try {
+      delivery = await client.claimDelivery(options.signal);
+    } catch (error) {
+      if (asAuthorityLoss(error) === null) throw error;
+      await wait(pollIntervalMs, options.signal);
+      continue;
+    }
     if (delivery !== null) {
-      await executeDelivery(client, delivery);
+      await options.onAfterDeliveryClaim?.(delivery);
+      try {
+        await executeDelivery(client, delivery, stepPacingMs, options.onBeforeCompleteStep);
+      } catch (error) {
+        const authorityLoss = asAuthorityLoss(error);
+        if (authorityLoss === null) throw error;
+        await options.onDeliveryAbandoned?.(delivery, authorityLoss);
+      }
       continue;
     }
     await wait(pollIntervalMs, options.signal);

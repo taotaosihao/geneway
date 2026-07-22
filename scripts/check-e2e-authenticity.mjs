@@ -27,7 +27,10 @@ const forbidden = [
 
 async function resolveLocalImport(from, specifier) {
   const base = path.resolve(path.dirname(from), specifier);
-  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.mjs`, path.join(base, 'index.ts'), path.join(base, 'index.tsx')]) {
+  const nodeNextSourceCandidates = specifier.endsWith('.js')
+    ? [base.slice(0, -3) + '.ts', base.slice(0, -3) + '.tsx']
+    : [];
+  for (const candidate of [...nodeNextSourceCandidates, base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.mjs`, path.join(base, 'index.ts'), path.join(base, 'index.tsx')]) {
     try { await access(candidate); return candidate; } catch { /* try the next local candidate */ }
   }
   throw new Error(`Cannot resolve local Playwright import ${specifier} from ${from}`);

@@ -5,9 +5,11 @@ const bucket = process.env.GENEWAY_S3_BUCKET;
 const accessKeyId = process.env.GENEWAY_S3_ADMIN_ACCESS_KEY_ID;
 const secretAccessKey = process.env.GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY;
 const appAccessKeyId = process.env.GENEWAY_S3_APP_ACCESS_KEY_ID;
+const reconcilerAccessKeyId = process.env.GENEWAY_S3_RECONCILER_ACCESS_KEY_ID;
 const tamperAccessKeyId = process.env.GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID;
+const backupAccessKeyId = process.env.GENEWAY_S3_BACKUP_ACCESS_KEY_ID;
 if (endpoint === undefined || bucket === undefined || accessKeyId === undefined || secretAccessKey === undefined
-  || appAccessKeyId === undefined || tamperAccessKeyId === undefined) {
+  || appAccessKeyId === undefined || reconcilerAccessKeyId === undefined || tamperAccessKeyId === undefined) {
   throw new Error('GENEWAY S3 provisioning environment is incomplete');
 }
 
@@ -26,25 +28,60 @@ try {
   if (candidate.name !== 'BucketAlreadyOwnedByYou' && candidate.name !== 'BucketAlreadyExists' && candidate.$metadata?.httpStatusCode !== 409) throw error;
 }
 
+const statements: Record<string, unknown>[] = [
+  {
+    Sid: 'GenewayOnlineArtifactObjectAccess',
+    Effect: 'Allow',
+    Principal: { AWS: appAccessKeyId },
+    Action: ['s3:PutObject', 's3:GetObject'],
+    Resource: `arn:aws:s3:::${bucket}/tenants/tenant_local/artifacts/*`,
+  },
+  {
+    Sid: 'GenewayReconcilerArtifactObjectAccess',
+    Effect: 'Allow',
+    Principal: { AWS: reconcilerAccessKeyId },
+    Action: ['s3:GetObject', 's3:DeleteObject'],
+    Resource: `arn:aws:s3:::${bucket}/tenants/tenant_local/artifacts/*`,
+  },
+  {
+    Sid: 'GenewayReconcilerArtifactInventory',
+    Effect: 'Allow',
+    Principal: { AWS: reconcilerAccessKeyId },
+    Action: ['s3:ListBucket'],
+    Resource: `arn:aws:s3:::${bucket}`,
+    Condition: { StringLike: { 's3:prefix': ['tenants/tenant_local/artifacts/*'] } },
+  },
+  {
+    Sid: 'GenewayTestOracleArtifactAccess',
+    Effect: 'Allow',
+    Principal: { AWS: tamperAccessKeyId },
+    Action: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject'],
+    Resource: `arn:aws:s3:::${bucket}/tenants/tenant_local/artifacts/*`,
+  },
+];
+if (backupAccessKeyId !== undefined) {
+  statements.push(
+    {
+      Sid: 'GenewayBackupArtifactObjectAccess',
+      Effect: 'Allow',
+      Principal: { AWS: backupAccessKeyId },
+      Action: ['s3:GetObject', 's3:PutObject'],
+      Resource: `arn:aws:s3:::${bucket}/tenants/tenant_local/artifacts/*`,
+    },
+    {
+      Sid: 'GenewayBackupArtifactInventory',
+      Effect: 'Allow',
+      Principal: { AWS: backupAccessKeyId },
+      Action: ['s3:ListBucket'],
+      Resource: `arn:aws:s3:::${bucket}`,
+    },
+  );
+}
+
 await client.send(new PutBucketPolicyCommand({
   Bucket: bucket,
   Policy: JSON.stringify({
     Version: '2012-10-17',
-    Statement: [
-      {
-        Sid: 'GenewayOnlineArtifactObjectAccess',
-        Effect: 'Allow',
-        Principal: { AWS: appAccessKeyId },
-        Action: ['s3:PutObject', 's3:GetObject'],
-        Resource: `arn:aws:s3:::${bucket}/tenants/tenant_local/artifacts/*`,
-      },
-      {
-        Sid: 'GenewayTestOracleArtifactAccess',
-        Effect: 'Allow',
-        Principal: { AWS: tamperAccessKeyId },
-        Action: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject'],
-        Resource: `arn:aws:s3:::${bucket}/tenants/tenant_local/artifacts/*`,
-      },
-    ],
+    Statement: statements,
   }),
 }));

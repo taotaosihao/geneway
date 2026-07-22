@@ -17,6 +17,14 @@ import type { ExecutionCommandPort } from './interpreter.js';
 const COMMAND_PATH = '/internal/worker/v1/commands';
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
+const MUTATION_MAX_ATTEMPTS = 3;
+const MUTATION_RETRY_DELAYS_MS = [25, 100] as const;
+
+class WorkerCommandOutcomeUncertainError extends GenewayError {
+  constructor(causeCode: string, message: string, statusCode = 502) {
+    super('WORKER_COMMAND_OUTCOME_UNCERTAIN', message, statusCode, { causeCode });
+  }
+}
 
 export type WorkerIdentity = Readonly<{
   workerInstanceId: string;
@@ -112,7 +120,7 @@ export class WorkerCommandClient {
     const fields = this.executionFields(delivery);
     return {
       claimStep: async (stepId, stepAttemptId) => {
-        const response = await this.send({
+        const response = await this.sendMutation({
           command: 'claim_step',
           ...fields,
           stepId,
@@ -120,13 +128,23 @@ export class WorkerCommandClient {
           idempotencyKey: buildIdempotencyKey('claim-step', delivery.lease.attemptId, stepId, stepAttemptId),
         });
         if (response.command !== 'claim_step') throw new GenewayError('WORKER_RESPONSE_MISMATCH', 'Worker step claim response has the wrong command');
+        if (response.result.state === 'completed') {
+          const output = response.result.output;
+          if (typeof output !== 'object' || output === null || typeof (output as { summary?: unknown }).summary !== 'string') {
+            throw new GenewayError('WORKER_CHECKPOINT_INVALID', 'Completed step checkpoint has an invalid output', 409);
+          }
+          return { state: 'completed' as const, output: output as { summary: string } };
+        }
         if (response.result.stepAttemptId !== stepAttemptId) {
           throw new GenewayError('WORKER_STEP_ATTEMPT_MISMATCH', 'Step lease is bound to a different attempt', 409);
         }
-        return { attemptId: response.result.stepAttemptId, fencingToken: response.result.fencingToken };
+        return {
+          state: 'claimed' as const,
+          lease: { attemptId: response.result.stepAttemptId, fencingToken: response.result.fencingToken },
+        };
       },
       completeStep: async (stepId, lease, output) => {
-        const response = await this.send({
+        const response = await this.sendMutation({
           command: 'complete_step',
           ...fields,
           stepId,
@@ -138,7 +156,7 @@ export class WorkerCommandClient {
         this.assertAccepted(response, 'complete_step');
       },
       submitCandidate: async (candidate, idempotencyKey) => {
-        const response = await this.send({
+        const response = await this.sendMutation({
           command: 'submit_candidate',
           ...fields,
           candidate,
@@ -147,7 +165,7 @@ export class WorkerCommandClient {
         this.assertAccepted(response, 'submit_candidate');
       },
       fail: async (code, message) => {
-        const response = await this.send({
+        const response = await this.sendMutation({
           command: 'fail_delivery',
           ...fields,
           code,
@@ -197,6 +215,36 @@ export class WorkerCommandClient {
   private async send(commandInput: WorkerCommand, signal?: AbortSignal): Promise<WorkerCommandResponse> {
     const command = workerCommandSchema.parse(commandInput);
     const body = JSON.stringify(command);
+    return this.sendSerialized(command, body, signal);
+  }
+
+  private async sendMutation(commandInput: WorkerCommand): Promise<WorkerCommandResponse> {
+    const command = workerCommandSchema.parse(commandInput);
+    const body = JSON.stringify(command);
+    let lastError: WorkerCommandOutcomeUncertainError | undefined;
+    for (let attempt = 1; attempt <= MUTATION_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.sendSerialized(command, body);
+      } catch (error) {
+        if (!(error instanceof WorkerCommandOutcomeUncertainError)) throw error;
+        lastError = error;
+        if (attempt === MUTATION_MAX_ATTEMPTS) break;
+        await new Promise((resolve) => setTimeout(resolve, MUTATION_RETRY_DELAYS_MS[attempt - 1]));
+      }
+    }
+    const lastCauseCode = lastError?.details?.causeCode;
+    throw new WorkerCommandOutcomeUncertainError(
+      typeof lastCauseCode === 'string' ? lastCauseCode : 'WORKER_COMMAND_TRANSPORT_FAILED',
+      `Worker command outcome remained uncertain after ${String(MUTATION_MAX_ATTEMPTS)} identical attempts`,
+      lastError?.statusCode ?? 502,
+    );
+  }
+
+  private async sendSerialized(
+    command: WorkerCommand,
+    body: string,
+    signal?: AbortSignal,
+  ): Promise<WorkerCommandResponse> {
     const payload = await new Promise<unknown>((resolve, reject) => {
       const req = request({
         socketPath: this.socketPath,
@@ -214,31 +262,56 @@ export class WorkerCommandClient {
         response.on('data', (chunk: Buffer) => {
           length += chunk.length;
           if (length > MAX_RESPONSE_BYTES) {
-            response.destroy(new GenewayError('WORKER_RESPONSE_TOO_LARGE', 'Worker command response exceeded the size limit', 502));
+            const statusCode = response.statusCode ?? 502;
+            response.destroy(statusCode === 200
+              ? new WorkerCommandOutcomeUncertainError('WORKER_RESPONSE_TOO_LARGE', 'Worker command response exceeded the size limit')
+              : new GenewayError('WORKER_COMMAND_REJECTED', `Worker command was rejected with HTTP ${String(statusCode)}`, statusCode));
             return;
           }
           chunks.push(chunk);
         });
-        response.on('error', reject);
+        response.once('aborted', () => reject(new WorkerCommandOutcomeUncertainError(
+          'WORKER_RESPONSE_ABORTED',
+          'Worker command response ended before completion',
+        )));
+        response.once('error', (error) => reject(new WorkerCommandOutcomeUncertainError(
+          errorCode(error),
+          'Worker command response failed before completion',
+        )));
         response.on('end', () => {
+          let decoded: unknown;
+          try {
+            decoded = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+          } catch {
+            const statusCode = response.statusCode ?? 502;
+            reject(statusCode === 200
+              ? new WorkerCommandOutcomeUncertainError('WORKER_RESPONSE_INVALID_JSON', 'Worker command response was not valid JSON')
+              : new GenewayError('WORKER_COMMAND_REJECTED', `Worker command was rejected with HTTP ${String(statusCode)}`, statusCode));
+            return;
+          }
           if (response.statusCode !== 200) {
-            reject(new GenewayError('WORKER_COMMAND_REJECTED', `Worker command was rejected with HTTP ${String(response.statusCode ?? 0)}`, response.statusCode ?? 502));
+            const payload = decoded as Readonly<{ error?: Readonly<{ code?: unknown; message?: unknown }> }>;
+            const code = typeof payload.error?.code === 'string' ? payload.error.code : 'WORKER_COMMAND_REJECTED';
+            const message = typeof payload.error?.message === 'string'
+              ? payload.error.message
+              : `Worker command was rejected with HTTP ${String(response.statusCode ?? 0)}`;
+            reject(new GenewayError(code, message, response.statusCode ?? 502));
             return;
           }
           const contentType = response.headers['content-type'];
           if (contentType === undefined || !contentType.toLowerCase().startsWith('application/json')) {
-            reject(new GenewayError('WORKER_RESPONSE_CONTENT_TYPE', 'Worker command response was not JSON', 502));
+            reject(new WorkerCommandOutcomeUncertainError('WORKER_RESPONSE_CONTENT_TYPE', 'Worker command response was not JSON'));
             return;
           }
-          try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown);
-          } catch {
-            reject(new GenewayError('WORKER_RESPONSE_INVALID_JSON', 'Worker command response was not valid JSON', 502));
-          }
+          resolve(decoded);
         });
       });
-      req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(new GenewayError('WORKER_COMMAND_TIMEOUT', 'Worker command timed out', 504)));
-      req.once('error', (error) => reject(new GenewayError(errorCode(error), 'Worker command transport failed', 502)));
+      req.setTimeout(REQUEST_TIMEOUT_MS, () => req.destroy(
+        new WorkerCommandOutcomeUncertainError('WORKER_COMMAND_TIMEOUT', 'Worker command timed out', 504),
+      ));
+      req.once('error', (error) => reject(error instanceof WorkerCommandOutcomeUncertainError
+        ? error
+        : new WorkerCommandOutcomeUncertainError(errorCode(error), 'Worker command transport failed')));
       req.end(body);
     });
 

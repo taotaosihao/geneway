@@ -1,7 +1,7 @@
 import { AssistantRuntimeProvider, ComposerPrimitive, type AppendMessage, type ThreadMessageLike, useExternalStoreRuntime } from '@assistant-ui/react';
 import { Dialog } from '@base-ui/react/dialog';
 import { Background, Controls, ReactFlow, type Edge, type Node } from '@xyflow/react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocumentSnapshotProjection, EvidenceProjection, ExpertTarget, TaskSnapshot } from '@geneway/contracts';
 import { SimulationNotice, TaskProgress } from '@geneway/ui';
 import { api, type Approval, type Conversation, type Workflow } from './api.js';
@@ -56,12 +56,14 @@ export function App() {
   const [snapshotReadUnavailable, setSnapshotReadUnavailable] = useState(false);
   const [cursor, setCursor] = useState(0);
   const [working, setWorking] = useState(false);
+  const [canceling, setCanceling] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string>();
   const [workflowOpen, setWorkflowOpen] = useState(true);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const [selectedEvidenceId, setSelectedEvidenceId] = useState<string>();
   const [evidenceDetail, setEvidenceDetail] = useState<EvidenceProjection>();
+  const latestTaskSnapshot = useRef<TaskSnapshot | undefined>(undefined);
 
   const loadDocumentSnapshots = useCallback(async (conversationId: string) => {
     try {
@@ -91,6 +93,9 @@ export function App() {
     const [conversationSnapshot, workflowVersion, approvalVersion] = await Promise.all([
       api.getConversation(snapshot.conversationId), api.getWorkflow(snapshot.workflowVersion.id), api.getApproval(snapshot.approval.id),
     ]);
+    const latest = latestTaskSnapshot.current;
+    if (latest?.id === taskId && latest.aggregateVersion > snapshot.aggregateVersion) snapshot = latest;
+    else latestTaskSnapshot.current = snapshot;
     const nextCursor = Math.max(streamCursor, snapshot.eventWatermark);
     const restoredRoute = snapshot.expertTarget.mode === 'expert' ? snapshot.expertTarget.expertId
       : snapshot.expertTarget.mode === 'team' ? snapshot.expertTarget.teamId : 'auto';
@@ -137,7 +142,7 @@ export function App() {
   const create = useCallback(async (body: string) => {
     setWorking(true); setError(undefined);
     try {
-      if (!capabilityOpen) throw new Error('NOT_OPEN: Capability is not open in Gate 0.2A');
+      if (!capabilityOpen) throw new Error('NOT_OPEN: 当前能力尚未开放');
       const selected = documentSnapshots.find((projection) => projection.documentSnapshot.id === selectedSnapshotId);
       if (selected === undefined || !selected.executionEligibility.eligible) {
         throw new Error('DOCUMENT_SNAPSHOT_REQUIRED: 请先明确选择一份已匹配演示 Profile 的材料');
@@ -148,6 +153,7 @@ export function App() {
       await api.addMessage(conversationId, body || '请分析已选择的脱敏方案材料');
       const target = ROUTES.find((item) => item.value === route)?.target ?? { mode: 'auto' as const };
       const created = await api.createTask(conversationId, selected.documentSnapshot.id, target);
+      latestTaskSnapshot.current = undefined;
       await recover(created.taskId, 0);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setWorking(false); }
@@ -172,14 +178,24 @@ export function App() {
       const approved = await recover(task.id, cursor);
       await api.execute(task.id);
       let currentCursor = approved.cursor;
-      for (let attempt = 0; attempt < 120; attempt += 1) {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
         const current = await recover(task.id, currentCursor);
         currentCursor = current.cursor;
-        if (['completed', 'failed', 'rejected'].includes(current.snapshot.status)) break;
-        await new Promise((resolve) => setTimeout(resolve, 25));
+        if (['completed', 'failed', 'rejected', 'canceled'].includes(current.snapshot.status)) break;
+        await new Promise((resolve) => setTimeout(resolve, 200));
       }
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setWorking(false); }
+  };
+
+  const cancelTask = async () => {
+    if (task === undefined || !['queued', 'running'].includes(task.status) || canceling) return;
+    setCanceling(true); setError(undefined);
+    try {
+      await api.cancelTask(task.id);
+      await recover(task.id, cursor);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setCanceling(false); }
   };
 
   const graph = useMemo(() => {
@@ -219,30 +235,30 @@ export function App() {
     }
   };
 
-  if (!capabilityOpen) return <main className="not-open" data-testid="not-open"><span>NOT_OPEN</span><h1>该能力尚未开放</h1><p>Gate 0.2A 只允许 solution.analysis.v1。</p></main>;
+  if (!capabilityOpen) return <main className="not-open" data-testid="not-open"><span>NOT_OPEN</span><h1>该能力尚未开放</h1><p>当前仅开放方案分析能力。</p></main>;
 
   return <AssistantRuntimeProvider runtime={runtime}>
     <main className="app-shell" data-testid="geneway-app">
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">纬</span><div><strong>geneway</strong><small>制造业数字员工</small></div></div>
         <button className="new-task" onClick={() => { localStorage.clear(); location.reload(); }}>＋ 新建会话</button>
-        <nav><b>今天</b><button className="nav-active">方案分析</button><button disabled>生产日报 · 后续开放</button></nav>
+        <nav><b>今天</b><button className="nav-active">方案分析</button><button disabled>生产日报 · 即将开放</button></nav>
         <section className="operations-preview" aria-label="制造业状态入口">
           <h3>现场动态</h3>
-          <button disabled><span className="signal danger" />设备异常待处理<small>后续 Gate 开放</small></button>
-          <button disabled><span className="signal warning" />产能进度落后<small>后续 Gate 开放</small></button>
+          <button disabled><span className="signal danger" />设备异常待处理<small>即将开放</small></button>
+          <button disabled><span className="signal warning" />产能进度落后<small>即将开放</small></button>
         </section>
       </aside>
 
       <section className="conversation-pane">
-        <header className="topbar"><div><h1>小纬</h1><p>通用数字员工 · 由小纬统一组织专家能力</p></div><SimulationNotice /></header>
+        <header className="topbar"><div><h1>小纬</h1><p>通用数字员工 · 当前为模拟运行</p></div><SimulationNotice /></header>
         <div className="thread" data-testid="message-thread">
           {(conversation?.messages.length ?? 0) === 0 && <section className="welcome-empty" data-testid="welcome-empty"><div className="avatar">纬</div><div><b>你好，我是小纬</b><p>请上传并明确选择一份只读材料，也可以指定专家或专家团。任何 Workflow 都会先展示并等待批准。</p></div></section>}
           {conversation?.messages.map((message) => <article className={`message ${message.author}`} key={message.id} data-author={message.author}>
             <div className="avatar">{message.author === 'xiaowei' ? '纬' : '你'}</div><div><b>{message.author === 'xiaowei' ? '小纬' : '你'}</b><p>{message.body}</p></div>
           </article>)}
           <section className="upload-card" data-testid="artifact-upload-card">
-            <div><span className="eyebrow">私有材料库 · Gate 0.2A.2</span><h2>上传分析材料</h2><p>仅接收不超过 1 MiB 的 UTF-8 .txt / .md。上传后请明确选择一份已匹配 Profile 的材料。</p></div>
+            <div><span className="eyebrow">私有材料库</span><h2>上传分析材料</h2><p>仅接收不超过 1 MiB 的 UTF-8 .txt / .md。上传后请明确选择一份已匹配 Profile 的材料。</p></div>
             <label className={`upload-action${uploading ? ' disabled' : ''}`}>
               {uploading ? '正在校验…' : '选择文件'}
               <input data-testid="artifact-upload-input" aria-label="上传分析材料" type="file" accept=".txt,text/plain,.md,text/markdown" disabled={uploading} onChange={(event) => {
@@ -272,7 +288,7 @@ export function App() {
           </section>; })}
           {task !== undefined && <section className="task-card" data-testid="task-card" data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}>
             <div className="task-title"><div><span className="eyebrow">小纬任务 · simulation=true</span><h2>方案分析流程</h2></div><span className={`status status-${task.status}`}>{task.status}</span></div>
-            <p>本次路线：{ROUTES.find((item) => item.value === route)?.label ?? task.expertTarget.mode}。专家能力在后台协作，客户消息仍只由小纬发出。</p>
+            <p>本次仅记录路线：{ROUTES.find((item) => item.value === route)?.label ?? task.expertTarget.mode}。本次由统一模拟 Runtime 执行，未调用真实专家；客户消息仍只由小纬发出。</p>
             <dl className="task-bindings">
               <div><dt>Snapshot</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.documentSnapshotId : task.inputRef.fixtureRef}</dd></div>
               <div><dt>Profile</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.simulationProfile : 'legacy fixture'}</dd></div>
@@ -281,7 +297,15 @@ export function App() {
             </dl>
             <TaskProgress completed={completed} total={7} /><p className="progress-copy">已完成 {completed} / 7 个步骤</p>
             <div className="version-strip"><code>{task.workflowVersion.id}</code><code title={task.workflowVersion.hash}>{task.workflowVersion.hash.slice(0, 16)}…</code><span>SSE cursor {cursor}</span></div>
-            <div className="actions"><button className="secondary" onClick={() => setWorkflowOpen(true)}>查看 Workflow</button>{task.status === 'awaiting_approval' && <button className="primary" disabled={working} onClick={() => void approveAndRun()}>批准并运行模拟任务</button>}</div>
+            <div className="actions">
+              <button className="secondary" onClick={() => setWorkflowOpen(true)}>查看 Workflow</button>
+              {task.status === 'awaiting_approval' && <button className="primary" disabled={working} onClick={() => void approveAndRun()}>批准并运行模拟任务</button>}
+              {task.status !== 'awaiting_approval' && <button className="secondary" type="button" data-testid="cancel-task-button"
+                disabled={!['queued', 'running'].includes(task.status) || canceling} onClick={() => void cancelTask()}>{canceling ? '正在取消…' : '取消模拟任务'}</button>}
+            </div>
+          </section>}
+          {task?.status === 'canceled' && <section className="result-card" data-testid="canceled-task-state">
+            <span className="eyebrow">小纬任务 · 已停止</span><h2>模拟任务已取消</h2><p>不会发布 Claim 或模拟报告。刷新页面后仍可查看该终态。</p>
           </section>}
           {task?.status === 'completed' && <section className="result-card" data-testid="result-card">
             <span className="eyebrow">小纬结论 · 模拟结果 · 不可用于业务决策</span><h2>方案分析完成</h2>

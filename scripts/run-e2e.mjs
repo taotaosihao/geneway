@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 
 async function findAvailablePort(excludedPorts = new Set()) {
@@ -35,7 +35,9 @@ const webPort = await allocatePort();
 const postgresPort = await allocatePort();
 const s3Port = await allocatePort();
 const storageAdapterPort = await allocatePort();
+const reconciliationAdapterPort = await allocatePort();
 const workerHealthPort = await allocatePort();
+const controlPlaneSupervisorPort = await allocatePort();
 const composeRunId = runId.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 const composeProjectName = `geneway-e2e-${composeRunId}`;
 const databaseUrl = `postgres://geneway:geneway@127.0.0.1:${postgresPort}/geneway_test`;
@@ -65,6 +67,12 @@ function processIdentityMatches(pid, procStartTicks) {
   }
 }
 
+function belongsToWorkerRun(candidate) {
+  if (candidate === workerInstanceId) return true;
+  const prefix = `${workerInstanceId}-g`;
+  return typeof candidate === 'string' && candidate.startsWith(prefix) && /^\d+$/u.test(candidate.slice(prefix.length));
+}
+
 async function waitForProcessExit(pid, procStartTicks, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (processIdentityMatches(pid, procStartTicks) && Date.now() < deadline) {
@@ -75,6 +83,7 @@ async function waitForProcessExit(pid, procStartTicks, timeoutMs) {
 
 let result;
 let cleanupFailed = false;
+let reportGateFailed = false;
 try {
   writeFileSync(workerTokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
   chmodSync(workerTokenFile, 0o600);
@@ -91,7 +100,9 @@ try {
       GENEWAY_POSTGRES_PORT: postgresPort,
       GENEWAY_S3_PORT: s3Port,
       GENEWAY_STORAGE_ADAPTER_PORT: storageAdapterPort,
+      GENEWAY_RECONCILIATION_ADAPTER_PORT: reconciliationAdapterPort,
       GENEWAY_WORKER_HEALTH_PORT: workerHealthPort,
+      GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT: controlPlaneSupervisorPort,
       GENEWAY_WORKER_SOCKET_PATH: workerSocketPath,
       GENEWAY_WORKER_TOKEN_FILE: workerTokenFile,
       GENEWAY_WORKER_INSTANCE_ID: workerInstanceId,
@@ -103,10 +114,20 @@ try {
     },
     stdio: 'inherit',
   });
+  if (result.status === 0) {
+    const reportGate = spawnSync('pnpm', ['exec', 'tsx', 'scripts/e2e-report-gate.ts',
+      `/tmp/geneway-runs/${runId}/playwright-report.json`, JSON.stringify(forwarded)], {
+      cwd: new URL('..', import.meta.url), env: baseEnvironment, stdio: 'inherit',
+    });
+    reportGateFailed = reportGate.status !== 0;
+  }
 } finally {
+  const boundaryDirectory = `/tmp/geneway-runs/${runId}/process-boundaries`;
   const workerReceiptPath = `/tmp/geneway-runs/${runId}/process-boundaries/worker.json`;
   let workerReceiptFound = false;
   let workerExited = true;
+  let workerGenerationReceipts = [];
+  let workerGenerationsExited = true;
   let workerPid;
   let workerProcStartTicks;
   try {
@@ -114,7 +135,7 @@ try {
     workerReceiptFound = receipt.role === 'worker'
       && receipt.phase === 'ready'
       && receipt.ready === true
-      && receipt.workerInstanceId === workerInstanceId
+      && belongsToWorkerRun(receipt.workerInstanceId)
       && Number.isSafeInteger(receipt.pid)
       && typeof receipt.procStartTicks === 'string';
     if (workerReceiptFound) {
@@ -134,7 +155,64 @@ try {
     if (result?.status === 0) console.error(`unable to verify Worker process receipt: ${String(error)}`);
     workerExited = false;
   }
-  if (result?.status === 0 && (!workerReceiptFound || !workerExited)) cleanupFailed = true;
+  try {
+    workerGenerationReceipts = readdirSync(boundaryDirectory)
+      .filter((name) => /^worker-generation-\d+\.json$/u.test(name))
+      .map((name) => JSON.parse(readFileSync(`${boundaryDirectory}/${name}`, 'utf8')))
+      .filter((receipt) => receipt.role === 'worker' && receipt.phase === 'ready' && receipt.ready === true
+        && belongsToWorkerRun(receipt.workerInstanceId)
+        && Number.isSafeInteger(receipt.generation) && Number.isSafeInteger(receipt.pid) && typeof receipt.procStartTicks === 'string')
+      .sort((left, right) => left.generation - right.generation);
+    const uniqueIdentities = new Map(workerGenerationReceipts.map((receipt) => [`${String(receipt.pid)}:${receipt.procStartTicks}`, receipt]));
+    for (const receipt of uniqueIdentities.values()) {
+      let exited = await waitForProcessExit(receipt.pid, receipt.procStartTicks, 2_000);
+      if (!exited && processIdentityMatches(receipt.pid, receipt.procStartTicks)) {
+        process.kill(receipt.pid, 'SIGTERM');
+        exited = await waitForProcessExit(receipt.pid, receipt.procStartTicks, 2_000);
+      }
+      if (!exited && processIdentityMatches(receipt.pid, receipt.procStartTicks)) {
+        process.kill(receipt.pid, 'SIGKILL');
+        exited = await waitForProcessExit(receipt.pid, receipt.procStartTicks, 2_000);
+      }
+      workerGenerationsExited &&= exited;
+    }
+  } catch (error) {
+    if (result?.status === 0) console.error(`unable to verify Worker generation receipts: ${String(error)}`);
+    workerGenerationsExited = false;
+  }
+  if (result?.status === 0 && (!workerReceiptFound || !workerExited || workerGenerationReceipts.length === 0 || !workerGenerationsExited)) cleanupFailed = true;
+
+  let controlPlaneReceiptFound = false;
+  let controlPlaneGenerations = [];
+  let controlPlaneGenerationsExited = true;
+  try {
+    const current = JSON.parse(readFileSync(`${boundaryDirectory}/control-plane.json`, 'utf8'));
+    controlPlaneReceiptFound = current.role === 'control-plane' && current.phase === 'ready' && current.ready === true
+      && Number.isSafeInteger(current.pid) && typeof current.procStartTicks === 'string' && Number.isSafeInteger(current.generation);
+    controlPlaneGenerations = readdirSync(boundaryDirectory)
+      .filter((name) => /^control-plane-generation-\d+\.json$/u.test(name))
+      .map((name) => JSON.parse(readFileSync(`${boundaryDirectory}/${name}`, 'utf8')))
+      .filter((receipt) => receipt.role === 'control-plane' && receipt.phase === 'ready' && receipt.ready === true
+        && Number.isSafeInteger(receipt.generation) && Number.isSafeInteger(receipt.pid) && typeof receipt.procStartTicks === 'string')
+      .sort((left, right) => left.generation - right.generation);
+    const uniqueIdentities = new Map(controlPlaneGenerations.map((receipt) => [`${String(receipt.pid)}:${receipt.procStartTicks}`, receipt]));
+    for (const receipt of uniqueIdentities.values()) {
+      let exited = await waitForProcessExit(receipt.pid, receipt.procStartTicks, 2_000);
+      if (!exited && processIdentityMatches(receipt.pid, receipt.procStartTicks)) {
+        process.kill(receipt.pid, 'SIGTERM');
+        exited = await waitForProcessExit(receipt.pid, receipt.procStartTicks, 2_000);
+      }
+      if (!exited && processIdentityMatches(receipt.pid, receipt.procStartTicks)) {
+        process.kill(receipt.pid, 'SIGKILL');
+        exited = await waitForProcessExit(receipt.pid, receipt.procStartTicks, 2_000);
+      }
+      controlPlaneGenerationsExited &&= exited;
+    }
+  } catch (error) {
+    if (result?.status === 0) console.error(`unable to verify Control Plane generation receipts: ${String(error)}`);
+    controlPlaneGenerationsExited = false;
+  }
+  if (result?.status === 0 && (!controlPlaneReceiptFound || controlPlaneGenerations.length === 0 || !controlPlaneGenerationsExited)) cleanupFailed = true;
 
   for (const [resource, listArguments, removeArguments] of [
     ['container', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${composeProjectName}`], ['rm', '-f']],
@@ -166,6 +244,22 @@ try {
     workerPid: workerPid ?? null,
     workerProcStartTicks: workerProcStartTicks ?? null,
     workerExited,
+    workerGenerationCount: workerGenerationReceipts.length,
+    workerGenerationsExited,
+    workerGenerations: workerGenerationReceipts.map((receipt) => ({
+      generation: receipt.generation,
+      pid: receipt.pid,
+      procStartTicks: receipt.procStartTicks,
+      workerInstanceId: receipt.workerInstanceId,
+    })),
+    controlPlaneReceiptFound,
+    controlPlaneGenerationCount: controlPlaneGenerations.length,
+    controlPlaneGenerationsExited,
+    controlPlaneGenerations: controlPlaneGenerations.map((receipt) => ({
+      generation: receipt.generation,
+      pid: receipt.pid,
+      procStartTicks: receipt.procStartTicks,
+    })),
     authorityCleaned,
     tokenRemoved: !existsSync(workerTokenFile),
     socketRemoved: !existsSync(workerSocketPath),
@@ -174,4 +268,4 @@ try {
   if (!authorityCleaned) cleanupFailed = true;
 }
 console.log(`geneway served-test artifacts: /tmp/geneway-runs/${runId}/`);
-process.exit(cleanupFailed ? 1 : (result?.status ?? 1));
+process.exit(cleanupFailed || reportGateFailed ? 1 : (result?.status ?? 1));

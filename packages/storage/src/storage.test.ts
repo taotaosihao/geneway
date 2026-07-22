@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createObjectStorageFromEnv, createS3ObjectStorageFromEnv } from './index.js';
+import {
+  createObjectStorageFromEnv,
+  createS3ObjectStorageFromEnv,
+  isCanonicalArtifactObjectKey,
+  isCanonicalArtifactPrefix,
+} from './index.js';
 
 describe('S3 storage configuration', () => {
   it('stays disabled when no storage variables are supplied', () => {
@@ -18,5 +23,21 @@ describe('S3 storage configuration', () => {
       GENEWAY_S3_ACCESS_KEY_ID: 'online',
       GENEWAY_S3_SECRET_ACCESS_KEY: 'secret',
     })).toThrow(/forbidden/u);
+  });
+
+  it('accepts only exact tenant artifact prefixes and canonical object keys', () => {
+    const prefix = 'tenants/tenant_local/artifacts/';
+    expect(isCanonicalArtifactPrefix(prefix)).toBe(true);
+    expect(isCanonicalArtifactPrefix('tenants/tenant_local/artifacts')).toBe(false);
+    expect(isCanonicalArtifactPrefix('tenants/tenant_local/artifacts-extra/')).toBe(false);
+    expect(isCanonicalArtifactObjectKey(`${prefix}artifact/source.txt`, prefix)).toBe(true);
+    expect([
+      prefix,
+      `${prefix}artifact//source.txt`,
+      `${prefix}artifact/../source.txt`,
+      `${prefix}artifact\\source.txt`,
+      `${prefix}artifact/nul\0source.txt`,
+      'tenants/tenant_other/artifacts/artifact/source.txt',
+    ].every((key) => !isCanonicalArtifactObjectKey(key, prefix))).toBe(true);
   });
 });

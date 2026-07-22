@@ -5,6 +5,7 @@ import {
   SIMULATION_ENVELOPE,
   isGenewayError,
   resolvedTaskInputRefSchema,
+  taskResultSchema,
   taskSnapshotSchema,
   type CreateTaskInput,
   type Principal,
@@ -109,6 +110,7 @@ export type CreatedTask = Readonly<{
 }>;
 
 export type ExecutionResponse = Readonly<{ taskId: string; status: 'accepted' | 'completed' }>;
+export type CancellationResponse = Readonly<{ taskId: string; status: 'canceled' }>;
 
 function normalizeStoredInput(value: JsonObject): ResolvedTaskInputRef {
   if (value.kind === 'fixture' || value.kind === 'document_snapshot') return resolvedTaskInputRefSchema.parse(value);
@@ -138,6 +140,7 @@ export class ControlPlaneRepository {
 
   async resetForTest(): Promise<void> {
     await this.pool.query(`TRUNCATE TABLE
+      platform_write_barriers,backup_sets,storage_orphan_tombstones,
       report_publish_intents,lineage_records,evidence_links,evidence_items,claims,worker_command_receipts,attempt_output_candidates,
       inbox_events,outbox_deliveries,execution_attempts,
       audit_events,document_snapshots,artifact_states,artifact_manifests,artifacts,artifact_ingest_intents,
@@ -366,6 +369,13 @@ export class ControlPlaneRepository {
   async getEvents(principal: Principal, taskId: string, afterCursor: number): Promise<readonly JsonObject[]> {
     return this.withTransaction(async (client) => {
       await this.requireReadableTask(client, principal, taskId);
+      if (afterCursor > 0) {
+        const cursor = await client.query(`SELECT 1 FROM business_task_events
+          WHERE tenant_id=$1 AND business_task_id=$2 AND cursor=$3`, [principal.tenantId, taskId, afterCursor]);
+        if (cursor.rowCount !== 1) {
+          throw new GenewayError('EVENT_CURSOR_INVALID', 'Event cursor does not belong to this task', 409);
+        }
+      }
       const result = await client.query(`SELECT cursor::text,id,business_task_id,sequence::text,event_type,payload,
         simulation,runtime_mode,business_decision_allowed,occurred_at
         FROM business_task_events WHERE tenant_id=$1 AND business_task_id=$2 AND cursor>$3 ORDER BY cursor`, [principal.tenantId, taskId, afterCursor]);
@@ -375,6 +385,7 @@ export class ControlPlaneRepository {
 
   async decideApproval(principal: Principal, approvalId: string, decision: 'approved' | 'rejected', idempotencyKey: string): Promise<{ approvalId: string; status: string }> {
     return this.withTransaction((client) => this.idempotent(client, principal, 'approval.decide', idempotencyKey, { approvalId, decision }, async () => {
+      await this.assertPlatformOperational(client);
       const result = await client.query<ApprovalRow>(`SELECT a.* FROM approval_versions a
         JOIN business_tasks t ON t.tenant_id=a.tenant_id AND t.id=a.business_task_id
         WHERE a.tenant_id=$1 AND a.id=$2 AND t.requester_id=$3 FOR UPDATE OF a,t`, [principal.tenantId, approvalId, principal.userId]);
@@ -460,6 +471,7 @@ export class ControlPlaneRepository {
 
   async enqueueExecution(principal: Principal, taskId: string, idempotencyKey: string): Promise<ExecutionResponse> {
     return this.withTransaction((client) => this.idempotent(client, principal, 'business-task.execute', idempotencyKey, { taskId }, async () => {
+      await this.assertPlatformOperational(client);
       const task = await this.requireTask(client, principal.tenantId, taskId, principal.userId);
       await this.assertApprovedExecutionAuthority(client, task);
       if (task.status === 'completed') return { taskId, status: 'completed' as const };
@@ -476,6 +488,82 @@ export class ControlPlaneRepository {
     }, async (response) => {
       const task = await this.requireTask(client, principal.tenantId, response.taskId, principal.userId);
       await this.assertApprovedExecutionAuthority(client, task);
+    }));
+  }
+
+  async assertPlatformOperational(client: Pick<PoolClient, 'query'> = this.pool): Promise<void> {
+    const barrier = await client.query(
+      'SELECT backup_set_id FROM platform_write_barriers WHERE active AND reads_blocked LIMIT 1',
+    );
+    if (barrier.rowCount !== 0) {
+      throw new GenewayError('RESTORE_PLATFORM_GATE_ACTIVE', 'Platform execution is unavailable until restore verification completes', 503);
+    }
+  }
+
+  async cancelTask(principal: Principal, taskId: string, idempotencyKey: string): Promise<CancellationResponse> {
+    return this.withTransaction((client) => this.idempotent(client, principal, 'business-task.cancel', idempotencyKey, { taskId }, async () => {
+      const task = await this.requireTask(client, principal.tenantId, taskId, principal.userId);
+      if (task.status === 'canceled') return { taskId, status: 'canceled' as const };
+      if (task.status !== 'queued' && task.status !== 'running') {
+        throw new GenewayError('TASK_CANCEL_NOT_ALLOWED', `Task cannot be canceled from state ${task.status}`, 409);
+      }
+
+      const canceledResult = taskResultSchema.parse({
+        kind: 'canceled',
+        code: 'USER_CANCELED',
+        message: '用户已取消模拟任务。',
+        ...SIMULATION_ENVELOPE,
+      });
+      const nextFence = Number(task.execution_fencing_token) + 1;
+      if (!Number.isSafeInteger(nextFence) || nextFence < 1) {
+        throw new GenewayError('EXECUTION_FENCE_INVALID', 'Task execution fence is invalid', 500);
+      }
+
+      if (task.current_execution_attempt_id !== null) {
+        const attempt = await client.query(`UPDATE execution_attempts SET status='canceled',completed_at=now(),
+          last_error='USER_CANCELED' WHERE tenant_id=$1 AND id=$2 AND business_task_id=$3 AND status='running'`, [
+          principal.tenantId, task.current_execution_attempt_id, taskId,
+        ]);
+        if (task.status === 'running' && attempt.rowCount !== 1) {
+          throw new GenewayError('TASK_CANCEL_CAS_CONFLICT', 'Current execution attempt changed before cancellation', 409);
+        }
+        const delivery = await client.query(`UPDATE outbox_deliveries SET status='canceled',last_error='USER_CANCELED',
+          lease_until=now(),updated_at=now() WHERE tenant_id=$1 AND business_task_id=$2
+          AND execution_attempt_id=$3 AND status='leased'`, [
+          principal.tenantId, taskId, task.current_execution_attempt_id,
+        ]);
+        if (task.status === 'running' && delivery.rowCount !== 1) {
+          throw new GenewayError('TASK_CANCEL_CAS_CONFLICT', 'Current delivery changed before cancellation', 409);
+        }
+        const inbox = await client.query(`UPDATE inbox_events SET status='canceled',processing_at=coalesce(processing_at,now()),
+          completed_at=now(),last_error='USER_CANCELED' WHERE tenant_id=$1 AND business_task_id=$2
+          AND execution_attempt_id=$3 AND status IN ('received','processing')`, [
+          principal.tenantId, taskId, task.current_execution_attempt_id,
+        ]);
+        if (task.status === 'running' && inbox.rowCount !== 1) {
+          throw new GenewayError('TASK_CANCEL_CAS_CONFLICT', 'Current inbox receipt changed before cancellation', 409);
+        }
+      }
+
+      await client.query(`UPDATE business_task_steps SET status='canceled',lease_until=null,updated_at=now()
+        WHERE tenant_id=$1 AND business_task_id=$2 AND status IN ('queued','running')`, [principal.tenantId, taskId]);
+      await client.query(`UPDATE report_publish_intents SET status='reconcile_required',state_version=state_version+1,
+        failure_code='TASK_CANCELED',updated_at=now() WHERE tenant_id=$1 AND business_task_id=$2
+        AND status IN ('prepared','object_verified')`, [principal.tenantId, taskId]);
+      const canceled = await client.query(`UPDATE business_tasks SET status='canceled',result=$4,
+        execution_fencing_token=$5,updated_at=now() WHERE tenant_id=$1 AND id=$2 AND requester_id=$3
+        AND status IN ('queued','running') AND execution_fencing_token=$6`, [
+        principal.tenantId, taskId, principal.userId, canceledResult, nextFence, Number(task.execution_fencing_token),
+      ]);
+      if (canceled.rowCount !== 1) throw new GenewayError('TASK_CANCEL_CAS_CONFLICT', 'Cancellation lost the terminal compare-and-set race', 409);
+      await this.appendEvent(client, principal.tenantId, taskId, 'business_task.canceled', {
+        reasonCode: 'USER_CANCELED',
+        executionFencingToken: nextFence,
+      });
+      return { taskId, status: 'canceled' as const };
+    }, async (response) => {
+      const task = await this.requireTask(client, principal.tenantId, response.taskId, principal.userId);
+      if (task.status !== 'canceled') throw new GenewayError('TASK_CANCEL_REPLAY_INVALID', 'Stored cancellation is no longer current', 409);
     }));
   }
 

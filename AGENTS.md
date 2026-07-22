@@ -4,8 +4,8 @@
 
 Before implementation, read:
 
-1. `/home/gewu/.codex/workflow/artifacts/20260720-010-geneway-gate-0-1/team/sdd/slices/gate-0-1/brief.md`
-2. `doc/plans/atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md`
+1. `/home/gewu/.codex/workflow/artifacts/20260722-003-geneway-gate-0-2a-artifact-evidence/team/sdd/slices/gate-0-2a-artifact-evidence/brief.md`
+2. `doc/plans/atlas-workflow/20260722-003-geneway-gate-0-2a-artifact-evidence/implementation-contract.final.md`
 
 The authority brief defines the stable Goal refs and the implementation contract is the only executable scope body. Read the technical appendix, UI ADR, roadmap, and spec pointer only when the current implementation question needs them; they cannot add acceptance, exit conditions, or implementation scope.
 
@@ -24,4 +24,4 @@ The authority brief defines the stable Goal refs and the implementation contract
 
 ## Current authority slice
 
-Gate R has established this repository. The current contract and SDD authority cover Gate 0.1 only. Contract readiness does not itself authorize product-code implementation; explicit user authorization is still required.
+Gate R and Gate 0.1 are established baselines. The current contract and SDD authority cover Gate 0.2A only. Contract readiness does not itself authorize product-code implementation; explicit user authorization is still required.

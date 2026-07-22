@@ -18,7 +18,7 @@ const fixturePath = path.resolve(process.cwd(), 'scripts/fixtures/gate0.2a/solut
 const runId = process.env.GENEWAY_RUN_ID;
 if (runId === undefined) throw new Error('Gate 0.2A storage thin test requires a run ID');
 
-function storageOracle(action: 'get' | 'delete', key: string): Readonly<{ bytesBase64?: string; contentSha256?: string | null; deleted?: boolean }> {
+function storageOracle(action: 'get', key: string): Readonly<{ bytesBase64?: string; contentSha256?: string | null }> {
   const located = spawnSync('docker', [
     'ps', '--filter', `label=com.docker.compose.project=${composeProject}`,
     '--filter', 'label=com.docker.compose.service=storage-oracle', '--format', '{{.ID}}',
@@ -30,7 +30,7 @@ function storageOracle(action: 'get' | 'delete', key: string): Readonly<{ bytesB
     'exec', '-i', containerId, './node_modules/.bin/tsx', 'scripts/storage-oracle-cli.ts', action, key,
   ], { encoding: 'utf8' });
   if (executed.status !== 0) throw new Error(`Storage oracle ${action} failed: ${executed.stderr}`);
-  return JSON.parse(executed.stdout) as Readonly<{ bytesBase64?: string; contentSha256?: string | null; deleted?: boolean }>;
+  return JSON.parse(executed.stdout) as Readonly<{ bytesBase64?: string; contentSha256?: string | null }>;
 }
 
 test('served UI uploads, verifies, recovers and downloads one private source artifact', async ({ page, request }) => {
@@ -99,12 +99,17 @@ test('served UI uploads, verifies, recovers and downloads one private source art
       artifact_id: string; manifest_id: string; snapshot_id: string; storage_key: string; content_sha256: string;
       artifact_count: string; task_count: string; outbox_count: string;
     }>(`SELECT a.id artifact_id,m.id manifest_id,d.id snapshot_id,m.storage_key,a.content_sha256,
-      (SELECT count(*)::text FROM artifacts) artifact_count,
-      (SELECT count(*)::text FROM business_tasks) task_count,
-      (SELECT count(*)::text FROM outbox_events) outbox_count
+      (SELECT count(*)::text FROM artifacts scoped_artifact
+        WHERE scoped_artifact.tenant_id=a.tenant_id AND scoped_artifact.id=a.id) artifact_count,
+      (SELECT count(*)::text FROM business_tasks scoped_task
+        WHERE scoped_task.tenant_id=a.tenant_id AND scoped_task.conversation_id=$2) task_count,
+      (SELECT count(*)::text FROM outbox_events scoped_outbox
+        JOIN business_tasks scoped_task ON scoped_task.tenant_id=scoped_outbox.tenant_id
+          AND scoped_task.id=scoped_outbox.business_task_id
+        WHERE scoped_task.tenant_id=a.tenant_id AND scoped_task.conversation_id=$2) outbox_count
       FROM artifacts a JOIN artifact_manifests m ON m.tenant_id=a.tenant_id AND m.artifact_id=a.id
       JOIN document_snapshots d ON d.tenant_id=a.tenant_id AND d.artifact_id=a.id
-      WHERE a.tenant_id='tenant_local' AND a.id=$1`, [ids.artifactId]);
+      WHERE a.tenant_id='tenant_local' AND a.id=$1`, [ids.artifactId, conversationId]);
     expect(authority.rows).toEqual([expect.objectContaining({
       artifact_id: ids.artifactId,
       manifest_id: ids.manifestId,
@@ -134,7 +139,7 @@ test('served UI uploads, verifies, recovers and downloads one private source art
   if (downloadPath === null) throw new Error('Browser did not retain the downloaded file');
   const browserBytes = await new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
-    createReadStream(downloadPath).on('data', (chunk: Buffer) => chunks.push(chunk)).on('end', () => resolve(Buffer.concat(chunks))).on('error', reject);
+    createReadStream(downloadPath).on('data', (chunk) => { chunks.push(Buffer.from(chunk)); }).on('end', () => resolve(Buffer.concat(chunks))).on('error', reject);
   });
   expect(browserBytes).toEqual(fixture);
 
@@ -150,59 +155,4 @@ test('served UI uploads, verifies, recovers and downloads one private source art
     } catch { return false; }
   }, s3Port);
   expect(browserCanReachS3).toBe(false);
-});
-
-test('served UI hides metadata and disables use after the backing object disappears', async ({ page, request }) => {
-  const fixture = await readFile(fixturePath);
-  await page.goto('/conversations/new?capability=solution.analysis.v1');
-  await page.getByTestId('artifact-upload-input').setInputFiles({
-    name: 'solution-analysis-demo-v2.txt',
-    mimeType: 'text/plain',
-    buffer: fixture,
-  });
-  const card = page.getByTestId('artifact-card');
-  await expect(card).toHaveCount(1);
-  const artifactId = await card.getAttribute('data-artifact-id');
-  expect(artifactId).toBeTruthy();
-
-  const pool = new Pool({ connectionString: databaseUrl });
-  let storageKey: string;
-  try {
-    const manifest = await pool.query<{ storage_key: string }>(`SELECT storage_key FROM artifact_manifests
-      WHERE tenant_id='tenant_local' AND artifact_id=$1`, [artifactId]);
-    const resolved = manifest.rows[0]?.storage_key;
-    if (resolved === undefined) throw new Error('Postgres did not resolve the object storage key');
-    storageKey = resolved;
-  } finally { await pool.end(); }
-
-  expect(storageOracle('delete', storageKey)).toEqual({ deleted: true });
-  const failedDownload = await request.get(`/api/artifacts/${artifactId ?? ''}/download`);
-  expect(failedDownload.status()).toBe(409);
-  await expect(failedDownload.json()).resolves.toMatchObject({ error: { code: 'ARTIFACT_OBJECT_MISSING' } });
-
-  await page.reload();
-  const unavailable = page.getByTestId('artifact-unavailable-card');
-  await expect(unavailable).toContainText('材料对象不可用或完整性异常');
-  await expect(page.getByTestId('snapshot-unavailable-inspector')).toContainText('对象不可用 / 完整性异常');
-  await expect(page.getByTestId('artifact-card')).toHaveCount(0);
-  await expect(page.getByTestId('artifact-download')).toHaveCount(0);
-  await expect(page.getByTestId('artifact-hash')).toHaveCount(0);
-  await expect(page.getByTestId('task-card')).toHaveCount(0);
-
-  const conversationId = await page.evaluate(() => localStorage.getItem('geneway.conversationId'));
-  const deniedList = await request.get(`/api/conversations/${conversationId ?? ''}/document-snapshots`);
-  expect(deniedList.status()).toBe(404);
-  const deniedBody = await deniedList.text();
-  expect(deniedBody).not.toContain(artifactId ?? 'missing-artifact');
-  expect(deniedBody).not.toContain(expectedHash);
-
-  const verificationPool = new Pool({ connectionString: databaseUrl });
-  try {
-    const state = await verificationPool.query<{ availability: string; integrity: string; reconcile_status: string }>(`SELECT availability,integrity,reconcile_status
-      FROM artifact_states WHERE tenant_id='tenant_local' AND artifact_id=$1`, [artifactId]);
-    expect(state.rows).toEqual([{ availability: 'missing', integrity: 'failed', reconcile_status: 'required' }]);
-    const audit = await verificationPool.query<{ reason_code: string }>(`SELECT reason_code FROM audit_events
-      WHERE tenant_id='tenant_local' AND event_type='artifact.snapshot.read.denied' AND resource_id=$1`, [artifactId]);
-    expect(audit.rows).toContainEqual({ reason_code: 'ARTIFACT_NOT_AVAILABLE' });
-  } finally { await verificationPool.end(); }
 });

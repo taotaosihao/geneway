@@ -12,6 +12,7 @@ export type WorkerProcessConfiguration = Readonly<{
   runId: string;
   socketPath: string;
   tokenFile: string;
+  stepDelayMs: number;
   identity: WorkerIdentity;
 }>;
 
@@ -28,6 +29,7 @@ export type WorkerProcessReceipt = Readonly<{
   workerInstanceId: string;
   consumer: 'gate0.2a-worker';
   deploymentId: 'gate0.2a-local';
+  stepDelayMs: number;
   forbiddenNamesPresent: readonly [];
   startingAt: string;
   readyAt: string | null;
@@ -57,6 +59,9 @@ export function findForbiddenWorkerEnvironmentNames(environment: NodeJS.ProcessE
     || name.startsWith('AWS_')
     || name.startsWith('GENEWAY_S3_')
     || name.startsWith('GENEWAY_STORAGE_')
+    || name.startsWith('GENEWAY_RECONCILIATION_')
+    || name.startsWith('GENEWAY_BACKUP_')
+    || name.startsWith('GENEWAY_RESTORE_')
     || name.startsWith('GENEWAY_E2E_S3_')
     || name.startsWith('GENEWAY_E2E_ORACLE_')
     || name === 'GENEWAY_SESSION_TOKEN'
@@ -85,11 +90,16 @@ export function readWorkerProcessConfiguration(environment: NodeJS.ProcessEnv): 
   const deploymentId = requiredEnvironment(environment, 'GENEWAY_WORKER_DEPLOYMENT');
   if (consumer !== 'gate0.2a-worker') throw new GenewayError('WORKER_CONSUMER_NOT_OPEN', 'GENEWAY_WORKER_CONSUMER is not open');
   if (deploymentId !== 'gate0.2a-local') throw new GenewayError('WORKER_DEPLOYMENT_NOT_OPEN', 'GENEWAY_WORKER_DEPLOYMENT is not open');
+  const stepDelayMs = Number(environment.GENEWAY_WORKER_STEP_DELAY_MS ?? 0);
+  if (!Number.isInteger(stepDelayMs) || stepDelayMs < 0 || stepDelayMs > 2_000) {
+    throw new GenewayError('WORKER_STEP_DELAY_INVALID', 'GENEWAY_WORKER_STEP_DELAY_MS must be an integer from 0 to 2000');
+  }
 
   return {
     runId,
     socketPath: requiredEnvironment(environment, 'GENEWAY_WORKER_SOCKET_PATH'),
     tokenFile: requiredEnvironment(environment, 'GENEWAY_WORKER_TOKEN_FILE'),
+    stepDelayMs,
     identity: { workerInstanceId, consumer, deploymentId },
   };
 }
@@ -176,6 +186,7 @@ export async function createWorkerProcessReceipt(
     workerInstanceId: configuration.identity.workerInstanceId,
     consumer: configuration.identity.consumer,
     deploymentId: configuration.identity.deploymentId,
+    stepDelayMs: configuration.stepDelayMs,
     forbiddenNamesPresent: [],
     startingAt,
   } as const;

@@ -17,6 +17,9 @@ importers:
       '@fastify/cors':
         specifier: ^11.1.0
         version: 11.3.0
+      '@geneway/contracts':
+        specifier: workspace:*
+        version: link:packages/contracts
       '@geneway/storage':
         specifier: workspace:*
         version: link:packages/storage

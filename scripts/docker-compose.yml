@@ -65,6 +65,59 @@ services:
       - storage
       - default
 
+  storage-reconciliation-adapter:
+    image: node@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
+    working_dir: /workspace
+    command: ["./node_modules/.bin/tsx", "scripts/storage-reconciliation-adapter.ts"]
+    environment:
+      GENEWAY_RECONCILIATION_ADAPTER_PORT: "7401"
+      GENEWAY_RECONCILIATION_ADAPTER_HOST: 0.0.0.0
+      GENEWAY_RECONCILIATION_ADAPTER_TOKEN: ${GENEWAY_RECONCILIATION_ADAPTER_TOKEN:?GENEWAY_RECONCILIATION_ADAPTER_TOKEN is required}
+      GENEWAY_STORAGE_ALLOWED_PREFIX: ${GENEWAY_STORAGE_ALLOWED_PREFIX:?GENEWAY_STORAGE_ALLOWED_PREFIX is required}
+      GENEWAY_S3_ENDPOINT: http://versitygw:7070
+      GENEWAY_S3_REGION: ${GENEWAY_S3_REGION:-us-east-1}
+      GENEWAY_S3_BUCKET: ${GENEWAY_S3_BUCKET:?GENEWAY_S3_BUCKET is required}
+      GENEWAY_S3_RECONCILER_ACCESS_KEY_ID: ${GENEWAY_S3_RECONCILER_ACCESS_KEY_ID:?GENEWAY_S3_RECONCILER_ACCESS_KEY_ID is required}
+      GENEWAY_S3_RECONCILER_SECRET_ACCESS_KEY: ${GENEWAY_S3_RECONCILER_SECRET_ACCESS_KEY:?GENEWAY_S3_RECONCILER_SECRET_ACCESS_KEY is required}
+    ports:
+      - "127.0.0.1:${GENEWAY_RECONCILIATION_ADAPTER_PORT:?GENEWAY_RECONCILIATION_ADAPTER_PORT is required}:7401"
+    volumes:
+      - ..:/workspace:ro
+    depends_on:
+      versitygw:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7401/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    networks:
+      - storage
+      - default
+
+  storage-reconciler:
+    image: node@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
+    working_dir: /workspace
+    command: ["./node_modules/.bin/tsx", "scripts/storage-reconciler.ts"]
+    environment:
+      DATABASE_URL: postgres://geneway:geneway@postgres:5432/geneway_test
+      GENEWAY_RECONCILIATION_ADAPTER_URL: http://storage-reconciliation-adapter:7401
+      GENEWAY_RECONCILIATION_ADAPTER_TOKEN: ${GENEWAY_RECONCILIATION_ADAPTER_TOKEN:?GENEWAY_RECONCILIATION_ADAPTER_TOKEN is required}
+      GENEWAY_S3_BUCKET: ${GENEWAY_S3_BUCKET:?GENEWAY_S3_BUCKET is required}
+      GENEWAY_STORAGE_ALLOWED_PREFIX: ${GENEWAY_STORAGE_ALLOWED_PREFIX:?GENEWAY_STORAGE_ALLOWED_PREFIX is required}
+      GENEWAY_RECONCILIATION_TENANT_ID: tenant_local
+      GENEWAY_RECONCILIATION_ORPHAN_DELETE_GRACE_MS: "30000"
+      GENEWAY_RECONCILIATION_STALE_INGEST_GRACE_MS: "1000"
+    volumes:
+      - ..:/workspace:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      storage-reconciliation-adapter:
+        condition: service_healthy
+    networks:
+      - default
+
   storage-oracle:
     image: node@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
     working_dir: /workspace
@@ -95,6 +148,8 @@ services:
       GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY: ${GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY:?GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY is required}
       GENEWAY_S3_APP_ACCESS_KEY_ID: ${GENEWAY_S3_APP_ACCESS_KEY_ID:?GENEWAY_S3_APP_ACCESS_KEY_ID is required}
       GENEWAY_S3_APP_SECRET_ACCESS_KEY: ${GENEWAY_S3_APP_SECRET_ACCESS_KEY:?GENEWAY_S3_APP_SECRET_ACCESS_KEY is required}
+      GENEWAY_S3_RECONCILER_ACCESS_KEY_ID: ${GENEWAY_S3_RECONCILER_ACCESS_KEY_ID:?GENEWAY_S3_RECONCILER_ACCESS_KEY_ID is required}
+      GENEWAY_S3_RECONCILER_SECRET_ACCESS_KEY: ${GENEWAY_S3_RECONCILER_SECRET_ACCESS_KEY:?GENEWAY_S3_RECONCILER_SECRET_ACCESS_KEY is required}
       GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID: ${GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID:?GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID is required}
       GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY: ${GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY:?GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY is required}
     volumes:

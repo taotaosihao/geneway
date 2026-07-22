@@ -1,0 +1,25 @@
+Gate 0.2A V-1 contract validation
+Date: 2026-07-22 Asia/Shanghai
+
+Command 1:
+node /home/gewu/.codex/plugins/cache/local-atlas/atlas-workflow/0.1.0+codex.20260720154112/scripts/codex-team-validate-json \
+  --type brief \
+  --file /home/gewu/.codex/workflow/artifacts/20260722-003-geneway-gate-0-2a-artifact-evidence/team/sdd/slices/gate-0-2a-artifact-evidence/brief.json
+
+Result:
+valid: true
+
+Command 2:
+node /home/gewu/.codex/plugins/cache/local-atlas/atlas-workflow/0.1.0+codex.20260720154112/scripts/codex-implementation-contract-lint \
+  --strict \
+  --new-authoring \
+  --file /home/gewu/work/geneway/doc/plans/atlas-workflow/20260722-003-geneway-gate-0-2a-artifact-evidence/implementation-contract.final.md \
+  --authority-slice /home/gewu/.codex/workflow/artifacts/20260722-003-geneway-gate-0-2a-artifact-evidence/team/sdd/slices/gate-0-2a-artifact-evidence
+
+Result:
+implementation_contract_lint: true
+strict: true
+new_authoring: true
+semantics_version: 2
+errors: 0
+warnings: 0

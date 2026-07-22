@@ -12,15 +12,19 @@ const endpoint = process.env.GENEWAY_S3_ENDPOINT;
 const bucket = process.env.GENEWAY_S3_BUCKET;
 const appAccessKeyId = process.env.GENEWAY_S3_APP_ACCESS_KEY_ID;
 const appSecretAccessKey = process.env.GENEWAY_S3_APP_SECRET_ACCESS_KEY;
+const reconcilerAccessKeyId = process.env.GENEWAY_S3_RECONCILER_ACCESS_KEY_ID;
+const reconcilerSecretAccessKey = process.env.GENEWAY_S3_RECONCILER_SECRET_ACCESS_KEY;
 const oracleAccessKeyId = process.env.GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID;
 const oracleSecretAccessKey = process.env.GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY;
 if (endpoint === undefined || bucket === undefined || appAccessKeyId === undefined || appSecretAccessKey === undefined
+  || reconcilerAccessKeyId === undefined || reconcilerSecretAccessKey === undefined
   || oracleAccessKeyId === undefined || oracleSecretAccessKey === undefined) {
   throw new Error('Storage permission verification environment is incomplete');
 }
 
 const region = process.env.GENEWAY_S3_REGION ?? 'us-east-1';
 const appClient = new S3Client({ endpoint, region, forcePathStyle: true, credentials: { accessKeyId: appAccessKeyId, secretAccessKey: appSecretAccessKey } });
+const reconcilerClient = new S3Client({ endpoint, region, forcePathStyle: true, credentials: { accessKeyId: reconcilerAccessKeyId, secretAccessKey: reconcilerSecretAccessKey } });
 const oracleClient = new S3Client({ endpoint, region, forcePathStyle: true, credentials: { accessKeyId: oracleAccessKeyId, secretAccessKey: oracleSecretAccessKey } });
 const storage = new S3ObjectStorage({ endpoint, region, bucket, accessKeyId: appAccessKeyId, secretAccessKey: appSecretAccessKey });
 const key = `tenants/tenant_local/artifacts/conformance-${randomUUID()}/source.txt`;
@@ -55,6 +59,13 @@ try {
   await expectDenied(() => appClient.send(new ListObjectsV2Command({ Bucket: bucket })), 'list');
   await expectDenied(() => appClient.send(new CreateBucketCommand({ Bucket: `${bucket}-forbidden` })), 'create bucket');
   await expectDenied(() => appClient.send(new PutObjectCommand({ Bucket: bucket, Key: `tenants/tenant_other/artifacts/${randomUUID()}/source.txt`, Body: 'forbidden' })), 'cross-prefix put');
+  const inventory = await reconcilerClient.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: 'tenants/tenant_local/artifacts/' }));
+  if (!(inventory.Contents ?? []).some((object) => object.Key === key)) throw new Error('Reconciler inventory did not include the online object');
+  await expectDenied(() => reconcilerClient.send(new PutObjectCommand({ Bucket: bucket, Key: `${key}.forbidden`, Body: 'forbidden' })), 'reconciler put');
+  // VersityGW does not implement S3 bucket-policy Condition clauses, so raw
+  // reconciliation credentials are isolated in the reconciliation adapter.
+  // Exact-prefix enforcement is verified against that adapter after startup.
+  await reconcilerClient.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 } finally {
   await oracleClient.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 }

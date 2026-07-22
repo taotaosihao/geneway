@@ -1,10 +1,24 @@
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
   type S3ClientConfig,
 } from '@aws-sdk/client-s3';
+
+const ARTIFACT_PREFIX_PATTERN = /^tenants\/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\/artifacts\/$/u;
+
+export function isCanonicalArtifactPrefix(prefix: string): boolean {
+  return ARTIFACT_PREFIX_PATTERN.test(prefix);
+}
+
+export function isCanonicalArtifactObjectKey(key: string, allowedPrefix: string): boolean {
+  if (!isCanonicalArtifactPrefix(allowedPrefix) || key === allowedPrefix || !key.startsWith(allowedPrefix)
+    || key.length > 512 || key.includes('..') || key.includes('\\') || key.includes('\0') || key.includes('//')) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(key.slice(allowedPrefix.length));
+}
 
 export type StoredObjectHead = Readonly<{
   sizeBytes: number;
@@ -21,6 +35,24 @@ export interface ObjectStorage {
   putCreateOnly(input: Readonly<{ key: string; bytes: Uint8Array; contentType: string; contentSha256: string }>): Promise<CreateObjectResult>;
   head(key: string): Promise<StoredObjectHead>;
   getBytes(key: string, maximumBytes: number): Promise<Uint8Array>;
+}
+
+export type StoredObjectInventoryItem = Readonly<{
+  key: string;
+  sizeBytes: number;
+  eTag: string | null;
+}>;
+
+/**
+ * Administrative recovery authority. This port is intentionally separate from
+ * ObjectStorage so the online Control Plane and Worker cannot list or delete.
+ */
+export interface ObjectReconciliationStorage {
+  readonly bucket: string;
+  head(key: string): Promise<StoredObjectHead>;
+  getBytes(key: string, maximumBytes: number): Promise<Uint8Array>;
+  listPrefix(prefix: string): Promise<readonly StoredObjectInventoryItem[]>;
+  delete(key: string): Promise<void>;
 }
 
 export class StorageObjectAlreadyExistsError extends Error {
@@ -70,6 +102,8 @@ export type S3ObjectStorageOptions = Readonly<{
   secretAccessKey: string;
   forcePathStyle?: boolean;
 }>;
+
+export type S3ObjectReconciliationStorageOptions = S3ObjectStorageOptions & Readonly<{ allowedPrefix: string }>;
 
 export class S3ObjectStorage implements ObjectStorage {
   readonly bucket: string;
@@ -154,6 +188,76 @@ export class S3ObjectStorage implements ObjectStorage {
   }
 }
 
+export class S3ObjectReconciliationStorage implements ObjectReconciliationStorage {
+  readonly bucket: string;
+  readonly #readStorage: S3ObjectStorage;
+  readonly #reconciliationClient: S3Client;
+  readonly #allowedPrefix: string;
+
+  constructor(options: S3ObjectReconciliationStorageOptions) {
+    if (!isCanonicalArtifactPrefix(options.allowedPrefix)) {
+      throw new TypeError('Reconciliation storage prefix is invalid');
+    }
+    this.bucket = options.bucket;
+    this.#readStorage = new S3ObjectStorage(options);
+    this.#allowedPrefix = options.allowedPrefix;
+    this.#reconciliationClient = new S3Client({
+      endpoint: options.endpoint,
+      region: options.region,
+      forcePathStyle: options.forcePathStyle ?? true,
+      credentials: { accessKeyId: options.accessKeyId, secretAccessKey: options.secretAccessKey },
+      maxAttempts: 2,
+    });
+  }
+
+  async head(key: string): Promise<StoredObjectHead> {
+    this.#assertAllowedKey(key);
+    return this.#readStorage.head(key);
+  }
+
+  async getBytes(key: string, maximumBytes: number): Promise<Uint8Array> {
+    this.#assertAllowedKey(key);
+    return this.#readStorage.getBytes(key, maximumBytes);
+  }
+
+  async listPrefix(prefix: string): Promise<readonly StoredObjectInventoryItem[]> {
+    if (prefix !== this.#allowedPrefix) throw new TypeError('Reconciliation inventory must use the exact allowed prefix');
+    const inventory: StoredObjectInventoryItem[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const page = await this.#reconciliationClient.send(new ListObjectsV2Command({
+        Bucket: this.bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      }));
+      for (const item of page.Contents ?? []) {
+        if (item.Key === undefined || item.Size === undefined || !Number.isSafeInteger(item.Size) || item.Size < 0) {
+          throw new Error('Storage inventory returned an invalid object');
+        }
+        this.#assertAllowedKey(item.Key);
+        inventory.push({ key: item.Key, sizeBytes: item.Size, eTag: item.ETag ?? null });
+      }
+      continuationToken = page.IsTruncated === true ? page.NextContinuationToken : undefined;
+      if (page.IsTruncated === true && continuationToken === undefined) {
+        throw new Error('Storage inventory omitted its continuation token');
+      }
+    } while (continuationToken !== undefined);
+    return inventory;
+  }
+
+  async delete(key: string): Promise<void> {
+    this.#assertAllowedKey(key);
+    await this.#reconciliationClient.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+  }
+
+
+  #assertAllowedKey(key: string): void {
+    if (!isCanonicalArtifactObjectKey(key, this.#allowedPrefix)) {
+      throw new TypeError('Reconciliation key is outside the allowed prefix');
+    }
+  }
+}
+
 type AdapterErrorPayload = Readonly<{ error?: Readonly<{ code?: string; message?: string }> }>;
 
 export class HttpObjectStorage implements ObjectStorage {
@@ -201,6 +305,88 @@ export class HttpObjectStorage implements ObjectStorage {
     if (code === 'STORAGE_OBJECT_NOT_FOUND') throw new StorageObjectNotFoundError(key);
     if (code === 'STORAGE_OBJECT_TOO_LARGE') throw new StorageObjectTooLargeError(key, Number(body.maximumBytes ?? 0));
     throw new Error(`Storage adapter request failed: ${code ?? String(response.status)}`);
+  }
+}
+
+/** Client for the separately authenticated reconciliation adapter. Raw S3
+ * reconciliation credentials remain inside that adapter process. */
+export class HttpObjectReconciliationStorage implements ObjectReconciliationStorage {
+  readonly bucket: string;
+  readonly #baseUrl: string;
+  readonly #token: string;
+  readonly #allowedPrefix: string;
+
+  constructor(options: Readonly<{ baseUrl: string; token: string; bucket: string; allowedPrefix: string }>) {
+    if (!isCanonicalArtifactPrefix(options.allowedPrefix)) {
+      throw new TypeError('Reconciliation storage prefix is invalid');
+    }
+    this.#baseUrl = options.baseUrl.replace(/\/$/u, '');
+    this.#token = options.token;
+    this.bucket = options.bucket;
+    this.#allowedPrefix = options.allowedPrefix;
+  }
+
+  async head(key: string): Promise<StoredObjectHead> {
+    this.#assertKey(key);
+    return this.#request<StoredObjectHead>('/v1/reconciliation/head', { key }, key);
+  }
+
+  async getBytes(key: string, maximumBytes: number): Promise<Uint8Array> {
+    this.#assertKey(key);
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0) throw new TypeError('maximumBytes must be a non-negative safe integer');
+    const response = await this.#request<Readonly<{ bytesBase64: string }>>(
+      '/v1/reconciliation/get', { key, maximumBytes }, key,
+    );
+    const bytes = new Uint8Array(Buffer.from(response.bytesBase64, 'base64'));
+    if (bytes.byteLength > maximumBytes) throw new StorageObjectTooLargeError(key, maximumBytes);
+    return bytes;
+  }
+
+  async listPrefix(prefix: string): Promise<readonly StoredObjectInventoryItem[]> {
+    if (prefix !== this.#allowedPrefix) throw new TypeError('Reconciliation inventory must use the exact allowed prefix');
+    const response = await this.#request<unknown>(
+      '/v1/reconciliation/list', { prefix }, prefix,
+    );
+    if (typeof response !== 'object' || response === null || !('items' in response)
+      || !Array.isArray(response.items)) {
+      throw new Error('Storage reconciliation adapter returned an invalid inventory');
+    }
+    return (response.items as readonly unknown[]).map((candidate) => {
+      if (typeof candidate !== 'object' || candidate === null
+        || !('key' in candidate) || !('sizeBytes' in candidate) || !('eTag' in candidate)
+        || typeof candidate.key !== 'string' || typeof candidate.sizeBytes !== 'number'
+        || !Number.isSafeInteger(candidate.sizeBytes) || candidate.sizeBytes < 0
+        || (candidate.eTag !== null && typeof candidate.eTag !== 'string')) {
+        throw new Error('Storage reconciliation adapter returned an invalid inventory item');
+      }
+      this.#assertKey(candidate.key);
+      return { key: candidate.key, sizeBytes: candidate.sizeBytes, eTag: candidate.eTag };
+    });
+  }
+
+  async delete(key: string): Promise<void> {
+    this.#assertKey(key);
+    await this.#request<Readonly<{ deleted: true }>>('/v1/reconciliation/delete', { key }, key);
+  }
+
+  #assertKey(key: string): void {
+    if (!isCanonicalArtifactObjectKey(key, this.#allowedPrefix)) {
+      throw new TypeError('Reconciliation key is outside the allowed prefix');
+    }
+  }
+
+  async #request<T>(path: string, body: Readonly<Record<string, unknown>>, key: string): Promise<T> {
+    const response = await fetch(`${this.#baseUrl}${path}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${this.#token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json() as T & AdapterErrorPayload;
+    if (response.ok) return payload;
+    const code = payload.error?.code;
+    if (code === 'STORAGE_OBJECT_NOT_FOUND') throw new StorageObjectNotFoundError(key);
+    if (code === 'STORAGE_OBJECT_TOO_LARGE') throw new StorageObjectTooLargeError(key, Number(body.maximumBytes ?? 0));
+    throw new Error(`Storage reconciliation adapter request failed: ${code ?? String(response.status)}`);
   }
 }
 

@@ -93,6 +93,11 @@ export const taskResultSchema = z.discriminatedUnion('kind', [
     code: z.string().min(1),
     message: z.string().min(1),
   }).extend(simulationEnvelopeSchema.shape).strict(),
+  z.object({
+    kind: z.literal('canceled'),
+    code: z.literal('USER_CANCELED'),
+    message: z.string().min(1),
+  }).extend(simulationEnvelopeSchema.shape).strict(),
 ]);
 
 export type TaskResult = z.infer<typeof taskResultSchema>;
@@ -428,7 +433,14 @@ export const workerCommandResponseSchema = z.discriminatedUnion('command', [
   z.object({
     command: z.literal('claim_step'),
     ok: z.literal(true),
-    result: z.object({ stepAttemptId: z.string().min(1), fencingToken: z.number().int().positive() }).strict(),
+    result: z.discriminatedUnion('state', [
+      z.object({
+        state: z.literal('claimed'),
+        stepAttemptId: z.string().min(1),
+        fencingToken: z.number().int().positive(),
+      }).strict(),
+      z.object({ state: z.literal('completed'), output: z.unknown() }).strict(),
+    ]),
   }).strict(),
   z.object({ command: z.literal('complete_step'), ok: z.literal(true), result: z.object({ accepted: z.literal(true) }).strict() }).strict(),
   z.object({ command: z.literal('submit_candidate'), ok: z.literal(true), result: z.object({ accepted: z.literal(true) }).strict() }).strict(),

@@ -5,11 +5,13 @@ const runId = process.env.GENEWAY_RUN_ID ?? 'gate-0.1-local';
 if (!/^[a-zA-Z0-9._-]+$/.test(runId)) throw new Error('GENEWAY_RUN_ID contains unsafe path characters');
 const webPort = Number(process.env.GENEWAY_WEB_PORT ?? 3200);
 const controlPlanePort = Number(process.env.GENEWAY_CONTROL_PLANE_PORT ?? 3100);
+const controlPlaneSupervisorPort = Number(process.env.GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT ?? 3400);
 const workerHealthPort = Number(process.env.GENEWAY_WORKER_HEALTH_PORT ?? 3300);
 const workerSocketPath = process.env.GENEWAY_WORKER_SOCKET_PATH;
 const workerTokenFile = process.env.GENEWAY_WORKER_TOKEN_FILE;
 const workerInstanceId = process.env.GENEWAY_WORKER_INSTANCE_ID;
-if (!Number.isInteger(webPort) || !Number.isInteger(controlPlanePort) || !Number.isInteger(workerHealthPort)) throw new Error('GENEWAY ports must be integers');
+if (!Number.isInteger(webPort) || !Number.isInteger(controlPlanePort) || !Number.isInteger(controlPlaneSupervisorPort)
+  || !Number.isInteger(workerHealthPort)) throw new Error('GENEWAY ports must be integers');
 if (workerSocketPath === undefined || workerTokenFile === undefined || workerInstanceId === undefined) throw new Error('E2E Worker authority is required');
 if (!/^\/tmp\/gw-uds-[a-zA-Z0-9]+\/worker\.sock$/u.test(workerSocketPath)
   || !/^\/tmp\/gw-uds-[a-zA-Z0-9]+\/token$/u.test(workerTokenFile)
@@ -47,13 +49,14 @@ export default defineConfig({
   },
   projects: [
     { name: 'gate0.1', testMatch: /gate-0\.1\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
-    { name: 'gate0.2a-storage-thin', testMatch: /gate-0\.2a-storage-thin\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
-    { name: 'gate0.2a-evidence', testMatch: /gate-0\.2a-evidence\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
+    { name: 'gate0.2a-success', testMatch: /gate-0\.2a-(?:storage-thin|evidence|recovery)\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
+    { name: 'gate0.2a-negative', testMatch: /gate-0\.2a-negative\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
+    { name: 'gate0.2a-recovery-multiprocess', testMatch: /gate-0\.2a-recovery(?:-matrix)?\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
   ],
   webServer: [
     {
-      command: `cd .. && exec env GENEWAY_STORAGE_TARGET_ROLE=control-plane PORT=${String(controlPlanePort)} GENEWAY_WEB_PORT=${String(webPort)} bash scripts/with-storage.sh env GENEWAY_WORKER_SOCKET_PATH=${workerSocketPath} GENEWAY_WORKER_TOKEN_FILE=${workerTokenFile} ./node_modules/.bin/tsx scripts/e2e/start-e2e-service.ts control-plane`,
-      url: `http://127.0.0.1:${String(controlPlanePort)}/health`,
+      command: `cd .. && exec env GENEWAY_STORAGE_TARGET_ROLE=control-plane GENEWAY_START_STORAGE_RECONCILER=1 PORT=${String(controlPlanePort)} GENEWAY_WEB_PORT=${String(webPort)} bash scripts/with-storage.sh env GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT=${String(controlPlaneSupervisorPort)} GENEWAY_WORKER_SOCKET_PATH=${workerSocketPath} GENEWAY_WORKER_TOKEN_FILE=${workerTokenFile} GENEWAY_WORKER_LEASE_MS=1000 GENEWAY_E2E_HOOK_URL=http://127.0.0.1:${String(workerHealthPort)} GENEWAY_E2E_HOOK_TOKEN_FILE=${workerTokenFile} ./node_modules/.bin/tsx scripts/e2e/start-e2e-control-plane.ts`,
+      url: `http://127.0.0.1:${String(controlPlaneSupervisorPort)}/health`,
       timeout: 60_000,
       reuseExistingServer: false,
       stdout: 'pipe',

@@ -48,6 +48,17 @@ async function applyGateMigration(client: PoolClient): Promise<void> {
   }
 }
 
+async function applyRecoveryMigration(client: PoolClient): Promise<void> {
+  await client.query('BEGIN');
+  try {
+    await client.query(await migration('0004_gate_0_2a_recovery.sql'));
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
+}
+
 async function seedLegacyAuthority(client: PoolClient): Promise<void> {
   await client.query(`
     INSERT INTO tenants (id,name) VALUES ('tenant_a','Tenant A');
@@ -166,6 +177,77 @@ describe('0003 Gate 0.2A delivery/evidence migration', () => {
         .rejects.toThrow(/legacy result tables are read-only/u);
       await expect(client.query(`UPDATE claims SET text='changed' WHERE tenant_id='tenant_a' AND id='claim_published'`))
         .rejects.toThrow(/immutable/u);
+    });
+  });
+
+  it('0004 replaces anonymous report intent checks without dropping resource or audience binding', async () => {
+    await inIsolatedSchema(async (client) => {
+      await applyBase(client);
+      await seedLegacyAuthority(client);
+      await applyGateMigration(client);
+      await applyRecoveryMigration(client);
+      const constraints = await client.query<{ conname: string; definition: string }>(`SELECT conname,pg_get_constraintdef(oid) definition
+        FROM pg_constraint WHERE conrelid='report_publish_intents'::regclass AND contype='c'
+          AND conname IN (
+            'report_publish_intents_resource_scope_check',
+            'report_publish_intents_audience_check',
+            'report_publish_intents_state_check'
+          ) ORDER BY conname`);
+      expect(constraints.rows.map((row) => row.conname)).toEqual([
+        'report_publish_intents_audience_check',
+        'report_publish_intents_resource_scope_check',
+        'report_publish_intents_state_check',
+      ]);
+      expect(constraints.rows.find((row) => row.conname.endsWith('resource_scope_check'))?.definition)
+        .toMatch(/resource_scope.*artifact:.*root_artifact_id/u);
+      expect(constraints.rows.find((row) => row.conname.endsWith('audience_check'))?.definition)
+        .toMatch(/audience.*conversation:.*conversation_id/u);
+      expect(constraints.rows.find((row) => row.conname.endsWith('state_check'))?.definition)
+        .toMatch(/delete_pending.*deleted/u);
+
+      await client.query(`INSERT INTO outbox_events
+        (tenant_id,id,business_task_id,event_id,event_type,payload)
+        VALUES ('tenant_a','outbox_0004_report','task_run','event_0004_report','workflow.execute.requested','{}')`);
+      await client.query(`INSERT INTO execution_attempts
+        (tenant_id,id,business_task_id,execution_version,source_event_id,consumer,deployment_id,worker_instance_id,
+         status,fencing_token,lease_until)
+        VALUES ('tenant_a','attempt_0004_report','task_run',1,'event_0004_report','gate0.2a-worker','gate0.2a-local',
+          'worker-0004-report','running',1,now()+interval '1 minute')`);
+      await client.query(`UPDATE business_tasks SET current_execution_attempt_id='attempt_0004_report',execution_version=1,
+        execution_fencing_token=1,status='running' WHERE tenant_id='tenant_a' AND id='task_run'`);
+      await client.query(`INSERT INTO attempt_output_candidates
+        (tenant_id,id,business_task_id,execution_attempt_id,execution_version,fencing_token,worker_instance_id,
+         payload,payload_sha256,idempotency_key)
+        VALUES ('tenant_a','candidate_0004_report','task_run','attempt_0004_report',1,1,'worker-0004-report',
+          '{}','${hashC}','candidate-0004-report')`);
+
+      const insertReportIntent = (id: string, resourceScope: string, audience: string) => client.query(`INSERT INTO report_publish_intents
+        (tenant_id,id,business_task_id,execution_attempt_id,candidate_id,source_document_snapshot_id,root_artifact_id,
+         conversation_id,owner_user_id,resource_scope,data_class,audience,artifact_id,manifest_id,storage_bucket,
+         storage_key,template_id,template_sha256,render_input_sha256,size_bytes,content_sha256,status)
+        VALUES ('tenant_a',$1,'task_run','attempt_0004_report','candidate_0004_report','snapshot_a','artifact_source',
+          'conversation_a','user_a',$2,'C1',$3,'artifact_0004_report','manifest_0004_report','bucket-a',
+          'report/0004-key','gate0.2a-report/v1','${hashA}','${hashB}',256,'${hashC}','prepared')`, [
+        id, resourceScope, audience,
+      ]);
+
+      await expect(insertReportIntent('report_0004_bad_scope', 'artifact:wrong', 'conversation:conversation_a'))
+        .rejects.toThrow(/report_publish_intents_resource_scope_check/u);
+      await expect(insertReportIntent('report_0004_bad_audience', 'artifact:artifact_source', 'conversation:wrong'))
+        .rejects.toThrow(/report_publish_intents_audience_check/u);
+      await insertReportIntent('report_0004', 'artifact:artifact_source', 'conversation:conversation_a');
+      await client.query(`UPDATE report_publish_intents
+        SET status='reconcile_required',failure_code='UNPUBLISHED_REPORT_ORPHAN',state_version=2,updated_at=now()
+        WHERE tenant_id='tenant_a' AND id='report_0004'`);
+      await client.query(`UPDATE report_publish_intents
+        SET status='delete_pending',state_version=3,updated_at=now()
+        WHERE tenant_id='tenant_a' AND id='report_0004'`);
+      await client.query(`UPDATE report_publish_intents
+        SET status='deleted',state_version=4,deleted_at=now(),updated_at=now()
+        WHERE tenant_id='tenant_a' AND id='report_0004'`);
+      const transitioned = await client.query(`SELECT status,state_version::int version,(deleted_at IS NOT NULL) deleted
+        FROM report_publish_intents WHERE tenant_id='tenant_a' AND id='report_0004'`);
+      expect(transitioned.rows).toEqual([{ status: 'deleted', version: 4, deleted: true }]);
     });
   });
 

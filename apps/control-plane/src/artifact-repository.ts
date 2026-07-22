@@ -167,6 +167,7 @@ export class ArtifactRepository {
     };
     const requestDigest = digest(semanticRequest);
     return this.withTransaction(async (client) => {
+      await this.assertWritesOpen(client);
       await this.assertConversationOwned(client, input.principal, input.conversationId);
       const artifactId = id('artifact');
       const intentId = id('ingest');
@@ -220,21 +221,30 @@ export class ArtifactRepository {
         throw new GenewayError('INVALID_INGEST_TRANSITION', `Artifact ingest cannot transition from ${status} to ${input.nextStatus}`, 500);
       }
     }
-    const result = await this.pool.query<IntentRow>(`UPDATE artifact_ingest_intents
-      SET status=$4,state_version=state_version+1,failure_code=$5,
-          object_verified_at=CASE WHEN $4='object_verified' THEN now() ELSE object_verified_at END,
-          etag_observed=COALESCE($8,etag_observed),updated_at=now()
-      WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND state_version=$6 AND status=ANY($7::text[])
-      RETURNING *`, [
-      input.principal.tenantId, input.intent.id, input.principal.userId, input.nextStatus, input.failureCode ?? null,
-      input.intent.stateVersion, input.expectedStatuses, input.eTagObserved ?? null,
-    ]);
+    const transition = async (queryable: Pick<pg.Pool, 'query'> | PoolClient) => queryable.query<IntentRow>(`UPDATE artifact_ingest_intents
+        SET status=$4,state_version=state_version+1,failure_code=$5,
+            object_verified_at=CASE WHEN $4='object_verified' THEN now() ELSE object_verified_at END,
+            etag_observed=COALESCE($8,etag_observed),updated_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND state_version=$6 AND status=ANY($7::text[])
+        RETURNING *`, [
+        input.principal.tenantId, input.intent.id, input.principal.userId, input.nextStatus, input.failureCode ?? null,
+        input.intent.stateVersion, input.expectedStatuses, input.eTagObserved ?? null,
+      ]);
+    // Entering PUT authority is gated. Outcome writes for an already in-flight
+    // PUT must remain available while a backup barrier drains the system.
+    const result = input.nextStatus === 'put_inflight'
+      ? await this.withTransaction(async (client) => {
+          await this.assertWritesOpen(client);
+          return transition(client);
+        })
+      : await transition(this.pool);
     const row = result.rows[0];
     return row === undefined ? null : mapIntent(row);
   }
 
   async finalizeIntent(principal: Principal, intent: ArtifactIngestIntent, storage: Readonly<{ eTag: string | null }>): Promise<ArtifactIngestResponse> {
     return this.withTransaction(async (client) => {
+      await this.assertWritesOpen(client);
       const selected = await client.query<IntentRow>(
         'SELECT * FROM artifact_ingest_intents WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 FOR UPDATE',
         [principal.tenantId, intent.id, principal.userId],
@@ -294,6 +304,23 @@ export class ArtifactRepository {
       });
       return this.getReadyProjectionWithClient(client, principal, current.id);
     });
+  }
+
+  async assertWritesOpen(client: PoolClient): Promise<void> {
+    await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('geneway'),hashtext('storage-write-gate'))");
+    const barrier = await client.query('SELECT backup_set_id FROM platform_write_barriers WHERE active AND writes_blocked LIMIT 1');
+    if (barrier.rowCount !== 0) {
+      throw new GenewayError('BACKUP_BARRIER_ACTIVE', 'Artifact writes are paused for a verified backup checkpoint', 503);
+    }
+  }
+
+  async assertReadsOpen(): Promise<void> {
+    const barrier = await this.pool.query(
+      'SELECT backup_set_id FROM platform_write_barriers WHERE active AND reads_blocked LIMIT 1',
+    );
+    if (barrier.rowCount !== 0) {
+      throw new GenewayError('RESTORE_READ_GATE_ACTIVE', 'Artifact reads are unavailable until restore verification completes', 503);
+    }
   }
 
   async getReadyProjection(principal: Principal, intentId: string): Promise<ArtifactIngestResponse> {

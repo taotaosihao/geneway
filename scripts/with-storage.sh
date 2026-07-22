@@ -13,6 +13,7 @@ if [[ "${GENEWAY_MANAGED_TEST_INFRA:-0}" == '1' ]]; then
   : "${GENEWAY_POSTGRES_PORT:?managed test infra requires GENEWAY_POSTGRES_PORT}"
   : "${GENEWAY_S3_PORT:?managed test infra requires GENEWAY_S3_PORT}"
   : "${GENEWAY_STORAGE_ADAPTER_PORT:?managed test infra requires GENEWAY_STORAGE_ADAPTER_PORT}"
+  : "${GENEWAY_RECONCILIATION_ADAPTER_PORT:?managed test infra requires GENEWAY_RECONCILIATION_ADAPTER_PORT}"
   : "${DATABASE_URL:?managed test infra requires DATABASE_URL}"
   : "${GENEWAY_S3_ENDPOINT:?managed test infra requires GENEWAY_S3_ENDPOINT}"
   : "${COMPOSE_PROJECT_NAME:?managed test infra requires COMPOSE_PROJECT_NAME}"
@@ -23,6 +24,7 @@ else
   export GENEWAY_POSTGRES_PORT="$(pick_port)"
   export GENEWAY_S3_PORT="$(pick_port)"
   export GENEWAY_STORAGE_ADAPTER_PORT="$(pick_port)"
+  export GENEWAY_RECONCILIATION_ADAPTER_PORT="$(pick_port)"
   export DATABASE_URL="postgres://geneway:geneway@127.0.0.1:${GENEWAY_POSTGRES_PORT}/geneway_test"
   export GENEWAY_S3_ENDPOINT="http://127.0.0.1:${GENEWAY_S3_PORT}"
   export COMPOSE_PROJECT_NAME="geneway-storage-$$-$(date +%s)"
@@ -34,10 +36,14 @@ export GENEWAY_S3_ADMIN_ACCESS_KEY_ID="geneway-admin-${COMPOSE_PROJECT_NAME}"
 export GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY="$(random_secret)"
 export GENEWAY_S3_APP_ACCESS_KEY_ID="geneway-online-${COMPOSE_PROJECT_NAME}"
 export GENEWAY_S3_APP_SECRET_ACCESS_KEY="$(random_secret)"
+export GENEWAY_S3_RECONCILER_ACCESS_KEY_ID="geneway-reconciler-${COMPOSE_PROJECT_NAME}"
+export GENEWAY_S3_RECONCILER_SECRET_ACCESS_KEY="$(random_secret)"
 export GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID="geneway-oracle-${COMPOSE_PROJECT_NAME}"
 export GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY="$(random_secret)"
 export GENEWAY_STORAGE_ADAPTER_TOKEN="$(random_secret)"
 export GENEWAY_STORAGE_ADAPTER_URL="http://127.0.0.1:${GENEWAY_STORAGE_ADAPTER_PORT}"
+export GENEWAY_RECONCILIATION_ADAPTER_TOKEN="$(random_secret)"
+export GENEWAY_RECONCILIATION_ADAPTER_URL="http://127.0.0.1:${GENEWAY_RECONCILIATION_ADAPTER_PORT}"
 export GENEWAY_STORAGE_ALLOWED_PREFIX='tenants/tenant_local/artifacts/'
 
 compose=(docker compose -f scripts/docker-compose.yml)
@@ -66,8 +72,13 @@ env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C.UTF-8}
 "${compose[@]}" exec -T versitygw \
   versitygw admin --access "$GENEWAY_S3_ADMIN_ACCESS_KEY_ID" --secret "$GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY" \
   --endpoint-url http://127.0.0.1:7071 create-user \
-  --access "$GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID" --secret "$GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY" \
+  --access "$GENEWAY_S3_RECONCILER_ACCESS_KEY_ID" --secret "$GENEWAY_S3_RECONCILER_SECRET_ACCESS_KEY" \
   --role user --user-id 1002 --group-id 1002 --project-id 1002 >/dev/null
+"${compose[@]}" exec -T versitygw \
+  versitygw admin --access "$GENEWAY_S3_ADMIN_ACCESS_KEY_ID" --secret "$GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY" \
+  --endpoint-url http://127.0.0.1:7071 create-user \
+  --access "$GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID" --secret "$GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY" \
+  --role user --user-id 1003 --group-id 1003 --project-id 1003 >/dev/null
 
 "${compose[@]}" run --rm -T storage-provisioner ./node_modules/.bin/tsx scripts/provision-storage.ts >/dev/null
 "${compose[@]}" run --rm -T storage-provisioner ./node_modules/.bin/tsx scripts/verify-storage-permissions.ts >/dev/null
@@ -79,7 +90,7 @@ if "${compose[@]}" exec -T versitygw \
   exit 1
 fi
 
-"${compose[@]}" up -d storage-adapter storage-oracle >/dev/null
+"${compose[@]}" up -d --wait storage-adapter storage-reconciliation-adapter storage-oracle >/dev/null
 if ! GENEWAY_STORAGE_HEALTH_URL="${GENEWAY_STORAGE_ADAPTER_URL}/health" node --input-type=module - <<'NODE'
 const url = process.env.GENEWAY_STORAGE_HEALTH_URL;
 for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -94,6 +105,22 @@ NODE
 then
   "${compose[@]}" logs --no-color storage-adapter >&2
   exit 1
+fi
+
+"${compose[@]}" exec -T \
+  -e GENEWAY_STORAGE_ADAPTER_URL=http://storage-adapter:7400 \
+  -e GENEWAY_STORAGE_ADAPTER_TOKEN="$GENEWAY_STORAGE_ADAPTER_TOKEN" \
+  -e GENEWAY_STORAGE_ALLOWED_PREFIX="$GENEWAY_STORAGE_ALLOWED_PREFIX" \
+  storage-oracle ./node_modules/.bin/tsx scripts/verify-storage-adapter.ts >/dev/null
+
+"${compose[@]}" exec -T \
+  -e GENEWAY_RECONCILIATION_ADAPTER_URL=http://storage-reconciliation-adapter:7401 \
+  -e GENEWAY_RECONCILIATION_ADAPTER_TOKEN="$GENEWAY_RECONCILIATION_ADAPTER_TOKEN" \
+  -e GENEWAY_STORAGE_ALLOWED_PREFIX="$GENEWAY_STORAGE_ALLOWED_PREFIX" \
+  storage-oracle ./node_modules/.bin/tsx scripts/verify-reconciliation-adapter.ts >/dev/null
+
+if [[ "${GENEWAY_START_STORAGE_RECONCILER:-0}" == '1' ]]; then
+  "${compose[@]}" up -d storage-reconciler >/dev/null
 fi
 
 base_env=(
@@ -123,5 +150,10 @@ else
     GENEWAY_E2E_S3_BUCKET="$GENEWAY_S3_BUCKET" \
     GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID="$GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID" \
     GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY="$GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY" \
+    GENEWAY_RECONCILIATION_ADAPTER_URL="$GENEWAY_RECONCILIATION_ADAPTER_URL" \
+    GENEWAY_RECONCILIATION_ADAPTER_TOKEN="$GENEWAY_RECONCILIATION_ADAPTER_TOKEN" \
+    GENEWAY_STORAGE_ALLOWED_PREFIX="$GENEWAY_STORAGE_ALLOWED_PREFIX" \
+    GENEWAY_S3_ENDPOINT="$GENEWAY_S3_ENDPOINT" \
+    GENEWAY_S3_REGION="$GENEWAY_S3_REGION" \
     "$@"
 fi

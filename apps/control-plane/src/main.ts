@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { chmod, lstat, open, unlink } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
+import { parseE2eHookEndpoint, postE2eHook } from './e2e-hook-client.js';
 import { createControlPlane } from './index.js';
 import { createWorkerCommandApp } from './worker-command-server.js';
 
@@ -8,20 +9,14 @@ const databaseUrl = process.env.DATABASE_URL;
 if (databaseUrl === undefined) throw new Error('DATABASE_URL is required');
 const webPort = Number(process.env.GENEWAY_WEB_PORT ?? 3200);
 if (!Number.isInteger(webPort)) throw new Error('GENEWAY_WEB_PORT must be an integer');
-
-const { app, repository, artifactService } = await createControlPlane({
-  databaseUrl,
-  logger: true,
-  allowedOrigins: [`http://localhost:${String(webPort)}`, `http://127.0.0.1:${String(webPort)}`],
-});
 const workerSocketPath = process.env.GENEWAY_WORKER_SOCKET_PATH;
 const workerTokenFile = process.env.GENEWAY_WORKER_TOKEN_FILE;
-let workerApp: ReturnType<typeof createWorkerCommandApp> | null = null;
 if ((workerSocketPath === undefined) !== (workerTokenFile === undefined)) {
   throw new Error('Worker socket path and token file must be configured together');
 }
+
+let workerToken: string | null = null;
 if (workerSocketPath !== undefined && workerTokenFile !== undefined) {
-  if (artifactService === null) throw new Error('Worker command service requires configured artifact storage');
   if (!isAbsolute(workerSocketPath) || workerSocketPath.includes('\0') || Buffer.byteLength(workerSocketPath) > 100) {
     throw new Error('Worker socket path must be a short absolute Unix-domain socket path');
   }
@@ -32,14 +27,87 @@ if (workerSocketPath !== undefined && workerTokenFile !== undefined) {
     throw new Error('Worker token file must be an owned regular 0600 file with a bounded secret');
   }
   const tokenHandle = await open(workerTokenFile, constants.O_RDONLY | constants.O_NOFOLLOW);
-  let workerToken: string;
   try {
     workerToken = (await tokenHandle.readFile('utf8')).trim();
   } finally {
     await tokenHandle.close();
   }
   if (workerToken.length < 32 || /\s/u.test(workerToken)) throw new Error('Worker token must be a non-whitespace secret');
-  workerApp = createWorkerCommandApp({ repository, storage: artifactService.storage, token: workerToken, logger: true });
+}
+
+const e2eHookUrl = process.env.GENEWAY_E2E_HOOK_URL;
+const e2eHookTokenFile = process.env.GENEWAY_E2E_HOOK_TOKEN_FILE;
+if ((e2eHookUrl === undefined) !== (e2eHookTokenFile === undefined)) throw new Error('E2E hook URL and token file must be configured together');
+let e2eHookEndpoint: URL | null = null;
+if (e2eHookUrl !== undefined && e2eHookTokenFile !== undefined) {
+  if (workerToken === null || workerTokenFile === undefined) throw new Error('E2E hook requires Worker authority');
+  e2eHookEndpoint = parseE2eHookEndpoint({
+    url: e2eHookUrl,
+    nodeEnvironment: process.env.NODE_ENV,
+    tokenFile: e2eHookTokenFile,
+    expectedTokenFile: workerTokenFile,
+  });
+}
+
+async function reachE2eHook(payload: Readonly<Record<string, unknown>>): Promise<'continue' | 'inject_error'> {
+  if (e2eHookEndpoint === null || workerToken === null) return 'continue';
+  return postE2eHook(e2eHookEndpoint, workerToken, payload);
+}
+
+const { app, repository, artifactService } = await createControlPlane({
+  databaseUrl,
+  logger: true,
+  allowedOrigins: [`http://localhost:${String(webPort)}`, `http://127.0.0.1:${String(webPort)}`],
+  ...(e2eHookEndpoint === null ? {} : {
+    artifactServiceHooks: {
+      afterIngestIntentPutAuthorityCommitted: (hook: Readonly<Record<string, unknown>>) => reachE2eHook({
+        protocolVersion: 'geneway-e2e-hook/1',
+        hook: 'control-plane.after_ingest_intent_put_authority_committed',
+        ...hook,
+      }).then(() => undefined),
+      afterSourceObjectPut: (hook: Readonly<Record<string, unknown>>) => reachE2eHook({
+        protocolVersion: 'geneway-e2e-hook/1',
+        hook: 'control-plane.after_source_object_put',
+        ...hook,
+      }),
+    },
+  }),
+});
+
+let workerApp: ReturnType<typeof createWorkerCommandApp> | null = null;
+if (workerSocketPath !== undefined && workerTokenFile !== undefined && workerToken !== null) {
+  if (artifactService === null) throw new Error('Worker command service requires configured artifact storage');
+  const workerCommandHooks: Parameters<typeof createWorkerCommandApp>[0]['hooks'] = e2eHookEndpoint === null
+    ? undefined
+    : {
+        afterCompleteStepCommitted: async (hook) => {
+          const action = await reachE2eHook({
+            protocolVersion: 'geneway-e2e-hook/1',
+            hook: 'control-plane.after_complete_step_committed_before_response',
+            ...hook,
+          });
+          return action === 'inject_error' ? 'drop_response' : 'continue';
+        },
+        afterReportObjectVerified: async (hook) => {
+          await reachE2eHook({
+            protocolVersion: 'geneway-e2e-hook/1',
+            hook: 'control-plane.after_report_object_verified',
+            ...hook,
+          });
+        },
+      };
+  const leaseDurationMs = Number(process.env.GENEWAY_WORKER_LEASE_MS ?? 300_000);
+  if (!Number.isInteger(leaseDurationMs) || leaseDurationMs < 250 || leaseDurationMs > 900_000) {
+    throw new Error('GENEWAY_WORKER_LEASE_MS must be an integer between 250 and 900000');
+  }
+  workerApp = createWorkerCommandApp({
+    repository,
+    storage: artifactService.storage,
+    token: workerToken,
+    logger: true,
+    leaseDurationMs,
+    ...(workerCommandHooks === undefined ? {} : { hooks: workerCommandHooks }),
+  });
   try {
     await unlink(workerSocketPath);
   } catch (error) {

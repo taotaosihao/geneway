@@ -21,8 +21,36 @@ const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes)
 export type DownloadedArtifact = Readonly<{ artifact: AuthorizedArtifact; bytes: Uint8Array }>;
 type StoredObjectIdentity = Readonly<{ eTag: string | null }>;
 
+export type ArtifactServiceHooks = Readonly<{
+  afterIngestIntentPutAuthorityCommitted?: (input: Readonly<{
+    conversationId: string;
+    idempotencyKey: string;
+    ingestIntentId: string;
+    artifactId: string;
+    documentSnapshotId: string;
+    storageKey: string;
+    intentStatus: 'put_inflight';
+    stateVersion: number;
+  }>) => Promise<void>;
+  afterSourceObjectPut?: (input: Readonly<{
+    conversationId: string;
+    idempotencyKey: string;
+    ingestIntentId: string;
+    artifactId: string;
+    documentSnapshotId: string;
+    storageKey: string;
+    contentSha256: string;
+    eTag: string | null;
+    versionId: string | null;
+  }>) => Promise<'continue' | 'inject_error'>;
+}>;
+
 export class ArtifactService {
-  constructor(readonly repository: ArtifactRepository, readonly storage: ObjectStorage) {}
+  constructor(
+    readonly repository: ArtifactRepository,
+    readonly storage: ObjectStorage,
+    private readonly hooks: ArtifactServiceHooks = {},
+  ) {}
 
   async ingest(input: Readonly<{
     principal: Principal;
@@ -44,6 +72,18 @@ export class ArtifactService {
       });
       intent = claimed ?? await this.repository.getIntent(input.principal, intent.id);
       ownsPut = claimed !== null;
+      if (ownsPut) {
+        await this.hooks.afterIngestIntentPutAuthorityCommitted?.({
+          conversationId: intent.conversationId,
+          idempotencyKey: input.idempotencyKey,
+          ingestIntentId: intent.id,
+          artifactId: intent.artifactId,
+          documentSnapshotId: intent.documentSnapshotId,
+          storageKey: intent.storageKey,
+          intentStatus: 'put_inflight',
+          stateVersion: intent.stateVersion,
+        });
+      }
     }
 
     if (intent.status === 'ready') return this.repository.getReadyProjection(input.principal, intent.id);
@@ -64,12 +104,25 @@ export class ArtifactService {
     if (ownsPut) {
       try {
         try {
-          stored = await this.storage.putCreateOnly({
+          const created = await this.storage.putCreateOnly({
             key: intent.storageKey,
             bytes: input.upload.bytes,
             contentType: intent.mediaType,
             contentSha256: intent.contentSha256,
           });
+          stored = created;
+          const action = await this.hooks.afterSourceObjectPut?.({
+            conversationId: intent.conversationId,
+            idempotencyKey: input.idempotencyKey,
+            ingestIntentId: intent.id,
+            artifactId: intent.artifactId,
+            documentSnapshotId: intent.documentSnapshotId,
+            storageKey: intent.storageKey,
+            contentSha256: intent.contentSha256,
+            eTag: created.eTag,
+            versionId: created.versionId,
+          });
+          if (action === 'inject_error') throw new Error('E2E_PUT_RESPONSE_LOST');
         } catch (error) {
           if (!(error instanceof StorageObjectAlreadyExistsError)) throw error;
         }
@@ -125,6 +178,7 @@ export class ArtifactService {
   }
 
   async listSnapshots(principal: Principal, conversationId: string): Promise<readonly DocumentSnapshotProjection[]> {
+    await this.repository.assertReadsOpen();
     let records: readonly Awaited<ReturnType<ArtifactRepository['listSnapshotRecords']>>[number][];
     try {
       records = await this.repository.listSnapshotRecords(principal, conversationId);
@@ -169,6 +223,7 @@ export class ArtifactService {
   }
 
   async download(principal: Principal, artifactId: string): Promise<DownloadedArtifact> {
+    await this.repository.assertReadsOpen();
     const artifact = await this.repository.getAuthorizedArtifact(principal, artifactId);
     assertArtifactDownloadAllowed({ principal, artifact, expectedBucket: this.storage.bucket, now: new Date() });
     try {

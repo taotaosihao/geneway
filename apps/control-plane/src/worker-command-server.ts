@@ -32,7 +32,11 @@ import {
   renderReport,
   sha256TextBytes,
 } from '@geneway/evidence';
-import { StorageObjectAlreadyExistsError, type ObjectStorage } from '@geneway/storage';
+import {
+  StorageObjectAlreadyExistsError,
+  StorageObjectNotFoundError,
+  type ObjectStorage,
+} from '@geneway/storage';
 import { hashCanonical, readStoredWorkflowVersion } from '@geneway/workflow';
 import { buildApprovalSubject, type ControlPlaneRepository } from './repository.js';
 
@@ -40,6 +44,8 @@ const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
 const CONSUMER = 'gate0.2a-worker' as const;
 const DEPLOYMENT = 'gate0.2a-local' as const;
 const MAX_OBJECT_BYTES = 1_048_576;
+
+class DropWorkerCommandResponseError extends Error {}
 
 type AttemptContext = Readonly<{
   tenantId: string;
@@ -57,18 +63,71 @@ type AttemptContext = Readonly<{
   workerInstanceId: string;
 }>;
 
+type DeliverySelection = Readonly<{
+  tenant_id: string;
+  event_id: string;
+  business_task_id: string;
+  execution_version: string;
+  execution_fencing_token: string;
+  input_snapshot: unknown;
+  workflow_version_id: string;
+  workflow_hash: string;
+  canonicalization_version: 'RFC8785/JCS-1';
+  canonical_json: unknown;
+}>;
+
 type ReportIntent = Readonly<{
   id: string;
   artifactId: string;
   manifestId: string;
   storageBucket: string;
   storageKey: string;
+  status: 'prepared' | 'object_verified' | 'reconcile_required';
+}>;
+
+type ReportIntentRow = Readonly<{
+  id: string;
+  artifact_id: string;
+  manifest_id: string;
+  storage_bucket: string;
+  storage_key: string;
+  content_sha256: string;
+  execution_attempt_id: string;
+  candidate_id: string;
+  status: string;
 }>;
 
 type IdempotentWorkerCommand =
   | Extract<WorkerCommand, { command: 'claim_step' }>
   | Extract<WorkerCommand, { command: 'complete_step' }>
   | Extract<WorkerCommand, { command: 'fail_delivery' }>;
+
+export type WorkerCommandHooks = Readonly<{
+  afterCompleteStepCommitted?: (input: Readonly<{
+    taskId: string;
+    workerInstanceId: string;
+    deliveryId: string;
+    eventId: string;
+    executionAttemptId: string;
+    fencingToken: number;
+    stepId: string;
+    stepAttemptId: string;
+    stepFencingToken: number;
+    idempotencyKey: string;
+  }>) => Promise<'continue' | 'drop_response'>;
+  afterReportObjectVerified?: (input: Readonly<{
+    taskId: string;
+    workerInstanceId: string;
+    deliveryId: string;
+    eventId: string;
+    executionAttemptId: string;
+    fencingToken: number;
+    reportIntentId: string;
+    artifactId: string;
+    storageKey: string;
+    contentSha256: string;
+  }>) => Promise<void>;
+}>;
 
 function bearerMatches(header: string | undefined, expected: string): boolean {
   if (header === undefined || !header.startsWith('Bearer ')) return false;
@@ -81,9 +140,16 @@ export class WorkerCommandService {
   constructor(
     private readonly repository: ControlPlaneRepository,
     private readonly storage: ObjectStorage,
-  ) {}
+    private readonly leaseDurationMs = 300_000,
+    private readonly hooks: WorkerCommandHooks = {},
+  ) {
+    if (!Number.isInteger(leaseDurationMs) || leaseDurationMs < 250 || leaseDurationMs > 900_000) {
+      throw new Error('Worker lease duration must be an integer between 250 and 900000 milliseconds');
+    }
+  }
 
   async execute(command: WorkerCommand): Promise<WorkerCommandResponse> {
+    if (command.command !== 'session') await this.repository.assertPlatformOperational();
     switch (command.command) {
       case 'session':
         return workerCommandResponseSchema.parse({ command: 'session', ok: true, result: { authenticated: true } });
@@ -107,18 +173,12 @@ export class WorkerCommandService {
 
   private async claimDelivery(workerInstanceId: string): Promise<WorkerDelivery | null> {
     return this.withTransaction(async (client) => {
-      const selected = await client.query<{
-        tenant_id: string;
-        event_id: string;
-        business_task_id: string;
-        execution_version: string;
-        execution_fencing_token: string;
-        input_snapshot: unknown;
-        workflow_version_id: string;
-        workflow_hash: string;
-        canonicalization_version: 'RFC8785/JCS-1';
-        canonical_json: unknown;
-      }>(`SELECT o.tenant_id,o.event_id,o.business_task_id,t.execution_version::text,t.execution_fencing_token::text,
+      // Expired work is always considered before new work so a steady stream of
+      // queued tasks cannot starve recovery indefinitely.
+      await this.failOneExpiredUnauthorizedDelivery(client);
+      const reclaimed = await this.reclaimExpiredDelivery(client, workerInstanceId);
+      if (reclaimed !== null) return reclaimed;
+      const selected = await client.query<DeliverySelection>(`SELECT o.tenant_id,o.event_id,o.business_task_id,t.execution_version::text,t.execution_fencing_token::text,
         t.input_snapshot,t.workflow_version_id,t.workflow_hash,w.canonicalization_version,w.canonical_json
         FROM outbox_events o JOIN business_tasks t ON t.tenant_id=o.tenant_id AND t.id=o.business_task_id
         JOIN workflow_versions w ON w.tenant_id=t.tenant_id AND w.id=t.workflow_version_id
@@ -151,15 +211,15 @@ export class WorkerCommandService {
       if (!Number.isSafeInteger(executionVersion) || executionVersion < 1) throw new GenewayError('EXECUTION_VERSION_INVALID', 'Queued task has no valid execution version', 500);
       await client.query(`INSERT INTO execution_attempts
         (tenant_id,id,business_task_id,execution_version,source_event_id,consumer,deployment_id,worker_instance_id,status,fencing_token,lease_until)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,now()+interval '5 minutes')`, [
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,now()+($10::bigint * interval '1 millisecond'))`, [
         row.tenant_id, attemptId, row.business_task_id, executionVersion, row.event_id, CONSUMER, DEPLOYMENT,
-        workerInstanceId, fencingToken,
+        workerInstanceId, fencingToken, this.leaseDurationMs,
       ]);
       await client.query(`INSERT INTO outbox_deliveries
         (tenant_id,id,business_task_id,consumer,deployment_id,event_id,status,execution_attempt_id,worker_instance_id,fencing_token,lease_until)
-        VALUES ($1,$2,$3,$4,$5,$6,'leased',$7,$8,$9,now()+interval '5 minutes')`, [
+        VALUES ($1,$2,$3,$4,$5,$6,'leased',$7,$8,$9,now()+($10::bigint * interval '1 millisecond'))`, [
         row.tenant_id, deliveryId, row.business_task_id, CONSUMER, DEPLOYMENT, row.event_id,
-        attemptId, workerInstanceId, fencingToken,
+        attemptId, workerInstanceId, fencingToken, this.leaseDurationMs,
       ]);
       await client.query(`INSERT INTO inbox_events
         (tenant_id,consumer,deployment_id,event_id,delivery_id,business_task_id,execution_attempt_id,
@@ -180,22 +240,202 @@ export class WorkerCommandService {
         executionVersion,
         fencingToken,
       });
-      return {
-        tenantId: row.tenant_id,
-        taskId: row.business_task_id,
-        consumer: CONSUMER,
-        deploymentId: DEPLOYMENT,
-        workerInstanceId,
-        lease: { eventId: row.event_id, deliveryId, attemptId, fencingToken },
-        inputRef: resolvedTaskInputRefSchema.parse(row.input_snapshot),
-        workflow: {
-          id: row.workflow_version_id,
-          hash: row.workflow_hash,
-          canonicalizationVersion: row.canonicalization_version,
-          canonicalPayload: row.canonical_json,
-        },
-      };
+      return this.deliveryProjection(row, workerInstanceId, deliveryId, attemptId, fencingToken);
     });
+  }
+
+  private async failOneExpiredUnauthorizedDelivery(client: PoolClient): Promise<void> {
+    const selected = await client.query<{
+      tenant_id: string;
+      business_task_id: string;
+      attempt_id: string;
+      delivery_id: string;
+      event_id: string;
+      execution_fencing_token: string;
+    }>(`SELECT t.tenant_id,t.id business_task_id,a.id attempt_id,d.id delivery_id,d.event_id,
+      t.execution_fencing_token::text
+      FROM business_tasks t
+      JOIN execution_attempts a ON a.tenant_id=t.tenant_id AND a.id=t.current_execution_attempt_id
+      JOIN outbox_deliveries d ON d.tenant_id=a.tenant_id AND d.execution_attempt_id=a.id
+      JOIN inbox_events i ON i.tenant_id=d.tenant_id AND i.consumer=d.consumer AND i.event_id=d.event_id
+      WHERE t.status='running' AND a.status='running' AND d.status='leased'
+        AND i.status IN ('received','processing') AND (a.lease_until<=now() OR d.lease_until<=now())
+        AND d.consumer=$1 AND d.deployment_id=$2
+        AND (
+          NOT EXISTS (
+            SELECT 1 FROM approval_versions approval
+            WHERE approval.tenant_id=t.tenant_id AND approval.business_task_id=t.id
+              AND approval.status='approved' AND approval.expires_at>now()
+              AND approval.version=(SELECT max(latest.version) FROM approval_versions latest
+                WHERE latest.tenant_id=t.tenant_id AND latest.business_task_id=t.id)
+          )
+          OR NOT EXISTS (
+            SELECT 1 FROM delegated_capabilities capability
+            WHERE capability.tenant_id=t.tenant_id AND capability.business_task_id=t.id
+              AND capability.principal_id=t.requester_id AND capability.expires_at>now()
+          )
+        )
+      ORDER BY least(a.lease_until,d.lease_until),t.updated_at,t.id
+      FOR UPDATE OF t,a,d,i SKIP LOCKED LIMIT 1`, [CONSUMER, DEPLOYMENT]);
+    const row = selected.rows[0];
+    if (row === undefined) return;
+    const nextFence = Number(row.execution_fencing_token) + 1;
+    const failed = taskResultSchema.parse({
+      kind: 'failed',
+      code: 'EXECUTION_AUTHORITY_EXPIRED',
+      message: '任务执行权限在故障恢复前已过期。',
+      ...SIMULATION_ENVELOPE,
+    });
+    const attempt = await client.query(`UPDATE execution_attempts SET status='failed',completed_at=now(),
+      last_error='EXECUTION_AUTHORITY_EXPIRED' WHERE tenant_id=$1 AND id=$2 AND status='running'`, [
+      row.tenant_id, row.attempt_id,
+    ]);
+    const delivery = await client.query(`UPDATE outbox_deliveries SET status='failed',lease_until=now(),
+      last_error='EXECUTION_AUTHORITY_EXPIRED',updated_at=now()
+      WHERE tenant_id=$1 AND id=$2 AND status='leased'`, [row.tenant_id, row.delivery_id]);
+    const inbox = await client.query(`UPDATE inbox_events SET status='failed',processing_at=coalesce(processing_at,now()),
+      completed_at=now(),last_error='EXECUTION_AUTHORITY_EXPIRED'
+      WHERE tenant_id=$1 AND consumer=$2 AND event_id=$3 AND status IN ('received','processing')`, [
+      row.tenant_id, CONSUMER, row.event_id,
+    ]);
+    await client.query(`UPDATE business_task_steps SET status='failed',lease_until=null,updated_at=now()
+      WHERE tenant_id=$1 AND business_task_id=$2 AND status IN ('queued','running')`, [row.tenant_id, row.business_task_id]);
+    await client.query(`UPDATE report_publish_intents SET status='reconcile_required',state_version=state_version+1,
+      failure_code='EXECUTION_AUTHORITY_EXPIRED',updated_at=now()
+      WHERE tenant_id=$1 AND business_task_id=$2 AND status IN ('prepared','object_verified')`, [
+      row.tenant_id, row.business_task_id,
+    ]);
+    const task = await client.query(`UPDATE business_tasks SET status='failed',result=$3,
+      execution_fencing_token=$4,updated_at=now()
+      WHERE tenant_id=$1 AND id=$2 AND status='running' AND current_execution_attempt_id=$5
+        AND execution_fencing_token=$6`, [
+      row.tenant_id, row.business_task_id, failed, nextFence, row.attempt_id, Number(row.execution_fencing_token),
+    ]);
+    if (attempt.rowCount !== 1 || delivery.rowCount !== 1 || inbox.rowCount !== 1 || task.rowCount !== 1) {
+      throw new GenewayError('EXPIRED_AUTHORITY_CAS_CONFLICT', 'Expired execution authority changed before terminal cleanup', 409);
+    }
+    await this.appendEvent(client, row.tenant_id, row.business_task_id, 'business_task.failed', {
+      code: 'EXECUTION_AUTHORITY_EXPIRED',
+      attemptId: row.attempt_id,
+    });
+  }
+
+  private async reclaimExpiredDelivery(client: PoolClient, workerInstanceId: string): Promise<WorkerDelivery | null> {
+    const selected = await client.query<DeliverySelection & Readonly<{
+      prior_attempt_id: string;
+      delivery_id: string;
+      prior_worker_instance_id: string;
+      prior_fencing_token: string;
+    }>>(`SELECT o.tenant_id,o.event_id,o.business_task_id,t.execution_version::text,
+      t.execution_fencing_token::text,t.input_snapshot,t.workflow_version_id,t.workflow_hash,
+      w.canonicalization_version,w.canonical_json,a.id prior_attempt_id,d.id delivery_id,
+      a.worker_instance_id prior_worker_instance_id,a.fencing_token::text prior_fencing_token
+      FROM business_tasks t
+      JOIN execution_attempts a ON a.tenant_id=t.tenant_id AND a.id=t.current_execution_attempt_id
+      JOIN outbox_deliveries d ON d.tenant_id=a.tenant_id AND d.execution_attempt_id=a.id
+      JOIN inbox_events i ON i.tenant_id=d.tenant_id AND i.consumer=d.consumer AND i.event_id=d.event_id
+      JOIN outbox_events o ON o.tenant_id=d.tenant_id AND o.event_id=d.event_id AND o.business_task_id=d.business_task_id
+      JOIN workflow_versions w ON w.tenant_id=t.tenant_id AND w.id=t.workflow_version_id
+      WHERE t.status='running' AND a.status='running' AND d.status='leased'
+        AND i.status IN ('received','processing') AND (a.lease_until<=now() OR d.lease_until<=now())
+        AND o.event_type='workflow.execute.requested' AND d.consumer=$1 AND d.deployment_id=$2
+        AND EXISTS (
+          SELECT 1 FROM approval_versions approval
+          WHERE approval.tenant_id=t.tenant_id AND approval.business_task_id=t.id
+            AND approval.status='approved' AND approval.expires_at>now()
+            AND approval.version=(SELECT max(latest.version) FROM approval_versions latest
+              WHERE latest.tenant_id=t.tenant_id AND latest.business_task_id=t.id)
+        )
+        AND EXISTS (
+          SELECT 1 FROM delegated_capabilities capability
+          WHERE capability.tenant_id=t.tenant_id AND capability.business_task_id=t.id
+            AND capability.principal_id=t.requester_id AND capability.expires_at>now()
+        )
+      ORDER BY least(a.lease_until,d.lease_until),o.created_at,o.event_id
+      FOR UPDATE OF t,a,d,i,o SKIP LOCKED LIMIT 1`, [CONSUMER, DEPLOYMENT]);
+    const row = selected.rows[0];
+    if (row === undefined) return null;
+    await this.assertTaskExecutionAuthority(client, row.tenant_id, row.business_task_id, {
+      inputRef: resolvedTaskInputRefSchema.parse(row.input_snapshot),
+      workflowVersionId: row.workflow_version_id,
+      workflowHash: row.workflow_hash,
+    });
+    const executionVersion = Number(row.execution_version);
+    const fencingToken = Number(row.execution_fencing_token) + 1;
+    if (!Number.isSafeInteger(executionVersion) || executionVersion < 1 || !Number.isSafeInteger(fencingToken)) {
+      throw new GenewayError('EXECUTION_VERSION_INVALID', 'Expired task has invalid execution authority', 500);
+    }
+    const attemptId = id('attempt');
+    const prior = await client.query(`UPDATE execution_attempts SET status='superseded',completed_at=now(),
+      last_error='LEASE_EXPIRED_RECLAIMED' WHERE tenant_id=$1 AND id=$2 AND status='running'
+      AND worker_instance_id=$3 AND fencing_token=$4 AND lease_until<=now()`, [
+      row.tenant_id, row.prior_attempt_id, row.prior_worker_instance_id,
+      Number(row.prior_fencing_token),
+    ]);
+    if (prior.rowCount !== 1) throw new GenewayError('DELIVERY_RECLAIM_CONFLICT', 'Expired attempt changed before reclaim', 409);
+    await client.query(`INSERT INTO execution_attempts
+      (tenant_id,id,business_task_id,execution_version,source_event_id,consumer,deployment_id,worker_instance_id,status,fencing_token,lease_until)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,now()+($10::bigint * interval '1 millisecond'))`, [
+      row.tenant_id, attemptId, row.business_task_id, executionVersion, row.event_id, CONSUMER, DEPLOYMENT,
+      workerInstanceId, fencingToken, this.leaseDurationMs,
+    ]);
+    const delivery = await client.query(`UPDATE outbox_deliveries SET status='leased',execution_attempt_id=$4,
+      worker_instance_id=$5,fencing_token=$6,delivery_count=delivery_count+1,
+      lease_until=now()+($7::bigint * interval '1 millisecond'),last_error=null,updated_at=now()
+      WHERE tenant_id=$1 AND id=$2 AND event_id=$3 AND status='leased'
+        AND execution_attempt_id=$8 AND worker_instance_id=$9 AND fencing_token=$10 AND lease_until<=now()`, [
+      row.tenant_id, row.delivery_id, row.event_id, attemptId, workerInstanceId, fencingToken, this.leaseDurationMs,
+      row.prior_attempt_id, row.prior_worker_instance_id, Number(row.prior_fencing_token),
+    ]);
+    if (delivery.rowCount !== 1) throw new GenewayError('DELIVERY_RECLAIM_CONFLICT', 'Expired delivery changed before reclaim', 409);
+    const inbox = await client.query(`UPDATE inbox_events SET execution_attempt_id=$4,worker_instance_id=$5,
+      fencing_token=$6,status='received',received_at=now(),processing_at=null,completed_at=null,last_error=null
+      WHERE tenant_id=$1 AND consumer=$2 AND event_id=$3 AND status IN ('received','processing')
+        AND execution_attempt_id=$7 AND worker_instance_id=$8 AND fencing_token=$9`, [
+      row.tenant_id, CONSUMER, row.event_id, attemptId, workerInstanceId, fencingToken,
+      row.prior_attempt_id, row.prior_worker_instance_id, Number(row.prior_fencing_token),
+    ]);
+    if (inbox.rowCount !== 1) throw new GenewayError('DELIVERY_RECLAIM_CONFLICT', 'Inbox changed before reclaim', 409);
+    await client.query(`UPDATE business_task_steps SET status='queued',attempt_id=null,lease_until=null,output=null,updated_at=now()
+      WHERE tenant_id=$1 AND business_task_id=$2 AND status='running'`, [row.tenant_id, row.business_task_id]);
+    const task = await client.query(`UPDATE business_tasks SET current_execution_attempt_id=$3,
+      execution_fencing_token=$4,updated_at=now() WHERE tenant_id=$1 AND id=$2 AND status='running'
+      AND current_execution_attempt_id=$5 AND execution_fencing_token=$6`, [
+      row.tenant_id, row.business_task_id, attemptId, fencingToken, row.prior_attempt_id, Number(row.execution_fencing_token),
+    ]);
+    if (task.rowCount !== 1) throw new GenewayError('DELIVERY_RECLAIM_CONFLICT', 'Task changed before reclaim', 409);
+    await this.appendEvent(client, row.tenant_id, row.business_task_id, 'workflow.run_reclaimed', {
+      priorAttemptId: row.prior_attempt_id,
+      attemptId,
+      workerInstanceId,
+      executionVersion,
+      fencingToken,
+    });
+    return this.deliveryProjection(row, workerInstanceId, row.delivery_id, attemptId, fencingToken);
+  }
+
+  private deliveryProjection(
+    row: DeliverySelection,
+    workerInstanceId: string,
+    deliveryId: string,
+    attemptId: string,
+    fencingToken: number,
+  ): WorkerDelivery {
+    return {
+      tenantId: row.tenant_id,
+      taskId: row.business_task_id,
+      consumer: CONSUMER,
+      deploymentId: DEPLOYMENT,
+      workerInstanceId,
+      lease: { eventId: row.event_id, deliveryId, attemptId, fencingToken },
+      inputRef: resolvedTaskInputRefSchema.parse(row.input_snapshot),
+      workflow: {
+        id: row.workflow_version_id,
+        hash: row.workflow_hash,
+        canonicalizationVersion: row.canonicalization_version,
+        canonicalPayload: row.canonical_json,
+      },
+    };
   }
 
   private async readInput(command: Extract<WorkerCommand, { command: 'read_input' }>): Promise<Readonly<Record<string, unknown>>> {
@@ -240,10 +480,14 @@ export class WorkerCommandService {
     return { kind: 'document_snapshot', inputRef: context.inputRef, bytesBase64: Buffer.from(bytes).toString('base64') };
   }
 
-  private async claimStep(command: Extract<WorkerCommand, { command: 'claim_step' }>): Promise<Readonly<{ stepAttemptId: string; fencingToken: number }>> {
+  private async claimStep(command: Extract<WorkerCommand, { command: 'claim_step' }>): Promise<
+    | Readonly<{ state: 'claimed'; stepAttemptId: string; fencingToken: number }>
+    | Readonly<{ state: 'completed'; output: unknown }>
+  > {
     return this.idempotentWorkerMutation(command, async (client) => {
       const context = await this.requireAttempt(command, client);
       await this.lockCurrentAttempt(client, context);
+      await this.renewCurrentLease(client, context);
       const workflow = await client.query<{ canonical_json: unknown }>('SELECT canonical_json FROM workflow_versions WHERE tenant_id=$1 AND id=$2', [context.tenantId, context.workflowVersionId]);
       const parsed = readStoredWorkflowVersion({ id: context.workflowVersionId, hash: context.workflowHash, canonicalizationVersion: 'RFC8785/JCS-1', canonicalPayload: workflow.rows[0]?.canonical_json }).payload;
       const nodeIndex = parsed.nodes.findIndex((node) => node.id === command.stepId);
@@ -253,10 +497,17 @@ export class WorkerCommandService {
         const complete = await client.query("SELECT 1 FROM business_task_steps WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3 AND status='completed'", [context.tenantId, context.taskId, predecessor.id]);
         if (complete.rowCount !== 1) throw new GenewayError('STEP_DEPENDENCY_NOT_READY', 'Predecessor is not complete', 409);
       }
+      const checkpoint = await client.query<{ status: string; output: unknown; lease_until: Date | null }>(`SELECT status,output,lease_until
+        FROM business_task_steps WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3 FOR UPDATE`, [
+        context.tenantId, context.taskId, command.stepId,
+      ]);
+      const checkpointRow = checkpoint.rows[0];
+      if (checkpointRow?.status === 'completed') return { state: 'completed' as const, output: checkpointRow.output };
       const updated = await client.query<{ fencing_token: string }>(`UPDATE business_task_steps SET status='running',attempt_id=$4,
-        fencing_token=fencing_token+1,lease_until=now()+interval '5 minutes',updated_at=now()
-        WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3 AND status='queued' RETURNING fencing_token::text`, [
-        context.tenantId, context.taskId, command.stepId, command.stepAttemptId,
+        fencing_token=fencing_token+1,lease_until=now()+($5::bigint * interval '1 millisecond'),updated_at=now()
+        WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3
+          AND (status='queued' OR (status='running' AND lease_until<=now())) RETURNING fencing_token::text`, [
+        context.tenantId, context.taskId, command.stepId, command.stepAttemptId, this.leaseDurationMs,
       ]);
       const row = updated.rows[0];
       if (row === undefined) throw new GenewayError('STEP_CLAIM_CONFLICT', 'Step cannot be claimed', 409);
@@ -266,7 +517,7 @@ export class WorkerCommandService {
         fencingToken: Number(row.fencing_token),
         executionAttemptId: context.attemptId,
       });
-      return { stepAttemptId: command.stepAttemptId, fencingToken: Number(row.fencing_token) };
+      return { state: 'claimed' as const, stepAttemptId: command.stepAttemptId, fencingToken: Number(row.fencing_token) };
     });
   }
 
@@ -274,6 +525,7 @@ export class WorkerCommandService {
     await this.idempotentWorkerMutation(command, async (client) => {
       const context = await this.requireAttempt(command, client);
       await this.lockCurrentAttempt(client, context);
+      await this.renewCurrentLease(client, context);
       const updated = await client.query(`UPDATE business_task_steps SET status='completed',output=$7,updated_at=now()
         WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3 AND status='running'
           AND attempt_id=$4 AND fencing_token=$5 AND lease_until>now()
@@ -290,6 +542,37 @@ export class WorkerCommandService {
       });
       return { accepted: true };
     });
+    if (this.hooks.afterCompleteStepCommitted === undefined) return;
+    const identity = await this.repository.pool.query<{ business_task_id: string }>(`SELECT a.business_task_id
+      FROM execution_attempts a JOIN outbox_deliveries d
+        ON d.tenant_id=a.tenant_id AND d.execution_attempt_id=a.id AND d.business_task_id=a.business_task_id
+      WHERE a.id=$1 AND a.worker_instance_id=$2 AND a.fencing_token=$3
+        AND d.id=$4 AND d.event_id=$5 AND d.consumer=$6 AND d.deployment_id=$7`, [
+      command.attemptId,
+      command.workerInstanceId,
+      command.fencingToken,
+      command.deliveryId,
+      command.eventId,
+      CONSUMER,
+      DEPLOYMENT,
+    ]);
+    const taskId = identity.rows[0]?.business_task_id;
+    if (taskId === undefined || identity.rowCount !== 1) {
+      throw new GenewayError('STALE_OR_UNAUTHORIZED_WORKER_COMMAND', 'Worker command does not match a known delivery identity', 409);
+    }
+    const action = await this.hooks.afterCompleteStepCommitted({
+      taskId,
+      workerInstanceId: command.workerInstanceId,
+      deliveryId: command.deliveryId,
+      eventId: command.eventId,
+      executionAttemptId: command.attemptId,
+      fencingToken: command.fencingToken,
+      stepId: command.stepId,
+      stepAttemptId: command.stepAttemptId,
+      stepFencingToken: command.stepFencingToken,
+      idempotencyKey: command.idempotencyKey,
+    });
+    if (action === 'drop_response') throw new DropWorkerCommandResponseError();
   }
 
   private async submitCandidate(command: Extract<WorkerCommand, { command: 'submit_candidate' }>): Promise<void> {
@@ -404,22 +687,21 @@ export class WorkerCommandService {
     const reportBytes = renderReport(renderInput);
     const reportSha256 = sha256TextBytes(reportBytes);
     const intent = await this.prepareReportIntent(context, candidateId, reportBytes.byteLength, reportSha256, hashCanonical(renderInput));
-    try {
-      await this.storage.putCreateOnly({ key: intent.storageKey, bytes: reportBytes, contentType: 'text/markdown', contentSha256: reportSha256 });
-    } catch (error) {
-      if (!(error instanceof StorageObjectAlreadyExistsError)) throw error;
+    const verifiedNow = await this.ensureReportObject(context, candidateId, intent, reportBytes, reportSha256);
+    if (verifiedNow) {
+      await this.hooks.afterReportObjectVerified?.({
+        taskId: context.taskId,
+        workerInstanceId: context.workerInstanceId,
+        deliveryId: context.deliveryId,
+        eventId: context.eventId,
+        executionAttemptId: context.attemptId,
+        fencingToken: context.fencingToken,
+        reportIntentId: intent.id,
+        artifactId: intent.artifactId,
+        storageKey: intent.storageKey,
+        contentSha256: reportSha256,
+      });
     }
-    const reportHead = await this.storage.head(intent.storageKey);
-    const observedReport = await this.storage.getBytes(intent.storageKey, MAX_OBJECT_BYTES);
-    if (reportHead.sizeBytes !== reportBytes.byteLength || reportHead.contentType !== 'text/markdown'
-      || reportHead.contentSha256 !== reportSha256 || sha256TextBytes(observedReport) !== reportSha256) {
-      throw new GenewayError('REPORT_OBJECT_INTEGRITY_FAILED', 'Report object failed immutable verification', 409);
-    }
-    if (reportHead.eTag === null) throw new GenewayError('REPORT_ETAG_MISSING', 'Storage did not return an observed ETag for the report', 409);
-    await this.repository.pool.query(`UPDATE report_publish_intents SET status='object_verified',state_version=state_version+1,
-      etag_observed=$3,updated_at=now() WHERE tenant_id=$1 AND id=$2 AND status='prepared'`, [
-      context.tenantId, intent.id, reportHead.eTag,
-    ]);
     await this.publishTerminal({
       context,
       candidateId,
@@ -440,31 +722,244 @@ export class WorkerCommandService {
     });
   }
 
+  private async ensureReportObject(
+    context: AttemptContext,
+    candidateId: string,
+    initialIntent: ReportIntent,
+    reportBytes: Uint8Array,
+    reportSha256: string,
+  ): Promise<boolean> {
+    let intent = initialIntent;
+    if (intent.status === 'reconcile_required') {
+      try {
+        const [head, observed] = await Promise.all([
+          this.storage.head(intent.storageKey),
+          this.storage.getBytes(intent.storageKey, MAX_OBJECT_BYTES),
+        ]);
+        await this.assertReportObjectIntegrity(context, candidateId, intent.id, head, observed, reportBytes, reportSha256);
+        await this.markReportObjectVerified(context, candidateId, intent.id, head.eTag);
+        return true;
+      } catch (error) {
+        if (!(error instanceof StorageObjectNotFoundError)) throw error;
+        await this.markReportPutFailedConfirmed(context, candidateId, intent.id);
+        intent = await this.prepareReportIntent(context, candidateId, reportBytes.byteLength, reportSha256, '');
+      }
+    }
+
+    if (intent.status === 'object_verified') {
+      try {
+        const [head, observed] = await Promise.all([
+          this.storage.head(intent.storageKey),
+          this.storage.getBytes(intent.storageKey, MAX_OBJECT_BYTES),
+        ]);
+        await this.assertReportObjectIntegrity(context, candidateId, intent.id, head, observed, reportBytes, reportSha256);
+        return false;
+      } catch (error) {
+        if (error instanceof GenewayError && error.code === 'REPORT_OBJECT_INTEGRITY_FAILED') throw error;
+        await this.markReportReconciliationRequired(context, candidateId, intent.id, 'REPORT_STORAGE_OUTCOME_UNCERTAIN');
+        throw error;
+      }
+    }
+
+    try {
+      try {
+        await this.storage.putCreateOnly({
+          key: intent.storageKey,
+          bytes: reportBytes,
+          contentType: 'text/markdown',
+          contentSha256: reportSha256,
+        });
+      } catch (error) {
+        if (!(error instanceof StorageObjectAlreadyExistsError)) throw error;
+      }
+      const [head, observed] = await Promise.all([
+        this.storage.head(intent.storageKey),
+        this.storage.getBytes(intent.storageKey, MAX_OBJECT_BYTES),
+      ]);
+      await this.assertReportObjectIntegrity(context, candidateId, intent.id, head, observed, reportBytes, reportSha256);
+      await this.markReportObjectVerified(context, candidateId, intent.id, head.eTag);
+      return true;
+    } catch (error) {
+      if (error instanceof GenewayError && error.code === 'REPORT_OBJECT_INTEGRITY_FAILED') throw error;
+      await this.markReportReconciliationRequired(context, candidateId, intent.id, 'REPORT_STORAGE_OUTCOME_UNCERTAIN');
+      throw error;
+    }
+  }
+
+  private async assertReportObjectIntegrity(
+    context: AttemptContext,
+    candidateId: string,
+    intentId: string,
+    head: Awaited<ReturnType<ObjectStorage['head']>>,
+    observed: Uint8Array,
+    expected: Uint8Array,
+    expectedSha256: string,
+  ): Promise<void> {
+    if (head.sizeBytes === expected.byteLength && head.contentType === 'text/markdown'
+      && head.contentSha256 === expectedSha256 && observed.byteLength === expected.byteLength
+      && sha256TextBytes(observed) === expectedSha256) return;
+    await this.markReportIntegrityError(context, candidateId, intentId, 'REPORT_OBJECT_INTEGRITY_FAILED');
+    throw new GenewayError('REPORT_OBJECT_INTEGRITY_FAILED', 'Report object failed immutable verification', 409);
+  }
+
+  private async markReportObjectVerified(
+    context: AttemptContext,
+    candidateId: string,
+    intentId: string,
+    observedETag: string | null,
+  ): Promise<void> {
+    await this.withTransaction(async (client) => {
+      // Re-check the complete execution authority after the external S3 round
+      // trip. Cancellation/reclaim wins by invalidating this lock and the old
+      // Worker cannot revive a reconcile_required intent.
+      await this.lockCurrentAttempt(client, context);
+      const current = await client.query<{
+        execution_attempt_id: string;
+        candidate_id: string;
+        status: string;
+        etag_observed: string | null;
+      }>(`SELECT execution_attempt_id,candidate_id,status,etag_observed
+        FROM report_publish_intents WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, [
+        context.tenantId, intentId,
+      ]);
+      const row = current.rows[0];
+      if (row === undefined || row.execution_attempt_id !== context.attemptId || row.candidate_id !== candidateId) {
+        throw new GenewayError('REPORT_INTENT_CONFLICT', 'Report intent is no longer bound to the current execution', 409);
+      }
+      if (row.status === 'object_verified') {
+        // ETag is observation-only; raw bytes and SHA-256 were revalidated
+        // above and remain the immutable identity.
+        return;
+      }
+      const updated = await client.query(`UPDATE report_publish_intents
+        SET status='object_verified',state_version=state_version+1,etag_observed=$5,failure_code=null,updated_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND execution_attempt_id=$3 AND candidate_id=$4
+          AND status IN ('prepared','reconcile_required')`, [
+        context.tenantId, intentId, context.attemptId, candidateId, observedETag,
+      ]);
+      if (updated.rowCount !== 1) {
+        throw new GenewayError('REPORT_INTENT_CONFLICT', 'Report intent is no longer verifiable by this execution', 409);
+      }
+    });
+  }
+
+  private async markReportPutFailedConfirmed(context: AttemptContext, candidateId: string, intentId: string): Promise<void> {
+    await this.withTransaction(async (client) => {
+      await this.lockCurrentAttempt(client, context);
+      const updated = await client.query(`UPDATE report_publish_intents
+        SET status='put_failed_confirmed',state_version=state_version+1,
+            failure_code='REPORT_OBJECT_CONFIRMED_MISSING',updated_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND execution_attempt_id=$3 AND candidate_id=$4
+          AND status='reconcile_required'`, [context.tenantId, intentId, context.attemptId, candidateId]);
+      if (updated.rowCount !== 1) throw new GenewayError('REPORT_INTENT_CONFLICT', 'Report missing outcome could not be confirmed', 409);
+    });
+  }
+
+  private async markReportIntegrityError(
+    context: AttemptContext,
+    candidateId: string,
+    intentId: string,
+    failureCode: string,
+  ): Promise<void> {
+    await this.withTransaction(async (client) => {
+      await this.lockCurrentAttempt(client, context);
+      const updated = await client.query(`UPDATE report_publish_intents
+        SET status='integrity_error',state_version=state_version+1,failure_code=$5,updated_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND execution_attempt_id=$3 AND candidate_id=$4
+          AND status IN ('prepared','object_verified','reconcile_required')`, [
+        context.tenantId, intentId, context.attemptId, candidateId, failureCode,
+      ]);
+      if (updated.rowCount !== 1) throw new GenewayError('REPORT_INTENT_CONFLICT', 'Report integrity failure could not be persisted', 409);
+    });
+  }
+
+  private async markReportReconciliationRequired(
+    context: AttemptContext,
+    candidateId: string,
+    intentId: string,
+    failureCode: string,
+  ): Promise<void> {
+    await this.withTransaction(async (client) => {
+      await this.lockCurrentAttempt(client, context);
+      const updated = await client.query(`UPDATE report_publish_intents
+        SET status='reconcile_required',state_version=state_version+1,failure_code=$5,updated_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND execution_attempt_id=$3 AND candidate_id=$4
+          AND status IN ('prepared','object_verified')`, [
+        context.tenantId, intentId, context.attemptId, candidateId, failureCode,
+      ]);
+      if (updated.rowCount !== 1) {
+        const current = await client.query<{ status: string }>(
+          'SELECT status FROM report_publish_intents WHERE tenant_id=$1 AND id=$2',
+          [context.tenantId, intentId],
+        );
+        if (current.rows[0]?.status !== 'reconcile_required') {
+          throw new GenewayError('REPORT_INTENT_CONFLICT', 'Report intent could not retain its uncertain storage outcome', 409);
+        }
+      }
+    });
+  }
+
   private async prepareReportIntent(context: AttemptContext, candidateId: string, sizeBytes: number, contentSha256: string, renderInputSha256: string): Promise<ReportIntent> {
     return this.withTransaction(async (client) => {
       await this.lockCurrentAttempt(client, context);
-      const artifactId = id('artifact');
-      const intentId = id('report_intent');
-      const manifestId = id('manifest');
-      const storageKey = `tenants/${context.tenantId}/artifacts/${artifactId}/report.md`;
-      await client.query(`INSERT INTO report_publish_intents
-        (tenant_id,id,business_task_id,execution_attempt_id,candidate_id,source_document_snapshot_id,root_artifact_id,
-         conversation_id,owner_user_id,resource_scope,data_class,audience,artifact_id,manifest_id,storage_bucket,storage_key,
-         template_id,template_sha256,render_input_sha256,size_bytes,content_sha256,status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'C1',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'prepared')
-        ON CONFLICT (tenant_id,business_task_id) DO NOTHING`, [
-        context.tenantId, intentId, context.taskId, context.attemptId, candidateId,
-        context.inputRef.kind === 'document_snapshot' ? context.inputRef.documentSnapshotId : '',
-        context.inputRef.kind === 'document_snapshot' ? context.inputRef.artifactId : '',
-        context.conversationId, context.requesterId,
-        context.inputRef.kind === 'document_snapshot' ? context.inputRef.resourceScope : '',
-        `conversation:${context.conversationId}`, artifactId, manifestId, this.storage.bucket, storageKey,
-        REPORT_TEMPLATE_ID, REPORT_TEMPLATE_SHA256, renderInputSha256, sizeBytes, contentSha256,
-      ]);
-      const selected = await client.query<{ id: string; artifact_id: string; manifest_id: string; storage_bucket: string; storage_key: string; content_sha256: string }>('SELECT id,artifact_id,manifest_id,storage_bucket,storage_key,content_sha256 FROM report_publish_intents WHERE tenant_id=$1 AND business_task_id=$2 FOR UPDATE', [context.tenantId, context.taskId]);
-      const row = selected.rows[0];
+      await this.renewCurrentLease(client, context);
+      const selected = await client.query<ReportIntentRow>('SELECT id,artifact_id,manifest_id,storage_bucket,storage_key,content_sha256,execution_attempt_id,candidate_id,status FROM report_publish_intents WHERE tenant_id=$1 AND business_task_id=$2 FOR UPDATE', [context.tenantId, context.taskId]);
+      let row = selected.rows[0];
+      if (row === undefined) {
+        await this.assertPlatformWritesOpen(client);
+        const artifactId = id('artifact');
+        const intentId = id('report_intent');
+        const manifestId = id('manifest');
+        const storageKey = `tenants/${context.tenantId}/artifacts/${artifactId}/report.md`;
+        await client.query(`INSERT INTO report_publish_intents
+          (tenant_id,id,business_task_id,execution_attempt_id,candidate_id,source_document_snapshot_id,root_artifact_id,
+           conversation_id,owner_user_id,resource_scope,data_class,audience,artifact_id,manifest_id,storage_bucket,storage_key,
+           template_id,template_sha256,render_input_sha256,size_bytes,content_sha256,status)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'C1',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'prepared')
+          ON CONFLICT (tenant_id,business_task_id) DO NOTHING`, [
+          context.tenantId, intentId, context.taskId, context.attemptId, candidateId,
+          context.inputRef.kind === 'document_snapshot' ? context.inputRef.documentSnapshotId : '',
+          context.inputRef.kind === 'document_snapshot' ? context.inputRef.artifactId : '',
+          context.conversationId, context.requesterId,
+          context.inputRef.kind === 'document_snapshot' ? context.inputRef.resourceScope : '',
+          `conversation:${context.conversationId}`, artifactId, manifestId, this.storage.bucket, storageKey,
+          REPORT_TEMPLATE_ID, REPORT_TEMPLATE_SHA256, renderInputSha256, sizeBytes, contentSha256,
+        ]);
+        const created = await client.query<ReportIntentRow>('SELECT id,artifact_id,manifest_id,storage_bucket,storage_key,content_sha256,execution_attempt_id,candidate_id,status FROM report_publish_intents WHERE tenant_id=$1 AND business_task_id=$2 FOR UPDATE', [context.tenantId, context.taskId]);
+        row = created.rows[0];
+      }
       if (row === undefined || row.content_sha256 !== contentSha256) throw new GenewayError('REPORT_INTENT_CONFLICT', 'Task already has a different report publish intent', 409);
-      return { id: row.id, artifactId: row.artifact_id, manifestId: row.manifest_id, storageBucket: row.storage_bucket, storageKey: row.storage_key };
+      if (row.execution_attempt_id !== context.attemptId || row.candidate_id !== candidateId) {
+        const adopted = await client.query(`UPDATE report_publish_intents SET execution_attempt_id=$3,candidate_id=$4,
+          state_version=state_version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2
+          AND status IN ('prepared','object_verified','reconcile_required','put_failed_confirmed')`, [
+          context.tenantId, row.id, context.attemptId, candidateId,
+        ]);
+        if (adopted.rowCount !== 1) throw new GenewayError('REPORT_INTENT_ADOPTION_CONFLICT', 'Report intent cannot be adopted by the current attempt', 409);
+        const refreshed = await client.query<ReportIntentRow>('SELECT id,artifact_id,manifest_id,storage_bucket,storage_key,content_sha256,execution_attempt_id,candidate_id,status FROM report_publish_intents WHERE tenant_id=$1 AND id=$2', [context.tenantId, row.id]);
+        row = refreshed.rows[0];
+        if (row === undefined) throw new GenewayError('REPORT_INTENT_CONFLICT', 'Adopted report intent disappeared', 409);
+      }
+      if (row.status === 'put_failed_confirmed') {
+        await this.assertPlatformWritesOpen(client);
+        const reserved = await client.query(`UPDATE report_publish_intents
+          SET status='prepared',state_version=state_version+1,failure_code=null,updated_at=now()
+          WHERE tenant_id=$1 AND id=$2 AND execution_attempt_id=$3 AND candidate_id=$4
+            AND status='put_failed_confirmed'`, [context.tenantId, row.id, context.attemptId, candidateId]);
+        if (reserved.rowCount !== 1) throw new GenewayError('REPORT_INTENT_CONFLICT', 'Report retry reservation was lost', 409);
+        row = { ...row, status: 'prepared' };
+      }
+      if (!['prepared', 'object_verified', 'reconcile_required'].includes(row.status)) {
+        throw new GenewayError('REPORT_INTENT_CONFLICT', `Report intent is not publishable from state ${row.status}`, 409);
+      }
+      return {
+        id: row.id,
+        artifactId: row.artifact_id,
+        manifestId: row.manifest_id,
+        storageBucket: row.storage_bucket,
+        storageKey: row.storage_key,
+        status: row.status as ReportIntent['status'],
+      };
     });
   }
 
@@ -484,6 +979,7 @@ export class WorkerCommandService {
   }>): Promise<void> {
     await this.withTransaction(async (client) => {
       const { context } = input;
+      await this.assertPlatformWritesOpen(client);
       await this.lockCurrentAttempt(client, context);
       await this.assertTaskExecutionAuthority(client, context.tenantId, context.taskId, {
         inputRef: context.inputRef,
@@ -740,6 +1236,7 @@ export class WorkerCommandService {
       if (hashCanonical(current) !== hashCanonical(expected)) {
         throw new GenewayError('EXECUTION_CONTEXT_CHANGED', 'Execution authority changed while Worker input was being read', 409);
       }
+      await this.renewCurrentLease(client, current);
       const updated = await client.query(`UPDATE inbox_events SET status='processing',processing_at=coalesce(processing_at,now())
         WHERE tenant_id=$1 AND consumer=$2 AND event_id=$3 AND execution_attempt_id=$4
           AND worker_instance_id=$5 AND fencing_token=$6 AND status IN ('received','processing')`, [
@@ -850,13 +1347,54 @@ export class WorkerCommandService {
   }
 
   private async lockCurrentAttempt(client: PoolClient, context: AttemptContext): Promise<void> {
-    const current = await client.query(`SELECT 1 FROM business_tasks t JOIN execution_attempts a
-      ON a.tenant_id=t.tenant_id AND a.id=t.current_execution_attempt_id
-      WHERE t.tenant_id=$1 AND t.id=$2 AND t.status='running' AND a.id=$3 AND a.status='running'
-        AND a.worker_instance_id=$4 AND a.fencing_token=$5 AND t.execution_fencing_token=$5 FOR UPDATE OF t,a`, [
-      context.tenantId, context.taskId, context.attemptId, context.workerInstanceId, context.fencingToken,
+    const task = await client.query(`SELECT 1 FROM business_tasks
+      WHERE tenant_id=$1 AND id=$2 AND status='running' AND current_execution_attempt_id=$3
+        AND execution_fencing_token=$4 FOR UPDATE`, [
+      context.tenantId, context.taskId, context.attemptId, context.fencingToken,
     ]);
-    if (current.rowCount !== 1) throw new GenewayError('STALE_EXECUTION_ATTEMPT', 'Execution attempt is no longer current', 409);
+    if (task.rowCount !== 1) throw new GenewayError('STALE_EXECUTION_ATTEMPT', 'Execution attempt is no longer current', 409);
+    const attempt = await client.query(`SELECT 1 FROM execution_attempts
+      WHERE tenant_id=$1 AND id=$2 AND business_task_id=$3 AND status='running'
+        AND worker_instance_id=$4 AND fencing_token=$5 AND lease_until>now() FOR UPDATE`, [
+      context.tenantId, context.attemptId, context.taskId, context.workerInstanceId, context.fencingToken,
+    ]);
+    if (attempt.rowCount !== 1) throw new GenewayError('STALE_EXECUTION_ATTEMPT', 'Execution attempt is no longer current', 409);
+    const delivery = await client.query(`SELECT 1 FROM outbox_deliveries
+      WHERE tenant_id=$1 AND id=$2 AND business_task_id=$3 AND event_id=$4 AND execution_attempt_id=$5
+        AND consumer=$6 AND deployment_id=$7 AND worker_instance_id=$8 AND fencing_token=$9
+        AND status='leased' AND lease_until>now() FOR UPDATE`, [
+      context.tenantId, context.deliveryId, context.taskId, context.eventId, context.attemptId,
+      CONSUMER, DEPLOYMENT, context.workerInstanceId, context.fencingToken,
+    ]);
+    if (delivery.rowCount !== 1) throw new GenewayError('STALE_EXECUTION_ATTEMPT', 'Execution delivery is no longer current', 409);
+    const inbox = await client.query(`SELECT 1 FROM inbox_events
+      WHERE tenant_id=$1 AND consumer=$2 AND deployment_id=$3 AND event_id=$4 AND delivery_id=$5
+        AND business_task_id=$6 AND execution_attempt_id=$7 AND worker_instance_id=$8 AND fencing_token=$9
+        AND status IN ('received','processing') FOR UPDATE`, [
+      context.tenantId, CONSUMER, DEPLOYMENT, context.eventId, context.deliveryId,
+      context.taskId, context.attemptId, context.workerInstanceId, context.fencingToken,
+    ]);
+    if (inbox.rowCount !== 1) throw new GenewayError('STALE_EXECUTION_ATTEMPT', 'Execution inbox receipt is no longer current', 409);
+  }
+
+  private async renewCurrentLease(client: PoolClient, context: AttemptContext): Promise<void> {
+    const attempt = await client.query(`UPDATE execution_attempts
+      SET lease_until=now()+($6::bigint * interval '1 millisecond')
+      WHERE tenant_id=$1 AND id=$2 AND business_task_id=$3 AND worker_instance_id=$4
+        AND fencing_token=$5 AND status='running'`, [
+      context.tenantId, context.attemptId, context.taskId, context.workerInstanceId,
+      context.fencingToken, this.leaseDurationMs,
+    ]);
+    const delivery = await client.query(`UPDATE outbox_deliveries
+      SET lease_until=now()+($6::bigint * interval '1 millisecond'),updated_at=now()
+      WHERE tenant_id=$1 AND id=$2 AND business_task_id=$3 AND execution_attempt_id=$4
+        AND fencing_token=$5 AND status='leased'`, [
+      context.tenantId, context.deliveryId, context.taskId, context.attemptId,
+      context.fencingToken, this.leaseDurationMs,
+    ]);
+    if (attempt.rowCount !== 1 || delivery.rowCount !== 1) {
+      throw new GenewayError('LEASE_RENEWAL_CONFLICT', 'Execution lease could not be renewed', 409);
+    }
   }
 
   private async appendEvent(client: PoolClient, tenantId: string, taskId: string, eventType: string, payload: unknown): Promise<void> {
@@ -887,6 +1425,14 @@ export class WorkerCommandService {
       client.release();
     }
   }
+
+  private async assertPlatformWritesOpen(client: PoolClient): Promise<void> {
+    await client.query("SELECT pg_advisory_xact_lock_shared(hashtext('geneway'),hashtext('storage-write-gate'))");
+    const barrier = await client.query('SELECT backup_set_id FROM platform_write_barriers WHERE active AND writes_blocked LIMIT 1');
+    if (barrier.rowCount !== 0) {
+      throw new GenewayError('BACKUP_BARRIER_ACTIVE', 'Report writes are paused for a verified backup checkpoint', 503);
+    }
+  }
 }
 
 export function createWorkerCommandApp(input: Readonly<{
@@ -894,9 +1440,11 @@ export function createWorkerCommandApp(input: Readonly<{
   storage: ObjectStorage;
   token: string;
   logger?: boolean;
+  leaseDurationMs?: number;
+  hooks?: WorkerCommandHooks;
 }>): FastifyInstance {
   if (input.token.length < 32) throw new Error('Worker service token must contain at least 32 characters');
-  const service = new WorkerCommandService(input.repository, input.storage);
+  const service = new WorkerCommandService(input.repository, input.storage, input.leaseDurationMs, input.hooks);
   const app = Fastify({ logger: input.logger ?? false, trustProxy: false, bodyLimit: 256 * 1024 });
   app.addHook('onRequest', (request, _reply, done) => {
     if (request.headers.origin !== undefined) {
@@ -914,7 +1462,12 @@ export function createWorkerCommandApp(input: Readonly<{
     if ('deploymentId' in command && command.deploymentId !== DEPLOYMENT) throw new GenewayError('WORKER_DEPLOYMENT_DENIED', 'Worker deployment is not allowed', 403);
     return reply.status(200).send(await service.execute(command));
   });
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
+    if (error instanceof DropWorkerCommandResponseError) {
+      reply.hijack();
+      request.raw.socket.destroy();
+      return;
+    }
     if (error instanceof GenewayError) {
       void reply.status(error.statusCode).send({ error: { code: error.code, message: error.message } });
       return;

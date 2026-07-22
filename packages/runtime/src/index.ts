@@ -7,6 +7,8 @@ import {
   UNSUPPORTED_CLAIM_TEXT,
 } from '@geneway/evidence';
 
+export { parseE2eHookEndpoint, postE2eHook, type E2eHookAction } from './e2e-hook-client.js';
+
 export type FakeRuntimeContext = Readonly<{
   inputRef: ResolvedTaskInputRef;
   inputBytes?: Uint8Array;

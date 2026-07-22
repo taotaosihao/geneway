@@ -20,7 +20,10 @@ import {
 } from '@geneway/evidence';
 import { ControlPlaneRepository } from './repository.js';
 import { ArtifactRepository } from './artifact-repository.js';
-import { ArtifactService } from './artifact-service.js';
+import { ArtifactService, type ArtifactServiceHooks } from './artifact-service.js';
+
+export { StorageReconciler } from './storage-reconciler.js';
+export type { StorageReconciliationFinding, StorageReconciliationResult } from './storage-reconciler.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -54,11 +57,14 @@ export async function createControlPlane(options: Readonly<{
   allowedOrigins?: readonly string[];
   objectStorage?: ObjectStorage | null;
   principalResolver?: PrincipalResolver;
+  artifactServiceHooks?: ArtifactServiceHooks;
 }>): Promise<ControlPlane> {
   const repository = new ControlPlaneRepository(options.databaseUrl);
   const artifactRepository = new ArtifactRepository(repository.pool);
   const objectStorage = options.objectStorage === undefined ? createObjectStorageFromEnv() : options.objectStorage;
-  const artifactService = objectStorage === null ? null : new ArtifactService(artifactRepository, objectStorage);
+  const artifactService = objectStorage === null
+    ? null
+    : new ArtifactService(artifactRepository, objectStorage, options.artifactServiceHooks);
   await repository.ensureSystemSeed();
   const allowedOrigins = new Set(options.allowedOrigins ?? ['http://localhost:3200', 'http://127.0.0.1:3200']);
   const app = Fastify({ logger: options.logger ?? false, trustProxy: false, bodyLimit: MAX_MULTIPART_ENVELOPE_BYTES });
@@ -284,6 +290,11 @@ export async function createControlPlane(options: Readonly<{
   app.post('/api/business-tasks/:id/execute', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
     return repository.enqueueExecution(request.principal, params.id, idempotencyKey(request));
+  });
+
+  app.post('/api/business-tasks/:id/cancel', async (request) => {
+    const params = z.object({ id: z.string() }).parse(request.params);
+    return repository.cancelTask(request.principal, params.id, idempotencyKey(request));
   });
 
   app.get('/api/claims/:id', async (request) => {

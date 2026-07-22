@@ -109,7 +109,7 @@ describe('independent worker loop', () => {
             claimed = true;
             break;
           case 'read_input': result = { kind: 'fixture', inputRef: claimedDelivery.inputRef }; break;
-          case 'claim_step': result = { stepAttemptId: command.stepAttemptId, fencingToken: commands.length + 20 }; break;
+          case 'claim_step': result = { state: 'claimed', stepAttemptId: command.stepAttemptId, fencingToken: commands.length + 20 }; break;
           case 'complete_step': result = { accepted: true }; break;
           case 'submit_candidate':
             result = { accepted: true };
@@ -132,12 +132,16 @@ describe('independent worker loop', () => {
         signal: shutdown.signal,
         pollIntervalMs: 10,
         onReady: () => { lifecycle.push('ready'); },
+        onAfterDeliveryClaim: () => {
+          lifecycle.push('after_delivery_claim');
+          return Promise.resolve();
+        },
       });
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
 
-    expect(lifecycle.slice(0, 3)).toEqual(['session', 'ready', 'claim_delivery']);
+    expect(lifecycle.slice(0, 5)).toEqual(['session', 'ready', 'claim_delivery', 'after_delivery_claim', 'read_input']);
     expect(commands.filter((command) => command.command === 'claim_step')).toHaveLength(7);
     expect(commands.filter((command) => command.command === 'complete_step')).toHaveLength(7);
     const candidates = commands.filter((command): command is Extract<WorkerCommand, { command: 'submit_candidate' }> => command.command === 'submit_candidate');
@@ -154,6 +158,7 @@ describe('independent worker loop', () => {
     const claimedDelivery = documentDelivery();
     const commands: WorkerCommand[] = [];
     const serverErrors: unknown[] = [];
+    const shutdown = new AbortController();
 
     const server = createServer((request, response) => {
       void (async () => {
@@ -175,8 +180,11 @@ describe('independent worker loop', () => {
               bytesBase64: Buffer.from('wrong document bytes', 'utf8').toString('base64'),
             };
             break;
-          case 'fail_delivery': result = { accepted: true }; break;
-          case 'claim_step': result = { stepAttemptId: command.stepAttemptId, fencingToken: 1 }; break;
+          case 'fail_delivery':
+            result = { accepted: true };
+            shutdown.abort();
+            break;
+          case 'claim_step': result = { state: 'claimed', stepAttemptId: command.stepAttemptId, fencingToken: 1 }; break;
           case 'complete_step':
           case 'submit_candidate':
             result = { accepted: true };
@@ -193,13 +201,84 @@ describe('independent worker loop', () => {
 
     try {
       const client = new WorkerCommandClient(socketPath, TOKEN, identity);
-      await expect(runWorkerLoop(client, { pollIntervalMs: 10 })).rejects.toMatchObject({ code: 'WORKER_INPUT_HASH_MISMATCH' });
+      await runWorkerLoop(client, { signal: shutdown.signal, pollIntervalMs: 10 });
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
     }
 
     expect(commands.filter((command) => command.command === 'fail_delivery')).toHaveLength(1);
     expect(commands.some((command) => command.command === 'claim_step')).toBe(false);
+    expect(serverErrors).toEqual([]);
+  });
+
+  it('abandons an outcome-uncertain completion without reporting the delivery as failed', async () => {
+    const directory = await makeDirectory();
+    const socketPath = join(directory, 'commands.sock');
+    const claimedDelivery = delivery();
+    const commands: WorkerCommand[] = [];
+    const serverErrors: unknown[] = [];
+    const shutdown = new AbortController();
+    let claimed = false;
+    let abandonCode: string | undefined;
+
+    const server = createServer((request, response) => {
+      void (async () => {
+        const chunks: Uint8Array[] = [];
+        for await (const chunk of request) {
+          if (!(chunk instanceof Uint8Array)) throw new Error('Expected request bytes');
+          chunks.push(chunk);
+        }
+        const command = workerCommandSchema.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown);
+        commands.push(command);
+        if (command.command === 'complete_step') {
+          request.socket.destroy();
+          return;
+        }
+        let result: unknown;
+        switch (command.command) {
+          case 'session': result = { authenticated: true }; break;
+          case 'claim_delivery':
+            result = claimed ? null : claimedDelivery;
+            claimed = true;
+            break;
+          case 'read_input': result = { kind: 'fixture', inputRef: claimedDelivery.inputRef }; break;
+          case 'claim_step': result = { state: 'claimed', stepAttemptId: command.stepAttemptId, fencingToken: 31 }; break;
+          case 'submit_candidate':
+          case 'fail_delivery':
+            result = { accepted: true };
+            break;
+        }
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ command: command.command, ok: true, result }));
+      })().catch((error: unknown) => {
+        serverErrors.push(error);
+        response.destroy(error instanceof Error ? error : new Error('Test command server failed'));
+      });
+    });
+    await new Promise<void>((resolve, reject) => server.listen(socketPath, resolve).once('error', reject));
+
+    try {
+      const client = new WorkerCommandClient(socketPath, TOKEN, identity);
+      await runWorkerLoop(client, {
+        signal: shutdown.signal,
+        pollIntervalMs: 10,
+        onDeliveryAbandoned: (_delivery, error) => {
+          abandonCode = error.code;
+          shutdown.abort();
+        },
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+    }
+
+    const completions = commands.filter(
+      (command): command is Extract<WorkerCommand, { command: 'complete_step' }> => command.command === 'complete_step',
+    );
+    expect(completions).toHaveLength(3);
+    expect(completions[1]).toEqual(completions[0]);
+    expect(completions[2]).toEqual(completions[0]);
+    expect(commands.some((command) => command.command === 'fail_delivery')).toBe(false);
+    expect(abandonCode).toBe('WORKER_COMMAND_OUTCOME_UNCERTAIN');
     expect(serverErrors).toEqual([]);
   });
 });

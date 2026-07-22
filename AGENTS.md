@@ -4,8 +4,8 @@
 
 Before implementation, read:
 
-1. `/home/gewu/.codex/workflow/artifacts/20260722-003-geneway-gate-0-2a-artifact-evidence/team/sdd/slices/gate-0-2a-artifact-evidence/brief.md`
-2. `doc/plans/atlas-workflow/20260722-003-geneway-gate-0-2a-artifact-evidence/implementation-contract.final.md`
+1. `/home/gewu/.codex/workflow/artifacts/20260722-009-geneway-gate-0-2b-task-exception-projection/team/sdd/slices/gate-0-2b-task-exception-projection/brief.md`
+2. `doc/plans/atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md`
 
 The authority brief defines the stable Goal refs and the implementation contract is the only executable scope body. Read the technical appendix, UI ADR, roadmap, and spec pointer only when the current implementation question needs them; they cannot add acceptance, exit conditions, or implementation scope.
 
@@ -24,4 +24,4 @@ The authority brief defines the stable Goal refs and the implementation contract
 
 ## Current authority slice
 
-Gate R and Gate 0.1 are established baselines. The current contract and SDD authority cover Gate 0.2A only. Contract readiness does not itself authorize product-code implementation; explicit user authorization is still required.
+Gate R、Gate 0.1 和 Gate 0.2A 是已关闭基线。当前 SDD authority 与最终合同只覆盖 Gate 0.2B Task / Exception Projection；合同已就绪，但不自动授权产品代码实施。未经新的明确实施授权，不得开始 `0.2B.1` 或开放 shadow Capability。

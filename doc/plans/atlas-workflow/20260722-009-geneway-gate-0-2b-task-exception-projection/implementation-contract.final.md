@@ -22,9 +22,9 @@ product_ui_not_applicable_reason:
 ### Goal
 
 - `G0.2B-PRODUCT`：交付一个真实 served 产品纵切：用户进入“异常与待办”，看到版本固定且显著标记为模拟的产能进度落后记录，查看其 Evidence、认领待办、选择自动/单专家/专家团并点击“让小纬分析”；系统以冻结的异常版本和分析请求创建唯一绑定任务，展示固定 Workflow 与审批，执行后可在“小纬、我的任务、Workflow”路由恢复同一任务、WorkflowVersion/hash、ApprovalSubject digest、Evidence 和 Artifact。客户消息作者仍只有 `{user, xiaowei}`。
-- `G0.2B-AUTHORITY`：Control Plane Postgres 是 BusinessException、BusinessExceptionSourceSnapshot、认领、Exception–Task 绑定、BusinessTask、WorkflowVersion、Approval、Claim/Evidence/Lineage、Artifact metadata 和事件的唯一业务权威；UI、fixture、Worker、SSE、React Flow 和 TanStack Table 只做投影或执行适配。
+- `G0.2B-AUTHORITY`：Control Plane Postgres 是 BusinessException、BusinessExceptionSourceSnapshot、认领、Exception–Task 绑定、BusinessTask、WorkflowVersion、Approval、Claim/Evidence/Lineage、Artifact metadata 和事件的唯一业务权威；UI、fixture、Worker、SSE、React Flow 和轻量语义表格只做投影或执行适配。
 - `G0.2B-EXCEPTION`：使用合同固定的两个安全 fixture，主 happy path 为产能进度落后，设备报警只作为列表和 Evidence 覆盖；fixture 重放必须按 tenant/source/type/object/window 去重。`operations.exception-assist.v1` 只以 `shadow + fixture-only + fake` 方式预演，不得宣称已毕业或可作真实业务决策。
-- `G0.2B-QUERY`：异常与任务列表使用服务端授权、字段 allowlist、稳定 cursor、受限 filter/sort/page size；统一 `EnterpriseTable` 使用稳定 TanStack Table headless core，不能在客户端扩大查询、拼接隐含字段或导出缓存数据。
+- `G0.2B-QUERY`：异常与任务列表使用服务端授权、字段 allowlist、稳定 cursor、受限 filter/sort/page size；界面使用轻量原生语义表格和服务端分页，不引入重型表格框架，不能在客户端扩大查询、拼接隐含字段或导出缓存数据。
 - `G0.2B-RECOVERY`：路由从 Control Plane 的版本化快照恢复；异常页按 aggregateVersion 重取快照，任务页按 task event cursor 断线续传。刷新、重复/乱序事件、Worker checkpoint/reclaim 后仍关联同一 exception/task/workflow/hash；`canceled` 继续是终态，不提供“恢复已取消任务”。
 - `G0.2B-SCHEMA`：新增或修改的 public wire contract 继续以 Zod 4 为单一来源并生成 JSON Schema artifact；冻结 corpus 证明 Zod runtime 的接受/拒绝结果，并校验生成 artifact 的来源、ID/version、digest、required、enum、discriminator/ref 等结构，不引入 TypeBox、手写平行 schema、第二 validator 或可执行 TS Workflow，也不宣称跨 validator 的完整语义等价。
 - `G0.2B-SAFETY`：所有列表、详情、认领、分析、任务、Workflow、Evidence 与 Artifact 访问逐次校验 tenant/principal/resource/data/audience；403/404 不泄漏对象存在性；真实模型、GearJob、真实告警、生产写与外部网络调用全部 fail closed。
@@ -42,9 +42,9 @@ product_ui_not_applicable_reason:
 ### Likely affected surfaces
 
 - `apps/control-plane/**`：BusinessException、列表/详情/认领/分析绑定、任务列表与 Workflow 列表投影。
-- `apps/web/**`：四路由、`EnterpriseTable`、状态矩阵、深链恢复与异常详情。
+- `apps/web/**`：四路由、轻量语义表格、状态矩阵、深链恢复与异常详情。
 - `packages/contracts/**`：Zod public wire schema 与生成的 JSON Schema artifact。
-- `packages/ui/**`：Base UI wrapper、`EnterpriseTable` 和共用状态组件。
+- `packages/ui/**`：Base UI wrapper 和共用状态组件；列表表格保持轻量，不增加专用表格框架。
 - `packages/workflow/**`：固定 `operations.exception-assist.v1` TS 对象模板；Compiler、canonical JSON/hash 和 Interpreter 仍是唯一流程链。
 - `migrations/**`、`scripts/**`：Gate 0.2B migration、fixture loader、真实 E2E 与聚合门禁。
 
@@ -175,7 +175,7 @@ expertCatalogVersion + permissionCeiling + inputDigest
 | Route | 主要职责 |
 | --- | --- |
 | `/conversations/new?capability=solution.analysis.v1` | 保留当前小纬材料分析入口 |
-| `/conversations/:conversationId` | 受权恢复服务端 Conversation；异常分析创建/绑定的私有会话从此深链恢复，不依赖 localStorage |
+| `/conversations/:conversationId` | 受权恢复服务端 Conversation，并返回当前调用者仍可读的 `latestTaskId` 作为任务绑定；异常分析创建/绑定的私有会话从此深链恢复，不依赖 localStorage |
 | `/exceptions`、`/exceptions/:exceptionId` | 异常与待办列表、详情、Evidence、认领和“让小纬分析” |
 | `/tasks`、`/tasks/:taskId`、`/tasks/:taskId/workflow` | 我的任务列表、步骤时间线、审批、取消、Evidence、Artifact，以及绑定该任务的 Workflow/Approval 运行投影 |
 | `/workflows`、`/workflows/:workflowVersionId` | 当前 principal 可见任务所引用的 Workflow 列表；详情严格只展示不可变 WorkflowVersion 和只读 React Flow 图，不凭版本 ID 猜测 Task/Approval |
@@ -203,8 +203,9 @@ GET  /api/workflow-versions/:id
 | --- | --- |
 | 异常列表 | `id, exceptionType, summary, severity, status, resourceScope, dataClass, detectedAt, aggregateVersion, simulation` |
 | 异常详情 | 列表字段 + `sourceObjectRef, detectionWindow, acknowledgedAt, ownerDisplayState, analysisDisplayState, evidence[]`；`ownerDisplayState` 只能是 `unassigned|mine|assigned` |
+| Conversation 详情 | `id, messages, documentSnapshots, reportArtifacts, latestTaskId`；`latestTaskId` 只能指向当前 principal 重新授权后仍可读的最新任务，否则为 `null` |
 | 任务列表 | `id, capabilityId, status, title, conversationId, workflowVersion{id,hash}, approvalStatus, createdAt, updatedAt, aggregateVersion, simulation` |
-| 任务详情 | 列表字段 + `expertTargetDisplay, approval, steps, claims, evidence, artifacts, result, eventWatermark` |
+| 任务详情 | 列表字段 + `inputRef, expertTarget, approval, steps, claims, evidence, artifacts, lineage, result, eventWatermark, runtimeMode, businessDecisionAllowed`；这些兼容字段仍由服务端按当前 principal 重新授权并通过 strict projection 返回，`steps` 只公开 `id,status`，不公开内部 step output |
 | Workflow 列表 | `id, hash, capabilityVersionId, harnessVersionId, createdAt, simulation` |
 | Workflow 详情 | 列表字段 + `compilerVersion, canonicalizationVersion, featureSet, nodes, edges, permissionCeiling` |
 
@@ -214,9 +215,9 @@ public Zod projection 必须 `strict()`。任何 endpoint 都不得返回 `tenan
 
 `paginationCursor` 与任务事件 `eventCursor` 是两种独立类型，不可互换。列表第一页在 Postgres 创建 15 分钟 TTL 的 `querySnapshot`，冻结授权后的有序 ID/排序键，并绑定 tenant、principal、authorizationEpoch、canonical filter/sort/limit、`asOf`、`queryVersion` 和 field-mask version。服务端签发的不透明 cursor 仅含 snapshot id、position、expiry 和 HMAC；每一页仍重新授权。跨 principal/tenant/query、篡改、过期、authorizationEpoch 变化或 snapshot 缺失统一返回 `CURSOR_INVALID`，不降级成全量查询。`nextCursor` 与其他列表元数据不得暴露无权对象数量。
 
-异常详情使用 `ETag=aggregateVersion`；刷新或网络恢复后按条件 GET 重取完整快照，本 Gate 不增加异常 SSE。任务详情继续使用 append-only task event stream；`eventCursor` 是事件水位，按 event id 去重并允许断线续传。异常创建、acknowledge 与 analysis binding 各自必须把 aggregate mutation、对应 `business_exception_events`、audit 和 outbox 在一个 transaction 中提交。
+异常详情使用 `ETag=aggregateVersion`；刷新或网络恢复后按条件 GET 重取完整快照，本 Gate 不增加异常 SSE。任务详情继续使用 append-only task event stream；公开 `eventCursor` 是 task-local `sequence` 水位，按 event id 去重并允许断线续传，不能暴露全局数据库 cursor。规范查询参数为 `after`；为兼容 Gate 0.2A 客户端，暂时接受同义的 `afterCursor`，两者同时出现必须返回 400。异常创建、acknowledge 与 analysis binding 各自必须把 aggregate mutation、对应 `business_exception_events`、audit 和 outbox 在一个 transaction 中提交。
 
-TanStack Table 只消费该响应，负责交互状态，不在浏览器做跨页排序、权限过滤、数据导出或缓存行拼接。URL 保存允许的 filter/sort/cursor；tenant、principal、data class、audience 和字段 mask 永远不由客户端提交。
+轻量语义表格只消费该响应并提供当前页展示、筛选状态与 cursor 导航，不在浏览器做跨页排序、权限过滤、数据导出或缓存行拼接。URL 保存允许的 filter/sort/cursor；tenant、principal、data class、audience 和字段 mask 永远不由客户端提交。
 
 ### Minimum persistence changes
 
@@ -234,8 +235,8 @@ TanStack Table 只消费该响应，负责交互状态，不在浏览器做跨�
 
 | Slice | Owned behavior | Required checks and exit oracle | Allowed conclusion |
 | --- | --- | --- | --- |
-| `0.2B.1 task/workflow routes` | 用真实 API/DB 将已有任务、Conversation、Workflow/hash、ApprovalSubject digest、Evidence、Artifact 投影成 `/tasks`、`/workflows` 与 task-scoped Workflow 可刷新深链，并形成核心应用壳；不创建 BusinessException | `pnpm lint && pnpm typecheck && pnpm test:contracts && pnpm test:integration && pnpm test:e2e -- --project=gate0.2b-success gate-0.2b-task-workflow-routes.spec.ts`；同一 task/workflow/hash/approval digest 在 UI、API、Postgres 和 Worker 关联 | 只能声明 task/workflow routes ready |
-| `0.2B.2 exception fixture vertical` | migration、受控 fixture/source Evidence seed、BusinessException 去重/认领、querySnapshot、`EnterpriseTable`、固定 shadow Workflow、singleton analysis binding 和主 happy path | `pnpm test:contracts && pnpm test:integration && pnpm test:security && pnpm test:e2e -- --project=gate0.2b-success gate-0.2b-exception-flow.spec.ts`；浏览器看到两条 DB fixture，主异常只绑定一个任务并生成可重验 Evidence/Artifact | 只能声明 exception fixture vertical ready |
+| `0.2B.1 task/workflow routes` | 用真实 API/DB 将已有任务、Conversation、Workflow/hash、ApprovalSubject digest、Evidence、Artifact 投影成 `/tasks`、`/workflows` 与 task-scoped Workflow 可刷新深链，并形成核心应用壳；同时实现不含任何异常业务语义的通用 `querySnapshot`/cursor 基础和 task/workflow list consumer；不创建 BusinessException | `pnpm lint && pnpm typecheck && pnpm test:contracts && pnpm test:integration && pnpm test:e2e -- --project=gate0.2b-success gate-0.2b-task-workflow-routes.spec.ts`；同一 task/workflow/hash/approval digest 在 UI、API、Postgres 和 Worker 关联 | 只能声明 task/workflow routes ready |
+| `0.2B.2 exception fixture vertical` | migration、受控 fixture/source Evidence seed、BusinessException 去重/认领、复用既有 querySnapshot 的 exception consumer、轻量语义表格、固定 shadow Workflow、singleton analysis binding 和主 happy path | `pnpm test:contracts && pnpm test:integration && pnpm test:security && pnpm test:e2e -- --project=gate0.2b-success gate-0.2b-exception-flow.spec.ts`；浏览器看到两条 DB fixture，主异常只绑定一个任务并生成可重验 Evidence/Artifact | 只能声明 exception fixture vertical ready |
 | `0.2B.3 state/authenticity hardening` | 有界 route-state oracle、Zod corpus 与生成 artifact 结构 parity、403/404/409/5xx/offline/stale/canceled/reclaim、task SSE replay/乱序、独立视觉回归和 Gate 0.2A 回归 | `pnpm verify:gate0.2b.3`；每个状态有真实或明确负向 oracle，成功路径无浏览器数据拦截 | 只能声明 state/authenticity hardening ready |
 | `Gate 0.2B` | 上述三个 slice 的同一集成结果，不进入任何 Non-goal | `pnpm verify:gate0.2b` 聚合全部检查，任一子项失败非零 | 唯一允许的 Gate 通过结论 |
 
@@ -294,7 +295,7 @@ negative-only setup 只能通过 test fixture/repository command、服务启停�
 | AC-AUTHORITY-01 | BusinessException、认领、Exception–Task、Task、Workflow/hash、Approval、Evidence/Artifact 和事件只由 Control Plane Postgres 权威保存 | yes | integration queries、唯一约束、snapshot/cursor 与 restart test | goal:G0.2B-AUTHORITY |
 | AC-EXCEPTION-01 | 两个 fixture 精确匹配合同 hash；重复 seed 不新增异常，不更改版本/hash；设备报警只作覆盖且不能产生设备动作 | yes | fixture hash test、seed replay integration、negative route scan | goal:G0.2B-EXCEPTION |
 | AC-EXCEPTION-02 | 同一 sourceVersion 只有一个冻结 analysis binding；同语义重放返回既有任务，不同 requester/conversation/expert/权限/输入返回无泄漏 409；无 Evidence 不发布结果 | yes | idempotency/concurrency/cross-principal integration + E2E + publish-guard test | goal:G0.2B-EXCEPTION |
-| AC-QUERY-01 | 异常和任务列表执行服务端 filter/sort/cursor/limit/field mask；`EnterpriseTable` 不做客户端权威过滤或导出 | yes | contract/integration tests、浏览器翻页/筛选、403 field leak negative | goal:G0.2B-QUERY |
+| AC-QUERY-01 | 异常和任务列表执行服务端 filter/sort/cursor/limit/field mask；轻量语义表格不做客户端权威过滤、跨页重排或导出 | yes | contract/integration tests、浏览器翻页/筛选、403 field leak negative | goal:G0.2B-QUERY |
 | AC-RECOVERY-01 | 适用路由按有界 oracle 覆盖九类状态；异常按 aggregateVersion 重取，任务按 event cursor 续传，canceled 保持终态，Worker reclaim 不重复完成 | yes | success/negative/recovery Playwright projects + DB event assertions | goal:G0.2B-RECOVERY |
 | AC-SCHEMA-01 | Gate 新增/修改 public Zod schema 都生成 wire JSON Schema artifact；冻结 corpus 验证 Zod accept/reject，并校验 artifact 的结构 golden/digest，无第二 authored schema/validator | yes | `pnpm test:contracts` 中 runtime corpus + generated artifact structure parity | goal:G0.2B-SCHEMA |
 | AC-SAFETY-01 | 跨 tenant、越 resource/data/audience、撤权、非法 cursor/filter/sort、fixture 生产启用及未开放真实 runtime/connector 全部 fail closed | yes | `pnpm test:security` + negative E2E + dependency/egress scan | goal:G0.2B-SAFETY |
@@ -361,7 +362,7 @@ negative-only setup 只能通过 test fixture/repository command、服务启停�
 - Stop and ask the user when：主异常 fixture 需要改变为真实业务数据；需要跨仓修改 GearJob/Hive/Sharp Cell；需要开放外部写、真实模型、Hatchet、动态 Workflow 或新渠道；核心路由无法在不建立第二权威的情况下实现；Kimi 不可用本身不构成停工条件。
 - Treat the task as failed when：只交付 schema/migration/fixture/headless test；成功路径依赖浏览器 mock/静态数据；fixture 被展示为真实异常；同一异常/任务重复；权限或 403/404 泄漏；旧审批仍可执行；Gate 0.1/0.2A 回归失败；真实 provider/Connector/外部网络被调用；`pnpm verify:gate0.2b` 非零。
 - Required safe fallback: goal:G0.2B-SAFETY——保持 Gate 0.2A 基线可用；未完整通过的异常、列表、路由和 shadow Capability 全部保持 `NOT_OPEN`，不得以部分 UI 或 feature flag 默认开放。
-- Optional fallback notes：如果 TanStack Table 自身阻断，可保留服务端查询合同并用最小自有表格完成内部诊断，但不能宣布 AC-QUERY-01 或 Gate 0.2B 通过；需要用户决定是否修改产品依赖要求。
+- Optional fallback notes：如果轻量语义表格无法保持服务端查询、授权和 cursor 合同，必须保持相关路由未开放；不能用浏览器缓存、跨页拼接或客户端权限过滤替代服务端权威查询。
 
 ## Finding Provenance
 

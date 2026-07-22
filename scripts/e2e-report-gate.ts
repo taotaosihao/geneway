@@ -29,6 +29,7 @@ export const expectedE2eTests: readonly ExpectedE2eTest[] = [
   { project: 'gate0.2a-recovery-multiprocess', file: 'gate-0.2a-recovery-matrix.spec.ts', title: 'sse_snapshot_subscribe_gap' },
   { project: 'gate0.2a-recovery-multiprocess', file: 'gate-0.2a-recovery-matrix.spec.ts', title: 'control_plane_restart' },
   { project: 'gate0.2a-recovery-multiprocess', file: 'gate-0.2a-recovery-matrix.spec.ts', title: 'worker_restart' },
+  { project: 'gate0.2b-success', file: 'gate-0.2b-task-workflow-routes.spec.ts', title: '真实任务可从六条 served 路由恢复，并与 API、Postgres 和 Worker 保持同一关联' },
 ];
 
 const resultSchema = z.object({ status: z.string() }).passthrough();

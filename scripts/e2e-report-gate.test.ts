@@ -20,6 +20,7 @@ describe('E2E report gate', () => {
       reportFor('gate0.2a-recovery-multiprocess'),
       ['--project=gate0.2a-recovery-multiprocess'],
     ).expectedCount).toBe(13);
+    expect(validateE2eReport(reportFor('gate0.2b-success'), ['--project=gate0.2b-success']).expectedCount).toBe(1);
   });
 
   it('rejects a skipped test even when Playwright would exit zero', () => {

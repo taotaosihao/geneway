@@ -12,17 +12,15 @@
 pnpm dev-up
 ```
 
-该命令会自动启动 PostgreSQL、VersityGW、存储适配器与 reconciler、Control Plane、独立 UDS Worker 和 Vite Web。Web 只监听自动识别的局域网 IPv4（默认端口 `3200`），不会顺带监听 Tailscale、WireGuard 或 Docker bridge；Control Plane 默认监听 `127.0.0.1:3100`。默认端口被占用时会向后寻找空闲端口并打印最终地址，显式指定的端口被占用时则安全失败。例如：
+该命令会自动启动 PostgreSQL、VersityGW、存储适配器与 reconciler、Control Plane、独立 UDS Worker 和 Vite Web。Web 会同时监听本机活动网卡上实际存在的 `192.168/16` 与 `10/8` 地址（默认端口 `3200`），无需指定地址环境变量；不会监听 `0.0.0.0`，也会排除 Tailscale、Docker bridge、libvirt 和 VMware 地址。Control Plane 默认监听 `127.0.0.1:3100`。默认端口在任一入口被占用时会为全部入口一起向后寻找空闲端口并打印最终地址，显式指定的端口被占用时则安全失败。例如：
 
 ```text
-局域网（本机同样使用）：http://192.168.0.104:3200/conversations/new?capability=solution.analysis.v1
+局域网入口（本机同样使用）：
+  http://192.168.0.104:3200/conversations/new?capability=solution.analysis.v1
+  http://10.0.0.8:3200/conversations/new?capability=solution.analysis.v1
 ```
 
-如果主机路由复杂或自动识别的地址不是需要暴露的网卡，显式指定 RFC1918 局域网 IPv4（`10/8`、`172.16/12` 或 `192.168/16`）：
-
-```bash
-GENEWAY_DEV_LAN_HOST=192.168.0.104 pnpm dev-up
-```
+只会为当前主机实际拥有且处于活动状态的地址创建入口；终端会逐行打印最终可用地址。其他设备能否跨子网访问仍取决于主机防火墙、WireGuard `AllowedIPs`、VLAN ACL 和路由设置。
 
 也可以覆盖端口：
 
@@ -30,7 +28,7 @@ GENEWAY_DEV_LAN_HOST=192.168.0.104 pnpm dev-up
 GENEWAY_WEB_PORT=4200 GENEWAY_CONTROL_PLANE_PORT=4100 pnpm dev-up
 ```
 
-安全边界保持不变：只有 Web 监听选定的局域网 IPv4；Control Plane 仍只监听 `127.0.0.1`，PostgreSQL、VersityGW 和存储适配器使用随机 loopback 端口，Worker 只使用本机 `0600` token 和 Unix-domain socket。Control Plane 只接受本机地址和本次打印的局域网 Origin，不接受任意跨域写请求。
+安全边界保持不变：只有 Web 精确监听自动发现的 `192.168/16` 与 `10/8` 地址；Control Plane 仍只监听 `127.0.0.1`，PostgreSQL、VersityGW 和存储适配器使用随机 loopback 端口，Worker 只使用本机 `0600` token 和 Unix-domain socket。Control Plane 只接受本机地址和本次打印的局域网 Origin，不接受任意跨域写请求。
 
 按 `Ctrl+C` 会按 Web → Worker → Control Plane 的顺序停止进程，并删除本次临时数据库、对象存储卷、网络和 Worker 凭据。该环境只用于开发与验收；停止后数据不会保留，也不会启动真实模型、ERP/MES Connector 或生产写操作。
 

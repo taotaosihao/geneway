@@ -2,19 +2,18 @@ import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
 const HELP = `用法: pnpm dev-up
 
-启动一次性的 geneway 本地验收栈，并把 Web 暴露到局域网：
-  Web                  <局域网 IPv4>:3200（默认，占用时自动顺延）
+启动一次性的 geneway 本地验收栈，并把 Web 暴露到本机可用的 192.168/16 与 10/8 网络：
+  Web                  <局域网 IPv4>:3200（全部入口共用，占用时自动顺延）
   Control Plane        127.0.0.1:3100（默认，占用时自动顺延）
   PostgreSQL / storage 随机 loopback 端口
   Worker               本机 Unix-domain socket
 
 环境变量：
-  GENEWAY_DEV_LAN_HOST           覆盖自动识别的局域网 IPv4
   GENEWAY_WEB_PORT               覆盖 Web 端口
   GENEWAY_CONTROL_PLANE_PORT     覆盖 Control Plane 端口
 
@@ -27,60 +26,58 @@ function parsePort(environment, name, fallback) {
   return value;
 }
 
-function assertUsableIpv4(value, source) {
-  if (!net.isIPv4(value)) throw new Error(`${source} must be an IPv4 address`);
+function isDefaultLanIpv4(value) {
+  if (!net.isIPv4(value)) return false;
   const [first, second] = value.split('.').map(Number);
-  const isPrivate = first === 10
-    || (first === 172 && second !== undefined && second >= 16 && second <= 31)
-    || (first === 192 && second === 168);
-  if (!isPrivate) {
-    throw new Error(`${source} must be an RFC1918 private IPv4 address`);
-  }
-  return value;
+  return first === 10 || (first === 192 && second === 168);
 }
 
-function detectLanHost() {
-  let routes;
-  try {
-    routes = execFileSync('ip', ['-4', 'route', 'show', 'default'], { encoding: 'utf8' });
-  } catch (error) {
-    throw new Error('Unable to inspect the default IPv4 route; set GENEWAY_DEV_LAN_HOST explicitly', { cause: error });
-  }
-  const sourceAddress = routes.match(/\bsrc\s+(\d{1,3}(?:\.\d{1,3}){3})\b/u)?.[1];
-  if (sourceAddress !== undefined) return assertUsableIpv4(sourceAddress, 'Detected LAN host');
+const EXCLUDED_INTERFACE = /^(?:br-|cni|docker|flannel|kube|podman|veth|virbr|vmnet)/u;
 
-  const device = routes.match(/\bdev\s+(\S+)\b/u)?.[1];
-  if (device === undefined || !/^[A-Za-z0-9_.:-]+$/u.test(device)) {
-    throw new Error('Default IPv4 route has no safe device or source address; set GENEWAY_DEV_LAN_HOST explicitly');
+export function parseLanHosts(addressOutput) {
+  const hosts = [];
+  for (const line of addressOutput.split('\n')) {
+    const match = line.match(/^\d+:\s+([^@\s]+)(?:@\S+)?\s+inet\s+(\d{1,3}(?:\.\d{1,3}){3})\//u);
+    if (match === null) continue;
+    const [, interfaceName, address] = match;
+    if (interfaceName === undefined || address === undefined || EXCLUDED_INTERFACE.test(interfaceName) || !isDefaultLanIpv4(address)) continue;
+    if (!hosts.includes(address)) hosts.push(address);
   }
+  hosts.sort((left, right) => {
+    const leftPriority = left.startsWith('192.168.') ? 0 : 1;
+    const rightPriority = right.startsWith('192.168.') ? 0 : 1;
+    return leftPriority - rightPriority || left.localeCompare(right, 'en');
+  });
+  if (hosts.length === 0) {
+    throw new Error('No usable 192.168/16 or 10/8 address found on an active non-virtual interface');
+  }
+  return hosts;
+}
+
+function detectLanHosts() {
   let addresses;
   try {
-    addresses = execFileSync('ip', ['-o', '-4', 'address', 'show', 'dev', device, 'scope', 'global'], { encoding: 'utf8' });
+    addresses = execFileSync('ip', ['-o', '-4', 'address', 'show', 'up', 'scope', 'global'], { encoding: 'utf8' });
   } catch (error) {
-    throw new Error(`Unable to inspect IPv4 addresses for ${device}; set GENEWAY_DEV_LAN_HOST explicitly`, { cause: error });
+    throw new Error('Unable to inspect active IPv4 addresses', { cause: error });
   }
-  const address = addresses.match(/\binet\s+(\d{1,3}(?:\.\d{1,3}){3})\//u)?.[1];
-  if (address === undefined) throw new Error(`No global IPv4 address found on ${device}; set GENEWAY_DEV_LAN_HOST explicitly`);
-  return assertUsableIpv4(address, 'Detected LAN host');
+  return parseLanHosts(addresses);
 }
 
-function readConfiguration(environment) {
+export function readConfiguration(environment, lanHosts = detectLanHosts()) {
   const webPort = parsePort(environment, 'GENEWAY_WEB_PORT', 3200);
   const controlPlanePort = parsePort(environment, 'GENEWAY_CONTROL_PLANE_PORT', 3100);
   if (webPort === controlPlanePort) throw new Error('GENEWAY_WEB_PORT and GENEWAY_CONTROL_PLANE_PORT must be different');
-  const lanHost = environment.GENEWAY_DEV_LAN_HOST === undefined
-    ? detectLanHost()
-    : assertUsableIpv4(environment.GENEWAY_DEV_LAN_HOST, 'GENEWAY_DEV_LAN_HOST');
   const localOrigins = [`http://localhost:${String(webPort)}`, `http://127.0.0.1:${String(webPort)}`];
-  const publicOrigin = `http://${lanHost}:${String(webPort)}`;
+  const publicOrigins = lanHosts.map((host) => `http://${host}:${String(webPort)}`);
   return {
-    lanHost,
-    webBindHost: lanHost,
+    lanHosts,
+    webBindHosts: lanHosts,
     webPort,
     controlPlaneBindHost: '127.0.0.1',
     controlPlanePort,
-    allowedWebOrigins: [...localOrigins, publicOrigin],
-    publicUrl: `${publicOrigin}/conversations/new?capability=solution.analysis.v1`,
+    allowedWebOrigins: [...localOrigins, ...publicOrigins],
+    publicUrls: publicOrigins.map((origin) => `${origin}/conversations/new?capability=solution.analysis.v1`),
   };
 }
 
@@ -95,8 +92,11 @@ function minimalEnvironment() {
 
 async function portIsAvailable(host, port) {
   const server = net.createServer();
-  const available = await new Promise((resolve) => {
-    server.once('error', () => resolve(false));
+  const available = await new Promise((resolve, reject) => {
+    server.once('error', (error) => {
+      if (error.code === 'EADDRINUSE') resolve(false);
+      else reject(error);
+    });
     server.listen(port, host, resolve);
   });
   if (available === false) return false;
@@ -104,11 +104,18 @@ async function portIsAvailable(host, port) {
   return true;
 }
 
-async function resolvePort(host, preferredPort, explicit, label) {
-  if (await portIsAvailable(host, preferredPort)) return preferredPort;
-  if (explicit) throw new Error(`${label} port ${host}:${String(preferredPort)} is unavailable`);
+async function portIsAvailableOnAll(hosts, port) {
+  for (const host of hosts) {
+    if (!await portIsAvailable(host, port)) return false;
+  }
+  return true;
+}
+
+async function resolvePort(hosts, preferredPort, explicit, label) {
+  if (await portIsAvailableOnAll(hosts, preferredPort)) return preferredPort;
+  if (explicit) throw new Error(`${label} port ${hosts.join(', ')}:${String(preferredPort)} is unavailable`);
   for (let port = preferredPort + 1; port <= Math.min(preferredPort + 99, 65_535); port += 1) {
-    if (await portIsAvailable(host, port)) return port;
+    if (await portIsAvailableOnAll(hosts, port)) return port;
   }
   throw new Error(`No available ${label} port found from ${String(preferredPort)} to ${String(preferredPort + 99)}`);
 }
@@ -156,9 +163,9 @@ async function waitFor(check, description, timeoutMs, child) {
   throw new Error(`Timed out waiting for ${description}`);
 }
 
-function startProcess(command, args, environment) {
+function startProcess(command, args, environment, cwd = repositoryRoot) {
   return spawn(command, args, {
-    cwd: repositoryRoot,
+    cwd,
     env: environment,
     stdio: 'inherit',
     detached: true,
@@ -180,8 +187,8 @@ async function main() {
   }
 
   const [controlPlanePort, webPort] = await Promise.all([
-    resolvePort('127.0.0.1', configuration.controlPlanePort, process.env.GENEWAY_CONTROL_PLANE_PORT !== undefined, 'Control Plane'),
-    resolvePort(configuration.webBindHost, configuration.webPort, process.env.GENEWAY_WEB_PORT !== undefined, 'Web'),
+    resolvePort(['127.0.0.1'], configuration.controlPlanePort, process.env.GENEWAY_CONTROL_PLANE_PORT !== undefined, 'Control Plane'),
+    resolvePort(configuration.webBindHosts, configuration.webPort, process.env.GENEWAY_WEB_PORT !== undefined, 'Web'),
   ]);
   configuration = readConfiguration({
     ...process.env,
@@ -200,7 +207,7 @@ async function main() {
 
   let controlPlane;
   let worker;
-  let web;
+  let webs = [];
   let stopping = false;
   let shutdownRequested = false;
   let fatalError;
@@ -235,7 +242,7 @@ async function main() {
     if (stopping) return;
     stopping = true;
     process.stdout.write('\n正在停止 geneway 开发环境…\n');
-    await stopProcess(web, 5_000);
+    for (const web of [...webs].reverse()) await stopProcess(web, 5_000);
     await stopProcess(worker, 5_000);
     await stopProcess(controlPlane, 20_000);
     if (!authorityDirectory.startsWith('/tmp/geneway-dev-')) throw new Error('Refusing to clean an unexpected authority directory');
@@ -289,24 +296,26 @@ async function main() {
       return receipt.ready === true && receipt.workerInstanceId === workerInstanceId;
     }, 'Worker readiness', 20_000, worker)) === 'shutdown') return;
 
-    process.stdout.write('启动局域网 Web…\n');
-    web = startProcess('pnpm', ['--filter', '@geneway/web', 'dev'], {
+    process.stdout.write(`启动 ${String(configuration.webBindHosts.length)} 个局域网 Web 入口…\n`);
+    webs = configuration.webBindHosts.map((host) => startProcess('./node_modules/.bin/vite', [], {
       ...minimalEnvironment(),
       NODE_ENV: 'development',
       GENEWAY_RUN_ID: runId,
-      GENEWAY_WEB_HOST: configuration.webBindHost,
+      GENEWAY_WEB_HOST: host,
       GENEWAY_WEB_PORT: String(configuration.webPort),
       GENEWAY_CONTROL_PLANE_PORT: String(configuration.controlPlanePort),
-    });
-    watch('Web', web);
-    if (await waitForLifecycle(waitFor(
-      async () => (await fetch(`http://${configuration.webBindHost}:${String(configuration.webPort)}/health`)).ok,
-      'Web',
+    }, `${repositoryRoot}/apps/web`));
+    webs.forEach((web, index) => watch(`Web ${configuration.webBindHosts[index]}`, web));
+    const webReadiness = Promise.all(configuration.webBindHosts.map((host, index) => waitFor(
+      async () => (await fetch(`http://${host}:${String(configuration.webPort)}/health`)).ok,
+      `Web ${host}`,
       30_000,
-      web,
-    )) === 'shutdown') return;
+      webs[index],
+    )));
+    if (await waitForLifecycle(webReadiness) === 'shutdown') return;
 
-    process.stdout.write(`\n✓ geneway 开发环境已启动\n\n局域网（本机同样使用）：${configuration.publicUrl}\n\nWeb 只监听 ${configuration.lanHost}；按 Ctrl+C 停止并清理全部临时数据。\n`);
+    const displayedUrls = configuration.publicUrls.map((url) => `  ${url}`).join('\n');
+    process.stdout.write(`\n✓ geneway 开发环境已启动\n\n局域网入口（本机同样使用）：\n${displayedUrls}\n\nWeb 只监听 ${configuration.lanHosts.join('、')}；按 Ctrl+C 停止并清理全部临时数据。\n`);
     const outcome = await Promise.race([fatal.then(() => 'fatal'), shutdown.then(() => 'shutdown')]);
     if (outcome === 'fatal') throw fatalError;
   } finally {
@@ -317,4 +326,4 @@ async function main() {
   }
 }
 
-await main();
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

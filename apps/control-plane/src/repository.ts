@@ -1,16 +1,32 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import pg, { type PoolClient } from 'pg';
 import {
+  approvalProjectionSchema,
+  conversationProjectionSchema,
   GenewayError,
   SIMULATION_ENVELOPE,
   isGenewayError,
   resolvedTaskInputRefSchema,
+  taskListItemSchema,
+  taskListResponseSchema,
+  taskEventProjectionSchema,
   taskResultSchema,
   taskSnapshotSchema,
+  workflowDetailProjectionSchema,
+  workflowListItemSchema,
+  workflowListResponseSchema,
   type CreateTaskInput,
+  type ApprovalProjection,
+  type ConversationProjection,
   type Principal,
   type ResolvedTaskInputRef,
+  type TaskListQuery,
+  type TaskListResponse,
+  type TaskEventProjection,
   type TaskSnapshot,
+  type WorkflowDetailProjection,
+  type WorkflowListQuery,
+  type WorkflowListResponse,
 } from '@geneway/contracts';
 import {
   FIXTURE_REF,
@@ -89,6 +105,8 @@ type TaskRow = {
   execution_version: string;
   current_execution_attempt_id: string | null;
   execution_fencing_token: string;
+  created_at: Date;
+  updated_at: Date;
 };
 
 type ApprovalRow = {
@@ -101,6 +119,80 @@ type ApprovalRow = {
   requester_id: string;
   expires_at: Date;
 };
+
+type QuerySnapshotRow = {
+  id: string;
+  query_kind: 'business_tasks' | 'workflow_versions';
+  authorization_epoch: string;
+  canonical_query: JsonObject;
+  query_version: string;
+  field_mask_version: string;
+  as_of: Date;
+  expires_at: Date;
+};
+
+type WorkflowVersionRow = {
+  id: string;
+  workflow_hash: string;
+  canonicalization_version: 'RFC8785/JCS-1';
+  canonical_json: unknown;
+  created_at: Date;
+};
+
+type PaginationCursorPayload = Readonly<{
+  snapshotId: string;
+  position: number;
+  expiresAt: number;
+}>;
+
+const TASK_LIST_QUERY_VERSION = 'business-tasks.list.v1';
+const TASK_LIST_FIELD_MASK_VERSION = 'business-tasks.list.public.v1';
+const WORKFLOW_LIST_QUERY_VERSION = 'workflow-versions.list.v1';
+const WORKFLOW_LIST_FIELD_MASK_VERSION = 'workflow-versions.list.public.v1';
+const QUERY_SNAPSHOT_TTL_MS = 15 * 60 * 1_000;
+const TASK_PROJECTION_AUTHORIZATION_SQL = `
+  t.requester_id=$2
+  AND EXISTS (
+    SELECT 1 FROM roles role_binding
+    WHERE role_binding.tenant_id=t.tenant_id AND role_binding.user_id=$2 AND role_binding.role='solution_reviewer'
+  )
+  AND EXISTS (
+    SELECT 1 FROM conversations owned_conversation
+    WHERE owned_conversation.tenant_id=t.tenant_id AND owned_conversation.id=t.conversation_id
+      AND owned_conversation.user_id=$2
+  )
+  AND (
+    (
+      coalesce(t.input_snapshot->>'kind','fixture')='fixture'
+      AND EXISTS (
+        SELECT 1 FROM resource_scopes readable_scope
+        WHERE readable_scope.tenant_id=t.tenant_id AND readable_scope.user_id=$2
+          AND readable_scope.resource_scope=t.input_snapshot->>'fixtureRef'
+      )
+    )
+    OR (
+      t.input_snapshot->>'kind'='document_snapshot'
+      AND EXISTS (
+        SELECT 1 FROM document_snapshots readable_snapshot
+        JOIN artifacts readable_artifact
+          ON readable_artifact.tenant_id=readable_snapshot.tenant_id
+          AND readable_artifact.id=readable_snapshot.artifact_id
+        WHERE readable_snapshot.tenant_id=t.tenant_id
+          AND readable_snapshot.id=t.input_snapshot->>'documentSnapshotId'
+          AND readable_snapshot.artifact_id=t.input_snapshot->>'artifactId'
+          AND readable_snapshot.manifest_id=t.input_snapshot->>'manifestId'
+          AND readable_snapshot.content_sha256=t.input_snapshot->>'contentSha256'
+          AND readable_snapshot.simulation_profile=t.input_snapshot->>'simulationProfile'
+          AND readable_snapshot.profile_registry_version=t.input_snapshot->>'profileRegistryVersion'
+          AND readable_snapshot.resource_scope=t.input_snapshot->>'resourceScope'
+          AND readable_snapshot.data_class=t.input_snapshot->>'dataClass'
+          AND ('conversation:' || readable_snapshot.conversation_id)=t.input_snapshot->>'audience'
+          AND readable_snapshot.conversation_id=t.conversation_id
+          AND readable_snapshot.created_by=$2
+          AND readable_artifact.owner_user_id=$2
+      )
+    )
+  )`;
 
 export type CreatedTask = Readonly<{
   taskId: string;
@@ -122,9 +214,12 @@ function normalizeStoredInput(value: JsonObject): ResolvedTaskInputRef {
 
 export class ControlPlaneRepository {
   readonly pool: pg.Pool;
+  private readonly cursorHmacSecret: string;
 
-  constructor(connectionString: string) {
+  constructor(connectionString: string, cursorHmacSecret: string) {
+    if (cursorHmacSecret.length < 32) throw new Error('GENEWAY_CURSOR_HMAC_SECRET must contain at least 32 characters');
     this.pool = new Pool({ connectionString, max: 10 });
+    this.cursorHmacSecret = cursorHmacSecret;
   }
 
   async close(): Promise<void> {
@@ -141,6 +236,7 @@ export class ControlPlaneRepository {
   async resetForTest(): Promise<void> {
     await this.pool.query(`TRUNCATE TABLE
       platform_write_barriers,backup_sets,storage_orphan_tombstones,
+      query_snapshot_items,query_snapshots,
       report_publish_intents,lineage_records,evidence_links,evidence_items,claims,worker_command_receipts,attempt_output_candidates,
       inbox_events,outbox_deliveries,execution_attempts,
       audit_events,document_snapshots,artifact_states,artifact_manifests,artifacts,artifact_ingest_intents,
@@ -169,12 +265,113 @@ export class ControlPlaneRepository {
     }));
   }
 
-  async getConversation(principal: Principal, conversationId: string): Promise<JsonObject> {
-    const conversation = await this.pool.query('SELECT id,created_at FROM conversations WHERE tenant_id=$1 AND id=$2 AND user_id=$3', [principal.tenantId, conversationId, principal.userId]);
-    const row = conversation.rows[0] as JsonObject | undefined;
-    if (row === undefined) throw new GenewayError('CONVERSATION_NOT_FOUND', 'Conversation was not found', 404);
-    const messages = await this.pool.query('SELECT id,author,body,created_at FROM messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at,id', [principal.tenantId, conversationId]);
-    return { ...row, messages: messages.rows };
+  async getConversation(principal: Principal, conversationId: string): Promise<ConversationProjection> {
+    return this.withTransaction(async (client) => {
+      const conversation = await client.query<{ id: string; created_at: Date }>('SELECT id,created_at FROM conversations WHERE tenant_id=$1 AND id=$2 AND user_id=$3', [principal.tenantId, conversationId, principal.userId]);
+      const row = conversation.rows[0];
+      if (row === undefined) throw new GenewayError('CONVERSATION_NOT_FOUND', 'Conversation was not found', 404);
+      const messages = await client.query<{ id: string; author: 'user' | 'xiaowei'; body: string; created_at: Date }>('SELECT id,author,body,created_at FROM messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at,id', [principal.tenantId, conversationId]);
+      const taskCandidates = await client.query<{ id: string }>(`SELECT id FROM business_tasks
+        WHERE tenant_id=$1 AND conversation_id=$2 AND requester_id=$3 ORDER BY updated_at DESC,id ASC`, [
+        principal.tenantId, conversationId, principal.userId,
+      ]);
+      let latestTaskId: string | null = null;
+      for (const candidate of taskCandidates.rows) {
+        try {
+          latestTaskId = (await this.requireTaskProjectionReadable(client, principal, candidate.id)).id;
+          break;
+        } catch (error) {
+          if (!this.isListVisibilityError(error)) throw error;
+        }
+      }
+      return conversationProjectionSchema.parse({
+        id: row.id,
+        createdAt: row.created_at.toISOString(),
+        latestTaskId,
+        messages: messages.rows.map((message) => ({
+          id: message.id,
+          author: message.author,
+          body: message.body,
+          createdAt: message.created_at.toISOString(),
+        })),
+      });
+    });
+  }
+
+  async listTasks(principal: Principal, query: TaskListQuery): Promise<TaskListResponse> {
+    return this.withTransaction(async (client) => {
+      await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+      const canonicalQuery = {
+        status: query.status ?? null,
+        capabilityId: query.capabilityId ?? null,
+        sort: query.sort,
+        direction: query.direction,
+        limit: query.limit,
+      };
+      const authorizationEpoch = await this.authorizationEpoch(client, principal);
+      let snapshot: QuerySnapshotRow;
+      let position = 0;
+
+      if (query.cursor === undefined) {
+        const orderColumn = query.sort === 'createdAt' ? 't.created_at' : 't.updated_at';
+        const candidates = await client.query<TaskRow>(`SELECT t.* FROM business_tasks t
+          JOIN capability_versions capability ON capability.tenant_id=t.tenant_id AND capability.id=t.capability_version_id
+          WHERE t.tenant_id=$1 AND ${TASK_PROJECTION_AUTHORIZATION_SQL}
+            AND ($3::text IS NULL OR t.status=$3)
+            AND ($4::text IS NULL OR capability.capability_id=$4)
+          ORDER BY ${orderColumn} DESC,t.id ASC`, [
+          principal.tenantId, principal.userId, query.status ?? null, query.capabilityId ?? null,
+        ]);
+        const readable: TaskRow[] = [];
+        for (const candidate of candidates.rows) {
+          try {
+            this.assertTaskProjectionContext(candidate);
+            readable.push(candidate);
+          } catch (error) {
+            if (!this.isListVisibilityError(error)) throw error;
+          }
+        }
+        snapshot = await this.createQuerySnapshot(client, principal, {
+          kind: 'business_tasks',
+          authorizationEpoch,
+          canonicalQuery,
+          queryVersion: TASK_LIST_QUERY_VERSION,
+          fieldMaskVersion: TASK_LIST_FIELD_MASK_VERSION,
+          items: readable.map((task) => ({
+            objectId: task.id,
+            sortKey: {
+              value: (query.sort === 'createdAt' ? task.created_at : task.updated_at).toISOString(),
+              id: task.id,
+            },
+          })),
+        });
+      } else {
+        const cursor = this.parsePaginationCursor(query.cursor);
+        position = cursor.position;
+        snapshot = await this.requireQuerySnapshot(client, principal, cursor, {
+          kind: 'business_tasks',
+          authorizationEpoch,
+          canonicalQuery,
+          queryVersion: TASK_LIST_QUERY_VERSION,
+          fieldMaskVersion: TASK_LIST_FIELD_MASK_VERSION,
+        });
+      }
+
+      const page = await this.readQuerySnapshotPage(client, principal, snapshot, position, query.limit, async (objectId) => {
+        try {
+          return await this.projectTaskListItem(client, await this.requireTaskProjectionReadable(client, principal, objectId));
+        } catch (error) {
+          if (this.isListVisibilityError(error)) return null;
+          throw error;
+        }
+      });
+      return taskListResponseSchema.parse({
+        tasks: page.items,
+        nextCursor: page.nextCursor,
+        asOf: snapshot.as_of.toISOString(),
+        queryVersion: snapshot.query_version,
+      });
+    });
   }
 
   async createTask(principal: Principal, input: CreateTaskInput, idempotencyKey: string): Promise<CreatedTask> {
@@ -253,12 +450,12 @@ export class ControlPlaneRepository {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
-      const task = await this.requireReadableTask(client, principal, taskId);
+      const task = await this.requireTaskProjectionReadable(client, principal, taskId);
       const inputRef = normalizeStoredInput(task.input_snapshot);
       const approvalResult = await client.query<ApprovalRow>('SELECT * FROM approval_versions WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY version DESC LIMIT 1', [principal.tenantId, taskId]);
       const approval = approvalResult.rows[0];
       if (approval === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Task has no approval version', 500);
-      const steps = await client.query<{ step_id: string; status: string; output: unknown }>('SELECT step_id,status,output FROM business_task_steps WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY step_id', [principal.tenantId, taskId]);
+      const steps = await client.query<{ step_id: string; status: string }>('SELECT step_id,status FROM business_task_steps WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY step_id', [principal.tenantId, taskId]);
       const claims = await client.query<{ id: string; text: string; status: 'published' | 'rejected'; rejection_code: string | null; evidence_id: string | null }>(`SELECT c.id,c.text,c.status,c.rejection_code,l.evidence_id
         FROM claims c
         LEFT JOIN evidence_links l ON l.tenant_id=c.tenant_id AND l.claim_id=c.id AND l.relation='supports'
@@ -316,16 +513,21 @@ export class ControlPlaneRepository {
         GROUP BY a.id,m.id,a.kind,a.display_name,a.media_type,a.size_bytes,a.content_sha256
         ORDER BY min(a.created_at),a.id`, [principal.tenantId, taskId, sourceArtifactId]);
       const lineage = await client.query<{ id: string; from_kind: string; from_id: string; to_kind: string; to_id: string; relation: string }>('SELECT id,from_kind,from_id,to_kind,to_id,relation FROM lineage_records WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY created_at,id', [principal.tenantId, taskId]);
-      const watermark = await client.query<{ watermark: string }>('SELECT coalesce(max(cursor),0)::text watermark FROM business_task_events WHERE tenant_id=$1 AND business_task_id=$2', [principal.tenantId, taskId]);
+      const watermark = await client.query<{ watermark: string }>('SELECT coalesce(max(sequence),0)::text watermark FROM business_task_events WHERE tenant_id=$1 AND business_task_id=$2', [principal.tenantId, taskId]);
       const snapshot = taskSnapshotSchema.parse({
         id: task.id,
+        capabilityId: this.capabilityIdForTask(task),
+        title: '方案分析',
         conversationId: task.conversation_id,
         status: task.status,
+        approvalStatus: approval.status,
+        createdAt: task.created_at.toISOString(),
+        updatedAt: task.updated_at.toISOString(),
         inputRef,
         workflowVersion: { id: task.workflow_version_id, hash: task.workflow_hash },
         approval: { id: approval.id, version: approval.version, status: approval.status, subjectDigest: approval.subject_digest },
         expertTarget: task.expert_target.requested ?? task.expert_target,
-        steps: steps.rows.map((row) => ({ id: row.step_id, status: row.status, output: row.output })),
+        steps: steps.rows.map((row) => ({ id: row.step_id, status: row.status })),
         claims: claims.rows.map((row) => ({ id: row.id, text: row.text, status: row.status, evidenceRefId: row.evidence_id, rejectionCode: row.rejection_code })),
         evidence: evidence.rows.map((row) => ({
           id: row.id,
@@ -366,21 +568,97 @@ export class ControlPlaneRepository {
     }
   }
 
-  async getEvents(principal: Principal, taskId: string, afterCursor: number): Promise<readonly JsonObject[]> {
+  async getEvents(principal: Principal, taskId: string, afterCursor: number): Promise<readonly TaskEventProjection[]> {
     return this.withTransaction(async (client) => {
-      await this.requireReadableTask(client, principal, taskId);
+      await this.requireTaskProjectionReadable(client, principal, taskId);
       if (afterCursor > 0) {
         const cursor = await client.query(`SELECT 1 FROM business_task_events
-          WHERE tenant_id=$1 AND business_task_id=$2 AND cursor=$3`, [principal.tenantId, taskId, afterCursor]);
+          WHERE tenant_id=$1 AND business_task_id=$2 AND sequence=$3`, [principal.tenantId, taskId, afterCursor]);
         if (cursor.rowCount !== 1) {
           throw new GenewayError('EVENT_CURSOR_INVALID', 'Event cursor does not belong to this task', 409);
         }
       }
-      const result = await client.query(`SELECT cursor::text,id,business_task_id,sequence::text,event_type,payload,
+      const result = await client.query<{
+        id: string;
+        business_task_id: string;
+        sequence: string;
+        event_type: string;
+        aggregate_version: string;
+        payload: unknown;
+        simulation: boolean;
+        runtime_mode: string;
+        business_decision_allowed: boolean;
+        occurred_at: Date;
+      }>(`SELECT id,business_task_id,sequence::text,event_type,aggregate_version::text,payload,
         simulation,runtime_mode,business_decision_allowed,occurred_at
-        FROM business_task_events WHERE tenant_id=$1 AND business_task_id=$2 AND cursor>$3 ORDER BY cursor`, [principal.tenantId, taskId, afterCursor]);
-      return result.rows.map((row: Record<string, unknown>) => ({ ...row, cursor: Number(row.cursor), sequence: Number(row.sequence) }));
+        FROM business_task_events WHERE tenant_id=$1 AND business_task_id=$2 AND sequence>$3 ORDER BY sequence`, [principal.tenantId, taskId, afterCursor]);
+      return result.rows.map((row) => this.projectTaskEvent(row));
     });
+  }
+
+  private projectTaskEvent(row: Readonly<{
+    id: string;
+    business_task_id: string;
+    sequence: string;
+    event_type: string;
+    aggregate_version: string;
+    payload: unknown;
+    simulation: boolean;
+    runtime_mode: string;
+    business_decision_allowed: boolean;
+    occurred_at: Date;
+  }>): TaskEventProjection {
+    const storedPayload = typeof row.payload === 'object' && row.payload !== null
+      ? row.payload as Readonly<Record<string, unknown>>
+      : {};
+    const common = {
+      cursor: Number(row.sequence),
+      id: row.id,
+      businessTaskId: row.business_task_id,
+      sequence: Number(row.sequence),
+      aggregateVersion: Number(row.aggregate_version),
+      occurredAt: row.occurred_at.toISOString(),
+      simulation: row.simulation,
+      runtimeMode: row.runtime_mode,
+      businessDecisionAllowed: row.business_decision_allowed,
+    };
+    let payload: Readonly<Record<string, unknown>>;
+    switch (row.event_type) {
+      case 'business_task.created':
+        payload = {
+          approvalId: storedPayload.approvalId,
+          workflowVersionId: storedPayload.workflowVersionId,
+          workflowHash: storedPayload.workflowHash,
+        };
+        break;
+      case 'approval.decided':
+        payload = { approvalId: storedPayload.approvalId, decision: storedPayload.decision };
+        break;
+      case 'workflow.execute.requested':
+        payload = {
+          workflowVersionId: storedPayload.workflowVersionId,
+          workflowHash: storedPayload.workflowHash,
+        };
+        break;
+      case 'workflow.step_started':
+      case 'workflow.step_completed':
+        payload = { stepId: storedPayload.stepId };
+        break;
+      case 'business_task.failed':
+        payload = { code: storedPayload.code };
+        break;
+      case 'business_task.canceled':
+        payload = { reasonCode: storedPayload.reasonCode };
+        break;
+      case 'workflow.run_started':
+      case 'workflow.run_reclaimed':
+      case 'business_task.completed':
+        payload = {};
+        break;
+      default:
+        throw new GenewayError('PUBLIC_TASK_EVENT_UNSUPPORTED', 'Stored task event is not safe for the public projection', 500);
+    }
+    return taskEventProjectionSchema.parse({ ...common, eventType: row.event_type, payload });
   }
 
   async decideApproval(principal: Principal, approvalId: string, decision: 'approved' | 'rejected', idempotencyKey: string): Promise<{ approvalId: string; status: string }> {
@@ -418,55 +696,93 @@ export class ControlPlaneRepository {
     }));
   }
 
-  async getApproval(principal: Principal, approvalId: string): Promise<JsonObject> {
+  async getApproval(principal: Principal, approvalId: string): Promise<ApprovalProjection> {
     return this.withTransaction(async (client) => {
-      const result = await client.query<{
-        id: string;
-        business_task_id: string;
-        version: number;
-        subject: JsonObject;
-        subject_digest: string;
-        status: string;
-        expires_at: Date;
-      }>(`SELECT a.id,a.business_task_id,a.version,a.subject,a.subject_digest,a.status,a.expires_at
+      const result = await client.query<ApprovalRow>(`SELECT a.*
         FROM approval_versions a JOIN business_tasks t ON t.tenant_id=a.tenant_id AND t.id=a.business_task_id
         WHERE a.tenant_id=$1 AND a.id=$2 AND t.requester_id=$3`, [principal.tenantId, approvalId, principal.userId]);
       const row = result.rows[0];
       if (row === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Approval was not found', 404);
-      await this.requireReadableTask(client, principal, row.business_task_id);
-      return {
+      const task = await this.requireTaskProjectionReadable(client, principal, row.business_task_id);
+      this.assertApprovalProjectionIntegrity(row, task);
+      return approvalProjectionSchema.parse({
         id: row.id,
-        business_task_id: row.business_task_id,
+        businessTaskId: row.business_task_id,
         version: row.version,
-        subject: row.subject,
-        subject_digest: row.subject_digest,
+        subjectDigest: row.subject_digest,
         status: row.status,
-        expires_at: row.expires_at,
-      };
+      });
     });
   }
 
-  async getWorkflow(principal: Principal, workflowId: string): Promise<CompiledWorkflowVersion> {
+  async listWorkflows(principal: Principal, query: WorkflowListQuery): Promise<WorkflowListResponse> {
     return this.withTransaction(async (client) => {
-      const candidates = await client.query<{ id: string }>('SELECT id FROM business_tasks WHERE tenant_id=$1 AND workflow_version_id=$2 AND requester_id=$3 ORDER BY created_at,id', [
-        principal.tenantId, workflowId, principal.userId,
-      ]);
-      let readable = false;
-      for (const candidate of candidates.rows) {
-        try {
-          await this.requireReadableTask(client, principal, candidate.id);
-          readable = true;
-          break;
-        } catch (error) {
-          if (!isGenewayError(error) || !['DOCUMENT_SNAPSHOT_NOT_READY', 'TASK_POLICY_CONTEXT_INVALID'].includes(error.code)) throw error;
+      await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+      const canonicalQuery = { limit: query.limit };
+      const authorizationEpoch = await this.authorizationEpoch(client, principal);
+      let snapshot: QuerySnapshotRow;
+      let position = 0;
+
+      if (query.cursor === undefined) {
+        const candidates = await client.query<{ id: string; created_at: Date }>(`WITH readable_tasks AS (
+          SELECT t.workflow_version_id FROM business_tasks t
+          WHERE t.tenant_id=$1 AND ${TASK_PROJECTION_AUTHORIZATION_SQL}
+        )
+          SELECT DISTINCT w.id,w.created_at FROM workflow_versions w JOIN readable_tasks task
+            ON task.workflow_version_id=w.id
+          WHERE w.tenant_id=$1
+          ORDER BY w.created_at DESC,w.id ASC`, [principal.tenantId, principal.userId]);
+        const readable: { id: string; createdAt: Date }[] = [];
+        for (const candidate of candidates.rows) {
+          try {
+            await this.requireReadableWorkflow(client, principal, candidate.id);
+            readable.push({ id: candidate.id, createdAt: candidate.created_at });
+          } catch (error) {
+            if (!this.isListVisibilityError(error) && (!isGenewayError(error) || error.code !== 'WORKFLOW_NOT_FOUND')) throw error;
+          }
         }
+        snapshot = await this.createQuerySnapshot(client, principal, {
+          kind: 'workflow_versions',
+          authorizationEpoch,
+          canonicalQuery,
+          queryVersion: WORKFLOW_LIST_QUERY_VERSION,
+          fieldMaskVersion: WORKFLOW_LIST_FIELD_MASK_VERSION,
+          items: readable.map((workflow) => ({
+            objectId: workflow.id,
+            sortKey: { value: workflow.createdAt.toISOString(), id: workflow.id },
+          })),
+        });
+      } else {
+        const cursor = this.parsePaginationCursor(query.cursor);
+        position = cursor.position;
+        snapshot = await this.requireQuerySnapshot(client, principal, cursor, {
+          kind: 'workflow_versions',
+          authorizationEpoch,
+          canonicalQuery,
+          queryVersion: WORKFLOW_LIST_QUERY_VERSION,
+          fieldMaskVersion: WORKFLOW_LIST_FIELD_MASK_VERSION,
+        });
       }
-      if (!readable) throw new GenewayError('WORKFLOW_NOT_FOUND', 'Workflow was not found', 404);
-      const result = await client.query<{ id: string; workflow_hash: string; canonicalization_version: 'RFC8785/JCS-1'; canonical_json: unknown }>('SELECT * FROM workflow_versions WHERE tenant_id=$1 AND id=$2', [principal.tenantId, workflowId]);
-      const row = result.rows[0];
-      if (row === undefined) throw new GenewayError('WORKFLOW_NOT_FOUND', 'Workflow was not found', 404);
-      return readStoredWorkflowVersion({ id: row.id, hash: row.workflow_hash, canonicalizationVersion: row.canonicalization_version, canonicalPayload: row.canonical_json });
+
+      const page = await this.readQuerySnapshotPage(client, principal, snapshot, position, query.limit, async (objectId) => {
+        try {
+          return this.projectWorkflowListItem(await this.requireReadableWorkflow(client, principal, objectId));
+        } catch (error) {
+          if (this.isListVisibilityError(error) || (isGenewayError(error) && error.code === 'WORKFLOW_NOT_FOUND')) return null;
+          throw error;
+        }
+      });
+      return workflowListResponseSchema.parse({
+        workflows: page.items,
+        nextCursor: page.nextCursor,
+        asOf: snapshot.as_of.toISOString(),
+        queryVersion: snapshot.query_version,
+      });
     });
+  }
+
+  async getWorkflow(principal: Principal, workflowId: string): Promise<WorkflowDetailProjection> {
+    return this.withTransaction(async (client) => this.projectWorkflowDetail(await this.requireReadableWorkflow(client, principal, workflowId)));
   }
 
   async enqueueExecution(principal: Principal, taskId: string, idempotencyKey: string): Promise<ExecutionResponse> {
@@ -690,6 +1006,252 @@ export class ControlPlaneRepository {
     if (result.rowCount !== 1) throw new GenewayError('DOCUMENT_SNAPSHOT_NOT_READY', 'Approved document snapshot is no longer execution-ready', 409);
   }
 
+  private capabilityIdForTask(task: TaskRow): 'solution.analysis.v1' {
+    if (task.capability_version_id !== SOLUTION_CAPABILITY_VERSION_ID) {
+      throw new GenewayError('TASK_CAPABILITY_UNSUPPORTED', 'Task capability is not available in this product projection', 500);
+    }
+    return 'solution.analysis.v1';
+  }
+
+  private async projectTaskListItem(client: PoolClient, task: TaskRow) {
+    const approvalResult = await client.query<ApprovalRow>(`SELECT * FROM approval_versions
+      WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY version DESC LIMIT 1`, [task.tenant_id, task.id]);
+    const approval = approvalResult.rows[0];
+    if (approval === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Task has no approval version', 500);
+    return taskListItemSchema.parse({
+      id: task.id,
+      capabilityId: this.capabilityIdForTask(task),
+      status: task.status,
+      title: '方案分析',
+      conversationId: task.conversation_id,
+      workflowVersion: { id: task.workflow_version_id, hash: task.workflow_hash },
+      approvalStatus: approval.status,
+      createdAt: task.created_at.toISOString(),
+      updatedAt: task.updated_at.toISOString(),
+      aggregateVersion: Number(task.aggregate_version),
+      simulation: task.simulation,
+    });
+  }
+
+  private async requireReadableWorkflow(client: PoolClient, principal: Principal, workflowId: string): Promise<WorkflowVersionRow> {
+    const candidates = await client.query<{ id: string }>(`SELECT id FROM business_tasks
+      WHERE tenant_id=$1 AND workflow_version_id=$2 AND requester_id=$3 ORDER BY created_at,id`, [
+      principal.tenantId, workflowId, principal.userId,
+    ]);
+    let readable = false;
+    for (const candidate of candidates.rows) {
+      try {
+        await this.requireTaskProjectionReadable(client, principal, candidate.id);
+        readable = true;
+        break;
+      } catch (error) {
+        if (!this.isListVisibilityError(error)) throw error;
+      }
+    }
+    if (!readable) throw new GenewayError('WORKFLOW_NOT_FOUND', 'Workflow was not found', 404);
+    const result = await client.query<WorkflowVersionRow>(`SELECT id,workflow_hash,canonicalization_version,
+      canonical_json,created_at FROM workflow_versions WHERE tenant_id=$1 AND id=$2`, [principal.tenantId, workflowId]);
+    const row = result.rows[0];
+    if (row === undefined) throw new GenewayError('WORKFLOW_NOT_FOUND', 'Workflow was not found', 404);
+    return row;
+  }
+
+  private projectWorkflowListItem(row: WorkflowVersionRow) {
+    const workflow = readStoredWorkflowVersion({
+      id: row.id,
+      hash: row.workflow_hash,
+      canonicalizationVersion: row.canonicalization_version,
+      canonicalPayload: row.canonical_json,
+    });
+    return workflowListItemSchema.parse({
+      id: workflow.id,
+      hash: workflow.hash,
+      capabilityVersionId: workflow.payload.capabilityVersionId,
+      harnessVersionId: workflow.payload.harnessVersionId,
+      createdAt: row.created_at.toISOString(),
+      simulation: true,
+    });
+  }
+
+  private projectWorkflowDetail(row: WorkflowVersionRow): WorkflowDetailProjection {
+    const workflow = readStoredWorkflowVersion({
+      id: row.id,
+      hash: row.workflow_hash,
+      canonicalizationVersion: row.canonicalization_version,
+      canonicalPayload: row.canonical_json,
+    });
+    return workflowDetailProjectionSchema.parse({
+      ...this.projectWorkflowListItem(row),
+      compilerVersion: workflow.payload.compilerVersion,
+      canonicalizationVersion: workflow.payload.canonicalizationVersion,
+      featureSet: workflow.payload.featureSet,
+      nodes: workflow.payload.nodes,
+      edges: workflow.payload.edges,
+      permissionCeiling: workflow.payload.permissionCeiling,
+    });
+  }
+
+  private isListVisibilityError(error: unknown): boolean {
+    return isGenewayError(error) && ['TASK_NOT_FOUND', 'DOCUMENT_SNAPSHOT_NOT_READY', 'TASK_POLICY_CONTEXT_INVALID'].includes(error.code);
+  }
+
+  private async authorizationEpoch(client: PoolClient, principal: Principal): Promise<string> {
+    const user = await client.query('SELECT 1 FROM users WHERE tenant_id=$1 AND id=$2', [principal.tenantId, principal.userId]);
+    if (user.rowCount !== 1) throw new GenewayError('PRINCIPAL_NOT_FOUND', 'Principal is not available', 403);
+    const roles = await client.query<{ role: string }>('SELECT role FROM roles WHERE tenant_id=$1 AND user_id=$2 ORDER BY role', [principal.tenantId, principal.userId]);
+    const scopes = await client.query<{ resource_scope: string }>('SELECT resource_scope FROM resource_scopes WHERE tenant_id=$1 AND user_id=$2 ORDER BY resource_scope', [principal.tenantId, principal.userId]);
+    return hashCanonical({
+      tenantId: principal.tenantId,
+      userId: principal.userId,
+      trust: principal.trust,
+      policyVersion: 'task-projection-read/v1',
+      roles: roles.rows.map((row) => row.role),
+      resourceScopes: scopes.rows.map((row) => row.resource_scope),
+    });
+  }
+
+  private async createQuerySnapshot(
+    client: PoolClient,
+    principal: Principal,
+    input: Readonly<{
+      kind: QuerySnapshotRow['query_kind'];
+      authorizationEpoch: string;
+      canonicalQuery: JsonObject;
+      queryVersion: string;
+      fieldMaskVersion: string;
+      items: readonly Readonly<{ objectId: string; sortKey: JsonObject }>[];
+    }>,
+  ): Promise<QuerySnapshotRow> {
+    await client.query('DELETE FROM query_snapshots WHERE expires_at<=now()');
+    const clock = await client.query<{ as_of: Date }>('SELECT transaction_timestamp() as_of');
+    const asOf = clock.rows[0]?.as_of;
+    if (asOf === undefined) throw new GenewayError('QUERY_SNAPSHOT_FAILED', 'Could not establish a query snapshot time', 500);
+    const snapshot: QuerySnapshotRow = {
+      id: id('query'),
+      query_kind: input.kind,
+      authorization_epoch: input.authorizationEpoch,
+      canonical_query: input.canonicalQuery,
+      query_version: input.queryVersion,
+      field_mask_version: input.fieldMaskVersion,
+      as_of: asOf,
+      expires_at: new Date(asOf.getTime() + QUERY_SNAPSHOT_TTL_MS),
+    };
+    await client.query(`INSERT INTO query_snapshots
+      (tenant_id,id,principal_id,query_kind,authorization_epoch,canonical_query,query_version,field_mask_version,as_of,expires_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [
+      principal.tenantId, snapshot.id, principal.userId, snapshot.query_kind, snapshot.authorization_epoch,
+      snapshot.canonical_query, snapshot.query_version, snapshot.field_mask_version, snapshot.as_of, snapshot.expires_at,
+    ]);
+    for (const [position, item] of input.items.entries()) {
+      await client.query(`INSERT INTO query_snapshot_items
+        (tenant_id,query_snapshot_id,position,object_id,sort_key) VALUES ($1,$2,$3,$4,$5)`, [
+        principal.tenantId, snapshot.id, position, item.objectId, item.sortKey,
+      ]);
+    }
+    return snapshot;
+  }
+
+  private async requireQuerySnapshot(
+    client: PoolClient,
+    principal: Principal,
+    cursor: PaginationCursorPayload,
+    expected: Readonly<{
+      kind: QuerySnapshotRow['query_kind'];
+      authorizationEpoch: string;
+      canonicalQuery: JsonObject;
+      queryVersion: string;
+      fieldMaskVersion: string;
+    }>,
+  ): Promise<QuerySnapshotRow> {
+    const result = await client.query<QuerySnapshotRow>(`SELECT id,query_kind,authorization_epoch,canonical_query,
+      query_version,field_mask_version,as_of,expires_at FROM query_snapshots
+      WHERE tenant_id=$1 AND id=$2 AND principal_id=$3`, [principal.tenantId, cursor.snapshotId, principal.userId]);
+    const snapshot = result.rows[0];
+    if (snapshot === undefined
+      || snapshot.query_kind !== expected.kind
+      || snapshot.authorization_epoch !== expected.authorizationEpoch
+      || hashCanonical(snapshot.canonical_query) !== hashCanonical(expected.canonicalQuery)
+      || snapshot.query_version !== expected.queryVersion
+      || snapshot.field_mask_version !== expected.fieldMaskVersion
+      || snapshot.expires_at.getTime() <= Date.now()
+      || snapshot.expires_at.getTime() !== cursor.expiresAt) {
+      throw new GenewayError('CURSOR_INVALID', 'Pagination cursor is invalid or expired', 409);
+    }
+    return snapshot;
+  }
+
+  private async readQuerySnapshotPage<T>(
+    client: PoolClient,
+    principal: Principal,
+    snapshot: QuerySnapshotRow,
+    position: number,
+    limit: number,
+    project: (objectId: string) => Promise<T | null>,
+  ): Promise<Readonly<{ items: readonly T[]; nextCursor: string | null }>> {
+    const items: T[] = [];
+    let scanPosition = position;
+    let nextVisiblePosition: number | null = null;
+    const scanBatchSize = 100;
+
+    scan: while (true) {
+      const rows = await client.query<{ position: number; object_id: string }>(`SELECT position,object_id
+        FROM query_snapshot_items WHERE tenant_id=$1 AND query_snapshot_id=$2 AND position>=$3
+        ORDER BY position LIMIT $4`, [principal.tenantId, snapshot.id, scanPosition, scanBatchSize]);
+      if (rows.rows.length === 0) break;
+      for (const row of rows.rows) {
+        scanPosition = row.position + 1;
+        const item = await project(row.object_id);
+        if (item === null) continue;
+        if (items.length < limit) items.push(item);
+        else {
+          nextVisiblePosition = row.position;
+          break scan;
+        }
+      }
+      if (rows.rows.length < scanBatchSize) break;
+    }
+    return {
+      items,
+      nextCursor: nextVisiblePosition === null
+        ? null
+        : this.issuePaginationCursor(snapshot.id, nextVisiblePosition, snapshot.expires_at.getTime()),
+    };
+  }
+
+  private issuePaginationCursor(snapshotId: string, position: number, expiresAt: number): string {
+    const encoded = Buffer.from(JSON.stringify({ snapshotId, position, expiresAt }), 'utf8').toString('base64url');
+    const signature = createHmac('sha256', this.cursorHmacSecret).update(encoded).digest('base64url');
+    return `${encoded}.${signature}`;
+  }
+
+  private parsePaginationCursor(cursor: string): PaginationCursorPayload {
+    const [encoded, signature, extra] = cursor.split('.');
+    if (encoded === undefined || signature === undefined || extra !== undefined) {
+      throw new GenewayError('CURSOR_INVALID', 'Pagination cursor is invalid or expired', 409);
+    }
+    try {
+      const canonicalBase64Url = /^[A-Za-z0-9_-]+$/u;
+      if (!canonicalBase64Url.test(encoded) || !canonicalBase64Url.test(signature)) throw new Error('invalid cursor encoding');
+      const encodedBytes = Buffer.from(encoded, 'base64url');
+      const actual = Buffer.from(signature, 'base64url');
+      if (encodedBytes.toString('base64url') !== encoded || actual.toString('base64url') !== signature) {
+        throw new Error('non-canonical cursor encoding');
+      }
+      const expected = createHmac('sha256', this.cursorHmacSecret).update(encoded).digest();
+      if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('invalid cursor signature');
+      const value = JSON.parse(encodedBytes.toString('utf8')) as Record<string, unknown>;
+      if (Object.keys(value).sort().join(',') !== 'expiresAt,position,snapshotId'
+        || typeof value.snapshotId !== 'string' || value.snapshotId.length === 0
+        || !Number.isSafeInteger(value.position) || Number(value.position) < 0
+        || !Number.isSafeInteger(value.expiresAt) || Number(value.expiresAt) <= Date.now()) {
+        throw new Error('invalid cursor payload');
+      }
+      return { snapshotId: value.snapshotId, position: Number(value.position), expiresAt: Number(value.expiresAt) };
+    } catch {
+      throw new GenewayError('CURSOR_INVALID', 'Pagination cursor is invalid or expired', 409);
+    }
+  }
+
   private async ensureVersions(client: PoolClient, tenantId: string, workflow: CompiledWorkflowVersion): Promise<{ expertCatalogVersionId: string }> {
     const expertCatalogVersionId = 'expert_catalog_solution_v1_1';
     await client.query(`INSERT INTO capability_versions (tenant_id,id,capability_id,version,spec)
@@ -737,6 +1299,59 @@ export class ControlPlaneRepository {
     const task = result.rows[0];
     if (task === undefined) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found', 404);
     return task;
+  }
+
+  private assertTaskProjectionContext(task: TaskRow): void {
+    const inputRef = normalizeStoredInput(task.input_snapshot);
+    const resourceScope = inputRef.kind === 'fixture' ? inputRef.fixtureRef : inputRef.resourceScope;
+    const expectedPermissionScope = { actions: ['R0', 'R1', 'A1'], resourceScopes: [resourceScope], dataClasses: ['C0', 'C1'] };
+    const expectedAudienceScope = { kind: 'private-conversation', ids: [`conversation:${task.conversation_id}`] };
+    if (hashCanonical(task.permission_scope) !== hashCanonical(expectedPermissionScope)
+      || hashCanonical(task.audience_scope) !== hashCanonical(expectedAudienceScope)
+      || (inputRef.kind === 'document_snapshot' && inputRef.audience !== `conversation:${task.conversation_id}`)) {
+      throw new GenewayError('TASK_POLICY_CONTEXT_INVALID', 'Task policy context no longer matches its immutable input', 403);
+    }
+  }
+
+  private async requireTaskProjectionReadable(client: PoolClient, principal: Principal, taskId: string): Promise<TaskRow> {
+    const result = await client.query<TaskRow>(`SELECT t.* FROM business_tasks t
+      WHERE t.tenant_id=$1 AND t.id=$3 AND ${TASK_PROJECTION_AUTHORIZATION_SQL}`, [
+      principal.tenantId, principal.userId, taskId,
+    ]);
+    const task = result.rows[0];
+    if (task === undefined) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found', 404);
+    this.assertTaskProjectionContext(task);
+    await this.assertTaskProjectionIntegrity(client, task);
+    return task;
+  }
+
+  private async assertTaskProjectionIntegrity(client: PoolClient, task: TaskRow): Promise<void> {
+    const workflowResult = await client.query<WorkflowVersionRow>(`SELECT id,workflow_hash,canonicalization_version,
+      canonical_json,created_at FROM workflow_versions WHERE tenant_id=$1 AND id=$2`, [task.tenant_id, task.workflow_version_id]);
+    const workflowRow = workflowResult.rows[0];
+    if (workflowRow === undefined) throw new GenewayError('TASK_WORKFLOW_BINDING_INVALID', 'Task workflow binding is unavailable', 409);
+    const workflow = readStoredWorkflowVersion({
+      id: workflowRow.id,
+      hash: workflowRow.workflow_hash,
+      canonicalizationVersion: workflowRow.canonicalization_version,
+      canonicalPayload: workflowRow.canonical_json,
+    });
+    if (workflow.id !== task.workflow_version_id || workflow.hash !== task.workflow_hash) {
+      throw new GenewayError('TASK_WORKFLOW_BINDING_INVALID', 'Task workflow binding no longer matches the immutable version', 409);
+    }
+    const approvalResult = await client.query<ApprovalRow>(`SELECT * FROM approval_versions
+      WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY version DESC LIMIT 1`, [task.tenant_id, task.id]);
+    const approval = approvalResult.rows[0];
+    if (approval === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Task has no approval version', 500);
+    this.assertApprovalProjectionIntegrity(approval, task);
+  }
+
+  private assertApprovalProjectionIntegrity(approval: ApprovalRow, task: TaskRow): void {
+    if (approval.business_task_id !== task.id || approval.requester_id !== task.requester_id
+      || hashCanonical(approval.subject) !== approval.subject_digest
+      || hashCanonical(this.subjectFromTask(task, task.id)) !== approval.subject_digest) {
+      throw new GenewayError('APPROVAL_SUBJECT_CHANGED', 'Approval projection no longer matches task semantics', 409);
+    }
   }
 
   private async requireReadableTask(client: PoolClient, principal: Principal, taskId: string): Promise<TaskRow> {

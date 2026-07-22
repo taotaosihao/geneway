@@ -2,7 +2,17 @@ import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { deriveTrustedLocalPrincipal } from '@geneway/authorization';
-import { createTaskInputSchema, evidenceProjectionSchema, GenewayError, isGenewayError, type Principal } from '@geneway/contracts';
+import {
+  createTaskInputSchema,
+  eventCursorSchema,
+  evidenceProjectionSchema,
+  GenewayError,
+  isGenewayError,
+  taskEventListResponseSchema,
+  taskListQuerySchema,
+  workflowListQuerySchema,
+  type Principal,
+} from '@geneway/contracts';
 import {
   MAX_MULTIPART_ENVELOPE_BYTES,
   MAX_RAW_UPLOAD_BYTES,
@@ -53,13 +63,16 @@ export type ControlPlane = Readonly<{
 
 export async function createControlPlane(options: Readonly<{
   databaseUrl: string;
+  cursorHmacSecret?: string;
   logger?: boolean;
   allowedOrigins?: readonly string[];
   objectStorage?: ObjectStorage | null;
   principalResolver?: PrincipalResolver;
   artifactServiceHooks?: ArtifactServiceHooks;
 }>): Promise<ControlPlane> {
-  const repository = new ControlPlaneRepository(options.databaseUrl);
+  const cursorHmacSecret = options.cursorHmacSecret ?? process.env.GENEWAY_CURSOR_HMAC_SECRET;
+  if (cursorHmacSecret === undefined) throw new Error('GENEWAY_CURSOR_HMAC_SECRET is required');
+  const repository = new ControlPlaneRepository(options.databaseUrl, cursorHmacSecret);
   const artifactRepository = new ArtifactRepository(repository.pool);
   const objectStorage = options.objectStorage === undefined ? createObjectStorageFromEnv() : options.objectStorage;
   const artifactService = objectStorage === null
@@ -248,6 +261,11 @@ export async function createControlPlane(options: Readonly<{
     return reply.status(201).send(result);
   });
 
+  app.get('/api/business-tasks', async (request) => {
+    const query = taskListQuerySchema.parse(request.query);
+    return repository.listTasks(request.principal, query);
+  });
+
   app.get('/api/business-tasks/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
     return repository.getTask(request.principal, params.id);
@@ -255,8 +273,13 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/business-tasks/:id/events', async (request, reply) => {
     const params = z.object({ id: z.string() }).parse(request.params);
-    const query = z.object({ afterCursor: z.coerce.number().int().nonnegative().default(0) }).parse(request.query);
-    const events = await repository.getEvents(request.principal, params.id, query.afterCursor);
+    const query = z.object({
+      after: eventCursorSchema.optional(),
+      afterCursor: eventCursorSchema.optional(),
+    }).strict().refine((value) => value.after === undefined || value.afterCursor === undefined, {
+      message: 'Use only one event cursor parameter',
+    }).parse(request.query);
+    const events = await repository.getEvents(request.principal, params.id, query.after ?? query.afterCursor ?? 0);
     if (request.headers.accept?.includes('text/event-stream') === true) {
       reply.raw.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
@@ -267,13 +290,17 @@ export async function createControlPlane(options: Readonly<{
       reply.raw.end();
       return reply;
     }
-    return { events };
+    return taskEventListResponseSchema.parse({ events });
+  });
+
+  app.get('/api/workflow-versions', async (request) => {
+    const query = workflowListQuerySchema.parse(request.query);
+    return repository.listWorkflows(request.principal, query);
   });
 
   app.get('/api/workflow-versions/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
-    const workflow = await repository.getWorkflow(request.principal, params.id);
-    return { id: workflow.id, hash: workflow.hash, canonicalizationVersion: workflow.canonicalizationVersion, payload: workflow.payload };
+    return repository.getWorkflow(request.principal, params.id);
   });
 
   app.get('/api/approvals/:id', async (request) => {

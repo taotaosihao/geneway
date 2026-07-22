@@ -27,6 +27,7 @@ const backupAccessKeyId = `gw${input.projectSuffix}${input.label}backup`;
 const backupSecretAccessKey = secret();
 const storageAdapterToken = secret();
 const workerToken = secret();
+const cursorHmacSecret = secret();
 const databaseUrl = `postgres://geneway:${postgresPassword}@127.0.0.1:${input.postgresPort}/geneway_backup`;
 const s3Endpoint = `http://127.0.0.1:${input.s3Port}`;
 const backupDatabaseUrl = `postgres://geneway:${postgresPassword}@postgres:5432/geneway_backup`;
@@ -109,6 +110,7 @@ await roleFile('control-plane-env', {
   GENEWAY_WORKER_SOCKET_PATH: input.socketPath,
   GENEWAY_WORKER_TOKEN_FILE: input.tokenFile,
   GENEWAY_WORKER_LEASE_MS: '300000',
+  GENEWAY_CURSOR_HMAC_SECRET: cursorHmacSecret,
 });
 await roleFile('worker-env', {
   GENEWAY_RUN_ID: input.runId,

@@ -34,13 +34,13 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
     await controlPlane.repository.pool.query("INSERT INTO roles (tenant_id,user_id,role) VALUES ('tenant_local','user_other','solution_reviewer')");
   });
 
-  async function createFixtureTask() {
-    const conversation = await controlPlane.app.inject({ method: 'POST', url: '/api/conversations', headers: baseHeaders('security-conversation-01') });
+  async function createFixtureTask(suffix = '01') {
+    const conversation = await controlPlane.app.inject({ method: 'POST', url: '/api/conversations', headers: baseHeaders(`security-conversation-${suffix}`) });
     const conversationId = conversation.json<{ id: string }>().id;
     const task = await controlPlane.app.inject({
       method: 'POST',
       url: '/api/business-tasks',
-      headers: baseHeaders('security-task-0000001'),
+      headers: baseHeaders(`security-task-${suffix}-0000001`),
       payload: {
         conversationId,
         capabilityId: 'solution.analysis.v1',
@@ -131,6 +131,133 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
     expect(principals.rows).toEqual([{ principal_id: 'user_local' }, { principal_id: 'user_other' }]);
   });
 
+  it('keeps task and workflow projections scoped, strict and bound to signed query snapshots', async () => {
+    const first = await createFixtureTask('projection-01');
+    const second = await createDocumentTask();
+    const third = await createFixtureTask('projection-03');
+    await controlPlane.repository.pool.query(`UPDATE business_tasks SET updated_at=CASE id
+      WHEN $1 THEN '2026-07-22T00:00:01Z'::timestamptz
+      WHEN $2 THEN '2026-07-22T00:00:02Z'::timestamptz
+      WHEN $3 THEN '2026-07-22T00:00:03Z'::timestamptz END
+      WHERE tenant_id='tenant_local' AND id IN ($1,$2,$3)`, [first.taskId, second.taskId, third.taskId]);
+
+    const firstPage = await controlPlane.app.inject({ method: 'GET', url: '/api/business-tasks?limit=1' });
+    expect(firstPage.statusCode, firstPage.body).toBe(200);
+    const firstPayload = firstPage.json<{
+      tasks: Array<Record<string, unknown> & { id: string }>;
+      nextCursor: string | null;
+      asOf: string;
+      queryVersion: string;
+    }>();
+    expect(Object.keys(firstPayload).sort()).toEqual(['asOf', 'nextCursor', 'queryVersion', 'tasks']);
+    expect(Object.keys(firstPayload.tasks[0] ?? {}).sort()).toEqual([
+      'aggregateVersion', 'approvalStatus', 'capabilityId', 'conversationId', 'createdAt', 'id',
+      'simulation', 'status', 'title', 'updatedAt', 'workflowVersion',
+    ]);
+    expect(firstPayload.nextCursor).not.toBeNull();
+    const cursor = firstPayload.nextCursor;
+    if (cursor === null) throw new Error('Expected a task pagination cursor');
+
+    await controlPlane.repository.pool.query(`UPDATE business_tasks
+      SET permission_scope='{"actions":["R0"],"resourceScopes":["artifact:revoked"],"dataClasses":["C0","C1"]}'::jsonb
+      WHERE tenant_id='tenant_local' AND id=$1`, [second.taskId]);
+    const nextPage = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks?limit=1&cursor=${encodeURIComponent(cursor)}` });
+    expect(nextPage.statusCode, nextPage.body).toBe(200);
+    const nextPayload = nextPage.json<{ tasks: Array<{ id: string }>; asOf: string; nextCursor: string | null }>();
+    expect(nextPayload.asOf).toBe(firstPayload.asOf);
+    expect(new Set([...firstPayload.tasks, ...nextPayload.tasks].map((task) => task.id))).toEqual(new Set([first.taskId, third.taskId]));
+    expect(nextPayload.tasks).toHaveLength(1);
+    expect(nextPayload.nextCursor).toBeNull();
+
+    const [cursorPayload, cursorSignature] = cursor.split('.');
+    if (cursorPayload === undefined || cursorSignature === undefined) throw new Error('Expected a signed cursor');
+    const tamperedSignature = `${cursorSignature.startsWith('A') ? 'B' : 'A'}${cursorSignature.slice(1)}`;
+    const tamperedCursor = `${cursorPayload}.${tamperedSignature}`;
+    const signatureBytes = Buffer.from(cursorSignature, 'base64url');
+    const base64UrlAlphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const equivalentLastCharacter = [...base64UrlAlphabet].find((candidate) => candidate !== cursorSignature.at(-1)
+      && Buffer.from(`${cursorSignature.slice(0, -1)}${candidate}`, 'base64url').equals(signatureBytes));
+    if (equivalentLastCharacter === undefined) throw new Error('Expected a non-canonical equivalent signature encoding');
+    const equivalentSignatureCursor = `${cursorPayload}.${cursorSignature.slice(0, -1)}${equivalentLastCharacter}`;
+    const invalidRequests = [
+      `/api/business-tasks?limit=1&cursor=${encodeURIComponent(tamperedCursor)}`,
+      `/api/business-tasks?limit=1&cursor=${encodeURIComponent(`${cursor}!`)}`,
+      `/api/business-tasks?limit=1&cursor=${encodeURIComponent(`${cursor}=`)}`,
+      `/api/business-tasks?limit=1&cursor=${encodeURIComponent(equivalentSignatureCursor)}`,
+      `/api/business-tasks?limit=1&status=awaiting_approval&cursor=${encodeURIComponent(cursor)}`,
+      `/api/workflow-versions?limit=1&cursor=${encodeURIComponent(cursor)}`,
+    ];
+    for (const url of invalidRequests) {
+      const response = await controlPlane.app.inject({ method: 'GET', url });
+      expect(response.statusCode, url).toBe(409);
+      expect(response.json()).toMatchObject({ error: { code: 'CURSOR_INVALID' } });
+    }
+    const crossPrincipalCursor = await controlPlane.app.inject({
+      method: 'GET', url: `/api/business-tasks?limit=1&cursor=${encodeURIComponent(cursor)}`, headers: { 'x-test-user': 'user_other' },
+    });
+    expect(crossPrincipalCursor.statusCode).toBe(409);
+    expect(crossPrincipalCursor.json()).toMatchObject({ error: { code: 'CURSOR_INVALID' } });
+
+    const taskDetail = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${first.taskId}` });
+    expect(taskDetail.statusCode, taskDetail.body).toBe(200);
+    const taskPayload = taskDetail.json<Record<string, unknown> & {
+      approval: Record<string, unknown>;
+      steps: Array<Record<string, unknown>>;
+    }>();
+    expect(Object.keys(taskPayload.approval).sort()).toEqual(['id', 'status', 'subjectDigest', 'version']);
+    expect(taskPayload.steps.every((step) => Object.keys(step).sort().join(',') === 'id,status')).toBe(true);
+    expect(JSON.stringify(taskPayload)).not.toContain('subject_digest');
+    expect(JSON.stringify(taskPayload)).not.toContain('"subject"');
+    expect(JSON.stringify(taskPayload)).not.toContain('"output"');
+
+    const approval = await controlPlane.app.inject({ method: 'GET', url: `/api/approvals/${first.approvalId}` });
+    expect(approval.statusCode, approval.body).toBe(200);
+    expect(Object.keys(approval.json<Record<string, unknown>>()).sort()).toEqual(['businessTaskId', 'id', 'status', 'subjectDigest', 'version']);
+
+    const workflow = await controlPlane.app.inject({ method: 'GET', url: `/api/workflow-versions/${first.workflowVersionId}` });
+    expect(workflow.statusCode, workflow.body).toBe(200);
+    expect(Object.keys(workflow.json<Record<string, unknown>>()).sort()).toEqual([
+      'canonicalizationVersion', 'capabilityVersionId', 'compilerVersion', 'createdAt', 'edges',
+      'featureSet', 'harnessVersionId', 'hash', 'id', 'nodes', 'permissionCeiling', 'simulation',
+    ]);
+
+    const deniedDetail = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${first.taskId}`, headers: { 'x-test-user': 'user_other' } });
+    const missingDetail = await controlPlane.app.inject({ method: 'GET', url: '/api/business-tasks/task_missing', headers: { 'x-test-user': 'user_other' } });
+    expect(deniedDetail.statusCode).toBe(404);
+    expect(deniedDetail.json()).toEqual(missingDetail.json());
+
+    const legacyCursorName = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${first.taskId}/events?afterCursor=0` });
+    expect(legacyCursorName.statusCode).toBe(200);
+
+    await controlPlane.repository.pool.query(`INSERT INTO business_task_events
+      (tenant_id,id,business_task_id,sequence,event_type,aggregate_version,correlation_id,payload,
+       simulation,runtime_mode,business_decision_allowed)
+      SELECT tenant_id,'event_public_projection',id,
+        (SELECT coalesce(max(sequence),0)+1 FROM business_task_events WHERE tenant_id=task.tenant_id AND business_task_id=task.id),
+        'workflow.run_started',aggregate_version,id,
+        '{"workerInstanceId":"worker_private","attemptId":"attempt_private","fencingToken":7,"executionVersion":3}'::jsonb,
+        true,'fake',false
+      FROM business_tasks task WHERE tenant_id='tenant_local' AND id=$1`, [first.taskId]);
+    const publicEvents = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${first.taskId}/events?after=0` });
+    expect(publicEvents.statusCode, publicEvents.body).toBe(200);
+    const publicEventPayload = publicEvents.json<{ events: Array<Record<string, unknown> & { id: string; payload: unknown }> }>();
+    const workerEvent = publicEventPayload.events.find((event) => event.id === 'event_public_projection');
+    expect(workerEvent).toBeDefined();
+    expect(Object.keys(workerEvent ?? {}).sort()).toEqual([
+      'aggregateVersion', 'businessDecisionAllowed', 'businessTaskId', 'cursor', 'eventType', 'id',
+      'occurredAt', 'payload', 'runtimeMode', 'sequence', 'simulation',
+    ]);
+    expect(workerEvent?.payload).toEqual({});
+    expect(JSON.stringify(publicEventPayload)).not.toMatch(/workerInstanceId|attemptId|fencingToken|executionVersion/u);
+
+    await controlPlane.repository.pool.query("DELETE FROM roles WHERE tenant_id='tenant_local' AND user_id='user_local' AND role='solution_reviewer'");
+    const revokedCursor = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks?limit=1&cursor=${encodeURIComponent(cursor)}` });
+    expect(revokedCursor.statusCode).toBe(409);
+    expect(revokedCursor.json()).toMatchObject({ error: { code: 'CURSOR_INVALID' } });
+    const revokedTask = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${first.taskId}` });
+    expect(revokedTask.statusCode).toBe(404);
+  });
+
   it('invalidates ApprovalVersion on semantic drift and expiry', async () => {
     const drifted = await createFixtureTask();
     await controlPlane.repository.pool.query("UPDATE business_tasks SET budget=jsonb_set(budget,'{maxRuntimeMs}','60000'::jsonb) WHERE tenant_id='tenant_local' AND id=$1", [drifted.taskId]);
@@ -153,11 +280,67 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
     });
     expect(approved.statusCode).toBe(200);
     await controlPlane.repository.pool.query("UPDATE approval_versions SET expires_at=now()-interval '1 second' WHERE tenant_id='tenant_local' AND id=$1", [expired.approvalId]);
+    await controlPlane.repository.pool.query("UPDATE delegated_capabilities SET expires_at=now()-interval '1 second' WHERE tenant_id='tenant_local' AND business_task_id=$1", [expired.taskId]);
+    for (const url of [
+      `/api/business-tasks/${expired.taskId}`,
+      `/api/workflow-versions/${expired.workflowVersionId}`,
+      `/api/approvals/${expired.approvalId}`,
+      `/api/business-tasks/${expired.taskId}/events?after=0`,
+    ]) {
+      const historicalRead = await controlPlane.app.inject({ method: 'GET', url });
+      expect(historicalRead.statusCode, `${url}: ${historicalRead.body}`).toBe(200);
+    }
     const execute = await controlPlane.app.inject({ method: 'POST', url: `/api/business-tasks/${expired.taskId}/execute`, headers: baseHeaders('expiry-execute-0000001') });
     expect(execute.statusCode).toBe(409);
     expect(execute.json()).toMatchObject({ error: { code: 'APPROVAL_EXPIRED' } });
     const outbox = await controlPlane.repository.pool.query("SELECT 1 FROM outbox_events WHERE business_task_id=$1 AND event_type='workflow.execute.requested'", [expired.taskId]);
     expect(outbox.rowCount).toBe(0);
+
+    await controlPlane.repository.resetForTest();
+    const historicalDocument = await createDocumentTask();
+    await controlPlane.repository.pool.query("UPDATE approval_versions SET expires_at=now()-interval '1 second' WHERE tenant_id='tenant_local' AND id=$1", [historicalDocument.approvalId]);
+    await controlPlane.repository.pool.query("UPDATE delegated_capabilities SET expires_at=now()-interval '1 second' WHERE tenant_id='tenant_local' AND business_task_id=$1", [historicalDocument.taskId]);
+    await controlPlane.repository.pool.query("UPDATE artifact_states SET retention_status='expired',retention_expires_at=now()-interval '1 second' WHERE tenant_id='tenant_local' AND artifact_id=$1", [historicalDocument.sourceArtifactId]);
+    for (const url of [
+      `/api/business-tasks/${historicalDocument.taskId}`,
+      `/api/workflow-versions/${historicalDocument.workflowVersionId}`,
+      `/api/approvals/${historicalDocument.approvalId}`,
+      `/api/business-tasks/${historicalDocument.taskId}/events?after=0`,
+    ]) {
+      const historicalRead = await controlPlane.app.inject({ method: 'GET', url });
+      expect(historicalRead.statusCode, `${url}: ${historicalRead.body}`).toBe(200);
+    }
+  });
+
+  it('fails public projections closed when immutable Workflow or Approval bindings drift', async () => {
+    const workflowDrift = await createFixtureTask('workflow-drift');
+    await controlPlane.repository.pool.query("UPDATE business_tasks SET workflow_hash=$2 WHERE tenant_id='tenant_local' AND id=$1", [
+      workflowDrift.taskId, '0'.repeat(64),
+    ]);
+    for (const url of [
+      `/api/business-tasks/${workflowDrift.taskId}`,
+      `/api/workflow-versions/${workflowDrift.workflowVersionId}`,
+      `/api/business-tasks/${workflowDrift.taskId}/events?after=0`,
+    ]) {
+      const response = await controlPlane.app.inject({ method: 'GET', url });
+      expect(response.statusCode, `${url}: ${response.body}`).toBe(409);
+      expect(response.json()).toMatchObject({ error: { code: 'TASK_WORKFLOW_BINDING_INVALID' } });
+    }
+
+    await controlPlane.repository.resetForTest();
+    const approvalDrift = await createFixtureTask('approval-drift');
+    await controlPlane.repository.pool.query(`UPDATE approval_versions
+      SET subject=jsonb_set(subject,'{budget,maxRuntimeMs}','60000'::jsonb)
+      WHERE tenant_id='tenant_local' AND id=$1`, [approvalDrift.approvalId]);
+    for (const url of [
+      `/api/business-tasks/${approvalDrift.taskId}`,
+      `/api/approvals/${approvalDrift.approvalId}`,
+      `/api/business-tasks/${approvalDrift.taskId}/events?after=0`,
+    ]) {
+      const response = await controlPlane.app.inject({ method: 'GET', url });
+      expect(response.statusCode, `${url}: ${response.body}`).toBe(409);
+      expect(response.json()).toMatchObject({ error: { code: 'APPROVAL_SUBJECT_CHANGED' } });
+    }
   });
 
   it('revalidates stored approval subjects, delegated capabilities and sensitive idempotency replays', async () => {

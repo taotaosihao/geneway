@@ -162,15 +162,85 @@ export const lineageProjectionSchema = z.object({
 
 export type LineageProjection = z.infer<typeof lineageProjectionSchema>;
 
+export const taskStatusSchema = z.enum([
+  'awaiting_approval',
+  'approved',
+  'rejected',
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'canceled',
+]);
+
+export const paginationCursorSchema = z.string().min(32).max(2_048);
+export const eventCursorSchema = z.coerce.number().int().nonnegative();
+
+const listMetadataSchema = z.object({
+  nextCursor: paginationCursorSchema.nullable(),
+  asOf: z.string().datetime(),
+}).strict();
+
+export const taskListItemSchema = z.object({
+  id: z.string().min(1),
+  capabilityId: z.literal('solution.analysis.v1'),
+  status: taskStatusSchema,
+  title: z.literal('方案分析'),
+  conversationId: z.string().min(1),
+  workflowVersion: z.object({
+    id: z.string().min(1),
+    hash: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict(),
+  approvalStatus: z.enum(['pending', 'approved', 'rejected']),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  aggregateVersion: z.number().int().positive(),
+  simulation: z.literal(true),
+}).strict();
+
+export type TaskListItem = z.infer<typeof taskListItemSchema>;
+
+export const taskListResponseSchema = z.object({
+  tasks: z.array(taskListItemSchema),
+  ...listMetadataSchema.shape,
+  queryVersion: z.literal('business-tasks.list.v1'),
+}).strict();
+
+export type TaskListResponse = z.infer<typeof taskListResponseSchema>;
+
+export const taskListQuerySchema = z.object({
+  status: taskStatusSchema.optional(),
+  capabilityId: z.literal('solution.analysis.v1').optional(),
+  sort: z.enum(['createdAt', 'updatedAt']).default('updatedAt'),
+  direction: z.literal('desc').default('desc'),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  cursor: paginationCursorSchema.optional(),
+}).strict();
+
+export type TaskListQuery = z.infer<typeof taskListQuerySchema>;
+
 export const taskSnapshotSchema = z.object({
   id: z.string(),
+  capabilityId: z.literal('solution.analysis.v1'),
+  title: z.literal('方案分析'),
   conversationId: z.string(),
-  status: z.string(),
+  status: taskStatusSchema,
+  approvalStatus: z.enum(['pending', 'approved', 'rejected']),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
   inputRef: resolvedTaskInputRefSchema,
   workflowVersion: z.object({ id: z.string(), hash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
-  approval: z.object({ id: z.string(), version: z.number().int().positive(), status: z.string(), subjectDigest: z.string() }).strict(),
+  approval: z.object({
+    id: z.string().min(1),
+    version: z.number().int().positive(),
+    status: z.enum(['pending', 'approved', 'rejected']),
+    subjectDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict(),
   expertTarget: expertTargetSchema,
-  steps: z.array(z.object({ id: z.string(), status: z.string(), output: z.unknown().nullable() }).strict()),
+  steps: z.array(z.object({
+    id: z.string().min(1),
+    status: z.enum(['queued', 'running', 'completed', 'failed', 'canceled']),
+  }).strict()),
   claims: z.array(z.object({
     id: z.string(),
     text: z.string(),
@@ -189,6 +259,177 @@ export const taskSnapshotSchema = z.object({
 }).extend(simulationEnvelopeSchema.shape).strict();
 
 export type TaskSnapshot = z.infer<typeof taskSnapshotSchema>;
+
+const taskEventCommonShape = {
+  cursor: eventCursorSchema,
+  id: z.string().min(1),
+  businessTaskId: z.string().min(1),
+  sequence: z.number().int().positive(),
+  aggregateVersion: z.number().int().positive(),
+  occurredAt: z.string().datetime(),
+  ...simulationEnvelopeSchema.shape,
+};
+
+export const taskEventProjectionSchema = z.discriminatedUnion('eventType', [
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('business_task.created'),
+    payload: z.object({
+      approvalId: z.string().min(1),
+      workflowVersionId: z.string().min(1),
+      workflowHash: z.string().regex(/^[a-f0-9]{64}$/),
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('approval.decided'),
+    payload: z.object({
+      approvalId: z.string().min(1),
+      decision: z.enum(['approved', 'rejected']),
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('workflow.execute.requested'),
+    payload: z.object({
+      workflowVersionId: z.string().min(1),
+      workflowHash: z.string().regex(/^[a-f0-9]{64}$/),
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('workflow.run_started'),
+    payload: z.object({}).strict(),
+  }).strict(),
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('workflow.run_reclaimed'),
+    payload: z.object({}).strict(),
+  }).strict(),
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('workflow.step_started'),
+    payload: z.object({ stepId: z.string().min(1) }).strict(),
+  }).strict(),
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('workflow.step_completed'),
+    payload: z.object({ stepId: z.string().min(1) }).strict(),
+  }).strict(),
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('business_task.completed'),
+    payload: z.object({}).strict(),
+  }).strict(),
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('business_task.failed'),
+    payload: z.object({ code: z.string().min(1) }).strict(),
+  }).strict(),
+  z.object({
+    ...taskEventCommonShape,
+    eventType: z.literal('business_task.canceled'),
+    payload: z.object({ reasonCode: z.string().min(1) }).strict(),
+  }).strict(),
+]);
+
+export type TaskEventProjection = z.infer<typeof taskEventProjectionSchema>;
+
+export const taskEventListResponseSchema = z.object({
+  events: z.array(taskEventProjectionSchema),
+}).strict();
+
+export type TaskEventListResponse = z.infer<typeof taskEventListResponseSchema>;
+
+export const approvalProjectionSchema = z.object({
+  id: z.string().min(1),
+  businessTaskId: z.string().min(1),
+  version: z.number().int().positive(),
+  status: z.enum(['pending', 'approved', 'rejected']),
+  subjectDigest: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+
+export type ApprovalProjection = z.infer<typeof approvalProjectionSchema>;
+
+export const conversationProjectionSchema = z.object({
+  id: z.string().min(1),
+  createdAt: z.string().datetime(),
+  latestTaskId: z.string().min(1).nullable(),
+  messages: z.array(z.object({
+    id: z.string().min(1),
+    author: z.enum(['user', 'xiaowei']),
+    body: z.string(),
+    createdAt: z.string().datetime(),
+  }).strict()),
+}).strict();
+
+export type ConversationProjection = z.infer<typeof conversationProjectionSchema>;
+
+export const workflowListItemSchema = z.object({
+  id: z.string().min(1),
+  hash: z.string().regex(/^[a-f0-9]{64}$/),
+  capabilityVersionId: z.string().min(1),
+  harnessVersionId: z.string().min(1),
+  createdAt: z.string().datetime(),
+  simulation: z.literal(true),
+}).strict();
+
+export type WorkflowListItem = z.infer<typeof workflowListItemSchema>;
+
+export const workflowListResponseSchema = z.object({
+  workflows: z.array(workflowListItemSchema),
+  ...listMetadataSchema.shape,
+  queryVersion: z.literal('workflow-versions.list.v1'),
+}).strict();
+
+export type WorkflowListResponse = z.infer<typeof workflowListResponseSchema>;
+
+export const workflowListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  cursor: paginationCursorSchema.optional(),
+}).strict();
+
+export type WorkflowListQuery = z.infer<typeof workflowListQuerySchema>;
+
+const workflowNodeProjectionSchema = z.discriminatedUnion('kind', [
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal('deterministic'),
+    handlerVersion: z.string().min(1),
+    inputRefs: z.array(z.string()),
+    outputSchemaId: z.string().min(1),
+  }).strict(),
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal('agent'),
+    capabilityVersionId: z.string().min(1),
+    harnessVersionId: z.string().min(1),
+    inputRefs: z.array(z.string()),
+    outputSchemaId: z.string().min(1),
+  }).strict(),
+  z.object({
+    id: z.string().min(1),
+    kind: z.literal('verification'),
+    policyVersion: z.string().min(1),
+    inputRefs: z.array(z.string()),
+    outputSchemaId: z.string().min(1),
+  }).strict(),
+]);
+
+export const workflowDetailProjectionSchema = workflowListItemSchema.extend({
+  compilerVersion: z.literal('geneway-workflow-compiler/0.1.0'),
+  canonicalizationVersion: z.literal('RFC8785/JCS-1'),
+  featureSet: z.literal('fixed-v1'),
+  nodes: z.array(workflowNodeProjectionSchema),
+  edges: z.array(z.object({ from: z.string().min(1), to: z.string().min(1) }).strict()),
+  permissionCeiling: z.object({
+    actions: z.array(z.enum(['R0', 'R1', 'A1'])).min(1),
+    resourceScopes: z.array(z.string().min(1)).min(1),
+    dataClasses: z.array(z.enum(['C0', 'C1', 'C2'])).min(1),
+  }).strict(),
+}).strict();
+
+export type WorkflowDetailProjection = z.infer<typeof workflowDetailProjectionSchema>;
 
 export const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -450,7 +691,16 @@ export const workerCommandResponseSchema = z.discriminatedUnion('command', [
 export type WorkerCommandResponse = z.infer<typeof workerCommandResponseSchema>;
 
 export const createTaskInputJsonSchema = z.toJSONSchema(createTaskInputSchema);
+export const conversationProjectionJsonSchema = z.toJSONSchema(conversationProjectionSchema);
+export const taskListQueryJsonSchema = z.toJSONSchema(taskListQuerySchema);
+export const taskListResponseJsonSchema = z.toJSONSchema(taskListResponseSchema);
 export const taskSnapshotJsonSchema = z.toJSONSchema(taskSnapshotSchema);
+export const taskEventProjectionJsonSchema = z.toJSONSchema(taskEventProjectionSchema);
+export const taskEventListResponseJsonSchema = z.toJSONSchema(taskEventListResponseSchema);
+export const approvalProjectionJsonSchema = z.toJSONSchema(approvalProjectionSchema);
+export const workflowListQueryJsonSchema = z.toJSONSchema(workflowListQuerySchema);
+export const workflowListResponseJsonSchema = z.toJSONSchema(workflowListResponseSchema);
+export const workflowDetailProjectionJsonSchema = z.toJSONSchema(workflowDetailProjectionSchema);
 export const workerDeliveryJsonSchema = z.toJSONSchema(workerDeliverySchema);
 export const workerCommandJsonSchema = z.toJSONSchema(workerCommandSchema);
 export const workerCommandResponseJsonSchema = z.toJSONSchema(workerCommandResponseSchema);

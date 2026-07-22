@@ -761,7 +761,7 @@ describe.sequential('Gate 0.2A required recovery fault matrix', () => {
     expect(approved.statusCode, approved.body).toBe(200);
     const sse = await controlPlane.app.inject({
       method: 'GET',
-      url: `/api/business-tasks/${task.taskId}/events?afterCursor=${String(watermark)}`,
+      url: `/api/business-tasks/${task.taskId}/events?after=${String(watermark)}`,
       headers: { accept: 'text/event-stream' },
     });
     expect(sse.statusCode, sse.body).toBe(200);

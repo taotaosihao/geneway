@@ -136,13 +136,12 @@ test('小纬完成真实 served UI 方案分析纵切并保持权威实体关联
     request.get(`${CONTROL_PLANE_URL}/api/business-tasks/${taskId ?? ''}/events?afterCursor=0`),
   ]);
   const workflow = await workflowResponse.json() as { id: string; hash: string };
-  const approval = await approvalResponse.json() as { id: string; business_task_id: string; status: string; subject_digest: string; subject: { workflowVersionId: string; workflowHash: string } };
-  const events = await eventsResponse.json() as { events: readonly { cursor: number; simulation: boolean; runtime_mode: string; business_decision_allowed: boolean }[] };
+  const approval = await approvalResponse.json() as { id: string; businessTaskId: string; status: string; subjectDigest: string };
+  const events = await eventsResponse.json() as { events: readonly { cursor: number; simulation: boolean; runtimeMode: string; businessDecisionAllowed: boolean }[] };
   expect(workflow).toEqual(expect.objectContaining({ id: workflowId, hash: workflowHash }));
-  expect(approval).toEqual(expect.objectContaining({ id: snapshot.approval.id, business_task_id: taskId, status: 'approved', subject_digest: snapshot.approval.subjectDigest }));
-  expect(approval.subject).toEqual(expect.objectContaining({ workflowVersionId: workflowId, workflowHash }));
+  expect(approval).toEqual({ id: snapshot.approval.id, businessTaskId: taskId, version: 1, status: 'approved', subjectDigest: snapshot.approval.subjectDigest });
   expect(events.events.length).toBeGreaterThan(10);
-  expect(events.events.every((event) => event.simulation && event.runtime_mode === 'fake' && event.business_decision_allowed === false)).toBeTruthy();
+  expect(events.events.every((event) => event.simulation && event.runtimeMode === 'fake' && event.businessDecisionAllowed === false)).toBeTruthy();
   expect(Math.max(...events.events.map((event) => event.cursor))).toBe(snapshot.eventWatermark);
 
   const conversationResponse = await request.get(`${CONTROL_PLANE_URL}/api/conversations/${snapshot.conversationId}`);
@@ -158,7 +157,7 @@ test('小纬完成真实 served UI 方案分析纵切并保持权威实体关联
       id: string; workflow_version_id: string; workflow_hash: string; approval_status: string; max_cursor: string;
       published_claims: string; rejected_claims: string; evidence_count: string; simulation: boolean; runtime_mode: string; business_decision_allowed: boolean;
     }>(`SELECT t.id,t.workflow_version_id,t.workflow_hash,a.status approval_status,
-      (SELECT max(cursor)::text FROM business_task_events e WHERE e.tenant_id=t.tenant_id AND e.business_task_id=t.id) max_cursor,
+      (SELECT max(sequence)::text FROM business_task_events e WHERE e.tenant_id=t.tenant_id AND e.business_task_id=t.id) max_cursor,
       (SELECT count(*)::text FROM claims c WHERE c.tenant_id=t.tenant_id AND c.business_task_id=t.id AND c.status='published') published_claims,
       (SELECT count(*)::text FROM claims c WHERE c.tenant_id=t.tenant_id AND c.business_task_id=t.id AND c.status='rejected') rejected_claims,
       (SELECT count(*)::text FROM evidence_items r WHERE r.tenant_id=t.tenant_id AND r.business_task_id=t.id) evidence_count,

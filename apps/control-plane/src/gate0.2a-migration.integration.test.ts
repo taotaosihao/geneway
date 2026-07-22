@@ -59,6 +59,17 @@ async function applyRecoveryMigration(client: PoolClient): Promise<void> {
   }
 }
 
+async function applyQuerySnapshotMigration(client: PoolClient): Promise<void> {
+  await client.query('BEGIN');
+  try {
+    await client.query(await migration('0005_gate_0_2b_query_snapshots.sql'));
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  }
+}
+
 async function seedLegacyAuthority(client: PoolClient): Promise<void> {
   await client.query(`
     INSERT INTO tenants (id,name) VALUES ('tenant_a','Tenant A');
@@ -426,6 +437,31 @@ describe('0003 Gate 0.2A delivery/evidence migration', () => {
       const principalColumn = await client.query(`SELECT 1 FROM information_schema.columns
         WHERE table_schema=current_schema() AND table_name='idempotency_records' AND column_name='principal_id'`);
       expect(principalColumn.rowCount).toBe(0);
+    });
+  });
+
+  it('creates immutable, principal-bound query snapshots with a bounded TTL', async () => {
+    await inIsolatedSchema(async (client) => {
+      await applyBase(client);
+      await client.query(`INSERT INTO tenants (id,name) VALUES ('tenant_a','Tenant A');
+        INSERT INTO users (tenant_id,id,display_name) VALUES ('tenant_a','user_a','User A')`);
+      await applyQuerySnapshotMigration(client);
+      await client.query(`INSERT INTO query_snapshots
+        (tenant_id,id,principal_id,query_kind,authorization_epoch,canonical_query,query_version,field_mask_version,as_of,expires_at)
+        VALUES ('tenant_a','query_a','user_a','business_tasks',$1,'{}','business-tasks.list.v1',
+          'business-tasks.list.public.v1',now(),now()+interval '15 minutes')`, [hashA]);
+      await client.query(`INSERT INTO query_snapshot_items
+        (tenant_id,query_snapshot_id,position,object_id,sort_key)
+        VALUES ('tenant_a','query_a',0,'task_a','{"value":"2026-07-22T00:00:00.000Z","id":"task_a"}')`);
+
+      await expect(client.query("UPDATE query_snapshots SET query_version='changed' WHERE tenant_id='tenant_a' AND id='query_a'"))
+        .rejects.toThrow(/query snapshots are immutable/u);
+      await expect(client.query("UPDATE query_snapshot_items SET object_id='task_b' WHERE tenant_id='tenant_a' AND query_snapshot_id='query_a' AND position=0"))
+        .rejects.toThrow(/query snapshots are immutable/u);
+      await expect(client.query(`INSERT INTO query_snapshots
+        (tenant_id,id,principal_id,query_kind,authorization_epoch,canonical_query,query_version,field_mask_version,as_of,expires_at)
+        VALUES ('tenant_a','query_too_long','user_a','business_tasks',$1,'{}','v1','mask-v1',now(),now()+interval '16 minutes')`, [hashA]))
+        .rejects.toThrow(/query_snapshots_check/u);
     });
   });
 });

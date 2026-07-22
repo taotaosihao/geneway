@@ -40,6 +40,7 @@ GENEWAY_WEB_PORT=4200 GENEWAY_CONTROL_PLANE_PORT=4100 pnpm dev-up
 
 - [Gate A0 Fast Chat 最终实施合同](doc/plans/atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md)是当前唯一可执行范围权威；它只覆盖无材料真实聊天，不自动授权产品代码实施。
 - [Gate 0.2B 最终实施合同](doc/plans/atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md)保留为延期工作的范围权威；Gate 0.2B.1 已关闭，0.2B.2–0.2B.3 未完成、未开放，Gate A0 关闭后再恢复。
+- [Gate A 最终实施合同](doc/plans/atlas-workflow/20260723-008-geneway-gate-a-gearjob/implementation-contract.final.md)已提前锁定真实材料分析与 GearJob 单工单只读查询的后续范围；它必须等待 Gate A0 和恢复后的 Gate 0.2B.2–0.2B.3 关闭，也不授权当前产品代码或跨仓 GearJob 修改。
 - [Gate 0.2A 最终实施合同](doc/plans/atlas-workflow/20260722-003-geneway-gate-0-2a-artifact-evidence/implementation-contract.final.md)保留为已关闭基线。
 
 支持材料不授予新范围：
@@ -62,4 +63,4 @@ Gate R（已关闭）
 → Gate B–G（长任务、动态 Workflow、异常/日报、多渠道和多 Runtime）
 ```
 
-Gate A0 的 authority slice 与合同已经建立，但当前只完成实施文档，`xiaowei.chat.v1` 和真实 Model Gateway 尚未实现或开放；产品代码仍需用户明确授权。Gate A0 实施后的默认入口目标是 `/conversations/new`，当前已实现的 `dev-up` 仍打印既有材料分析入口，不能把目标状态误报为已经交付。Gate 0.2B.2–0.2B.3 延期不等于完成或取消，恢复时仍必须遵守其原合同。Gate A 及以后仍只是路线图，必须另建 authority slice 和合同。新代码必须遵守当前实施合同；旧仓库只作为可恢复历史和文件级迁移来源，不得从 dirty worktree 直接复制，不得整包合并、rebase 或 cherry-pick，也不得引入 `@paperclipai/*` 运行依赖。
+Gate A0 的 authority slice 与合同已经建立，但当前只完成实施文档，`xiaowei.chat.v1` 和真实 Model Gateway 尚未实现或开放；产品代码仍需用户明确授权。Gate A0 实施后的默认入口目标是 `/conversations/new`，当前已实现的 `dev-up` 仍打印既有材料分析入口，不能把目标状态误报为已经交付。Gate 0.2B.2–0.2B.3 延期不等于完成或取消，恢复时仍必须遵守其原合同。Gate A 已有未来合同，但在进入条件关闭和另行实施授权前不是当前执行范围；Gate B 及以后仍只是路线图。新代码必须遵守当前实施合同；旧仓库只作为可恢复历史和文件级迁移来源，不得从 dirty worktree 直接复制，不得整包合并、rebase 或 cherry-pick，也不得引入 `@paperclipai/*` 运行依赖。

@@ -4,7 +4,7 @@
 
 日期：2026-07-23
 
-文档角色：支持性技术参考。本文件保留数据模型、接口、故障恢复、安全和迁移细节，但不授予实施范围；任何内容与当前合同冲突时，以 [Gate A0 Fast Chat 最终实施合同](atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md) 为准。延期的异常投影范围仍由 [Gate 0.2B 最终实施合同](atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md) 控制。长期阶段见[非执行路线图](2026-07-18-geneway-v19-reimplementation.md)。
+文档角色：支持性技术参考。本文件保留数据模型、接口、故障恢复、安全和迁移细节，但不授予实施范围；任何内容与当前合同冲突时，以 [Gate A0 Fast Chat 最终实施合同](atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md) 为准。延期的异常投影范围仍由 [Gate 0.2B 最终实施合同](atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md) 控制；未来真实材料分析与单工单只读范围由 [Gate A 最终实施合同](atlas-workflow/20260723-008-geneway-gate-a-gearjob/implementation-contract.final.md) 控制，但在进入条件与独立实施授权满足前不是当前执行范围。长期阶段见[非执行路线图](2026-07-18-geneway-v19-reimplementation.md)。
 
 当前 Atlas authority：`20260723-002-geneway-fast-chat` / `gate-a0-fast-chat`；Gate 0.2B.2–0.2B.3 延期且未关闭，旧任务 `20260715-044-paperclip-agent-mvp` 仅作历史来源。
 
@@ -1472,6 +1472,8 @@ Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，�
 ---
 
 ### Gate A：共享 Codex 订阅业务 MVP + GearJob 单工单查询
+
+详细且唯一的未来实施范围见 [Gate A 最终实施合同](atlas-workflow/20260723-008-geneway-gate-a-gearjob/implementation-contract.final.md)。本节仅作技术参考，不能扩大合同或绕过 Gate A0、Gate 0.2B.2–0.2B.3、GearJob preflight 与独立实施授权。
 
 #### 目标
 

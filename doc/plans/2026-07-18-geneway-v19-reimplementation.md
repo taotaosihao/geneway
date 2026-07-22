@@ -6,7 +6,7 @@
 
 文档角色：**非执行路线图**。本文件说明长期产品与阶段关系，不授予任何 Gate 的实施权限，也不能覆盖当前合同。
 
-详细技术约束见[技术实施附录](2026-07-18-geneway-v19-technical-appendix.md)，当前快速可用切片见 [Gate A0 Fast Chat 最终实施合同](atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md)，延期的异常投影范围见 [Gate 0.2B 最终实施合同](atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md)，界面细节见[界面设计 ADR](atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md)，v19 后确认的长期决定见[架构决策索引](../adr/README.md)。后续 Gate 必须由用户另行授权并建立新的 authority slice；accepted ADR 不等于已实现或已开放。
+详细技术约束见[技术实施附录](2026-07-18-geneway-v19-technical-appendix.md)，当前快速可用切片见 [Gate A0 Fast Chat 最终实施合同](atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md)，延期的异常投影范围见 [Gate 0.2B 最终实施合同](atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md)，未来真实业务 MVP 范围见 [Gate A 最终实施合同](atlas-workflow/20260723-008-geneway-gate-a-gearjob/implementation-contract.final.md)，界面细节见[界面设计 ADR](atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md)，v19 后确认的长期决定见[架构决策索引](../adr/README.md)。Gate A 合同不自动授权实施；Gate B 及以后仍必须由用户另行授权并建立新的 authority slice。accepted ADR 不等于已实现或已开放。
 
 ## 1. 一句话目标
 
@@ -249,6 +249,8 @@ Gate A0 只面向单用户、共享会话的 trusted-local LAN 开发验收，�
 ### Gate A：用共享 Codex 订阅完成真实业务 MVP
 
 复用 Gate A0 已通过的 Model Gateway、`codex_subscription_dev` 与 OpenAI Agents Runtime，实现文档分析、方案生成、用户指定专家、人工复核、证据引用、预算、取消和失败恢复。
+
+详细且唯一的未来实施范围见 [Gate A 最终实施合同](atlas-workflow/20260723-008-geneway-gate-a-gearjob/implementation-contract.final.md)。该合同必须等待 Gate A0 和恢复后的 Gate 0.2B.2–0.2B.3 关闭，且不自动授权当前产品代码或跨仓 GearJob 修改。
 
 结果中的事实、推断、建议和不确定项必须分开显示。
 

@@ -2,7 +2,7 @@
 
 `geneway` 是面向制造业的通用数字员工平台。客户只与“小纬”交互，也可以指定一个专家或专家团；后台 Agent、Workflow、工具和模型都受统一权限、审批、证据与审计约束。
 
-当前仓库是独立于旧 Paperclip fork 的全新产品代码基地。Gate R、Gate 0.1、Gate 0.2A 和 Gate 0.2B.1 Task / Workflow 产品路由纵切已关闭；完整 **Gate 0.2B：任务与异常投影纵切**仍未关闭。
+当前仓库是独立于旧 Paperclip fork 的全新产品代码基地。Gate R、Gate 0.1、Gate 0.2A 和 Gate 0.2B.1 Task / Workflow 产品路由纵切已关闭；Gate 0.2B.2–0.2B.3 已从当前关键路径延期且仍未关闭。下一执行顺序调整为 **Gate A0 Fast Chat：无材料真实基础聊天**，其合同已就绪、产品代码尚未实施。
 
 ## 局域网开发验收环境
 
@@ -36,7 +36,8 @@ GENEWAY_WEB_PORT=4200 GENEWAY_CONTROL_PLANE_PORT=4100 pnpm dev-up
 
 ## 当前执行权威
 
-- [Gate 0.2B 最终实施合同](doc/plans/atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md)是剩余 Gate 0.2B 工作的唯一可执行范围权威；Gate 0.2B.1 已作为关闭基线保留。
+- [Gate A0 Fast Chat 最终实施合同](doc/plans/atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md)是当前唯一可执行范围权威；它只覆盖无材料真实聊天，不自动授权产品代码实施。
+- [Gate 0.2B 最终实施合同](doc/plans/atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md)保留为延期工作的范围权威；Gate 0.2B.1 已关闭，0.2B.2–0.2B.3 未完成、未开放，Gate A0 关闭后再恢复。
 - [Gate 0.2A 最终实施合同](doc/plans/atlas-workflow/20260722-003-geneway-gate-0-2a-artifact-evidence/implementation-contract.final.md)保留为已关闭基线。
 
 支持材料不授予新范围：
@@ -53,9 +54,10 @@ Gate R（已关闭）
 → Gate 0.1（已关闭：小纬安全模拟纵切）
 → Gate 0.2A（已关闭：Artifact / Evidence）
 → Gate 0.2B.1（已关闭：Task / Workflow 产品路由）
-→ Gate 0.2B.2–0.2B.3（合同就绪：异常 fixture 投影与加固）
+→ Gate A0（当前合同就绪：无材料真实基础聊天）
+→ Gate 0.2B.2–0.2B.3（延期：异常 fixture 投影与加固）
 → Gate A（真实文档分析 + GearJob 单工单只读查询）
 → Gate B–G（长任务、动态 Workflow、异常/日报、多渠道和多 Runtime）
 ```
 
-Gate 0.2B 的 authority slice 与合同已经建立；Gate 0.2B.1 已关闭，剩余产品代码仍需用户明确授权。Gate A 及以后仍只是路线图，必须另建 authority slice 和合同。新代码必须遵守当前实施合同；旧仓库只作为可恢复历史和文件级迁移来源，不得从 dirty worktree 直接复制，不得整包合并、rebase 或 cherry-pick，也不得引入 `@paperclipai/*` 运行依赖。
+Gate A0 的 authority slice 与合同已经建立，但当前只完成实施文档，`xiaowei.chat.v1` 和真实 Model Gateway 尚未实现或开放；产品代码仍需用户明确授权。Gate 0.2B.2–0.2B.3 延期不等于完成或取消，恢复时仍必须遵守其原合同。Gate A 及以后仍只是路线图，必须另建 authority slice 和合同。新代码必须遵守当前实施合同；旧仓库只作为可恢复历史和文件级迁移来源，不得从 dirty worktree 直接复制，不得整包合并、rebase 或 cherry-pick，也不得引入 `@paperclipai/*` 运行依赖。

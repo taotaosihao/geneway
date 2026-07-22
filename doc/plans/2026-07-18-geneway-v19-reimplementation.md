@@ -1,12 +1,12 @@
 # geneway 制造业数字员工平台实施方案
 
-版本：v19 精简实施版
+版本：v19.1 快速可用顺序版
 
-日期：2026-07-18
+日期：2026-07-23
 
 文档角色：**非执行路线图**。本文件说明长期产品与阶段关系，不授予任何 Gate 的实施权限，也不能覆盖当前合同。
 
-详细技术约束见[技术实施附录](2026-07-18-geneway-v19-technical-appendix.md)，Gate 0.1 的最终实施边界见[最终实施合同](atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md)，界面细节见[界面设计 ADR](atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md)，v19 后确认的长期决定见[架构决策索引](../adr/README.md)。后续 Gate 必须由用户另行授权并建立新的 authority slice；accepted ADR 不等于已实现或已开放。
+详细技术约束见[技术实施附录](2026-07-18-geneway-v19-technical-appendix.md)，当前快速可用切片见 [Gate A0 Fast Chat 最终实施合同](atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md)，延期的异常投影范围见 [Gate 0.2B 最终实施合同](atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md)，界面细节见[界面设计 ADR](atlas-workflow/20260720-010-geneway-gate-0-1/ui-design.md)，v19 后确认的长期决定见[架构决策索引](../adr/README.md)。后续 Gate 必须由用户另行授权并建立新的 authority slice；accepted ADR 不等于已实现或已开放。
 
 ## 1. 一句话目标
 
@@ -30,15 +30,19 @@ Gate R 已于 2026-07-19 关闭。旧 Paperclip 项目已归档为 `/home/gewu/w
 
 ## 3. 产品先做什么
 
-MVP 只做两个小闭环：
+为了先形成可用产品，MVP 顺序调整为先交付一个不创建业务任务的基础交互闭环：
 
-1. `solution.analysis.v1`：读取客户需求、会议纪要和现有方案，输出需求清单、差距、实施建议、风险和引用证据。
-2. `production.work-order-status.v1`：用户输入或选择一个 GearJob 生产工单，小纬返回工单状态、计划数量、已产数量、进度、数据更新时间和原始证据。这是首个真实 ERP/MES 任务，不先做复杂异常诊断或日报。
+1. `xiaowei.chat.v1`：用户无需上传材料即可与小纬进行真实模型、多轮、流式、可取消的基础聊天。首版不调用工具，不访问企业知识或联网搜索，只面向可信本机内部使用。
+
+随后交付两个受治理业务闭环：
+
+2. `solution.analysis.v1`：读取客户需求、会议纪要和现有方案，输出需求清单、差距、实施建议、风险和引用证据。
+3. `production.work-order-status.v1`：用户输入或选择一个 GearJob 生产工单，小纬返回工单状态、计划数量、已产数量、进度、数据更新时间和原始证据。这是首个真实 ERP/MES 任务，不先做复杂异常诊断或日报。
 
 MVP 通过 `~/work/gearjob` 现有 Frappe 权限和只读 API 查询一个 Work Order，不直连数据库。设备异常、产能进度落后和生产日报仍保留在产品界面与路线图中，但放到 MVP 之后：
 
-3. `operations.exception-assist.v1`：主动发现设备告警、停机、工单或产能进度落后，形成异常待办；小纬调用设备、生产、质量等专家分析影响、原因和处理建议。
-4. `production.daily-report.v1`：只读查询 ERP/MES/QMS 数据，生成生产日报，并明确标记数据缺失和无法判断的内容。
+4. `operations.exception-assist.v1`：主动发现设备告警、停机、工单或产能进度落后，形成异常待办；小纬调用设备、生产、质量等专家分析影响、原因和处理建议。
+5. `production.daily-report.v1`：只读查询 ERP/MES/QMS 数据，生成生产日报，并明确标记数据缺失和无法判断的内容。
 
 第一版不做生产写入，不修改排产，不控制设备，不自动创建正式工单。
 
@@ -160,8 +164,8 @@ flowchart LR
 | [AG-UI](https://docs.ag-ui.com/) | Gate 0.1 | Web 前端事件投影 | 采用兼容事件模型，不保存业务权威 |
 | [TanStack Table](https://tanstack.com/table/latest/docs/installation) | Gate 0.2 | 异常、任务、Evidence 和工单表格逻辑 | 稳定版 headless table；服务端受控查询 |
 | [VersityGW](https://github.com/versity/versitygw) | Gate 0.2 | S3 兼容 Artifact 存储 | 复用 Hive/Sharp Cell POSIX backend，不使用 MinIO |
-| [OpenAI Agents SDK for TypeScript](https://openai.github.io/openai-agents-js/) | Gate A | 首个真实 Agent Runtime | npm 依赖，封装在 Runtime Adapter 后面 |
-| [`@openai/agents-extensions`](https://openai.github.io/openai-agents-js/extensions/ai-sdk/) | Gate A | AI SDK model bridge | 复用经审查的固定版本测试车道 |
+| [OpenAI Agents SDK for TypeScript](https://openai.github.io/openai-agents-js/) | Gate A0 | 首个真实基础聊天 Runtime；Gate A 复用到业务任务 | npm 依赖，封装在 Runtime Adapter 后面 |
+| [`@openai/agents-extensions`](https://openai.github.io/openai-agents-js/extensions/ai-sdk/) | Gate A0 | AI SDK model bridge | 复用经审查的固定版本测试车道 |
 | [Hatchet](https://github.com/hatchet-dev/hatchet) | Gate B | 长任务排队、等待、重试和恢复 | 独立服务，不 fork；只托管同一 Interpreter |
 | [OpenTelemetry](https://opentelemetry.io/) | Gate G 前逐步引入 | 日志、指标和调用链 | Gate 0.1 先保留内部观测接口，正式 exporter 后置 |
 
@@ -234,11 +238,17 @@ Gate 0.1 只使用预置、已批准的只读脱敏输入引用和服务端 fake
 
 Gate 0.2 再加入受鉴权上传、Artifact/VersityGW、报告下载、完整 Claim–Evidence–Lineage、inbox/恢复、异常 fixture、TanStack Table、四个完整路由、JSON Schema parity/property tests 与 UI 状态矩阵。
 
-当前唯一可执行范围只到 Gate 0.1；本路线图不授权 Gate 0.2。
+当前已关闭基线为 Gate 0.2B.1；Gate 0.2B.2–0.2B.3 延期且保持未关闭。当前唯一执行范围由 Gate A0 authority 与最终合同定义，本路线图本身不授权产品代码。
 
-### 阶段 2：用共享 Codex 订阅完成真实 MVP
+### Gate A0：先完成无材料真实基础聊天
 
-接入 Model Gateway 合同和复用后的 OpenAI Agents Runtime，先启用 `codex_subscription_dev` 测试 profile，实现文档分析、方案生成、用户指定专家、人工复核、证据引用、预算、取消和失败恢复。
+在不创建 BusinessTask、WorkflowRun、Evidence 或 Artifact 的前提下，新增 `xiaowei.chat.v1`，把默认 Composer 与材料分析入口分离。普通聊天通过最小 Model Gateway 和真实 Runtime 完成多轮、流式与取消；首版 `tool_choice=none`，不访问企业知识、联网、GearJob 或任何 Connector。
+
+Gate A0 只面向可信本机内部测试，复用 `pnpm dev-up` 和现有 192/10 网段 Web 入口。`codex_subscription_dev` 的 auth-file 只挂载到本机 Model Gateway provider plugin；Web、Control Plane、Runtime 和 Worker 不读取凭据，不允许 FakeRuntime 冒充真实聊天。
+
+### Gate A：用共享 Codex 订阅完成真实业务 MVP
+
+复用 Gate A0 已通过的 Model Gateway、`codex_subscription_dev` 与 OpenAI Agents Runtime，实现文档分析、方案生成、用户指定专家、人工复核、证据引用、预算、取消和失败恢复。
 
 结果中的事实、推断、建议和不确定项必须分开显示。
 
@@ -291,6 +301,7 @@ draft → shadow → internal → graduated
 | --- | --- | --- |
 | R：仓库门 | 旧仓库可恢复；新仓库全小写、无 Paperclip 运行依赖；未丢分支和未跟踪文件 | 停止改名和新建，不覆盖旧目录 |
 | 0：产品骨架门 | Gate 0.1 先完成 tenant isolation、服务端身份、最小 Authorization/delegated capability、Zod/Compiler/hash、固定 HarnessVersion/ApprovalVersion、BusinessTaskEvent、最小 Evidence publish guard 和真实 API + served UI，并由同一 `verify:gate0.1` run 同时关闭产品/安全门；Gate 0.2 再完成迁移清单、Schema parity/property tests、完整 Lineage/outbox、VersityGW、React Flow 四路由和异常 fixture | 不接真实模型 |
+| A0：基础聊天门 | 默认小纬会话无需材料即可通过唯一 Model Gateway 完成真实模型流式首问、追问和取消；普通聊天不创建 BusinessTask，跨 Conversation/tenant 隔离、凭据隔离、错误映射和材料分析回归通过 | 保持 `xiaowei.chat.v1` 为 `NOT_OPEN`，继续使用已关闭模拟基线，不用 FakeRuntime 冒充真实聊天 |
 | A：MVP 真实 Agent 门 | 共享 Codex 订阅车道在可信本机通过依赖、刷新、配额、崩溃和脱敏测试；两个固定 TS 对象模板均生成标准 WorkflowDraft，并由普通 Worker Interpreter 执行；文档分析有证据；用户指定专家有效；GearJob 单工单进度只读查询通过 | 关闭订阅车道，保留 fake Runtime 和固定模板，不接 Hatchet 或动态 Workflow |
 | B：长任务门 | 同一个 Interpreter 托管到 Hatchet 后，lease/fencing、双 Worker、服务重启、重复事件和断线续传均不重复完成；WorkflowVersion、事件和 UI 合同不变 | 保留 Gate A 短任务；不启用需要 durable wait/recovery 的流程 |
 | C：动态 Harness、流程与审批门 | Agent 只能生成 HarnessDraft/Patch 与 WorkflowDraft/Patch JSON；Agent/Tool/Model/Memory/Verifier/Budget 选择、条件、并行、等待、引用和版本解析由 Compiler 校验；未批准版本绝不执行；变化显示 Diff 并使旧审批失效；Agent 不能生成 TS 或新增权限 | 不开放动态 Harness/流程，只保留已注册固定版本；不得宣称内部平台完成 |
@@ -334,12 +345,12 @@ draft → shadow → internal → graduated
 ### 客户看到什么
 
 - 默认只看到一个“小纬”通用数字员工，界面像简洁的 ChatGPT/Claude 对话。
-- 输入框旁提供“自动安排 / 指定专家 / 指定专家团”；小纬仍是唯一发言人，所选专家只显示在任务卡、流程节点和结论来源中。
+- 默认基础聊天只显示普通文本输入与发送/停止；进入受治理业务能力后，输入框旁再提供“自动安排 / 指定专家 / 指定专家团”。小纬仍是唯一发言人，所选专家只显示在任务卡、流程节点和结论来源中。
 - 小纬可以调用设备、生产、质量、供应链和方案专家团；专家只显示为任务进度和结构化结论，不各自占用聊天消息流。
 - 复杂任务显示可视 Workflow、等待原因、审批卡片和报告，不展示模型内部思维。
 - 右侧抽屉展示任务、证据、数据范围、费用和下载文件。
 
-桌面工作区采用 Codex 式布局：左侧是小纬、异常与待办、任务、Workflow 和历史会话；中间承载当前对话或业务页面；右侧按选中对象展示任务、节点、Evidence、权限和 Artifact；底部 Composer 固定提供附件、专家/专家团选择、范围提示和发送。右侧未选中对象时隐藏，窄屏改为 Drawer，不把三栏强行压缩。
+桌面工作区采用 Codex 式布局：左侧是小纬、异常与待办、任务、Workflow 和历史会话；中间承载当前对话或业务页面；右侧按选中对象展示任务、节点、Evidence、权限和 Artifact。底部 Composer 默认提供基础文本聊天与发送/停止，只有显式进入材料分析或其他业务 Capability 时才显示附件、专家/专家团和范围控件。右侧未选中对象时隐藏，窄屏改为 Drawer，不把三栏强行压缩。
 
 ### 主要页面
 
@@ -411,7 +422,7 @@ geneway 自研并掌握：
 专家群聊、外部 Agent、更多 Runtime 和生产写动作
 ```
 
-实施顺序固定为：先迁移已验证底层资产，再写缺失功能；先做小纬 + 用户可选专家的可用产品，再用共享 Codex 订阅完成内部 MVP；GearJob 先查一个工单，再做异常和日报；先完成能力毕业，再连接外部 Agent。
+实施顺序调整为：保留 Gate 0.2B.1 已关闭基线，先用 Gate A0 打通无材料真实基础聊天，再恢复 Gate 0.2B.2–0.2B.3；Gate A 复用同一 Model Gateway 完成真实材料分析和 GearJob 单工单查询，随后再做长任务、动态 Workflow、异常和日报；先完成能力毕业，再连接外部 Agent。
 
 ## 11. 资料引用
 

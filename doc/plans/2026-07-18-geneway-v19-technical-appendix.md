@@ -2,11 +2,11 @@
 
 状态：`supporting-implementation-reference`
 
-日期：2026-07-18
+日期：2026-07-23
 
-文档角色：支持性技术参考。本文件保留数据模型、接口、故障恢复、安全和迁移细节，但不授予实施范围；任何内容与当前合同冲突时，以 [`atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md`](atlas-workflow/20260720-010-geneway-gate-0-1/implementation-contract.final.md) 为准。长期阶段见[非执行路线图](2026-07-18-geneway-v19-reimplementation.md)。
+文档角色：支持性技术参考。本文件保留数据模型、接口、故障恢复、安全和迁移细节，但不授予实施范围；任何内容与当前合同冲突时，以 [Gate A0 Fast Chat 最终实施合同](atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md) 为准。延期的异常投影范围仍由 [Gate 0.2B 最终实施合同](atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md) 控制。长期阶段见[非执行路线图](2026-07-18-geneway-v19-reimplementation.md)。
 
-当前 Atlas authority：`20260720-010-geneway-gate-0-1`；旧任务 `20260715-044-paperclip-agent-mvp` 仅作历史来源。
+当前 Atlas authority：`20260723-002-geneway-fast-chat` / `gate-a0-fast-chat`；Gate 0.2B.2–0.2B.3 延期且未关闭，旧任务 `20260715-044-paperclip-agent-mvp` 仅作历史来源。
 
 产品设计来源：[`doc/reference/制造业数字员工平台_内部能力内核细节终审与兼容实施方案_v19.md`](../reference/制造业数字员工平台_内部能力内核细节终审与兼容实施方案_v19.md)
 
@@ -38,6 +38,7 @@ Gate R 已于 2026-07-19 关闭。旧仓库已做可验证归档，新小写 `ge
 ```text
 Capability-first Manufacturing Control Plane
   + Restricted Workflow DSL
+  + Chat Runtime（Gate A0，无 BusinessTask/Workflow）
   + Fixed Workflow Interpreter（Gate 0/A 普通 Worker，Gate B 起 Hatchet 托管）
   + Versioned Approval
   + Runtime-neutral Agent Host
@@ -60,7 +61,7 @@ Capability-first Manufacturing Control Plane
 → 重新通过新合同与安全测试
 ```
 
-首个业务纵切是 `solution.analysis.v1`；首个真实 GearJob 任务收敛为 `production.work-order-status.v1`，只查询一个生产工单的状态和进度。设备/产能异常助理与生产日报在该简单任务通过后再实施。MVP 复用旧实现分支的 OpenAI Agents SDK + Codex 订阅测试车道，正式环境仍使用 Model Gateway 管理的 API/企业凭据。第一阶段动作上限为 A1，只允许查询、分析和建议，不允许正式业务写入或设备控制。
+首个真实模型可用纵切调整为不创建业务任务的 `xiaowei.chat.v1`；首个受治理业务纵切仍是 `solution.analysis.v1`，首个真实 GearJob 任务仍是 `production.work-order-status.v1`。Gate A0 先证明无材料、多轮、流式、可取消的基础聊天与 Model Gateway 边界；Gate A 再复用该 Runtime/Gateway 处理材料和单工单业务。设备/产能异常助理与生产日报在该简单任务通过后再实施。正式环境仍使用 Model Gateway 管理的 API/企业凭据。第一阶段动作上限为 A1，只允许查询、分析和建议，不允许正式业务写入或设备控制。
 
 ---
 
@@ -83,12 +84,13 @@ v19：
 
 ```text
 Tenant / User / Conversation
-  → BusinessTask
-  → CapabilityVersion
-  → WorkflowVersion / WorkflowRun
-  → ApprovalVersion
-  → AgentTask / ToolExecution
-  → Claim / Evidence / Lineage / Artifact
+  ├→ xiaowei.chat.v1 → Message / ModelInvocation（Gate A0，无 BusinessTask）
+  └→ 业务 CapabilityVersion
+       → BusinessTask
+       → WorkflowVersion / WorkflowRun
+       → ApprovalVersion
+       → AgentTask / ToolExecution
+       → Claim / Evidence / Lineage / Artifact
 ```
 
 这两个模型的差异涉及：
@@ -135,7 +137,7 @@ Tenant / User / Conversation
 4. 长任务可以暂停、恢复、重放、取消和故障恢复。
 5. 所有模型、工具和制造业系统调用均受统一权限、数据等级和动作等级约束。
 6. 所有关键结论均可追溯到 Evidence 和完整 Lineage。
-7. 先完成文档/方案分析和 GearJob 单工单进度查询，再扩展异常待办和生产日报。
+7. 先完成无材料基础聊天，再完成文档/方案分析和 GearJob 单工单进度查询，随后扩展异常待办和生产日报。
 8. 同一内核支持 WebChat、飞书、企微和未来小程序投影。
 9. Runtime 可替换：OpenAI first，Claude second，未来可接 AgentScope、DeerFlow、外部 A2A。
 10. 只有已毕业 Capability 才能进入外部 Agent 联邦。
@@ -404,7 +406,7 @@ Codex 只作为信息架构参考，不作为 UI 技术来源：
 - 左侧异常入口显示未处理数量和最高严重度，设备异常和产能落后不能只藏在聊天或表格中。
 - 中间区域按 `/conversations/new?capability=...`、`/conversations/:id`、`/exceptions`、`/tasks/:id`、`/workflows/:id` 切换，每个页面只有一个主任务；`/xiaowei` 仅作为导航别名，重定向到 canonical 新会话入口，Playwright 和审计统一记录 canonical route。
 - 右侧只展示当前选中对象；无选中时隐藏，窄屏改为 Drawer。
-- 底部 Composer 提供 `ExpertTarget`、工厂/车间范围和发送；用户可自动安排、指定专家或指定专家团。附件入口从 Gate 0.2 起开放，Gate 0.1 只选择服务端预置脱敏输入。
+- 底部 Composer 在 Gate A0 默认提供普通文本聊天与发送/停止；只有显式进入业务 Capability 时才展示 `ExpertTarget`、工厂/车间范围和附件等受治理控件。附件入口从 Gate 0.2 起开放，Gate 0.1 只选择服务端预置脱敏输入。
 - Codex 的 File Diff、Terminal、Repository 分别映射为 Workflow/报告版本 Diff、Connector 调用摘要和制造业工作上下文，不向普通员工展示开发工具术语。
 
 #### geneway design token 起始值
@@ -760,6 +762,7 @@ DSL v1 不提供通用循环。需要集合处理时使用注册的 deterministi
 | --- | --- |
 | Gate 0.1 | Zod 4 fixed-v1 schema、Compiler 基线、canonical JSON/hash、固定 Workflow/Harness API、最小只读 React Flow 投影、普通 Worker Interpreter + Fake Runtime |
 | Gate 0.2 | JSON Schema wire artifact、fixture export parity/property tests、完整只读 React Flow 投影和四路由状态矩阵 |
+| Gate A0 | 新增 `xiaowei.chat.v1`、Conversation/Message/ModelInvocation 与真实 Chat Runtime/Model Gateway；普通聊天不创建 Workflow 或 BusinessTask，既有 Workflow DSL 不变 |
 | Gate A | 保持 Gate 0.1 的 `solution.analysis.v1` 固定模板与 wire contract，切换到真实 OpenAI Runtime；新增 `production.work-order-status.v1` 六节点模板、Model Gateway 与 GearJob 只读闭环 |
 | Gate B | 不改 DSL、WorkflowVersion、审批或 UI；仅把同一个 Interpreter 托管到 Hatchet，增加 durable wait/retry/recovery 和多 Agent child task |
 | Gate C | Agent 结构化 HarnessDraft/Patch 与 WorkflowDraft/Patch、condition/parallel/wait、图形 Diff、重新审批；仍由同一 Compiler 和 Interpreter 处理 |
@@ -833,7 +836,7 @@ egress policy
 
 Gateway 必须记录 model route、provider/model revision、capability conformance、token/cost、retry/fallback、数据等级和脱敏策略。Runtime 只拿逻辑 policy，不持久化 provider secret。
 
-Gate A 只允许 C0/C1 或经过批准脱敏的 C2 fixture 进入公有模型。真实 C2 只有在客户 VPC/私有 route 和数据规则验收后才能使用。
+Gate A0 只允许 C0/C1 普通文本进入公有模型；Gate A 可增加经过批准脱敏的 C2 fixture。真实 C2 只有在客户 VPC/私有 route 和数据规则验收后才能使用。
 
 MVP 增加一个明确的非生产 profile：
 
@@ -1369,7 +1372,7 @@ context_resolve
 Gate 0 分为两个可审计切片：
 
 - **Gate 0.1 安全产品纵切**：Postgres migration、仅 loopback 可用的服务端 trusted-local principal、tenant isolation、最小 Authorization/delegated capability、Zod fixed-v1/Workflow Compiler/canonical hash、固定 ExpertCatalogVersion/HarnessVersion/WorkflowVersion、完整执行语义的 ApprovalSubject/ApprovalVersion、最小 result Claim/EvidenceRef publish guard、Conversation/BusinessTask/BusinessTaskEvent API、最小 outbox、普通 Worker Interpreter和真实 served WebChat。用户必须在页面完成一次任务提交、审批、执行、正向 Claim/Evidence 与无证据拒绝查看；该切片结束仍无安全闭环的真实 API + UI 即停止。
-- **Gate 0.2 完整产品骨架**：上传、Artifact/VersityGW、完整 Claim–Evidence–Lineage、outbox/inbox 扩展、异常 fixture、恢复、TanStack Table 和四路由状态矩阵。Gate 0.2 不属于当前实施合同。
+- **Gate 0.2 完整产品骨架**：上传、Artifact/VersityGW、完整 Claim–Evidence–Lineage、outbox/inbox 扩展、异常 fixture、恢复、TanStack Table 和四路由状态矩阵。该范围不属于历史 Gate 0.1 合同；Gate 0.2A 与 0.2B.1 后来已关闭，0.2B.2–0.2B.3 现按 Gate A0 顺序决定延期。
 
 Gate 0.1 的代码顺序是“基础合同 → 单一纵切”，但它们共同属于一个 Gate，不能把基础合同交付冒充产品验收。
 
@@ -1439,11 +1442,39 @@ Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，�
 
 ---
 
-### Gate A：共享 Codex 订阅 MVP + GearJob 单工单查询
+### Gate A0：无材料真实基础聊天
 
 #### 目标
 
-复用旧分支的 OpenAI Agents SDK 订阅测试车道，用一个真实 Runtime 完成方案分析，并通过 GearJob 只读 API 完成一个生产工单进度查询。此 Gate 只面向可信本机内部测试。
+在已关闭 Gate 0.2B.1 产品壳和 Conversation 基线上，新增 `xiaowei.chat.v1`。默认小纬会话无需材料即可通过唯一 Model Gateway 获得真实模型的流式回答、继续追问并停止生成；普通聊天不创建 BusinessTask、WorkflowRun、Evidence 或 Artifact。
+
+#### 边界
+
+- 首版只处理 C0/C1 普通文本，`tool_choice=none`，不访问企业知识、联网、GearJob、Connector 或写动作；
+- 复用 `codex_subscription_dev` 的可信本机 provider plugin，auth-file 只对 Model Gateway 进程可见；
+- Control Plane Postgres 保存 Conversation、Message、ModelInvocation、幂等、游标、取消和终态；
+- 上下文只取当前 Conversation 最近 24 条已完成消息且总文本不超过 64 KiB，跨 tenant/principal/conversation fail closed；
+- 未配置、未通过 conformance、配额、超时、流中断或取消时返回明确终态，不回退 FakeRuntime；
+- `solution.analysis.v1` 继续保持材料、审批、Evidence、Artifact 和任务门，不因普通聊天放宽。
+
+#### 退出条件
+
+- `pnpm dev-up` 启动真实 Web、Control Plane、Worker 与本机 Model Gateway；
+- `/conversations/new` 在无材料时完成真实首问、至少两个流式增量、追问与停止生成；
+- 普通聊天数据库断言为零 BusinessTask、WorkflowRun、Evidence 和 Artifact；
+- UI、API、Postgres、Worker 与 Model Gateway redacted audit 可按同一 ModelInvocation 关联；
+- 跨 Conversation/tenant、凭据、旁路、tool call、取消竞态和迟到 completion 负向测试通过；
+- `solution.analysis.v1` 与 Gate 0.2B.1 已关闭基线回归通过。
+
+详细且唯一可执行范围见 [Gate A0 最终实施合同](atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md)。
+
+---
+
+### Gate A：共享 Codex 订阅业务 MVP + GearJob 单工单查询
+
+#### 目标
+
+复用 Gate A0 已通过的 Model Gateway、OpenAI Agents Runtime 与订阅测试车道，用同一真实 Runtime 完成方案分析，并通过 GearJob 只读 API 完成一个生产工单进度查询。此 Gate 只面向可信本机内部测试。
 
 #### 进入条件
 

@@ -4,10 +4,10 @@
 
 Before implementation, read:
 
-1. `/home/gewu/.codex/workflow/artifacts/20260722-009-geneway-gate-0-2b-task-exception-projection/team/sdd/slices/gate-0-2b-task-exception-projection/brief.md`
-2. `doc/plans/atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md`
+1. `/home/gewu/.codex/workflow/artifacts/20260723-002-geneway-fast-chat/team/sdd/slices/gate-a0-fast-chat/brief.md`
+2. `doc/plans/atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md`
 
-The authority brief defines the stable Goal refs and the implementation contract is the only executable scope body. Read the technical appendix, UI ADR, roadmap, and spec pointer only when the current implementation question needs them; they cannot add acceptance, exit conditions, or implementation scope.
+The Gate A0 authority brief defines the stable Goal refs and the Gate A0 implementation contract is the only current executable scope body. Gate 0.2B.2–0.2B.3 is explicitly deferred, not completed or deleted; when that work resumes, its own authority brief and final contract become authoritative for that separate slice. Read the technical appendix, UI ADR, roadmap, and spec pointers only when the current implementation question needs them; they cannot add acceptance, exit conditions, or implementation scope.
 
 ## Core rules
 
@@ -24,4 +24,4 @@ The authority brief defines the stable Goal refs and the implementation contract
 
 ## Current authority slice
 
-Gate R、Gate 0.1 和 Gate 0.2A 是已关闭基线。当前 SDD authority 与最终合同只覆盖 Gate 0.2B Task / Exception Projection；合同已就绪，但不自动授权产品代码实施。未经新的明确实施授权，不得开始 `0.2B.1` 或开放 shadow Capability。
+Gate R、Gate 0.1、Gate 0.2A 和 Gate 0.2B.1 是已关闭基线。当前 SDD authority 与最终合同只覆盖 Gate A0 Fast Chat；Gate 0.2B.2–0.2B.3 延期且保持未关闭。Gate A0 合同就绪不自动授权产品代码实施；未经新的明确实施授权，不得开始 `A0.1`、启用真实模型通道或开放 `xiaowei.chat.v1`。

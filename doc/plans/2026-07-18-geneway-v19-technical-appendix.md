@@ -1461,7 +1461,7 @@ Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，�
 #### 退出条件
 
 - `pnpm dev-up` 启动真实 Web、Control Plane、Worker 与本机 Model Gateway；
-- 无需 LAN host 环境变量，默认 `/conversations/new` 在本机实际 192/10 地址以共享 `tenant_local/user_local` 完成无材料真实首问、至少两个流式增量、追问与停止生成；
+- 无需 LAN host 环境变量，默认 `/conversations/new` 在本机实际 192/10 地址以共享 `tenant_local/user_local` 完成无材料真实首问、terminal 前至少一个真实持久化 `message.delta`、追问与停止生成；
 - 普通聊天数据库断言为零 BusinessTask、WorkflowRun、Evidence 和 Artifact；
 - UI、API、Postgres、Worker 与 Model Gateway redacted audit 可按同一 ModelInvocation 关联；
 - 当前 Conversation 上下文不串线、客户端 tenant/principal 覆盖无效、凭据、旁路、tool call、取消竞态和迟到 completion 负向测试通过；另一个 LAN 浏览器访问和取消同一共享 principal 的 Conversation 是预期行为，不作为越权失败；

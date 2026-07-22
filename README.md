@@ -2,7 +2,7 @@
 
 `geneway` 是面向制造业的通用数字员工平台。客户只与“小纬”交互，也可以指定一个专家或专家团；后台 Agent、Workflow、工具和模型都受统一权限、审批、证据与审计约束。
 
-当前仓库是独立于旧 Paperclip fork 的全新产品代码基地。Gate R、Gate 0.1、Gate 0.2A 和 Gate 0.2B.1 Task / Workflow 产品路由纵切已关闭；Gate 0.2B.2–0.2B.3 已从当前关键路径延期且仍未关闭。下一执行顺序调整为 **Gate A0 Fast Chat：无材料真实基础聊天**；其 authority 与合同已经建立，合同当前为 `changes_required`，产品代码尚未实施。
+当前仓库是独立于旧 Paperclip fork 的全新产品代码基地。Gate R、Gate 0.1、Gate 0.2A 和 Gate 0.2B.1 Task / Workflow 产品路由纵切已关闭；Gate 0.2B.2–0.2B.3 已从当前关键路径延期且仍未关闭。下一执行顺序调整为 **Gate A0 Fast Chat：无材料真实基础聊天**；其 authority 与最终合同已经就绪，产品代码尚未实施。
 
 ## 局域网开发验收环境
 
@@ -56,7 +56,7 @@ Gate R（已关闭）
 → Gate 0.1（已关闭：小纬安全模拟纵切）
 → Gate 0.2A（已关闭：Artifact / Evidence）
 → Gate 0.2B.1（已关闭：Task / Workflow 产品路由）
-→ Gate A0（当前合同待修订复审：无材料真实基础聊天）
+→ Gate A0（当前合同就绪：无材料真实基础聊天）
 → Gate 0.2B.2–0.2B.3（延期：异常 fixture 投影与加固）
 → Gate A（真实文档分析 + GearJob 单工单只读查询）
 → Gate B–G（长任务、动态 Workflow、异常/日报、多渠道和多 Runtime）

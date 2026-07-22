@@ -24,4 +24,4 @@ The Gate A0 authority brief defines the stable Goal refs and the Gate A0 impleme
 
 ## Current authority slice
 
-Gate R、Gate 0.1、Gate 0.2A 和 Gate 0.2B.1 是已关闭基线。当前 SDD authority 与最终合同只覆盖 Gate A0 Fast Chat；Gate 0.2B.2–0.2B.3 延期且保持未关闭。Gate A0 合同就绪不自动授权产品代码实施；未经新的明确实施授权，不得开始 `A0.1`、启用真实模型通道或开放 `xiaowei.chat.v1`。
+Gate R、Gate 0.1、Gate 0.2A 和 Gate 0.2B.1 是已关闭基线。当前 SDD authority 与合同只覆盖 Gate A0 Fast Chat；Gate 0.2B.2–0.2B.3 延期且保持未关闭。Gate A0 合同当前为 `changes_required`，其余 controller finding 修订与复审完成前不得开始产品代码实施；即使合同重新就绪，仍需新的明确实施授权才能开始 `A0.1`、启用真实模型通道或开放 `xiaowei.chat.v1`。

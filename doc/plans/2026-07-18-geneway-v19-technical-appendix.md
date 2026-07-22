@@ -1451,19 +1451,20 @@ Gate 0.1 结束仍只有文档、schema、fixture、scanner 或 headless API，�
 #### 边界
 
 - 首版只处理 C0/C1 普通文本，`tool_choice=none`，不访问企业知识、联网、GearJob、Connector 或写动作；
+- `pnpm dev-up` 使用单用户、共享会话的 trusted-local LAN 模式；192/10 地址上的所有访问者都映射为 `tenant_local/user_local`，共享 Conversation、上下文和取消能力，不提供配对、注册、登录或设备间隐私隔离；
 - 复用 `codex_subscription_dev` 的可信本机 provider plugin，auth-file 只对 Model Gateway 进程可见；
 - Control Plane Postgres 保存 Conversation、Message、ModelInvocation、幂等、游标、取消和终态；
-- 上下文只取当前 Conversation 最近 24 条已完成消息且总文本不超过 64 KiB，跨 tenant/principal/conversation fail closed；
+- 上下文只取当前 Conversation 最近 24 条已完成消息且总文本不超过 64 KiB，不混入该共享 principal 的其他 Conversation；客户端提交的 tenant/principal 覆盖值无效；
 - 未配置、未通过 conformance、配额、超时、流中断或取消时返回明确终态，不回退 FakeRuntime；
 - `solution.analysis.v1` 继续保持材料、审批、Evidence、Artifact 和任务门，不因普通聊天放宽。
 
 #### 退出条件
 
 - `pnpm dev-up` 启动真实 Web、Control Plane、Worker 与本机 Model Gateway；
-- `/conversations/new` 在无材料时完成真实首问、至少两个流式增量、追问与停止生成；
+- 无需 LAN host 环境变量，默认 `/conversations/new` 在本机实际 192/10 地址以共享 `tenant_local/user_local` 完成无材料真实首问、至少两个流式增量、追问与停止生成；
 - 普通聊天数据库断言为零 BusinessTask、WorkflowRun、Evidence 和 Artifact；
 - UI、API、Postgres、Worker 与 Model Gateway redacted audit 可按同一 ModelInvocation 关联；
-- 跨 Conversation/tenant、凭据、旁路、tool call、取消竞态和迟到 completion 负向测试通过；
+- 当前 Conversation 上下文不串线、客户端 tenant/principal 覆盖无效、凭据、旁路、tool call、取消竞态和迟到 completion 负向测试通过；另一个 LAN 浏览器访问和取消同一共享 principal 的 Conversation 是预期行为，不作为越权失败；
 - `solution.analysis.v1` 与 Gate 0.2B.1 已关闭基线回归通过。
 
 详细且唯一可执行范围见 [Gate A0 最终实施合同](atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md)。

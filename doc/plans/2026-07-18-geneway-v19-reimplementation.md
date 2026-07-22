@@ -32,7 +32,7 @@ Gate R 已于 2026-07-19 关闭。旧 Paperclip 项目已归档为 `/home/gewu/w
 
 为了先形成可用产品，MVP 顺序调整为先交付一个不创建业务任务的基础交互闭环：
 
-1. `xiaowei.chat.v1`：用户无需上传材料即可与小纬进行真实模型、多轮、流式、可取消的基础聊天。首版不调用工具，不访问企业知识或联网搜索，只面向可信本机内部使用。
+1. `xiaowei.chat.v1`：用户无需上传材料即可与小纬进行真实模型、多轮、流式、可取消的基础聊天。首版不调用工具，不访问企业知识或联网搜索，只面向单用户、共享会话的 trusted-local LAN 开发验收。
 
 随后交付两个受治理业务闭环：
 
@@ -244,7 +244,7 @@ Gate 0.2 再加入受鉴权上传、Artifact/VersityGW、报告下载、完整 C
 
 在不创建 BusinessTask、WorkflowRun、Evidence 或 Artifact 的前提下，新增 `xiaowei.chat.v1`，把默认 Composer 与材料分析入口分离。普通聊天通过最小 Model Gateway 和真实 Runtime 完成多轮、流式与取消；首版 `tool_choice=none`，不访问企业知识、联网、GearJob 或任何 Connector。
 
-Gate A0 只面向可信本机内部测试，复用 `pnpm dev-up` 和现有 192/10 网段 Web 入口。`codex_subscription_dev` 的 auth-file 只挂载到本机 Model Gateway provider plugin；Web、Control Plane、Runtime 和 Worker 不读取凭据，不允许 FakeRuntime 冒充真实聊天。
+Gate A0 只面向单用户、共享会话的 trusted-local LAN 开发验收，复用 `pnpm dev-up` 和现有 192/10 网段 Web 入口。所有访问者都映射为同一个 `tenant_local/user_local` 并共享 Conversation、上下文和取消能力；本 Gate 不提供配对、注册、登录或 LAN 设备之间的隐私隔离。`codex_subscription_dev` 的 auth-file 只挂载到本机 Model Gateway provider plugin；Web、Control Plane、Runtime 和 Worker 不读取凭据，不允许 FakeRuntime 冒充真实聊天。
 
 ### Gate A：用共享 Codex 订阅完成真实业务 MVP
 
@@ -301,7 +301,7 @@ draft → shadow → internal → graduated
 | --- | --- | --- |
 | R：仓库门 | 旧仓库可恢复；新仓库全小写、无 Paperclip 运行依赖；未丢分支和未跟踪文件 | 停止改名和新建，不覆盖旧目录 |
 | 0：产品骨架门 | Gate 0.1 先完成 tenant isolation、服务端身份、最小 Authorization/delegated capability、Zod/Compiler/hash、固定 HarnessVersion/ApprovalVersion、BusinessTaskEvent、最小 Evidence publish guard 和真实 API + served UI，并由同一 `verify:gate0.1` run 同时关闭产品/安全门；Gate 0.2 再完成迁移清单、Schema parity/property tests、完整 Lineage/outbox、VersityGW、React Flow 四路由和异常 fixture | 不接真实模型 |
-| A0：基础聊天门 | 默认小纬会话无需材料即可通过唯一 Model Gateway 完成真实模型流式首问、追问和取消；普通聊天不创建 BusinessTask，跨 Conversation/tenant 隔离、凭据隔离、错误映射和材料分析回归通过 | 保持 `xiaowei.chat.v1` 为 `NOT_OPEN`，继续使用已关闭模拟基线，不用 FakeRuntime 冒充真实聊天 |
+| A0：基础聊天门 | 默认小纬会话无需材料即可通过唯一 Model Gateway 完成真实模型流式首问、追问和取消；普通聊天不创建 BusinessTask；当前 Conversation 上下文边界、共享 trusted-local principal、客户端身份覆盖拒绝、凭据隔离、错误映射和材料分析回归通过 | 保持 `xiaowei.chat.v1` 为 `NOT_OPEN`，继续使用已关闭模拟基线，不用 FakeRuntime 冒充真实聊天 |
 | A：MVP 真实 Agent 门 | 共享 Codex 订阅车道在可信本机通过依赖、刷新、配额、崩溃和脱敏测试；两个固定 TS 对象模板均生成标准 WorkflowDraft，并由普通 Worker Interpreter 执行；文档分析有证据；用户指定专家有效；GearJob 单工单进度只读查询通过 | 关闭订阅车道，保留 fake Runtime 和固定模板，不接 Hatchet 或动态 Workflow |
 | B：长任务门 | 同一个 Interpreter 托管到 Hatchet 后，lease/fencing、双 Worker、服务重启、重复事件和断线续传均不重复完成；WorkflowVersion、事件和 UI 合同不变 | 保留 Gate A 短任务；不启用需要 durable wait/recovery 的流程 |
 | C：动态 Harness、流程与审批门 | Agent 只能生成 HarnessDraft/Patch 与 WorkflowDraft/Patch JSON；Agent/Tool/Model/Memory/Verifier/Budget 选择、条件、并行、等待、引用和版本解析由 Compiler 校验；未批准版本绝不执行；变化显示 Diff 并使旧审批失效；Agent 不能生成 TS 或新增权限 | 不开放动态 Harness/流程，只保留已注册固定版本；不得宣称内部平台完成 |

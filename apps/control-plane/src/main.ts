@@ -3,6 +3,7 @@ import { chmod, lstat, open, unlink } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { parseE2eHookEndpoint, postE2eHook } from './e2e-hook-client.js';
 import { createControlPlane } from './index.js';
+import { readAllowedWebOrigins } from './server-config.js';
 import { createWorkerCommandApp } from './worker-command-server.js';
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -57,7 +58,7 @@ async function reachE2eHook(payload: Readonly<Record<string, unknown>>): Promise
 const { app, repository, artifactService } = await createControlPlane({
   databaseUrl,
   logger: true,
-  allowedOrigins: [`http://localhost:${String(webPort)}`, `http://127.0.0.1:${String(webPort)}`],
+  allowedOrigins: readAllowedWebOrigins(process.env, webPort),
   ...(e2eHookEndpoint === null ? {} : {
     artifactServiceHooks: {
       afterIngestIntentPutAuthorityCommitted: (hook: Readonly<Record<string, unknown>>) => reachE2eHook({

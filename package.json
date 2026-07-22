@@ -18,6 +18,7 @@
     "test:recovery": "node scripts/test-recovery.mjs",
     "test:backup-restore": "node scripts/test-backup-restore.mjs",
     "db:migrate": "tsx scripts/migrate.ts",
+    "dev-up": "node scripts/dev-up.mjs",
     "dev:control-plane": "pnpm --filter @geneway/control-plane dev",
     "verify:foundation": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:integration && pnpm test:security && pnpm build",
     "verify:gate0.1": "pnpm verify:foundation && pnpm test:e2e -- --project=gate0.1",

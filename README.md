@@ -2,11 +2,43 @@
 
 `geneway` 是面向制造业的通用数字员工平台。客户只与“小纬”交互，也可以指定一个专家或专家团；后台 Agent、Workflow、工具和模型都受统一权限、审批、证据与审计约束。
 
-当前仓库是独立于旧 Paperclip fork 的全新产品代码基地。Gate R、Gate 0.1 和 Gate 0.2A 已关闭；**Gate 0.2B：任务与异常投影纵切**的实施合同已就绪，但尚未授权产品代码实施。
+当前仓库是独立于旧 Paperclip fork 的全新产品代码基地。Gate R、Gate 0.1、Gate 0.2A 和 Gate 0.2B.1 Task / Workflow 产品路由纵切已关闭；完整 **Gate 0.2B：任务与异常投影纵切**仍未关闭。
+
+## 局域网开发验收环境
+
+运行下面一条命令，会启动当前已验收的临时开发栈：
+
+```bash
+pnpm dev-up
+```
+
+该命令会自动启动 PostgreSQL、VersityGW、存储适配器与 reconciler、Control Plane、独立 UDS Worker 和 Vite Web。Web 只监听自动识别的局域网 IPv4（默认端口 `3200`），不会顺带监听 Tailscale、WireGuard 或 Docker bridge；Control Plane 默认监听 `127.0.0.1:3100`。默认端口被占用时会向后寻找空闲端口并打印最终地址，显式指定的端口被占用时则安全失败。例如：
+
+```text
+局域网（本机同样使用）：http://192.168.0.104:3200/conversations/new?capability=solution.analysis.v1
+```
+
+如果主机路由复杂或自动识别的地址不是需要暴露的网卡，显式指定 RFC1918 局域网 IPv4（`10/8`、`172.16/12` 或 `192.168/16`）：
+
+```bash
+GENEWAY_DEV_LAN_HOST=192.168.0.104 pnpm dev-up
+```
+
+也可以覆盖端口：
+
+```bash
+GENEWAY_WEB_PORT=4200 GENEWAY_CONTROL_PLANE_PORT=4100 pnpm dev-up
+```
+
+安全边界保持不变：只有 Web 监听选定的局域网 IPv4；Control Plane 仍只监听 `127.0.0.1`，PostgreSQL、VersityGW 和存储适配器使用随机 loopback 端口，Worker 只使用本机 `0600` token 和 Unix-domain socket。Control Plane 只接受本机地址和本次打印的局域网 Origin，不接受任意跨域写请求。
+
+按 `Ctrl+C` 会按 Web → Worker → Control Plane 的顺序停止进程，并删除本次临时数据库、对象存储卷、网络和 Worker 凭据。该环境只用于开发与验收；停止后数据不会保留，也不会启动真实模型、ERP/MES Connector 或生产写操作。
+
+如果其他局域网设备无法访问，检查主机防火墙是否允许所选 Web TCP 端口；不要开放随机 PostgreSQL、S3、存储适配器端口或 Worker socket。
 
 ## 当前执行权威
 
-- [Gate 0.2B 最终实施合同](doc/plans/atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md)是下一项可授权工作的唯一可执行范围权威。
+- [Gate 0.2B 最终实施合同](doc/plans/atlas-workflow/20260722-009-geneway-gate-0-2b-task-exception-projection/implementation-contract.final.md)是剩余 Gate 0.2B 工作的唯一可执行范围权威；Gate 0.2B.1 已作为关闭基线保留。
 - [Gate 0.2A 最终实施合同](doc/plans/atlas-workflow/20260722-003-geneway-gate-0-2a-artifact-evidence/implementation-contract.final.md)保留为已关闭基线。
 
 支持材料不授予新范围：
@@ -22,9 +54,10 @@
 Gate R（已关闭）
 → Gate 0.1（已关闭：小纬安全模拟纵切）
 → Gate 0.2A（已关闭：Artifact / Evidence）
-→ Gate 0.2B（合同就绪：任务、Workflow 与异常 fixture 投影）
+→ Gate 0.2B.1（已关闭：Task / Workflow 产品路由）
+→ Gate 0.2B.2–0.2B.3（合同就绪：异常 fixture 投影与加固）
 → Gate A（真实文档分析 + GearJob 单工单只读查询）
 → Gate B–G（长任务、动态 Workflow、异常/日报、多渠道和多 Runtime）
 ```
 
-Gate 0.2B 的 authority slice 与合同已经建立，但产品代码仍需用户明确授权。Gate A 及以后仍只是路线图，必须另建 authority slice 和合同。新代码必须遵守当前实施合同；旧仓库只作为可恢复历史和文件级迁移来源，不得从 dirty worktree 直接复制，不得整包合并、rebase 或 cherry-pick，也不得引入 `@paperclipai/*` 运行依赖。
+Gate 0.2B 的 authority slice 与合同已经建立；Gate 0.2B.1 已关闭，剩余产品代码仍需用户明确授权。Gate A 及以后仍只是路线图，必须另建 authority slice 和合同。新代码必须遵守当前实施合同；旧仓库只作为可恢复历史和文件级迁移来源，不得从 dirty worktree 直接复制，不得整包合并、rebase 或 cherry-pick，也不得引入 `@paperclipai/*` 运行依赖。

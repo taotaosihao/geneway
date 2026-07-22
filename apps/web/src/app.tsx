@@ -22,7 +22,8 @@ const TASK_CURSOR_KEY = 'geneway.gate02a.cursor';
 
 let conversationBootstrap: Promise<Conversation> | undefined;
 
-async function ensureConversation(): Promise<Conversation> {
+async function ensureConversation(explicitConversationId?: string): Promise<Conversation> {
+  if (explicitConversationId !== undefined) return api.getConversation(explicitConversationId);
   const storedId = localStorage.getItem('geneway.conversationId');
   if (storedId !== null) {
     try { return await api.getConversation(storedId); } catch { localStorage.removeItem('geneway.conversationId'); }
@@ -44,8 +45,8 @@ const convertConversationMessage = (message: Conversation['messages'][number]): 
   content: [{ type: 'text', text: message.body }],
 });
 
-export function App() {
-  const capabilityOpen = new URLSearchParams(window.location.search).get('capability') === 'solution.analysis.v1';
+export function ConversationExperience({ conversationId: explicitConversationId, forceOpen = false }: Readonly<{ conversationId?: string; forceOpen?: boolean }>) {
+  const capabilityOpen = forceOpen || new URLSearchParams(window.location.search).get('capability') === 'solution.analysis.v1';
   const [route, setRoute] = useState('auto');
   const [conversation, setConversation] = useState<Conversation>();
   const [task, setTask] = useState<TaskSnapshot>();
@@ -110,6 +111,14 @@ export function App() {
 
   useEffect(() => {
     if (!capabilityOpen) return;
+    if (explicitConversationId !== undefined) {
+      void ensureConversation(explicitConversationId).then(async (current) => {
+        setConversation(current);
+        await loadDocumentSnapshots(current.id);
+        if (current.latestTaskId !== null) await recover(current.latestTaskId, 0);
+      }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+      return;
+    }
     const taskId = localStorage.getItem(TASK_ID_KEY);
     if (taskId !== null) {
       const saved = Number(localStorage.getItem(TASK_CURSOR_KEY) ?? 0);
@@ -126,18 +135,18 @@ export function App() {
       setConversation(current);
       await loadDocumentSnapshots(current.id);
     }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
-  }, [capabilityOpen, loadDocumentSnapshots, recover]);
+  }, [capabilityOpen, explicitConversationId, loadDocumentSnapshots, recover]);
 
   const uploadArtifact = useCallback(async (file: File) => {
     setUploading(true); setError(undefined);
     try {
-      const current = conversation ?? await ensureConversation();
+      const current = conversation ?? await ensureConversation(explicitConversationId);
       setConversation(current);
       await api.uploadArtifact(current.id, file);
       await loadDocumentSnapshots(current.id);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setUploading(false); }
-  }, [conversation, loadDocumentSnapshots]);
+  }, [conversation, explicitConversationId, loadDocumentSnapshots]);
 
   const create = useCallback(async (body: string) => {
     setWorking(true); setError(undefined);
@@ -147,7 +156,7 @@ export function App() {
       if (selected === undefined || !selected.executionEligibility.eligible) {
         throw new Error('DOCUMENT_SNAPSHOT_REQUIRED: 请先明确选择一份已匹配演示 Profile 的材料');
       }
-      const current = conversation ?? await ensureConversation();
+      const current = conversation ?? await ensureConversation(explicitConversationId);
       setConversation(current);
       const conversationId = current.id;
       await api.addMessage(conversationId, body || '请分析已选择的脱敏方案材料');
@@ -157,7 +166,7 @@ export function App() {
       await recover(created.taskId, 0);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setWorking(false); }
-  }, [capabilityOpen, conversation, documentSnapshots, recover, route, selectedSnapshotId]);
+  }, [capabilityOpen, conversation, documentSnapshots, explicitConversationId, recover, route, selectedSnapshotId]);
 
   const selectedSnapshot = useMemo(() => documentSnapshots.find((projection) =>
     projection.documentSnapshot.id === selectedSnapshotId && projection.executionEligibility.eligible), [documentSnapshots, selectedSnapshotId]);
@@ -202,11 +211,11 @@ export function App() {
     if (workflow === undefined) return { nodes: [] as Node[], edges: [] as Edge[] };
     const status = new Map(task?.steps.map((step) => [step.id, step.status]) ?? []);
     return {
-      nodes: workflow.payload.nodes.map((node, index): Node => ({
+      nodes: workflow.nodes.map((node, index): Node => ({
         id: node.id, position: { x: index * 190, y: index % 2 === 0 ? 20 : 125 }, data: { label: STEP_NAMES[node.id] ?? node.id },
         className: `flow-node flow-node-${status.get(node.id) ?? 'queued'}`, draggable: false, selectable: true,
       })),
-      edges: workflow.payload.edges.map((edge): Edge => ({ id: `${edge.from}-${edge.to}`, source: edge.from, target: edge.to, animated: status.get(edge.to) === 'running' })),
+      edges: workflow.edges.map((edge): Edge => ({ id: `${edge.from}-${edge.to}`, source: edge.from, target: edge.to, animated: status.get(edge.to) === 'running' })),
     };
   }, [task?.steps, workflow]);
 
@@ -241,8 +250,8 @@ export function App() {
     <main className="app-shell" data-testid="geneway-app">
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">纬</span><div><strong>geneway</strong><small>制造业数字员工</small></div></div>
-        <button className="new-task" onClick={() => { localStorage.clear(); location.reload(); }}>＋ 新建会话</button>
-        <nav><b>今天</b><button className="nav-active">方案分析</button><button disabled>生产日报 · 即将开放</button></nav>
+        <a className="new-task" href="/conversations/new?capability=solution.analysis.v1" onClick={() => localStorage.clear()}>＋ 新建会话</a>
+        <nav><b>工作区</b><a className="nav-active" href="/conversations/new?capability=solution.analysis.v1">小纬</a><a href="/tasks">我的任务</a><a href="/workflows">Workflow</a><span>生产日报 · 即将开放</span></nav>
         <section className="operations-preview" aria-label="制造业状态入口">
           <h3>现场动态</h3>
           <button disabled><span className="signal danger" />设备异常待处理<small>即将开放</small></button>
@@ -309,7 +318,7 @@ export function App() {
           </section>}
           {task?.status === 'completed' && <section className="result-card" data-testid="result-card">
             <span className="eyebrow">小纬结论 · 模拟结果 · 不可用于业务决策</span><h2>方案分析完成</h2>
-            {published !== undefined && <div className="claim published" data-testid="published-claim"><b>已核验结论</b><p>{published.text}</p>{evidence !== undefined && <div className="claim-evidence"><span>已绑定 Evidence · {evidence.id}</span><button className="secondary" type="button" onClick={() => openEvidence(evidence.id)}>查看证据</button></div>}</div>}
+            {published !== undefined && <div className="claim published" data-testid="published-claim"><b>已核验结论</b><p>{published.text}</p>{evidence !== undefined && <div className="claim-evidence" data-evidence-id={evidence.id}><span>已绑定 Evidence · {evidence.id}</span><button className="secondary" type="button" onClick={() => openEvidence(evidence.id)}>查看证据</button></div>}</div>}
             {rejected !== undefined && <div className="claim rejected" data-testid="rejected-claim"><b>未发布候选</b><p>{rejected.text}</p><small>缺少可访问来源，已由 Evidence publish guard 拒绝。</small></div>}
           </section>}
           {task !== undefined && <section className="delivery-card" data-testid="task-deliveries">
@@ -321,7 +330,7 @@ export function App() {
                 ? <a href={taskSourceProjection.downloadUrl}>下载原件</a>
                 : <span className="delivery-unavailable">原件下载信息当前不可用</span>}
             </article>}
-            {reportArtifacts.map((artifact) => <article className="delivery-item" key={artifact.id} data-testid="report-artifact-item">
+            {reportArtifacts.map((artifact) => <article className="delivery-item" key={artifact.id} data-testid="report-artifact-item" data-artifact-id={artifact.id} data-content-sha256={artifact.contentSha256}>
               <div><b>{artifact.displayName}</b><span>{artifact.kind} · {artifact.sizeBytes} bytes</span></div>
               <code>sha256:{artifact.contentSha256}</code>
               <a href={artifact.downloadUrl}>下载模拟报告</a>
@@ -340,7 +349,7 @@ export function App() {
       <aside className="inspector">
         <div className="inspector-head"><span>任务检查器</span><button onClick={() => setWorkflowOpen((value) => !value)}>{workflowOpen ? '收起' : '展开'}</button></div>
         {task === undefined && snapshotReadUnavailable ? <div className="snapshot-inspector" data-testid="snapshot-unavailable-inspector"><span className="eyebrow">材料权威状态</span><h2>对象不可用 / 完整性异常</h2><p>敏感元数据已隐藏，下载与执行已禁用。</p></div> : task === undefined && documentSnapshots.length === 0 ? <div className="empty-inspector"><span>◇</span><p>上传材料或发送问题后，这里会显示存储校验、Workflow、审批、证据和安全边界。</p></div> : task === undefined ? <div className="snapshot-inspector" data-testid="snapshot-inspector"><span className="eyebrow">材料权威状态</span><h2>{documentSnapshots.length} 份已校验材料</h2>{documentSnapshots.map(({ documentSnapshot: snapshot, artifactState }) => <dl className="facts" key={snapshot.id}><div><dt>Artifact</dt><dd>{snapshot.artifactId}</dd></div><div><dt>Manifest</dt><dd>{snapshot.manifestId}</dd></div><div><dt>Snapshot</dt><dd>{snapshot.id}</dd></div><div><dt>Integrity</dt><dd>{artifactState.integrity}</dd></div></dl>)}</div> : <>
-          <dl className="facts"><div><dt>Task</dt><dd data-testid="task-id">{task.id}</dd></div><div><dt>Approval</dt><dd data-testid="approval-id">{task.approval.id}</dd></div><div><dt>输入</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.documentSnapshotId : task.inputRef.fixtureRef}</dd></div><div><dt>Profile</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.simulationProfile : 'legacy fixture'}</dd></div><div><dt>状态</dt><dd>{task.status}</dd></div><div><dt>事件游标</dt><dd data-testid="sse-cursor">{cursor}</dd></div></dl>
+          <dl className="facts"><div><dt>Task</dt><dd data-testid="task-id">{task.id}</dd></div><div><dt>Approval</dt><dd data-testid="approval-id">{task.approval.id}</dd></div><div><dt>Approval digest</dt><dd data-testid="conversation-approval-digest">{task.approval.subjectDigest}</dd></div><div><dt>输入</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.documentSnapshotId : task.inputRef.fixtureRef}</dd></div><div><dt>Profile</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.simulationProfile : 'legacy fixture'}</dd></div><div><dt>状态</dt><dd>{task.status}</dd></div><div><dt>事件游标</dt><dd data-testid="sse-cursor">{cursor}</dd></div></dl>
           <SimulationNotice />
           <Dialog.Root open={workflowOpen} onOpenChange={setWorkflowOpen}><Dialog.Trigger className="secondary">打开流程图</Dialog.Trigger><Dialog.Portal><Dialog.Backdrop className="dialog-backdrop" /><Dialog.Popup className="workflow-dialog"><Dialog.Title>固定 Workflow</Dialog.Title><Dialog.Description>只读图来自 Control Plane 中不可变 WorkflowVersion；审批与 Interpreter 使用同一 id + hash。</Dialog.Description><div className="workflow-meta"><code data-testid="workflow-id">{workflow?.id}</code><code data-testid="workflow-hash">{workflow?.hash}</code></div><div className="flow-wrap" data-testid="workflow-graph"><ReactFlow nodes={graph.nodes} edges={graph.edges} fitView nodesDraggable={false} nodesConnectable={false} elementsSelectable><Background /><Controls showInteractive={false} /></ReactFlow></div><Dialog.Close className="primary">关闭</Dialog.Close></Dialog.Popup></Dialog.Portal></Dialog.Root>
         </>}

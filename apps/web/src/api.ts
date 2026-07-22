@@ -1,14 +1,27 @@
 import {
+  approvalProjectionSchema,
   artifactIngestResponseSchema,
+  conversationProjectionSchema,
   documentSnapshotListSchema,
   evidenceProjectionSchema,
+  taskEventProjectionSchema,
+  taskListResponseSchema,
   taskSnapshotSchema,
+  workflowDetailProjectionSchema,
+  workflowListResponseSchema,
+  type ApprovalProjection,
   type ArtifactIngestResponse,
+  type ConversationProjection,
   type CreateTaskInput,
   type DocumentSnapshotList,
   type EvidenceProjection,
   type ExpertTarget,
+  type TaskListQuery,
+  type TaskListResponse,
   type TaskSnapshot,
+  type WorkflowDetailProjection,
+  type WorkflowListQuery,
+  type WorkflowListResponse,
 } from '@geneway/contracts';
 
 export type CreatedTask = Readonly<{
@@ -18,28 +31,9 @@ export type CreatedTask = Readonly<{
   workflowHash: string;
 }>;
 
-export type Conversation = Readonly<{
-  id: string;
-  messages: readonly Readonly<{ id: string; author: 'user' | 'xiaowei'; body: string }>[];
-}>;
-
-export type Workflow = Readonly<{
-  id: string;
-  hash: string;
-  canonicalizationVersion: string;
-  payload: Readonly<{
-    nodes: readonly Readonly<{ id: string; kind: string }>[];
-    edges: readonly Readonly<{ from: string; to: string }>[];
-  }>;
-}>;
-
-export type Approval = Readonly<{
-  id: string;
-  business_task_id: string;
-  version: number;
-  subject_digest: string;
-  status: string;
-}>;
+export type Conversation = ConversationProjection;
+export type Workflow = WorkflowDetailProjection;
+export type Approval = ApprovalProjection;
 
 const key = (prefix: string): string => `${prefix}-${crypto.randomUUID()}`;
 
@@ -57,7 +51,8 @@ export const api = {
   addMessage: (conversationId: string, body: string) => request<{ id: string }>(`/api/conversations/${conversationId}/messages`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('message') }, body: JSON.stringify({ body }),
   }),
-  getConversation: (conversationId: string) => request<Conversation>(`/api/conversations/${conversationId}`),
+  getConversation: async (conversationId: string): Promise<Conversation> =>
+    conversationProjectionSchema.parse(await request(`/api/conversations/${conversationId}`)),
   uploadArtifact: async (conversationId: string, file: File): Promise<ArtifactIngestResponse> => {
     const form = new FormData();
     form.append('file', file, file.name);
@@ -79,9 +74,29 @@ export const api = {
     });
   },
   getTask: async (taskId: string): Promise<TaskSnapshot> => taskSnapshotSchema.parse(await request(`/api/business-tasks/${taskId}`)),
+  listTasks: async (query: Partial<TaskListQuery> = {}): Promise<TaskListResponse> => {
+    const params = new URLSearchParams();
+    if (query.status !== undefined) params.set('status', query.status);
+    if (query.capabilityId !== undefined) params.set('capabilityId', query.capabilityId);
+    if (query.sort !== undefined) params.set('sort', query.sort);
+    if (query.direction !== undefined) params.set('direction', query.direction);
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    if (query.cursor !== undefined) params.set('cursor', query.cursor);
+    const suffix = params.size === 0 ? '' : `?${params.toString()}`;
+    return taskListResponseSchema.parse(await request(`/api/business-tasks${suffix}`));
+  },
   getEvidence: async (evidenceId: string): Promise<EvidenceProjection> => evidenceProjectionSchema.parse(await request(`/api/evidence/${evidenceId}`)),
-  getWorkflow: (id: string) => request<Workflow>(`/api/workflow-versions/${id}`),
-  getApproval: (id: string) => request<Approval>(`/api/approvals/${id}`),
+  getWorkflow: async (id: string): Promise<Workflow> =>
+    workflowDetailProjectionSchema.parse(await request(`/api/workflow-versions/${id}`)),
+  listWorkflows: async (query: Partial<WorkflowListQuery> = {}): Promise<WorkflowListResponse> => {
+    const params = new URLSearchParams();
+    if (query.limit !== undefined) params.set('limit', String(query.limit));
+    if (query.cursor !== undefined) params.set('cursor', query.cursor);
+    const suffix = params.size === 0 ? '' : `?${params.toString()}`;
+    return workflowListResponseSchema.parse(await request(`/api/workflow-versions${suffix}`));
+  },
+  getApproval: async (id: string): Promise<Approval> =>
+    approvalProjectionSchema.parse(await request(`/api/approvals/${id}`)),
   approve: (id: string) => request<{ approvalId: string; status: string }>(`/api/approvals/${id}/decisions`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('approval') }, body: JSON.stringify({ decision: 'approved' }),
   }),
@@ -92,9 +107,9 @@ export const api = {
     method: 'POST', headers: { 'idempotency-key': key('cancel') },
   }),
   events: async (taskId: string, afterCursor: number) => {
-    const response = await fetch(`/api/business-tasks/${taskId}/events?afterCursor=${String(afterCursor)}`, { headers: { accept: 'text/event-stream' } });
+    const response = await fetch(`/api/business-tasks/${taskId}/events?after=${String(afterCursor)}`, { headers: { accept: 'text/event-stream' } });
     if (!response.ok) throw new Error(`EVENT_STREAM_FAILED: ${response.statusText}`);
     const text = await response.text();
-    return [...text.matchAll(/^data: (.+)$/gm)].map((match) => JSON.parse(match[1] ?? '{}') as { cursor?: number });
+    return [...text.matchAll(/^data: (.+)$/gm)].map((match) => taskEventProjectionSchema.parse(JSON.parse(match[1] ?? '{}')));
   },
 };

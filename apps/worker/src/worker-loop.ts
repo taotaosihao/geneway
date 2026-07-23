@@ -158,12 +158,38 @@ export async function runWorkerLoop(client: WorkerCommandClient, options: Worker
   }
 }
 
-async function executeChatTurn(
+export async function executeChatTurn(
   client: ChatWorkerCommandClient,
   runtime: ChatRuntimeAdapter,
   claim: ChatTurnClaim,
   signal?: AbortSignal,
 ): Promise<void> {
+  const cancelController = new AbortController();
+  const executionSignal = signal === undefined
+    ? cancelController.signal
+    : AbortSignal.any([signal, cancelController.signal]);
+  let monitorActive = true;
+  let cancelFence: number | null = null;
+  let monitorFailure: unknown;
+  const monitor = (async () => {
+    while (monitorActive && !isAborted(signal)) {
+      await wait(50, signal);
+      if (!monitorActive || isAborted(signal)) return;
+      try {
+        const requestedFence = await client.cancelRequested(claim, signal);
+        if (requestedFence !== null) {
+          cancelFence = requestedFence;
+          cancelController.abort(new Error('user canceled chat generation'));
+          return;
+        }
+      } catch (error) {
+        if (isAborted(signal)) return;
+        monitorFailure = error;
+        cancelController.abort(error);
+        return;
+      }
+    }
+  })();
   try {
     await client.execute(claim);
     await client.started(claim);
@@ -177,11 +203,23 @@ async function executeChatTurn(
       systemPrompt: claim.systemPrompt,
       context: claim.context,
       deadline: claim.deadline,
-    }, (delta) => client.delta(claim, delta), signal);
-    await client.completed(claim, terminal);
+    }, (delta) => client.delta(claim, delta), executionSignal);
+    if (monitorFailure !== undefined) throw monitorFailure instanceof Error ? monitorFailure : new Error('Chat cancel monitor failed');
+    if (cancelFence !== null) await client.canceled(claim, cancelFence);
+    else await client.completed(claim, terminal);
   } catch (error) {
+    if (monitorFailure !== undefined) throw monitorFailure instanceof Error ? monitorFailure : new Error('Chat cancel monitor failed');
+    if (cancelFence === null && !isAborted(signal)) cancelFence = await client.cancelRequested(claim);
+    if (cancelFence !== null) {
+      await client.canceled(claim, cancelFence);
+      return;
+    }
     if (!(error instanceof ChatRuntimeError) || error.receipt === undefined) throw error;
     await client.failed(claim, error.receipt);
+  } finally {
+    monitorActive = false;
+    cancelController.abort();
+    await monitor;
   }
 }
 

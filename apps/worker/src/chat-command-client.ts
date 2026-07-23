@@ -52,6 +52,20 @@ export class ChatWorkerCommandClient {
       terminal: { status: 'failed', receipt: modelGatewayReceiptSchema.parse(receipt) },
     });
   }
+  async cancelRequested(claim: ChatTurnClaim, signal?: AbortSignal): Promise<number | null> {
+    const payload = await this.send({ command: 'request_chat_cancel', ...this.mutation(claim) }, signal);
+    const result = z.object({
+      command: z.literal('request_chat_cancel'),
+      result: z.discriminatedUnion('cancelRequested', [
+        z.object({ cancelRequested: z.literal(false) }).strict(),
+        z.object({ cancelRequested: z.literal(true), fence: z.number().int().positive() }).strict(),
+      ]),
+    }).strict().parse(payload);
+    return result.result.cancelRequested ? result.result.fence : null;
+  }
+  async canceled(claim: ChatTurnClaim, fence: number): Promise<void> {
+    await this.accepted('chat_terminal', { ...claim, fence }, { terminal: { status: 'canceled' } });
+  }
 
   private mutation(claim: ChatTurnClaim): Readonly<Record<string, unknown>> {
     return {

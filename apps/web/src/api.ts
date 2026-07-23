@@ -4,6 +4,7 @@ import {
   conversationProjectionSchema,
   chatRunEventSchema,
   chatRunProjectionSchema,
+  cancelChatRunProjectionSchema,
   documentSnapshotListSchema,
   evidenceProjectionSchema,
   taskEventProjectionSchema,
@@ -16,6 +17,7 @@ import {
   type ConversationProjection,
   type ChatRunEvent,
   type ChatRunProjection,
+  type CancelChatRunProjection,
   type CreateTaskInput,
   type DocumentSnapshotList,
   type EvidenceProjection,
@@ -77,6 +79,11 @@ export const api = {
       return data === undefined ? [] : [chatRunEventSchema.parse(JSON.parse(data.slice('data: '.length)))];
     });
   },
+  cancelChatRun: async (conversationId: string, modelInvocationId: string): Promise<CancelChatRunProjection> =>
+    cancelChatRunProjectionSchema.parse(await request(
+      `/api/conversations/${conversationId}/chat-runs/${modelInvocationId}/cancel`,
+      { method: 'POST', headers: { 'idempotency-key': key('chat-cancel') } },
+    )),
   uploadArtifact: async (conversationId: string, file: File): Promise<ArtifactIngestResponse> => {
     const form = new FormData();
     form.append('file', file, file.name);

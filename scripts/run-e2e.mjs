@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
+import { resolve } from 'node:path';
 
 async function findAvailablePort(excludedPorts = new Set()) {
   while (true) {
@@ -50,6 +51,7 @@ const reconciliationAdapterPort = await allocatePort();
 const workerHealthPort = await allocatePort();
 const controlPlaneSupervisorPort = await allocatePort();
 const modelGatewayPort = await allocatePort();
+const modelGatewaySupervisorPort = await allocatePort();
 const gateA0ReleasePort = await allocatePort();
 const composeRunId = runId.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 const composeProjectName = `geneway-e2e-${composeRunId}`;
@@ -62,6 +64,7 @@ const workerInstanceId = `e2e-worker-${process.pid}-${Date.now()}`;
 const modelGatewayAuthorityDirectory = gateA0Live ? mkdtempSync('/tmp/gw-mgw-') : undefined;
 const modelGatewayServiceTokenFile = modelGatewayAuthorityDirectory === undefined ? undefined : `${modelGatewayAuthorityDirectory}/service-token`;
 const modelGatewayInvocationSecretFile = modelGatewayAuthorityDirectory === undefined ? undefined : `${modelGatewayAuthorityDirectory}/invocation-secret`;
+const e2eSecretCanary = gateA0Live ? `geneway-secret-canary-${randomBytes(24).toString('hex')}` : undefined;
 const baseEnvironment = {
   PATH: process.env.PATH ?? '/usr/bin:/bin',
   HOME: process.env.HOME ?? '/tmp',
@@ -97,10 +100,35 @@ async function waitForProcessExit(pid, procStartTicks, timeoutMs) {
   return !processIdentityMatches(pid, procStartTicks);
 }
 
+function writeSourceBinding() {
+  const listed = spawnSync('git', ['ls-files', '-co', '--exclude-standard', '-z'], {
+    cwd: process.cwd(), encoding: 'buffer', maxBuffer: 32 * 1024 * 1024,
+  });
+  if (listed.status !== 0 || !Buffer.isBuffer(listed.stdout)) throw new Error('Unable to enumerate the E2E source tree');
+  const files = listed.stdout.toString('utf8').split('\0').filter(Boolean).sort();
+  const digest = createHash('sha256');
+  for (const file of files) {
+    const bytes = readFileSync(resolve(process.cwd(), file));
+    digest.update(`${Buffer.byteLength(file, 'utf8')}:${file}:${String(bytes.byteLength)}:`);
+    digest.update(bytes);
+  }
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' });
+  if (head.status !== 0 || typeof head.stdout !== 'string') throw new Error('Unable to resolve the E2E source HEAD');
+  writeFileSync(`/tmp/geneway-runs/${runId}/source-binding.json`, `${JSON.stringify({
+    schemaVersion: 'geneway-source-binding/1',
+    runId,
+    head: head.stdout.trim(),
+    workspaceSha256: digest.digest('hex'),
+    fileCount: files.length,
+  })}\n`, { mode: 0o600 });
+}
+
 let result;
 let cleanupFailed = false;
 let reportGateFailed = false;
 try {
+  mkdirSync(`/tmp/geneway-runs/${runId}`, { recursive: true });
+  writeSourceBinding();
   writeFileSync(workerTokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
   chmodSync(workerTokenFile, 0o600);
   if ((statSync(workerTokenFile).mode & 0o777) !== 0o600 || Buffer.byteLength(workerSocketPath, 'utf8') > 100) {
@@ -126,6 +154,7 @@ try {
       GENEWAY_WORKER_HEALTH_PORT: workerHealthPort,
       GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT: controlPlaneSupervisorPort,
       GENEWAY_MODEL_GATEWAY_PORT: modelGatewayPort,
+      GENEWAY_MODEL_GATEWAY_SUPERVISOR_PORT: modelGatewaySupervisorPort,
       GENEWAY_GATE_A0_RELEASE_PORT: gateA0ReleasePort,
       GENEWAY_WORKER_SOCKET_PATH: workerSocketPath,
       GENEWAY_WORKER_TOKEN_FILE: workerTokenFile,
@@ -133,6 +162,7 @@ try {
       GENEWAY_MANAGED_TEST_INFRA: '1',
       ...(gateA0Live ? {
         GENEWAY_GATE_A0_LIVE: '1',
+        GENEWAY_E2E_SECRET_CANARY: e2eSecretCanary,
         GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE: liveAuthFile,
         GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE: liveConformanceFile,
         GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: modelGatewayServiceTokenFile,

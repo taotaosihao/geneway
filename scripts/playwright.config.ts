@@ -12,13 +12,16 @@ const workerTokenFile = process.env.GENEWAY_WORKER_TOKEN_FILE;
 const workerInstanceId = process.env.GENEWAY_WORKER_INSTANCE_ID;
 const gateA0Live = process.env.GENEWAY_GATE_A0_LIVE === '1';
 const modelGatewayPort = Number(process.env.GENEWAY_MODEL_GATEWAY_PORT ?? 3150);
+const modelGatewaySupervisorPort = Number(process.env.GENEWAY_MODEL_GATEWAY_SUPERVISOR_PORT ?? 3450);
 const gateA0ReleasePort = Number(process.env.GENEWAY_GATE_A0_RELEASE_PORT ?? 3160);
 const modelGatewayServiceTokenFile = process.env.GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE;
 const modelGatewayInvocationSecretFile = process.env.GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE;
 const codexSubscriptionAuthFile = process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE;
 const modelGatewayConformanceFile = process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE;
+const e2eSecretCanary = process.env.GENEWAY_E2E_SECRET_CANARY;
 if (!Number.isInteger(webPort) || !Number.isInteger(controlPlanePort) || !Number.isInteger(controlPlaneSupervisorPort)
   || !Number.isInteger(workerHealthPort) || !Number.isInteger(modelGatewayPort)
+  || !Number.isInteger(modelGatewaySupervisorPort)
   || !Number.isInteger(gateA0ReleasePort)) throw new Error('GENEWAY ports must be integers');
 if (workerSocketPath === undefined || workerTokenFile === undefined || workerInstanceId === undefined) throw new Error('E2E Worker authority is required');
 if (!/^\/tmp\/gw-uds-[a-zA-Z0-9]+\/worker\.sock$/u.test(workerSocketPath)
@@ -27,9 +30,12 @@ if (!/^\/tmp\/gw-uds-[a-zA-Z0-9]+\/worker\.sock$/u.test(workerSocketPath)
   throw new Error('E2E Worker authority contains unsafe values');
 }
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-if (gateA0Live && [modelGatewayServiceTokenFile, modelGatewayInvocationSecretFile, codexSubscriptionAuthFile, modelGatewayConformanceFile]
-  .some((value) => value === undefined || !value.startsWith('/'))) {
+if (gateA0Live && ([modelGatewayServiceTokenFile, modelGatewayInvocationSecretFile, codexSubscriptionAuthFile, modelGatewayConformanceFile]
+  .some((value) => value === undefined || !value.startsWith('/')))) {
   throw new Error('gate-a0-live requires absolute Model Gateway authority, auth and conformance paths');
+}
+if (gateA0Live && (e2eSecretCanary === undefined || !/^geneway-secret-canary-[a-f0-9]{48}$/u.test(e2eSecretCanary))) {
+  throw new Error('gate-a0-live requires a valid secret-isolation canary');
 }
 const modelGatewayUrl = `http://127.0.0.1:${String(modelGatewayPort)}`;
 const controlPlaneGatewayEnvironment = gateA0Live
@@ -77,7 +83,9 @@ export default defineConfig({
     { name: 'gate0.2a-negative', testMatch: /gate-0\.2a-negative\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate0.2a-recovery-multiprocess', testMatch: /gate-0\.2a-recovery(?:-matrix)?\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate0.2b-success', testMatch: /gate-0\.2b-task-workflow-routes\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
-    { name: 'gate-a0-live', testMatch: /gate-a0-fast-chat\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
+    { name: 'gate-a0-live', testMatch: /gate-a0-(?:fast-chat|context-cancel)\.spec\.ts/u, use: {
+      ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, trace: 'on',
+    } },
   ],
   webServer: [
     {
@@ -105,8 +113,8 @@ export default defineConfig({
       stderr: 'pipe',
     },
     ...(gateA0Live ? [{
-      command: `cd .. && exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${process.env.TMPDIR ?? '/tmp'}" LANG="${process.env.LANG ?? 'C.UTF-8'}" NODE_ENV=test GENEWAY_MODEL_GATEWAY_PORT=${String(modelGatewayPort)} GENEWAY_CONTROL_PLANE_URL=${shellQuote(`http://127.0.0.1:${String(controlPlanePort)}`)} GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE=${shellQuote(modelGatewayServiceTokenFile ?? '')} GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE=${shellQuote(modelGatewayInvocationSecretFile ?? '')} GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE=${shellQuote(codexSubscriptionAuthFile ?? '')} GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE=${shellQuote(modelGatewayConformanceFile ?? '')} ./node_modules/.bin/tsx services/model-gateway/src/main.ts`,
-      url: `${modelGatewayUrl}/health`,
+      command: `cd .. && exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${process.env.TMPDIR ?? '/tmp'}" LANG="${process.env.LANG ?? 'C.UTF-8'}" NODE_ENV=test GENEWAY_RUN_ID=${shellQuote(runId)} GENEWAY_WORKER_TOKEN_FILE=${shellQuote(workerTokenFile)} GENEWAY_MODEL_GATEWAY_SUPERVISOR_PORT=${String(modelGatewaySupervisorPort)} GENEWAY_E2E_SECRET_CANARY=${shellQuote(e2eSecretCanary ?? '')} GENEWAY_MODEL_GATEWAY_PORT=${String(modelGatewayPort)} GENEWAY_CONTROL_PLANE_URL=${shellQuote(`http://127.0.0.1:${String(controlPlanePort)}`)} GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE=${shellQuote(modelGatewayServiceTokenFile ?? '')} GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE=${shellQuote(modelGatewayInvocationSecretFile ?? '')} GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE=${shellQuote(codexSubscriptionAuthFile ?? '')} GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE=${shellQuote(modelGatewayConformanceFile ?? '')} ./node_modules/.bin/tsx scripts/e2e/start-e2e-model-gateway.ts`,
+      url: `http://127.0.0.1:${String(modelGatewaySupervisorPort)}/health`,
       timeout: 60_000,
       reuseExistingServer: false,
       stdout: 'pipe' as const,

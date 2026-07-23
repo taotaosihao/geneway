@@ -28,6 +28,9 @@ const chatWorkerCommandSchema = z.discriminatedUnion('command', [
         status: z.literal('failed'),
         receipt: modelGatewayReceiptSchema,
       }).strict(),
+      z.object({
+        status: z.literal('canceled'),
+      }).strict(),
     ]),
   }).strict(),
   z.object({ command: z.literal('request_chat_cancel'), ...mutationShape }).strict(),
@@ -78,10 +81,18 @@ export function registerChatWorkerCommands(app: FastifyInstance, input: Readonly
       case 'chat_terminal':
         if (command.terminal.status === 'completed') {
           await input.repository.chatCompleted(mutation, command.terminal.receipt, input.invocationTokenSecret);
-        } else await input.repository.chatFailed(mutation, command.terminal.receipt, input.invocationTokenSecret);
+        } else if (command.terminal.status === 'failed') {
+          await input.repository.chatFailed(mutation, command.terminal.receipt, input.invocationTokenSecret);
+        } else await input.repository.chatCanceled(mutation);
         return reply.status(200).send({ command: command.command, result: { accepted: true } });
       case 'request_chat_cancel':
-        return reply.status(200).send({ command: command.command, result: { cancelRequested: false } });
+        {
+          const fence = await input.repository.requestedCancellationFence(mutation);
+          return reply.status(200).send({
+            command: command.command,
+            result: fence === null ? { cancelRequested: false } : { cancelRequested: true, fence },
+          });
+        }
     }
   });
 }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatRunProjection } from '@geneway/contracts';
+import type { ChatRunEvent, ChatRunProjection } from '@geneway/contracts';
 import { api, type Conversation } from './api.js';
 
 const ERROR_MESSAGES: Readonly<Record<string, string>> = {
@@ -22,6 +22,7 @@ export function FastChatExperience({ conversationId: explicitConversationId }: R
   const [conversation, setConversation] = useState<Conversation>();
   const [draft, setDraft] = useState('');
   const [running, setRunning] = useState<ChatRunProjection>();
+  const [canceling, setCanceling] = useState(false);
   const [error, setError] = useState<string>();
   const mounted = useRef(true);
 
@@ -34,8 +35,29 @@ export function FastChatExperience({ conversationId: explicitConversationId }: R
 
   const follow = useCallback(async (conversationId: string, invocation: ChatRunProjection) => {
     let cursor = invocation.eventCursor;
+    let reconnectFailures = 0;
     for (let attempt = 0; attempt < 600 && mounted.current; attempt += 1) {
-      const events = await api.chatEvents(conversationId, invocation.modelInvocationId, cursor);
+      let events: readonly ChatRunEvent[];
+      try {
+        events = (await api.chatEvents(conversationId, invocation.modelInvocationId, cursor))
+          .filter((event) => event.cursor > cursor);
+        reconnectFailures = 0;
+      } catch (cause) {
+        reconnectFailures += 1;
+        try {
+          const snapshot = await api.getConversation(conversationId);
+          setConversation(snapshot);
+          if (snapshot.latestModelInvocation === null
+            || ['completed', 'failed', 'canceled'].includes(snapshot.latestModelInvocation.status)) break;
+          cursor = Math.max(cursor, snapshot.eventWatermark);
+        } catch {
+          // The same network fault can affect both SSE and its recovery snapshot.
+          // Retain the committed cursor and retry after bounded backoff.
+        }
+        if (reconnectFailures >= 6) throw cause;
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1_500, reconnectFailures * 250)));
+        continue;
+      }
       if (events.length > 0) {
         cursor = Math.max(cursor, ...events.map((event) => event.cursor));
         const latest = events.at(-1);
@@ -68,7 +90,7 @@ export function FastChatExperience({ conversationId: explicitConversationId }: R
     void load().then((snapshot) => {
       setConversation(snapshot);
       const invocation = snapshot.latestModelInvocation;
-      if (invocation !== null && ['pending', 'running'].includes(invocation.status)) {
+      if (invocation !== null && ['pending', 'running', 'cancel_requested'].includes(invocation.status)) {
         const projection: ChatRunProjection = {
           conversationId: snapshot.id,
           userMessageId: snapshot.messages.filter((message) => message.author === 'user').at(-1)?.id ?? '',
@@ -96,8 +118,24 @@ export function FastChatExperience({ conversationId: explicitConversationId }: R
       await follow(conversation.id, invocation);
     } catch (cause) {
       setError(publicError(cause));
-      setRunning(undefined);
-      setConversation(await api.getConversation(conversation.id).catch(() => conversation));
+      const snapshot = await api.getConversation(conversation.id).catch(() => conversation);
+      setConversation(snapshot);
+      if (snapshot.latestModelInvocation === null
+        || ['completed', 'failed', 'canceled'].includes(snapshot.latestModelInvocation.status)) setRunning(undefined);
+    }
+  };
+
+  const cancel = async () => {
+    if (conversation === undefined || running === undefined || canceling) return;
+    setCanceling(true);
+    setError(undefined);
+    try {
+      await api.cancelChatRun(conversation.id, running.modelInvocationId);
+      setConversation(await api.getConversation(conversation.id));
+    } catch (cause) {
+      setError(publicError(cause));
+    } finally {
+      setCanceling(false);
     }
   };
 
@@ -127,9 +165,10 @@ export function FastChatExperience({ conversationId: explicitConversationId }: R
       <form className="fast-chat-composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>
         <textarea aria-label="给小纬发消息" value={draft} maxLength={16 * 1024} disabled={conversation === undefined || running !== undefined}
           placeholder="给小纬发消息…" onChange={(event) => setDraft(event.target.value)} />
-        <button className="send" type="submit" disabled={conversation === undefined || running !== undefined || draft.trim().length === 0}>
-          {running === undefined ? '发送' : '生成中'}
-        </button>
+        {running === undefined
+          ? <button className="send" type="submit" disabled={conversation === undefined || draft.trim().length === 0}>发送</button>
+          : <button className="secondary" type="button" data-testid="stop-generation" disabled={canceling}
+            onClick={() => void cancel()}>{canceling ? '正在停止…' : '停止生成'}</button>}
       </form>
       <footer className="chat-safety-note">回答可能有误，请核对重要信息。普通聊天不会创建 BusinessTask、Workflow、Evidence 或 Artifact。</footer>
     </section>

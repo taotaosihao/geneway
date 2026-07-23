@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { modelGatewayReceiptSchema } from '@geneway/contracts';
-import { createModelGateway, mapProviderError, redactedProviderFailure } from './index.js';
+import { chunkProviderDelta, createModelGateway, mapProviderError, redactedProviderFailure } from './index.js';
 import {
   assertLockfilePackageIntegrity, verifyOwnedPrivateFile, verifyProviderAuthFile, verifyProviderManifest,
 } from './provider-manifest.js';
@@ -44,6 +44,14 @@ const streamBody = (token: string, overrides: Readonly<Record<string, unknown>> 
   messages: [{ messageId: 'message-test', author: 'user', content: 'hello' }],
   toolChoice: 'none',
   ...overrides,
+});
+
+it('splits coalesced provider text into bounded UTF-8-safe application checkpoints', () => {
+  const text = `${'汉'.repeat(64)}🙂${'a'.repeat(64)}`;
+  const chunks = chunkProviderDelta(text);
+  expect(chunks).toHaveLength(3);
+  expect(chunks.every((chunk) => Array.from(chunk).length <= 64)).toBe(true);
+  expect(chunks.join('')).toBe(text);
 });
 const conformance = (manifestDigest: string, expired = false) => {
   const now = Date.now();
@@ -154,7 +162,9 @@ describe('codex_subscription_dev provider boundary', () => {
       });
       expect(readiness.statusCode).toBe(503);
       expect(readiness.json()).toEqual({ ready: false, profile: 'codex_subscription_dev', reason: 'provider gates not satisfied' });
-      expect(mapProviderError(new Error('quota 429'))).toEqual({ errorClass: 'MODEL_QUOTA' });
+      const quota = mapProviderError(new Error('quota 429'));
+      expect(quota.errorClass).toBe('MODEL_QUOTA');
+      expect(quota.retryNotBefore).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
       expect(mapProviderError(new Error('auth 401'))).toEqual({ errorClass: 'MODEL_AUTH_FAILED' });
       expect(mapProviderError(new Error('tool call'))).toEqual({ errorClass: 'MODEL_PROTOCOL_VIOLATION' });
       const canary = 'synthetic-secret-canary-do-not-leak';
@@ -321,6 +331,107 @@ describe('codex_subscription_dev provider boundary', () => {
       expect(providerCalls).toBe(2);
     } finally {
       releaseAuthorization();
+      await app.close();
+    }
+  });
+
+  it('returns signed redacted quota, timeout and interruption terminals', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'geneway-provider-faults-'));
+    await chmod(directory, 0o700);
+    const authFile = join(directory, 'auth.json');
+    const conformanceFile = join(directory, 'conformance.json');
+    const verified = await verifyProviderManifest();
+    await writeFile(authFile, '{}', { mode: 0o600 });
+    await writeFile(conformanceFile, JSON.stringify(conformance(verified.digest)), { mode: 0o600 });
+    const canary = 'provider-secret-canary-must-never-escape';
+    const faults = [
+      { message: `quota 429 ${canary}`, outcome: 'MODEL_QUOTA' },
+      { message: `deadline timeout ${canary}`, outcome: 'MODEL_TIMEOUT' },
+      { message: `socket reset ${canary}`, outcome: 'MODEL_STREAM_INTERRUPTED' },
+    ] as const;
+    for (const [index, fault] of faults.entries()) {
+      const app = await createModelGateway({
+        serviceToken, invocationSecret, controlPlaneUrl: 'http://127.0.0.1:3100', authFilePath: authFile,
+        conformanceFilePath: conformanceFile,
+        authorizeInvocationForTest: () => Promise.resolve(true),
+        providerCallForTest: () => Promise.reject(new Error(fault.message)),
+      });
+      try {
+        const modelInvocationId = `model-invocation-fault-${String(index)}`;
+        const response = await app.inject({
+          method: 'POST', url: '/internal/model-gateway/v1/stream',
+          headers: { authorization: `Bearer ${serviceToken}` },
+          payload: streamBody(invocationToken({ modelInvocationId }), { modelInvocationId }),
+        });
+        expect(response.statusCode, response.body).toBe(200);
+        expect(response.body).not.toContain(canary);
+        const terminal = JSON.parse(response.body.trim()) as { errorClass: string; retryNotBefore?: string; receipt: unknown };
+        expect(terminal.errorClass).toBe(fault.outcome);
+        if (fault.outcome === 'MODEL_QUOTA') expect(terminal.retryNotBefore).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
+        const signed = modelGatewayReceiptSchema.parse(terminal.receipt);
+        expect(signed.payload).toMatchObject({ modelInvocationId, outcome: fault.outcome });
+        expect(JSON.stringify(signed)).not.toContain(canary);
+      } finally {
+        await app.close();
+      }
+    }
+  });
+
+  it('aborts provider work when the downstream Worker closes the stream', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'geneway-provider-cancel-'));
+    await chmod(directory, 0o700);
+    const authFile = join(directory, 'auth.json');
+    const conformanceFile = join(directory, 'conformance.json');
+    const verified = await verifyProviderManifest();
+    await writeFile(authFile, '{}', { mode: 0o600 });
+    await writeFile(conformanceFile, JSON.stringify(conformance(verified.digest)), { mode: 0o600 });
+    let providerCalls = 0;
+    let providerSawAbort = false;
+    let markProviderEntered = (): void => { throw new Error('Provider entry gate was not initialized'); };
+    const providerEntered = new Promise<void>((resolve) => { markProviderEntered = resolve; });
+    const app = await createModelGateway({
+      serviceToken, invocationSecret, controlPlaneUrl: 'http://127.0.0.1:3100', authFilePath: authFile,
+      conformanceFilePath: conformanceFile,
+      authorizeInvocationForTest: () => Promise.resolve(true),
+      providerCallForTest: ({ signal }) => {
+        providerCalls += 1;
+        if (providerCalls > 1) {
+          return Promise.resolve({
+            deltas: ['after cancel'], providerRevision: 'test-provider/1', modelRevision: 'test-model/1',
+            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, pricing: 'unpriced' },
+          });
+        }
+        markProviderEntered();
+        return new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            providerSawAbort = true;
+            reject(new Error('provider aborted after downstream cancellation'));
+          }, { once: true });
+        });
+      },
+    });
+    try {
+      const address = await app.listen({ host: '127.0.0.1', port: 0 });
+      const controller = new AbortController();
+      const response = await fetch(new URL('/internal/model-gateway/v1/stream', address), {
+        method: 'POST',
+        headers: { authorization: `Bearer ${serviceToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify(streamBody(invocationToken())),
+        signal: controller.signal,
+      });
+      await providerEntered;
+      controller.abort();
+      await response.text().catch(() => 'aborted');
+      await expect.poll(() => providerSawAbort, { timeout: 2_000 }).toBe(true);
+      const nextInvocationId = 'model-invocation-after-cancel';
+      const next = await app.inject({
+        method: 'POST', url: '/internal/model-gateway/v1/stream', headers: { authorization: `Bearer ${serviceToken}` },
+        payload: streamBody(invocationToken({ modelInvocationId: nextInvocationId }), { modelInvocationId: nextInvocationId }),
+      });
+      expect(next.statusCode, next.body).toBe(200);
+      expect(next.body).toContain('"type":"completed"');
+      expect(providerCalls).toBe(2);
+    } finally {
       await app.close();
     }
   });

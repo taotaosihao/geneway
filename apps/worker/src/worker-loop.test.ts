@@ -10,7 +10,9 @@ import {
 import { compileWorkflow, createSolutionAnalysisDocumentDraft, createSolutionAnalysisDraft } from '@geneway/workflow';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WorkerCommandClient } from './command-client.js';
-import { runWorkerLoop } from './worker-loop.js';
+import type { ChatRuntimeAdapter } from '@geneway/runtime';
+import type { ChatWorkerCommandClient, ChatTurnClaim } from './chat-command-client.js';
+import { executeChatTurn, runWorkerLoop } from './worker-loop.js';
 
 const TOKEN = 'worker-loop-token-0123456789';
 const identity = {
@@ -81,6 +83,42 @@ function documentDelivery(): WorkerDelivery {
 }
 
 describe('independent worker loop', () => {
+  it('aborts a running Gateway stream and reports canceled with the incremented fence', async () => {
+    const lifecycle: string[] = [];
+    const claim: ChatTurnClaim = {
+      dispatchId: 'dispatch-cancel', conversationId: 'conversation-cancel', modelInvocationId: 'invocation-cancel',
+      assistantMessageId: 'message-cancel', attemptId: 'attempt-cancel', fence: 1,
+      deadline: new Date(Date.now() + 60_000).toISOString(), invocationToken: 't'.repeat(40),
+      logicalModelPolicy: 'general.chat.standard', promptPolicyVersion: 'xiaowei.chat.system/1', systemPrompt: 'test',
+      context: [{ messageId: 'message-user', author: 'user', content: 'long answer' }], contextTruncated: false,
+    };
+    const client = {
+      execute: () => { lifecycle.push('execute'); return Promise.resolve(); },
+      started: () => { lifecycle.push('started'); return Promise.resolve(); },
+      delta: (_claim: ChatTurnClaim, delta: string) => { lifecycle.push(`delta:${delta}`); return Promise.resolve(); },
+      completed: () => { lifecycle.push('completed'); return Promise.resolve(); },
+      failed: () => { lifecycle.push('failed'); return Promise.resolve(); },
+      cancelRequested: () => Promise.resolve(2),
+      canceled: (_claim: ChatTurnClaim, fence: number) => { lifecycle.push(`canceled:${String(fence)}`); return Promise.resolve(); },
+    } as unknown as ChatWorkerCommandClient;
+    const runtime = {
+      stream: async (
+        _input: unknown,
+        onDelta: (delta: string) => Promise<void>,
+        signal?: AbortSignal,
+      ) => {
+        await onDelta('partial');
+        return new Promise<never>((_resolve, reject) => {
+          if (signal?.aborted === true) reject(new Error('canceled'));
+          else signal?.addEventListener('abort', () => reject(new Error('canceled')), { once: true });
+        });
+      },
+    } as unknown as ChatRuntimeAdapter;
+
+    await executeChatTurn(client, runtime, claim);
+    expect(lifecycle).toEqual(['execute', 'started', 'delta:partial', 'canceled:2']);
+  });
+
   it('authenticates before readiness, claims one delivery, runs seven steps, and submits one candidate', async () => {
     const directory = await makeDirectory();
     const socketPath = join(directory, 'commands.sock');

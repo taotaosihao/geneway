@@ -101,7 +101,9 @@ function verifyInvocationToken(token: string, secret: string): z.infer<typeof to
 
 export function mapProviderError(error: unknown): Readonly<{ errorClass: string; retryNotBefore?: string }> {
   const text = error instanceof Error ? error.message.toLowerCase() : '';
-  if (text.includes('quota') || text.includes('rate limit') || text.includes('429')) return { errorClass: 'MODEL_QUOTA' };
+  if (text.includes('quota') || text.includes('rate limit') || text.includes('429')) {
+    return { errorClass: 'MODEL_QUOTA', retryNotBefore: new Date(Date.now() + 60_000).toISOString() };
+  }
   if (text.includes('auth') || text.includes('token') || text.includes('401') || text.includes('403')) return { errorClass: 'MODEL_AUTH_FAILED' };
   if (text.includes('abort') || text.includes('timeout') || text.includes('deadline')) return { errorClass: 'MODEL_TIMEOUT' };
   if (text.includes('tool')) return { errorClass: 'MODEL_PROTOCOL_VIOLATION' };
@@ -132,6 +134,17 @@ type TestProviderResult = Readonly<{
   usage: Readonly<Record<string, unknown>>;
 }>;
 
+const maxCheckpointDeltaCodePoints = 64;
+
+export function chunkProviderDelta(delta: string): readonly string[] {
+  const codePoints = Array.from(delta);
+  const chunks: string[] = [];
+  for (let offset = 0; offset < codePoints.length; offset += maxCheckpointDeltaCodePoints) {
+    chunks.push(codePoints.slice(offset, offset + maxCheckpointDeltaCodePoints).join(''));
+  }
+  return chunks;
+}
+
 export type ModelGatewayOptions = Readonly<{
   serviceToken: string;
   invocationSecret: string;
@@ -140,7 +153,7 @@ export type ModelGatewayOptions = Readonly<{
   conformanceFilePath?: string;
   logger?: boolean;
   providerCallForTest?: (input: Readonly<{
-    conversationId: string; modelInvocationId: string; fence: number; deadline: string;
+    conversationId: string; modelInvocationId: string; fence: number; deadline: string; signal: AbortSignal;
   }>) => Promise<TestProviderResult>;
   authorizeInvocationForTest?: (claims: z.infer<typeof tokenClaimsSchema>) => Promise<boolean>;
 }>;
@@ -235,6 +248,28 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
       if (!authorized) return reply.status(401).send({ errorClass: 'MODEL_AUTH_FAILED' });
       reply.hijack();
       reply.raw.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' });
+      reply.raw.flushHeaders();
+      const providerAbort = new AbortController();
+      const abortProvider = (): void => {
+        if (!providerAbort.signal.aborted) providerAbort.abort(new Error('downstream stream canceled'));
+      };
+      const abortOnClosedResponse = (): void => {
+        if (!reply.raw.writableEnded) abortProvider();
+      };
+      const writeDelta = async (delta: string): Promise<void> => {
+        for (const chunk of chunkProviderDelta(delta)) {
+          if (providerAbort.signal.aborted || reply.raw.destroyed || reply.raw.writableEnded) {
+            throw new Error('downstream stream canceled');
+          }
+          reply.raw.write(`${JSON.stringify({ type: 'delta', delta: chunk })}\n`);
+          // A provider is allowed to coalesce its whole answer into one SDK delta.
+          // Yield between bounded application checkpoints so cancellation and
+          // persistence are still observable before the terminal event.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      };
+      request.raw.once('aborted', abortProvider);
+      reply.raw.once('close', abortOnClosedResponse);
       try {
         if (options.providerCallForTest !== undefined) {
           const terminal = await options.providerCallForTest({
@@ -242,11 +277,12 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
             modelInvocationId: input.modelInvocationId,
             fence: input.fence,
             deadline: claims.deadline,
+            signal: providerAbort.signal,
           });
           if (terminal.deltas.length === 0 || terminal.deltas.some((delta) => delta.length === 0)) {
             throw new Error('test provider returned an invalid text stream');
           }
-          for (const delta of terminal.deltas) reply.raw.write(`${JSON.stringify({ type: 'delta', delta })}\n`);
+          for (const delta of terminal.deltas) await writeDelta(delta);
           const receipt = signGatewayReceipt({
             schemaVersion: 'model-gateway-receipt/1', issuer: 'geneway-model-gateway', audience: 'geneway-control-plane',
             receiptJti: randomUUID(), conversationId: input.conversationId, modelInvocationId: input.modelInvocationId,
@@ -269,13 +305,16 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
           })),
           maxOutputTokens: claims.maxOutputTokens,
           toolChoice: 'none',
-          abortSignal: AbortSignal.timeout(Math.max(1, Date.parse(claims.deadline) - Date.now())),
+          abortSignal: AbortSignal.any([
+            providerAbort.signal,
+            AbortSignal.timeout(Math.max(1, Date.parse(claims.deadline) - Date.now())),
+          ]),
         });
         let producedText = false;
         for await (const part of result.fullStream) {
           if (part.type === 'text-delta') {
             producedText = true;
-            reply.raw.write(`${JSON.stringify({ type: 'delta', delta: part.text })}\n`);
+            await writeDelta(part.text);
           } else if (part.type === 'tool-call' || part.type === 'tool-result' || part.type === 'tool-error') {
             throw new Error('provider returned a forbidden tool call');
           }
@@ -301,9 +340,15 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
           receiptJti: randomUUID(), conversationId: input.conversationId, modelInvocationId: input.modelInvocationId,
           fence: input.fence, issuedAt: new Date().toISOString(), outcome: publicFailure.errorClass as ChatErrorClass,
           providerRevision: '@openai-oauth/ai-sdk@2.0.0', modelRevision: readiness.model, usage: null,
+          ...(publicFailure.retryNotBefore === undefined ? {} : { retryNotBefore: publicFailure.retryNotBefore }),
         }, options.invocationSecret);
-        reply.raw.write(`${JSON.stringify({ ...publicFailure, receipt })}\n`);
-        reply.raw.end();
+        if (!reply.raw.destroyed) {
+          reply.raw.write(`${JSON.stringify({ ...publicFailure, receipt })}\n`);
+          reply.raw.end();
+        }
+      } finally {
+        request.raw.off('aborted', abortProvider);
+        reply.raw.off('close', abortOnClosedResponse);
       }
       return reply;
     } finally {

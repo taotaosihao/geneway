@@ -55,6 +55,16 @@ describe('Gate 0.2A executable script contract', () => {
     );
   });
 
+  it('keeps the Gate A0.2 live context/cancel oracle and post-run secret scan executable', async () => {
+    const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as Readonly<{
+      scripts?: Readonly<Record<string, string>>;
+    }>;
+    expect(manifest.scripts?.['verify:gate-a0.2']?.split(' && ').slice(-2)).toEqual([
+      'pnpm test:e2e -- --project=gate-a0-live gate-a0-context-cancel.spec.ts',
+      'pnpm gate-a0:secret-scan',
+    ]);
+  });
+
   it('passes only the loopback Gateway client configuration through the E2E Worker supervisor', async () => {
     expect(modelGatewayWorkerEnvironment({
       GENEWAY_MODEL_GATEWAY_URL: 'http://127.0.0.1:3150',

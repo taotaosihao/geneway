@@ -41,22 +41,28 @@ export class ChatRuntimeAdapter {
 
   async stream(input: ChatRuntimeInput, onDelta: (delta: string) => Promise<void>, signal?: AbortSignal): Promise<ChatRuntimeResult> {
     const timeout = Math.max(1, Date.parse(input.deadline) - Date.now());
-    const response = await fetch(this.endpoint, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${this.serviceToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        invocationToken: input.invocationToken,
-        conversationId: input.conversationId,
-        modelInvocationId: input.modelInvocationId,
-        fence: input.fence,
-        logicalModelPolicy: input.logicalModelPolicy,
-        promptPolicyVersion: input.promptPolicyVersion,
-        systemPrompt: input.systemPrompt,
-        messages: input.context,
-        toolChoice: 'none',
-      }),
-      signal: signal === undefined ? AbortSignal.timeout(timeout) : AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
-    });
+    const deadlineSignal = AbortSignal.timeout(timeout);
+    let response: Response;
+    try {
+      response = await fetch(this.endpoint, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${this.serviceToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          invocationToken: input.invocationToken,
+          conversationId: input.conversationId,
+          modelInvocationId: input.modelInvocationId,
+          fence: input.fence,
+          logicalModelPolicy: input.logicalModelPolicy,
+          promptPolicyVersion: input.promptPolicyVersion,
+          systemPrompt: input.systemPrompt,
+          messages: input.context,
+          toolChoice: 'none',
+        }),
+        signal: signal === undefined ? deadlineSignal : AbortSignal.any([signal, deadlineSignal]),
+      });
+    } catch {
+      throw new ChatRuntimeError(deadlineSignal.aborted ? 'MODEL_TIMEOUT' : 'MODEL_STREAM_INTERRUPTED');
+    }
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { errorClass?: unknown; receipt?: unknown };
       const errorClass = terminalErrorClasses.has(payload.errorClass as ChatErrorClass)
@@ -69,28 +75,34 @@ export class ChatRuntimeAdapter {
     const decoder = new TextDecoder('utf-8', { fatal: true });
     let buffered = '';
     let terminal: ChatRuntimeResult | undefined;
-    while (true) {
-      const chunk = await reader.read();
-      const rawChunk: unknown = chunk.value;
-      const bytes = rawChunk instanceof Uint8Array ? rawChunk : undefined;
-      buffered += decoder.decode(bytes, { stream: !chunk.done });
-      const lines = buffered.split('\n');
-      buffered = lines.pop() ?? '';
-      for (const line of lines) {
-        if (line.length === 0) continue;
-        const event = JSON.parse(line) as Readonly<Record<string, unknown>>;
-        if (event.type === 'delta' && typeof event.delta === 'string' && event.delta.length > 0) await onDelta(event.delta);
-        else if (event.type === 'completed') {
-          const receipt = modelGatewayReceiptSchema.safeParse(event.receipt);
-          if (!receipt.success || receipt.data.payload.outcome !== 'completed') throw new ChatRuntimeError('MODEL_PROTOCOL_VIOLATION');
-          terminal = { receipt: receipt.data };
-        } else if (event.type === 'failed' && terminalErrorClasses.has(event.errorClass as ChatErrorClass)) {
-          const receipt = modelGatewayReceiptSchema.safeParse(event.receipt);
-          if (!receipt.success || receipt.data.payload.outcome !== event.errorClass) throw new ChatRuntimeError('MODEL_PROTOCOL_VIOLATION');
-          throw new ChatRuntimeError(event.errorClass as ChatErrorClass, receipt.data);
-        } else throw new ChatRuntimeError('MODEL_PROTOCOL_VIOLATION');
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        const rawChunk: unknown = chunk.value;
+        const bytes = rawChunk instanceof Uint8Array ? rawChunk : undefined;
+        buffered += decoder.decode(bytes, { stream: !chunk.done });
+        const lines = buffered.split('\n');
+        buffered = lines.pop() ?? '';
+        for (const line of lines) {
+          if (line.length === 0) continue;
+          const event = JSON.parse(line) as Readonly<Record<string, unknown>>;
+          if (event.type === 'delta' && typeof event.delta === 'string' && event.delta.length > 0) await onDelta(event.delta);
+          else if (event.type === 'completed') {
+            const receipt = modelGatewayReceiptSchema.safeParse(event.receipt);
+            if (!receipt.success || receipt.data.payload.outcome !== 'completed') throw new ChatRuntimeError('MODEL_PROTOCOL_VIOLATION');
+            terminal = { receipt: receipt.data };
+          } else if (event.type === 'failed' && terminalErrorClasses.has(event.errorClass as ChatErrorClass)) {
+            const receipt = modelGatewayReceiptSchema.safeParse(event.receipt);
+            if (!receipt.success || receipt.data.payload.outcome !== event.errorClass) throw new ChatRuntimeError('MODEL_PROTOCOL_VIOLATION');
+            throw new ChatRuntimeError(event.errorClass as ChatErrorClass, receipt.data);
+          } else throw new ChatRuntimeError('MODEL_PROTOCOL_VIOLATION');
+        }
+        if (chunk.done) break;
       }
-      if (chunk.done) break;
+    } catch (error) {
+      if (error instanceof ChatRuntimeError) throw error;
+      if (error instanceof SyntaxError) throw new ChatRuntimeError('MODEL_PROTOCOL_VIOLATION');
+      throw new ChatRuntimeError(deadlineSignal.aborted ? 'MODEL_TIMEOUT' : 'MODEL_STREAM_INTERRUPTED');
     }
     if (buffered.trim().length > 0) throw new ChatRuntimeError('MODEL_PROTOCOL_VIOLATION');
     if (terminal === undefined) throw new ChatRuntimeError('MODEL_STREAM_INTERRUPTED');

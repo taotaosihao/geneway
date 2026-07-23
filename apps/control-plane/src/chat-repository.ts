@@ -3,12 +3,14 @@ import type pg from 'pg';
 import {
   chatRunEventSchema,
   chatRunProjectionSchema,
+  cancelChatRunProjectionSchema,
   conversationProjectionSchema,
   GenewayError,
   modelGatewayReceiptSchema,
   type ChatErrorClass,
   type ChatRunEvent,
   type ChatRunProjection,
+  type CancelChatRunProjection,
   type ConversationProjection,
   type CreateChatRunInput,
   type ModelGatewayReceipt,
@@ -285,19 +287,27 @@ export class ChatRepository {
 
   async claimChatTurn(workerInstanceId: string, tokenSecret: string, leaseDurationMs: number): Promise<ChatTurnClaim | null> {
     return this.withTransaction(async (client) => {
+      await this.settleExpiredChatTurnsInTransaction(client);
       const selected = await client.query<{
         tenant_id: string; id: string; principal_id: string; conversation_id: string; model_invocation_id: string;
-        assistant_message_id: string; execution_fence: string; deadline: Date;
-      }>(`SELECT tenant_id,id,principal_id,conversation_id,model_invocation_id,assistant_message_id,execution_fence::text,deadline
-        FROM chat_turn_dispatches WHERE status='pending' AND deadline>now()
-        ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1`);
+        user_message_id: string; assistant_message_id: string; execution_fence: string; deadline: Date;
+      }>(`SELECT dispatch.tenant_id,dispatch.id,dispatch.principal_id,dispatch.conversation_id,
+          dispatch.model_invocation_id,invocation.user_message_id,dispatch.assistant_message_id,
+          dispatch.execution_fence::text,dispatch.deadline
+        FROM chat_turn_dispatches dispatch
+        JOIN model_invocations invocation ON invocation.tenant_id=dispatch.tenant_id
+          AND invocation.id=dispatch.model_invocation_id
+        WHERE dispatch.status='pending' AND dispatch.deadline>now()
+        ORDER BY dispatch.created_at,dispatch.id FOR UPDATE OF dispatch SKIP LOCKED LIMIT 1`);
       const row = selected.rows[0];
       if (row === undefined) return null;
       const globallyActive = await client.query(`SELECT 1 FROM chat_turn_dispatches
         WHERE status IN ('leased','running','cancel_requested') LIMIT 1`);
       if (globallyActive.rowCount !== 0) return null;
       const attemptId = id('chat_attempt');
-      const context = await this.buildContext(client, row.tenant_id, row.conversation_id, row.assistant_message_id);
+      const context = await this.buildContext(
+        client, row.tenant_id, row.conversation_id, row.user_message_id, row.assistant_message_id,
+      );
       const prompt = await client.query<{ policy: { system?: unknown } }>(`SELECT policy FROM prompt_policy_versions
         WHERE tenant_id=$1 AND id='prompt_xiaowei_chat_system_v1'`, [row.tenant_id]);
       const systemPrompt = prompt.rows[0]?.policy.system;
@@ -351,6 +361,10 @@ export class ChatRepository {
         contextTruncated: context.truncated,
       };
     });
+  }
+
+  async settleExpiredChatTurns(): Promise<number> {
+    return this.withTransaction((client) => this.settleExpiredChatTurnsInTransaction(client));
   }
 
   async consumeInvocationToken(token: string, tokenSecret: string): Promise<boolean> {
@@ -468,7 +482,105 @@ export class ChatRepository {
       ]);
       await this.appendEvent(client, row, 'run.failed', {
         status: 'failed', errorClass,
+        ...(attestation.payload.retryNotBefore === undefined ? {} : { retryNotBefore: attestation.payload.retryNotBefore }),
       });
+    });
+  }
+
+  async cancelChatRun(
+    principal: Principal,
+    conversationId: string,
+    invocationId: string,
+    idempotencyKey: string,
+  ): Promise<CancelChatRunProjection> {
+    if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+      throw new GenewayError('IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key is required', 400);
+    }
+    return this.withTransaction(async (client) => {
+      const locked = await client.query<{
+        tenant_id: string; dispatch_id: string; assistant_message_id: string; attempt_id: string | null;
+        dispatch_status: 'pending' | 'leased' | 'running' | 'cancel_requested' | 'completed' | 'canceled' | 'failed';
+        invocation_status: InvocationRow['status']; execution_fence: string; last_event_cursor: string;
+      }>(`SELECT dispatch.tenant_id,dispatch.id dispatch_id,dispatch.assistant_message_id,dispatch.attempt_id,
+          dispatch.status dispatch_status,invocation.status invocation_status,
+          dispatch.execution_fence::text,invocation.last_event_cursor::text
+        FROM chat_turn_dispatches dispatch
+        JOIN model_invocations invocation ON invocation.tenant_id=dispatch.tenant_id
+          AND invocation.id=dispatch.model_invocation_id
+        WHERE dispatch.tenant_id=$1 AND dispatch.conversation_id=$2 AND dispatch.model_invocation_id=$3
+          AND dispatch.principal_id=$4 AND invocation.requester_id=$4
+        FOR UPDATE OF dispatch,invocation`, [principal.tenantId, conversationId, invocationId, principal.userId]);
+      const row = locked.rows[0];
+      if (row === undefined) throw new GenewayError('CHAT_RUN_NOT_FOUND', 'Chat run was not found', 404);
+      if (row.invocation_status === 'canceled') {
+        return cancelChatRunProjectionSchema.parse({
+          modelInvocationId: invocationId, status: 'canceled', eventCursor: Number(row.last_event_cursor),
+        });
+      }
+      if (row.invocation_status === 'cancel_requested') {
+        return cancelChatRunProjectionSchema.parse({
+          modelInvocationId: invocationId, status: 'cancel_requested', eventCursor: Number(row.last_event_cursor),
+        });
+      }
+      if (['completed', 'failed'].includes(row.invocation_status)) {
+        throw new GenewayError('CHAT_CANCEL_NOT_ALLOWED', `Chat run cannot be canceled from state ${row.invocation_status}`, 409);
+      }
+      const nextFence = Number(row.execution_fence) + 1;
+      await client.query(`UPDATE model_invocation_token_authorizations SET expires_at=least(expires_at,now())
+        WHERE tenant_id=$1 AND model_invocation_id=$2`, [row.tenant_id, invocationId]);
+      if (row.dispatch_status === 'pending' && row.attempt_id === null) {
+        await client.query(`UPDATE chat_turn_dispatches SET status='canceled',execution_fence=$3,lease_until=NULL,updated_at=now()
+          WHERE tenant_id=$1 AND id=$2 AND status='pending' AND execution_fence=$4`, [
+          row.tenant_id, row.dispatch_id, nextFence, Number(row.execution_fence),
+        ]);
+        await client.query(`UPDATE model_invocations SET status='canceled',execution_fence=$3,terminal_at=now()
+          WHERE tenant_id=$1 AND id=$2 AND status='pending'`, [row.tenant_id, invocationId, nextFence]);
+        await client.query(`UPDATE messages SET status='canceled',completed_at=now()
+          WHERE tenant_id=$1 AND id=$2 AND status='streaming'`, [row.tenant_id, row.assistant_message_id]);
+        await this.appendEvent(client, {
+          tenant_id: row.tenant_id, conversation_id: conversationId,
+          model_invocation_id: invocationId, assistant_message_id: row.assistant_message_id,
+        }, 'run.canceled', { status: 'canceled', reason: 'USER_CANCELED' });
+        const cursor = await client.query<{ cursor: string }>(`SELECT last_event_cursor::text cursor FROM model_invocations
+          WHERE tenant_id=$1 AND id=$2`, [row.tenant_id, invocationId]);
+        return cancelChatRunProjectionSchema.parse({
+          modelInvocationId: invocationId, status: 'canceled', eventCursor: Number(cursor.rows[0]?.cursor),
+        });
+      }
+      const dispatch = await client.query(`UPDATE chat_turn_dispatches SET status='cancel_requested',execution_fence=$3,updated_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND status IN ('leased','running') AND execution_fence=$4`, [
+        row.tenant_id, row.dispatch_id, nextFence, Number(row.execution_fence),
+      ]);
+      if (dispatch.rowCount !== 1) throw new GenewayError('CHAT_CANCEL_CAS_CONFLICT', 'Cancellation lost the compare-and-set race', 409);
+      await client.query(`UPDATE model_invocations SET status='cancel_requested',execution_fence=$3
+        WHERE tenant_id=$1 AND id=$2 AND status IN ('pending','running')`, [row.tenant_id, invocationId, nextFence]);
+      return cancelChatRunProjectionSchema.parse({
+        modelInvocationId: invocationId, status: 'cancel_requested', eventCursor: Number(row.last_event_cursor),
+      });
+    });
+  }
+
+  async requestedCancellationFence(mutation: ChatWorkerMutation): Promise<number | null> {
+    const result = await this.pool.query<{ execution_fence: string }>(`SELECT execution_fence::text FROM chat_turn_dispatches
+      WHERE id=$1 AND model_invocation_id=$2 AND attempt_id=$3 AND execution_fence=$4+1
+        AND status='cancel_requested' AND lease_until>now()`, [
+      mutation.dispatchId, mutation.modelInvocationId, mutation.attemptId, mutation.fence,
+    ]);
+    return result.rows[0] === undefined ? null : Number(result.rows[0].execution_fence);
+  }
+
+  async chatCanceled(mutation: ChatWorkerMutation): Promise<void> {
+    await this.withTransaction(async (client) => {
+      const row = await this.lockMutation(client, mutation, ['cancel_requested']);
+      await client.query(`UPDATE messages SET status='canceled',completed_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND status='streaming'`, [row.tenant_id, row.assistant_message_id]);
+      await client.query(`UPDATE chat_turn_dispatches SET status='canceled',lease_until=NULL,updated_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND status='cancel_requested'`, [row.tenant_id, mutation.dispatchId]);
+      await client.query(`UPDATE model_invocations SET status='canceled',terminal_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND status='cancel_requested' AND execution_fence=$3`, [
+        row.tenant_id, mutation.modelInvocationId, mutation.fence,
+      ]);
+      await this.appendEvent(client, row, 'run.canceled', { status: 'canceled', reason: 'USER_CANCELED' });
     });
   }
 
@@ -490,26 +602,56 @@ export class ChatRepository {
     });
   }
 
-  private async buildContext(client: pg.PoolClient, tenantId: string, conversationId: string, excludedMessageId: string): Promise<{
+  private async buildContext(
+    client: pg.PoolClient,
+    tenantId: string,
+    conversationId: string,
+    currentUserMessageId: string,
+    excludedAssistantMessageId: string,
+  ): Promise<{
     messages: readonly Readonly<{ messageId: string; author: 'user' | 'xiaowei'; content: string }>[];
     truncated: boolean;
   }> {
-    const result = await client.query<{ id: string; author: 'user' | 'xiaowei'; body: string }>(`SELECT id,author,body FROM messages
-      WHERE tenant_id=$1 AND conversation_id=$2 AND id<>$3 AND status='completed'
-      ORDER BY sequence DESC LIMIT 25`, [tenantId, conversationId, excludedMessageId]);
-    const selected: { messageId: string; author: 'user' | 'xiaowei'; content: string }[] = [];
-    let bytes = 0;
-    let truncated = result.rows.length > MAX_CONTEXT_MESSAGES;
+    const result = await client.query<{
+      id: string; author: 'user' | 'xiaowei'; body: string; status: 'completed' | 'streaming' | 'failed' | 'canceled';
+    }>(`SELECT id,author,body,status FROM messages
+      WHERE tenant_id=$1 AND conversation_id=$2 AND id<>$3
+      ORDER BY sequence`, [tenantId, conversationId, excludedAssistantMessageId]);
+    type ContextMessage = { messageId: string; author: 'user' | 'xiaowei'; content: string };
+    const turns: ContextMessage[][] = [];
+    let currentUser: ContextMessage | undefined;
     for (const message of result.rows) {
-      const messageBytes = Buffer.byteLength(message.body, 'utf8');
-      if (selected.length >= MAX_CONTEXT_MESSAGES || bytes + messageBytes > MAX_CONTEXT_BYTES) {
+      if (message.author === 'user' && message.status === 'completed') {
+        const normalized = { messageId: message.id, author: message.author, content: message.body.normalize('NFC') } as const;
+        if (message.id === currentUserMessageId) currentUser = normalized;
+        else turns.push([normalized]);
+      } else if (message.author === 'xiaowei' && message.status === 'completed') {
+        const latestTurn = turns.at(-1);
+        if (latestTurn?.length === 1 && latestTurn[0]?.author === 'user') {
+          latestTurn.push({ messageId: message.id, author: message.author, content: message.body.normalize('NFC') });
+        }
+      }
+    }
+    if (currentUser === undefined) throw new GenewayError('CHAT_CONTEXT_INVALID', 'Current chat user message is unavailable', 409);
+    const completeTurns = turns.filter((turn) => turn.length === 2);
+    completeTurns.push([currentUser]);
+    const selectedTurns: ContextMessage[][] = [];
+    let selectedCount = 0;
+    let bytes = 0;
+    let truncated = false;
+    for (let index = completeTurns.length - 1; index >= 0; index -= 1) {
+      const turn = completeTurns[index];
+      if (turn === undefined) continue;
+      const turnBytes = turn.reduce((total, message) => total + Buffer.byteLength(message.content, 'utf8'), 0);
+      if (selectedCount + turn.length > MAX_CONTEXT_MESSAGES || bytes + turnBytes > MAX_CONTEXT_BYTES) {
         truncated = true;
         break;
       }
-      selected.push({ messageId: message.id, author: message.author, content: message.body });
-      bytes += messageBytes;
+      selectedTurns.push(turn);
+      selectedCount += turn.length;
+      bytes += turnBytes;
     }
-    return { messages: selected.reverse(), truncated };
+    return { messages: selectedTurns.reverse().flat(), truncated };
   }
 
   private async appendEvent(
@@ -529,6 +671,34 @@ export class ChatRepository {
     await client.query(`UPDATE model_invocations SET last_event_cursor=$3 WHERE tenant_id=$1 AND id=$2`, [
       row.tenant_id, row.model_invocation_id, Number(inserted.rows[0]?.cursor),
     ]);
+  }
+
+  private async settleExpiredChatTurnsInTransaction(client: pg.PoolClient): Promise<number> {
+    const expired = await client.query<{
+      tenant_id: string; id: string; conversation_id: string; model_invocation_id: string;
+      assistant_message_id: string; status: 'pending' | 'leased' | 'running' | 'cancel_requested';
+    }>(`SELECT tenant_id,id,conversation_id,model_invocation_id,assistant_message_id,status
+      FROM chat_turn_dispatches
+      WHERE status IN ('pending','leased','running','cancel_requested') AND deadline<=now()
+      ORDER BY deadline,id FOR UPDATE`);
+    for (const row of expired.rows) {
+      const canceled = row.status === 'cancel_requested';
+      const terminalStatus = canceled ? 'canceled' : 'failed';
+      await client.query(`UPDATE messages SET status=$3,completed_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND status='streaming'`, [row.tenant_id, row.assistant_message_id, terminalStatus]);
+      await client.query(`UPDATE chat_turn_dispatches SET status=$3,lease_until=NULL,updated_at=now()
+        WHERE tenant_id=$1 AND id=$2`, [row.tenant_id, row.id, terminalStatus]);
+      await client.query(`UPDATE model_invocation_token_authorizations SET expires_at=least(expires_at,now())
+        WHERE tenant_id=$1 AND model_invocation_id=$2`, [row.tenant_id, row.model_invocation_id]);
+      await client.query(`UPDATE model_invocations SET status=$3,error_class=$4,terminal_at=now()
+        WHERE tenant_id=$1 AND id=$2 AND status IN ('pending','running','cancel_requested')`, [
+        row.tenant_id, row.model_invocation_id, terminalStatus, canceled ? null : 'MODEL_STREAM_INTERRUPTED',
+      ]);
+      await this.appendEvent(client, row, canceled ? 'run.canceled' : 'run.failed', canceled
+        ? { status: 'canceled', reason: 'USER_CANCELED' }
+        : { status: 'failed', errorClass: 'MODEL_STREAM_INTERRUPTED' });
+    }
+    return expired.rowCount ?? expired.rows.length;
   }
 
   private async lockMutation(client: pg.PoolClient, mutation: ChatWorkerMutation, allowedStatuses: readonly string[]): Promise<{

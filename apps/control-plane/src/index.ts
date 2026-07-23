@@ -83,6 +83,7 @@ export async function createControlPlane(options: Readonly<{
   chatRouteAvailable?: () => Promise<boolean>;
   modelGatewayAuthority?: Readonly<{ serviceToken: string; invocationTokenSecret: string }>;
   liveValidationRunId?: string;
+  chatReaperIntervalMs?: number;
 }>): Promise<ControlPlane> {
   const cursorHmacSecret = options.cursorHmacSecret ?? process.env.GENEWAY_CURSOR_HMAC_SECRET;
   if (cursorHmacSecret === undefined) throw new Error('GENEWAY_CURSOR_HMAC_SECRET is required');
@@ -234,6 +235,15 @@ export async function createControlPlane(options: Readonly<{
     }
     const result = await chatRepository.createChatRun(request.principal, params.id, input, idempotencyKey(request));
     return reply.status(202).send(result);
+  });
+
+  app.post('/api/conversations/:conversationId/chat-runs/:modelInvocationId/cancel', async (request) => {
+    const params = z.object({
+      conversationId: z.string().min(1), modelInvocationId: z.string().min(1),
+    }).parse(request.params);
+    return chatRepository.cancelChatRun(
+      request.principal, params.conversationId, params.modelInvocationId, idempotencyKey(request),
+    );
   });
 
   app.get('/api/conversations/:conversationId/chat-runs/:modelInvocationId/events', async (request, reply) => {
@@ -463,7 +473,24 @@ export async function createControlPlane(options: Readonly<{
   app.get('/api/business-exceptions', notOpen);
   app.all('/api/runtime/:kind', notOpen);
 
-  app.addHook('onClose', async () => repository.close());
+  const chatReaperIntervalMs = options.chatReaperIntervalMs ?? 250;
+  if (!Number.isInteger(chatReaperIntervalMs) || chatReaperIntervalMs < 20 || chatReaperIntervalMs > 10_000) {
+    throw new Error('Chat reaper interval must be an integer between 20 and 10000 milliseconds');
+  }
+  let chatReaperRun: Promise<void> | null = null;
+  const chatReaperTimer = setInterval(() => {
+    if (chatReaperRun !== null) return;
+    chatReaperRun = chatRepository.settleExpiredChatTurns()
+      .then(() => undefined)
+      .catch((error: unknown) => { app.log.error(error); })
+      .finally(() => { chatReaperRun = null; });
+  }, chatReaperIntervalMs);
+  chatReaperTimer.unref();
+  app.addHook('onClose', async () => {
+    clearInterval(chatReaperTimer);
+    await chatReaperRun;
+    await repository.close();
+  });
   return { app, repository, artifactRepository, artifactService, chatRepository };
 }
 

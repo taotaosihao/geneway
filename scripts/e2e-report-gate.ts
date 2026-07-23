@@ -31,6 +31,7 @@ export const expectedE2eTests: readonly ExpectedE2eTest[] = [
   { project: 'gate0.2a-recovery-multiprocess', file: 'gate-0.2a-recovery-matrix.spec.ts', title: 'worker_restart' },
   { project: 'gate0.2b-success', file: 'gate-0.2b-task-workflow-routes.spec.ts', title: '真实任务可从六条 served 路由恢复，并与 API、Postgres 和 Worker 保持同一关联' },
   { project: 'gate-a0-live', file: 'gate-a0-fast-chat.spec.ts', title: '真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gateway audit' },
+  { project: 'gate-a0-live', file: 'gate-a0-context-cancel.spec.ts', title: '真实 served Fast Chat 追问上下文并用停止生成完成 cancel fencing' },
 ];
 
 const resultSchema = z.object({ status: z.string() }).passthrough();

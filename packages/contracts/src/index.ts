@@ -422,6 +422,7 @@ export const modelGatewayReceiptPayloadSchema = z.discriminatedUnion('outcome', 
     providerRevision: z.string().min(1).max(200).nullable(),
     modelRevision: z.string().min(1).max(200).nullable(),
     usage: z.null(),
+    retryNotBefore: z.string().datetime().optional(),
   }).strict(),
 ]);
 

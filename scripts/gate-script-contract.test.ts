@@ -298,6 +298,31 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     })).toBe(true);
   });
 
+  it('accepts status 143 only after a successful verifier-requested SIGTERM monitor stop', () => {
+    const cleanState = {
+      containers: new Map(), networks: new Map(), monitorStarted: true, eventCount: 36,
+      eventParseErrors: [], monitorErrors: [],
+    };
+    expect(dockerStructuralIsolationReceipt({
+      ...cleanState, monitorExit: { status: 143, signal: null }, monitorStop: {
+        requested: true, signal: 'SIGTERM', requestSucceeded: true, exit: { status: 143, signal: null },
+      },
+    }).passed).toBe(true);
+    expect(dockerStructuralIsolationReceipt({
+      ...cleanState, monitorExit: { status: 143, signal: null },
+    }).passed).toBe(false);
+    expect(dockerStructuralIsolationReceipt({
+      ...cleanState, monitorExit: { status: 143, signal: 'SIGTERM' }, monitorStop: {
+        requested: true, signal: 'SIGTERM', requestSucceeded: true, exit: { status: 143, signal: 'SIGTERM' },
+      },
+    }).passed).toBe(false);
+    expect(dockerStructuralIsolationReceipt({
+      ...cleanState, monitorExit: { status: 137, signal: null }, monitorStop: {
+        requested: true, signal: 'SIGTERM', requestSucceeded: true, exit: { status: 137, signal: null },
+      },
+    }).passed).toBe(false);
+  });
+
   it('requires exact structured backup child run membership', () => {
     const log = `${JSON.stringify({ outcome: 'passed', results: [
       { runId: 'backup-success' }, { runId: 'backup-missing' }, { runId: 'backup-mismatch' },

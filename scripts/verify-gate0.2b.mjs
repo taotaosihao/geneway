@@ -714,11 +714,26 @@ function startDockerEventMonitor(state) {
 }
 
 async function stopDockerEventMonitor(monitor, state) {
-  monitor.kill('SIGTERM');
-  const forcedKill = setTimeout(() => monitor.kill('SIGKILL'), 2_000);
-  const result = await state.monitorClosed;
-  clearTimeout(forcedKill);
-  state.monitorExit = result;
+  const stop = { requested: true, signal: 'SIGTERM', requestSucceeded: false, exit: null };
+  state.monitorStop = stop;
+  stop.requestSucceeded = monitor.kill('SIGTERM');
+  if (!stop.requestSucceeded) throw new Error('Docker event monitor rejected SIGTERM request');
+  const forcedKill = setTimeout(() => {
+    try {
+      const requestSucceeded = monitor.kill('SIGKILL');
+      stop.forcedKill = { requested: true, signal: 'SIGKILL', requestSucceeded };
+      if (!requestSucceeded) state.monitorErrors.push('stop:Docker event monitor rejected SIGKILL request');
+    } catch (cause) {
+      state.monitorErrors.push(`stop:${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }, 2_000);
+  try {
+    const result = await state.monitorClosed;
+    stop.exit = result;
+    state.monitorExit = result;
+  } finally {
+    clearTimeout(forcedKill);
+  }
 }
 
 function minimumBackupStartIdentities(role, action) {
@@ -901,10 +916,15 @@ export function dockerStructuralIsolationReceipt(state, expectedBackupRunIds = [
   }
   const backupRunIds = [...new Set(containers.flatMap((container) => typeof container.backupRun === 'string' ? [container.backupRun] : []))].sort();
   if (JSON.stringify(backupRunIds) !== JSON.stringify(expectedBackupRunIds)) violations.push('backup-run-membership-mismatch');
+  const requestedSigtermExit = state.monitorStop?.requested === true && state.monitorStop?.signal === 'SIGTERM'
+    && state.monitorStop?.requestSucceeded === true
+    && state.monitorStop?.exit?.status === 143 && state.monitorStop?.exit?.signal === null
+    && state.monitorExit?.status === 143 && state.monitorExit?.signal === null;
   const eventMonitor = { checked: true, started: state.monitorStarted === true, eventCount: state.eventCount,
-    parseErrors: state.eventParseErrors, errors: state.monitorErrors, exit: state.monitorExit ?? null,
+    parseErrors: state.eventParseErrors, errors: state.monitorErrors, stop: state.monitorStop ?? null, exit: state.monitorExit ?? null,
     passed: state.monitorStarted === true && state.eventParseErrors.length === 0 && state.monitorErrors.length === 0
-      && (state.monitorExit?.signal === 'SIGTERM' || state.monitorExit?.status === 0) };
+      && ((state.monitorExit?.status === null && state.monitorExit?.signal === 'SIGTERM')
+        || (state.monitorExit?.status === 0 && state.monitorExit?.signal === null) || requestedSigtermExit) };
   return { checked: true, eventMonitor, backupRunIds, expectedBackupRunIds, observedContainers: containers, observedNetworks: networks,
     violations: eventMonitor.passed ? violations : [...violations, 'docker-event-monitor-failed'],
     passed: eventMonitor.passed && violations.length === 0 };

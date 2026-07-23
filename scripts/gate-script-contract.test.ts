@@ -21,18 +21,26 @@ interface Gate02bModule {
   gate02bAggregatePassed: (input: Readonly<Record<string, unknown>>) => boolean;
   gateAuthorityRootNames: (entries: readonly string[]) => string[];
   isForbiddenRuntimeCommandLine: (commandLine: string) => boolean;
+  isInternalDockerAdapterListener: (line: string, context: { gatewayAddresses: string[]; interfaceNames: string[] },
+    commandLines: ReadonlyMap<number, string> | Readonly<Record<string, string>>) => boolean;
+  internalDockerListenerBinding: (policy: unknown, container: unknown, network: unknown,
+    bridgeSnapshot: unknown, memberLinks: unknown) => { gatewayAddresses: string[]; interfaceNames: string[] } | null;
   isGateAuthorityPath: (path: string) => boolean;
   isRepositoryDockerScope: (name: string, labels?: Readonly<Record<string, string>>) => boolean;
   dockerStructuralIsolationReceipt: (state: unknown, backupRunIds?: string[], proxyRoots?: string[], expectation?: unknown) => {
     passed: boolean; violations: string[];
   };
   parseSocketLine: (line: string, kind: 'listener' | 'egress') => { local: string; peer: string; pids: number[] };
+  parseProcNetSockets: (text: string, protocol: string) => Array<{ protocol: string; remoteAddress: string; remotePort: number; state: string }>;
+  procNetReadErrorIsExitRace: (errorCode: string, expectedStartTicks: string,
+    identity: { status: string; state?: string; startTicks?: string }) => boolean;
   parseBackupRawReceipt: (raw: string, containerId: string, role: string, action: string, allowedPorts: readonly string[],
     allowedUnix?: readonly string[]) => {
     passed: boolean; reloadCount: number; unknownLines: string[]; unexpected: string[];
   };
   proxyTargetBindingMatches: (policy: unknown, container: unknown, network: unknown) => boolean;
   proxyPolicyPathFromCommandLine: (commandLine: string) => string | null;
+  networkAttachmentsAfterInspect: (previous: unknown[], container: unknown) => unknown[];
   validateProxyPolicy: (policy: unknown, expectedRoot: string) => unknown;
   validateProxyInventory: (inventory: string[]) => string[];
   validateProxyIdentityChain: (policy: unknown, ready: unknown, summary: unknown) => boolean;
@@ -53,9 +61,9 @@ const {
   backupArtifactRoots, childEnvironment, collectReachableCommandStrings, dockerStructuralIsolationReceipt, extractNestedVerifierCommands,
   extractStructuredBackupRunIds,
   findForbiddenEnvironmentNames, gate02bAggregatePassed, gate02bDockerIsolationEnvironment, gateAuthorityRootNames,
-  isForbiddenRuntimeCommandLine, isGateAuthorityPath,
-  isRepositoryDockerScope, parseBackupRawReceipt, parseSocketLine, proxyPolicyPathFromCommandLine,
-  proxyTargetBindingMatches, requiredGate02bSteps,
+  internalDockerListenerBinding, isForbiddenRuntimeCommandLine, isGateAuthorityPath, isInternalDockerAdapterListener,
+  isRepositoryDockerScope, parseBackupRawReceipt, parseProcNetSockets, parseSocketLine, proxyPolicyPathFromCommandLine,
+  networkAttachmentsAfterInspect, procNetReadErrorIsExitRace, proxyTargetBindingMatches, requiredGate02bSteps,
   sourceBindingsMatch, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
   validateDockerIsolationCommandSafety, validateDockerStructuralIsolationReceipt, validateGate02bStepPlan,
   validateGate02bInvocationTopology, validateProcessLifecycleReceipt, validateProxyIdentityChain, validateProxyInventory, validateProxyPolicy,
@@ -734,6 +742,96 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     expect(parseSocketLine('0 0 127.0.0.1:35927 127.0.0.1:49220 users:(("node",pid=2185374,fd=22))', 'egress')).toEqual({
       local: '127.0.0.1:35927', peer: '127.0.0.1:49220', pids: [2185374],
     });
+  });
+
+  it('normalizes IPv4-mapped IPv6 container peers before internal-subnet checks', () => {
+    const procNet = [
+      'sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode',
+      '0: 00000000000000000000000000000000:0000 0000000000000000FFFF00000460A8C0:E5AA 01 0:0 0:0 0 0 0',
+    ].join('\n');
+    expect(parseProcNetSockets(procNet, 'tcp6')).toEqual([
+      { protocol: 'tcp6', remoteAddress: '192.168.96.4', remotePort: 58_794, state: '01' },
+    ]);
+  });
+
+  it('ignores a proc-net ENOENT only after the original process identity is proven gone', () => {
+    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'missing' })).toBe(true);
+    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'present', state: 'Z', startTicks: '42' })).toBe(true);
+    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'present', state: 'S', startTicks: '43' })).toBe(true);
+    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'present', state: 'S', startTicks: '42' })).toBe(false);
+    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'error' })).toBe(false);
+    expect(procNetReadErrorIsExitRace('EACCES', '42', { status: 'missing' })).toBe(false);
+    expect(procNetReadErrorIsExitRace('ENOENT', '', { status: 'missing' })).toBe(false);
+  });
+
+  it('retains the last inspected network attachments when a later inspect disappears', () => {
+    const attachments = networkAttachmentsAfterInspect([], { NetworkSettings: { Networks: {
+      'geneway-storage-test_storage': { NetworkID: 'network-id', IPAddress: '192.168.96.4' },
+    } } });
+    expect(attachments).toEqual([
+      { name: 'geneway-storage-test_storage', id: 'network-id', ip: '192.168.96.4' },
+    ]);
+    expect(networkAttachmentsAfterInspect(attachments, undefined)).toBe(attachments);
+  });
+
+  it('exempts only exact rygel listeners on interfaces proven to belong to current internal Docker networks', () => {
+    const context = { gatewayAddresses: ['192.168.96.1'], interfaceNames: ['br-f093b06b9760', 'veth7783ad3'] };
+    const commands = new Map([[2448240, '/usr/bin/rygel']]);
+    expect(isInternalDockerAdapterListener('192.168.96.1:48343 pids=2448240', context, commands)).toBe(true);
+    expect(isInternalDockerAdapterListener(
+      '[fe80::109b:abff:fe5d:ef7b]%veth7783ad3:58346 pids=2448240', context, commands,
+    )).toBe(true);
+    for (const line of [
+      '192.168.0.104:48343 pids=2448240',
+      '0.0.0.0:48343 pids=2448240',
+      '192.168.96.1:3150 pids=2448240',
+      '192.168.96.1:3450 pids=2448240',
+      '[fe80::1]%wlp129s0f0:58346 pids=2448240',
+      '192.168.96.1:48343 pids=2448240,2448241',
+    ]) expect(isInternalDockerAdapterListener(line, context, commands)).toBe(false);
+    expect(isInternalDockerAdapterListener('192.168.96.1:48343 pids=2448240', context,
+      new Map([[2448240, '/usr/bin/not-rygel']]))).toBe(false);
+    expect(isInternalDockerAdapterListener('192.168.96.1:48343 pids=2448240', context,
+      new Map([[2448240, '/usr/bin/rygel --flag']]))).toBe(false);
+  });
+
+  it('derives the rygel exception context only from an exact live internal bridge binding', () => {
+    const project = 'geneway-storage-test';
+    const networkId = 'f'.repeat(64);
+    const networkName = `${project}_storage`;
+    const bridgeName = `br-${networkId.slice(0, 12)}`;
+    const policy = { target: { project, service: 'versitygw', port: 7070, containerPort: 7070,
+      containerId: 'a'.repeat(64), networkId, networkName, ip: '192.168.96.4' } };
+    const container = { Id: policy.target.containerId, Config: { Labels: {
+      'com.docker.compose.project': project, 'com.docker.compose.service': 'versitygw',
+    } }, NetworkSettings: { Networks: { [networkName]: { NetworkID: networkId, IPAddress: policy.target.ip } } } };
+    const network = { Id: networkId, Name: networkName, Internal: true, Driver: 'bridge',
+      Labels: { 'com.docker.compose.project': project }, IPAM: { Config: [{ Gateway: '192.168.96.1' }] } };
+    const bridge = [{ ifname: bridgeName }];
+    const members = [{ ifname: 'veth7783ad3', master: bridgeName }];
+    expect(internalDockerListenerBinding(policy, container, network, bridge, members)).toEqual({
+      gatewayAddresses: ['192.168.96.1'], interfaceNames: [bridgeName, 'veth7783ad3'].sort(),
+    });
+    const invalidBindings: Array<[unknown, unknown, unknown, unknown, unknown]> = [
+      [{ target: { ...policy.target, containerId: 'b'.repeat(64) } }, container, network, bridge, members],
+      [policy, undefined, network, bridge, members],
+      [policy, container, { ...network, Internal: false }, bridge, members],
+      [policy, container, { ...network, Driver: 'overlay' }, bridge, members],
+      [policy, container, network, [], members],
+      [policy, container, network, bridge, []],
+      [policy, container, network, bridge, [{ ifname: 'veth7783ad3', master: 'docker0' }]],
+      [policy, container, { ...network, IPAM: { Config: [] } }, bridge, members],
+    ];
+    for (const args of invalidBindings) {
+      expect(internalDockerListenerBinding(args[0], args[1], args[2], args[3], args[4])).toBeNull();
+    }
+  });
+
+  it('keeps provisioner containers inspectable until the bounded Compose cleanup', async () => {
+    const source = await readFile(new URL('./with-storage.sh', import.meta.url), 'utf8');
+    expect(source).not.toContain('run --rm -T storage-provisioner');
+    expect(source.match(/run -T storage-provisioner/gu)).toHaveLength(2);
+    expect(source.match(/\[\[ "\$state" != Z\*/gu)).toHaveLength(3);
   });
 
   it('fails closed on source drift or any child failure', () => {

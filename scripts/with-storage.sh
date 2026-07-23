@@ -70,22 +70,25 @@ start_proxy() {
   local control_fd
   exec {control_fd}>"$control_fifo"
   unlink "$control_fifo"
-  local start_ticks pgid sid ppid
+  local start_ticks pgid sid ppid stat_line stat_fields state
   start_ticks=''
   pgid=''
   sid=''
   ppid=''
   for _ in $(seq 1 20); do
-    if [[ -r "/proc/${pid}/stat" ]]; then
-      start_ticks="$(awk '{print $22}' "/proc/${pid}/stat")"
-      pgid="$(ps -o pgid= -p "$pid" | tr -d ' ')"
-      sid="$(ps -o sid= -p "$pid" | tr -d ' ')"
-      ppid="$(ps -o ppid= -p "$pid" | tr -d ' ')"
-      [[ "$start_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ppid" == "$$" ]] && break
+    if IFS= read -r stat_line 2>/dev/null <"/proc/${pid}/stat"; then
+      stat_fields="${stat_line##*) }"
+      read -r -a stat_fields <<<"$stat_fields"
+      state="${stat_fields[0]:-}"
+      ppid="${stat_fields[1]:-}"
+      pgid="${stat_fields[2]:-}"
+      sid="${stat_fields[3]:-}"
+      start_ticks="${stat_fields[19]:-}"
+      [[ "$state" != Z* && "$start_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ppid" == "$$" ]] && break
     fi
     sleep 0.01
   done
-  [[ "$start_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ppid" == "$$" ]] || {
+  [[ "$state" != Z* && "$start_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ppid" == "$$" ]] || {
     echo "loopback proxy did not inherit the private control pipe as a direct child: $name" >&2
     proxy_pids+=("$pid")
     proxy_start_ticks+=("${start_ticks:-unknown}")
@@ -113,15 +116,17 @@ stop_proxies() {
   local index pid control_fd failed=0 identity_status
   trap '' PIPE
   controller_identity_status() {
-    local identity_index="$1" controller_pid state current_ticks current_ppid current_pgid current_sid
+    local identity_index="$1" controller_pid stat_line stat_fields state current_ticks current_ppid current_pgid current_sid
     controller_pid="${proxy_pids[$identity_index]}"
-    [[ -r "/proc/${controller_pid}/stat" ]] || return 2
-    state="$(ps -o stat= -p "$controller_pid" | tr -d ' ')"
+    if ! IFS= read -r stat_line 2>/dev/null <"/proc/${controller_pid}/stat"; then return 2; fi
+    stat_fields="${stat_line##*) }"
+    read -r -a stat_fields <<<"$stat_fields"
+    state="${stat_fields[0]:-}"
     [[ "$state" != Z* ]] || return 2
-    current_ticks="$(awk '{print $22}' "/proc/${controller_pid}/stat")"
-    current_ppid="$(ps -o ppid= -p "$controller_pid" | tr -d ' ')"
-    current_pgid="$(ps -o pgid= -p "$controller_pid" | tr -d ' ')"
-    current_sid="$(ps -o sid= -p "$controller_pid" | tr -d ' ')"
+    current_ppid="${stat_fields[1]:-}"
+    current_pgid="${stat_fields[2]:-}"
+    current_sid="${stat_fields[3]:-}"
+    current_ticks="${stat_fields[19]:-}"
     [[ "$current_ticks" == "${proxy_start_ticks[$identity_index]}"
       && "$current_ppid" == "$$"
       && "$current_pgid" == "${proxy_pgids[$identity_index]}"
@@ -268,8 +273,8 @@ env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C.UTF-8}
   --access "$GENEWAY_E2E_S3_ORACLE_ACCESS_KEY_ID" --secret "$GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY" \
   --role user --user-id 1003 --group-id 1003 --project-id 1003 >/dev/null
 
-"${compose[@]}" run --rm -T storage-provisioner ./node_modules/.bin/tsx scripts/provision-storage.ts >/dev/null
-"${compose[@]}" run --rm -T storage-provisioner ./node_modules/.bin/tsx scripts/verify-storage-permissions.ts >/dev/null
+"${compose[@]}" run -T storage-provisioner ./node_modules/.bin/tsx scripts/provision-storage.ts >/dev/null
+"${compose[@]}" run -T storage-provisioner ./node_modules/.bin/tsx scripts/verify-storage-permissions.ts >/dev/null
 
 if "${compose[@]}" exec -T versitygw \
   versitygw admin --access "$GENEWAY_S3_APP_ACCESS_KEY_ID" --secret "$GENEWAY_S3_APP_SECRET_ACCESS_KEY" \

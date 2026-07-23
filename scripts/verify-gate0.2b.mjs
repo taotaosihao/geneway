@@ -543,6 +543,28 @@ function globalListenerLines() {
   }).sort();
 }
 
+function processCommandLine(pid) {
+  try {
+    return readFileSync(`/proc/${String(pid)}/cmdline`).toString('utf8').split('\0').filter(Boolean).join(' ');
+  } catch {
+    return null;
+  }
+}
+
+export function isInternalDockerAdapterListener(line, context, commandLines) {
+  const match = line.match(/^(\S+) pids=([1-9][0-9]*)$/u);
+  if (match === null) return false;
+  const pid = Number(match[2]);
+  const commandLine = commandLines instanceof Map ? commandLines.get(pid) : commandLines?.[String(pid)];
+  if (commandLine !== '/usr/bin/rygel') return false;
+  const ipv4 = match[1].match(/^(\d+\.\d+\.\d+\.\d+):([1-9][0-9]*)$/u);
+  const scopedIpv6 = match[1].match(/^\[(fe80:[0-9a-f:]+)\]%([A-Za-z0-9_.-]+):([1-9][0-9]*)$/iu);
+  const port = Number(ipv4?.[2] ?? scopedIpv6?.[3] ?? 0);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535 || [3150, 3450].includes(port)) return false;
+  if (ipv4 !== null) return context.gatewayAddresses.includes(ipv4[1]);
+  return scopedIpv6 !== null && context.interfaceNames.includes(scopedIpv6[2]);
+}
+
 function dockerJson(command) {
   const result = capture(command);
   if (result.status !== 0 || typeof result.stdout !== 'string') return null;
@@ -613,6 +635,33 @@ function observeDockerNetwork(state, identity) {
     subnets: (network.IPAM?.Config ?? []).flatMap((config) => typeof config.Subnet === 'string' ? [config.Subnet] : []) });
 }
 
+function processIdentityObservation(pid) {
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/u);
+    const state = fields[0];
+    const startTicks = fields[19];
+    if (typeof state !== 'string' || !/^[1-9][0-9]*$/u.test(startTicks ?? '')) return { status: 'error' };
+    return { status: 'present', state, startTicks };
+  } catch (cause) {
+    return cause?.code === 'ENOENT' ? { status: 'missing' } : { status: 'error' };
+  }
+}
+
+export function procNetReadErrorIsExitRace(errorCode, expectedStartTicks, identityObservation) {
+  if (errorCode !== 'ENOENT' || !/^[1-9][0-9]*$/u.test(expectedStartTicks ?? '')) return false;
+  return identityObservation?.status === 'missing'
+    || (identityObservation?.status === 'present'
+      && (identityObservation.state?.startsWith('Z') || identityObservation.startTicks !== expectedStartTicks));
+}
+
+export function networkAttachmentsAfterInspect(previous, container) {
+  if (container === undefined) return previous;
+  return Object.entries(container.NetworkSettings?.Networks ?? {}).map(([name, attachment]) => ({
+    name, id: attachment?.NetworkID ?? null, ip: attachment?.IPAddress ?? null,
+  }));
+}
+
 function observeDockerContainer(state, identity, fallbackName) {
   const inspected = dockerJson(['docker', 'container', 'inspect', identity]);
   const container = Array.isArray(inspected) ? inspected[0] : undefined;
@@ -633,19 +682,18 @@ function observeDockerContainer(state, identity, fallbackName) {
   existing.extraHosts = container?.HostConfig?.ExtraHosts ?? existing.extraHosts ?? [];
   if (container?.State?.Running === true && Number.isInteger(container.State.Pid) && container.State.Pid > 0) {
     existing.pid = container.State.Pid;
-    try {
-      const procStat = readFileSync(`/proc/${String(container.State.Pid)}/stat`, 'utf8');
-      existing.pidStartTicks = procStat.slice(procStat.lastIndexOf(')') + 1).trim().split(/\s+/u)[19] ?? null;
-    } catch { existing.pidStartTicks = null; }
+    const processIdentity = processIdentityObservation(container.State.Pid);
+    existing.pidStartTicks = processIdentity.status === 'present' ? processIdentity.startTicks : null;
   }
   existing.publishedPorts = Object.values(container?.NetworkSettings?.Ports ?? {}).flatMap((bindings) => Array.isArray(bindings)
     ? bindings.map((binding) => ({ hostIp: binding.HostIp, hostPort: binding.HostPort })) : []);
-  existing.networkAttachments = [];
-  for (const [networkName, attachment] of Object.entries(container?.NetworkSettings?.Networks ?? {})) {
-    existing.networkNames.add(networkName);
-    if (typeof attachment?.NetworkID === 'string' && attachment.NetworkID.length > 0) existing.networkIds.add(attachment.NetworkID);
-    existing.networkAttachments.push({ name: networkName, id: attachment?.NetworkID ?? null, ip: attachment?.IPAddress ?? null });
-    observeDockerNetwork(state, attachment?.NetworkID || networkName);
+  if (container !== undefined) {
+    existing.networkAttachments = networkAttachmentsAfterInspect(existing.networkAttachments ?? [], container);
+    for (const attachment of existing.networkAttachments) {
+      existing.networkNames.add(attachment.name);
+      if (typeof attachment.id === 'string' && attachment.id.length > 0) existing.networkIds.add(attachment.id);
+      observeDockerNetwork(state, attachment.id || attachment.name);
+    }
   }
   if (container?.State?.Running === true && Number.isInteger(container.State.Pid) && container.State.Pid > 0) {
     existing.netnsAttempted = true;
@@ -656,7 +704,9 @@ function observeDockerContainer(state, identity, fallbackName) {
         const text = readFileSync(`/proc/${String(container.State.Pid)}/net/${file}`, 'utf8');
         existing.netnsSockets.push(...parseProcNetSockets(text, protocol));
       } catch (cause) {
-        existing.netnsErrors.push(`${protocol}:${cause instanceof Error ? cause.message : String(cause)}`);
+        const exitRace = procNetReadErrorIsExitRace(cause?.code, existing.pidStartTicks,
+          processIdentityObservation(container.State.Pid));
+        if (!exitRace) existing.netnsErrors.push(`${protocol}:${cause instanceof Error ? cause.message : String(cause)}`);
       }
     }
   }
@@ -718,7 +768,7 @@ function parseProcNetIpv4(hex) {
   return [6, 4, 2, 0].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16)).join('.');
 }
 
-function parseProcNetSockets(text, protocol) {
+export function parseProcNetSockets(text, protocol) {
   const sockets = [];
   for (const line of text.trim().split('\n').slice(1).filter(Boolean)) {
     const fields = line.trim().split(/\s+/u);
@@ -733,7 +783,10 @@ function parseProcNetSockets(text, protocol) {
       if (!/^[0-9A-F]{32}$/iu.test(remoteHex)) throw new Error(`invalid ${protocol} IPv6 address`);
       const normalized = [...remoteHex.matchAll(/[0-9A-F]{8}/giu)].map((chunk) =>
         [...chunk[0].matchAll(/[0-9A-F]{2}/giu)].map((byte) => byte[0]).reverse().join('')).join('').toUpperCase();
-      remoteAddress = /^0+$/u.test(normalized) ? '::' : /^0{31}1$/u.test(normalized) ? '::1' : normalized;
+      const mapped = normalized.match(/^0{20}FFFF([0-9A-F]{8})$/u)?.[1];
+      remoteAddress = /^0+$/u.test(normalized) ? '::' : /^0{31}1$/u.test(normalized) ? '::1'
+        : mapped === undefined ? normalized
+          : [0, 2, 4, 6].map((offset) => Number.parseInt(mapped.slice(offset, offset + 2), 16)).join('.');
     } else remoteAddress = parseProcNetIpv4(remoteHex);
     if (state === '01' || (protocol.startsWith('udp') && remotePort !== 0)) sockets.push({ protocol, remoteAddress, remotePort, state });
   }
@@ -1005,6 +1058,7 @@ export function dockerStructuralIsolationReceipt(state, expectedBackupRunIds = [
     netnsErrors: [...new Set(container.netnsErrors ?? [])],
     netnsSockets: [...new Map((container.netnsSockets ?? []).map((socket) => [JSON.stringify(socket), socket])).values()],
     networkIds: [...container.networkIds].sort(), networkNames: [...container.networkNames].sort(),
+    networkAttachments: container.networkAttachments ?? [],
   })).sort((left, right) => left.name.localeCompare(right.name));
   const networks = [...state.networks.values()].sort((left, right) => left.name.localeCompare(right.name));
   const internalIdentities = new Set(networks.filter((network) => network.internal).flatMap((network) => [network.id, network.name]));
@@ -1163,6 +1217,22 @@ export function proxyTargetBindingMatches(policy, container, network) {
     && attachment?.IPAddress === policy?.target?.ip && network?.Id === policy?.target?.networkId
     && network?.Name === policy?.target?.networkName && network?.Internal === true
     && network?.Labels?.['com.docker.compose.project'] === policy?.target?.project;
+}
+
+export function internalDockerListenerBinding(policy, container, network, bridgeSnapshot, memberLinks) {
+  if (!proxyTargetBindingMatches(policy, container, network) || network.Driver !== 'bridge'
+    || !Array.isArray(bridgeSnapshot) || bridgeSnapshot.length !== 1 || !Array.isArray(memberLinks)
+    || memberLinks.length === 0) return null;
+  const configuredBridge = network.Options?.['com.docker.network.bridge.name'];
+  const bridgeName = typeof configuredBridge === 'string' && configuredBridge.length > 0
+    ? configuredBridge : `br-${network.Id.slice(0, 12)}`;
+  if (bridgeSnapshot[0]?.ifname !== bridgeName
+    || memberLinks.some((link) => link?.master !== bridgeName || typeof link.ifname !== 'string')) return null;
+  const gatewayAddresses = (network.IPAM?.Config ?? []).flatMap((config) =>
+    typeof config?.Gateway === 'string' && config.Gateway.length > 0 ? [config.Gateway] : []);
+  if (gatewayAddresses.length === 0) return null;
+  return { gatewayAddresses: [...new Set(gatewayAddresses)].sort(),
+    interfaceNames: [bridgeName, ...new Set(memberLinks.map((link) => link.ifname))].sort() };
 }
 
 export function validateProxyRawReceipt(policy, summary, raw, attemptsText = '') {
@@ -1345,6 +1415,43 @@ export function proxyEgressMatchesPolicy(processItem, line) {
   return proxyTargetBindingMatches(policy, inspected, inspectedNetwork);
 }
 
+function internalDockerListenerContext(processes, knownPolicyPaths = []) {
+  const gatewayAddresses = new Set();
+  const interfaceNames = new Set();
+  const policyPaths = [...new Set([
+    ...knownPolicyPaths,
+    ...processes.map((item) => proxyPolicyPathFromCommandLine(item.commandLine)).filter(Boolean),
+  ])];
+  for (const path of policyPaths) {
+    try {
+      const stat = lstatSync(path);
+      if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) continue;
+      const runRoot = dirname(dirname(path));
+      const policy = validateProxyPolicy(JSON.parse(readFileSync(path, 'utf8')), runRoot);
+      const containerResult = dockerJson(['docker', 'container', 'inspect', policy.target.containerId]);
+      const networkResult = dockerJson(['docker', 'network', 'inspect', policy.target.networkId]);
+      const container = Array.isArray(containerResult) ? containerResult[0] : undefined;
+      const network = Array.isArray(networkResult) ? networkResult[0] : undefined;
+      if (!proxyTargetBindingMatches(policy, container, network) || network.Driver !== 'bridge') continue;
+      const configuredBridge = network.Options?.['com.docker.network.bridge.name'];
+      const bridgeName = typeof configuredBridge === 'string' && configuredBridge.length > 0
+        ? configuredBridge : `br-${network.Id.slice(0, 12)}`;
+      const bridgeResult = capture(['ip', '-j', 'link', 'show', 'dev', bridgeName]);
+      const memberResult = capture(['ip', '-j', 'link', 'show', 'master', bridgeName]);
+      if (bridgeResult.status !== 0 || typeof bridgeResult.stdout !== 'string'
+        || memberResult.status !== 0 || typeof memberResult.stdout !== 'string') continue;
+      const binding = internalDockerListenerBinding(policy, container, network,
+        JSON.parse(bridgeResult.stdout), JSON.parse(memberResult.stdout));
+      if (binding === null) continue;
+      for (const gateway of binding.gatewayAddresses) gatewayAddresses.add(gateway);
+      for (const name of binding.interfaceNames) interfaceNames.add(name);
+    } catch {
+      // A disappearing policy, container, network, or link cannot earn an adapter-listener exemption.
+    }
+  }
+  return { gatewayAddresses: [...gatewayAddresses].sort(), interfaceNames: [...interfaceNames].sort(), policyPaths };
+}
+
 function isModelGatewayTypeScriptProjectBuild(commandLine) {
   if (typeof commandLine !== 'string'
     || !/(?:^|\s)services\/model-gateway\/tsconfig\.json(?:\s|$)/u.test(commandLine)
@@ -1360,18 +1467,27 @@ export function isForbiddenRuntimeCommandLine(commandLine) {
   return /services\/model-gateway/iu.test(commandLine) && !isModelGatewayTypeScriptProjectBuild(commandLine);
 }
 
-function runtimeBoundarySample(rootPid, initialGlobalListeners) {
+function runtimeBoundarySample(rootPid, initialGlobalListeners, knownProxyPolicyPaths = []) {
   const descendants = descendantProcesses(rootPid);
   const listeners = socketLinesForProcesses(['ss', '-H', '-ltnp'], descendants, 'listener');
   const egress = socketLinesForProcesses(['ss', '-H', '-tnp', 'state', 'established'], descendants, 'egress');
   const addedGlobalListeners = additions(initialGlobalListeners, globalListenerLines());
+  const internalDockerContext = internalDockerListenerContext(descendants, knownProxyPolicyPaths);
+  const listenerProcessIds = [...new Set(addedGlobalListeners.flatMap((line) =>
+    [...line.matchAll(/pids=([1-9][0-9]*)/gu)].map((match) => Number(match[1]))))];
+  const listenerCommandLines = new Map(listenerProcessIds.map((pid) => [pid, processCommandLine(pid)]));
+  const internalDockerAdapterListeners = addedGlobalListeners.filter((line) =>
+    isInternalDockerAdapterListener(line, internalDockerContext, listenerCommandLines));
   const forbiddenProcesses = descendants.filter((item) => isForbiddenRuntimeCommandLine(item.commandLine))
     .map((item) => ({ pid: item.pid, command: item.command, identity: item.commandLine.split(/\s+/u).slice(0, 4).join(' ') }));
-  const unsafeListeners = [...listeners, ...addedGlobalListeners].filter((line) => {
+  const listenerIsUnsafe = (line) => {
     const local = line.split(/\s+/u)[0] ?? '';
     return (!local.startsWith('127.0.0.1:') && !local.startsWith('[::1]:'))
       || /:(?:3150|3450)(?:\s|$)/u.test(local);
-  });
+  };
+  const internalDockerAdapterSet = new Set(internalDockerAdapterListeners);
+  const unsafeListeners = [...listeners.filter(listenerIsUnsafe),
+    ...addedGlobalListeners.filter((line) => listenerIsUnsafe(line) && !internalDockerAdapterSet.has(line))];
   const nonLoopbackEgress = egress.filter((line) => {
     const connection = line.split(/\s+/u)[0] ?? '';
     const peer = connection.split('->')[1] ?? '';
@@ -1385,6 +1501,7 @@ function runtimeBoundarySample(rootPid, initialGlobalListeners) {
     identities: descendants.map((item) => ({ pid: item.pid, startTicks: item.startTicks, command: item.command,
       listenerEndpoints: listeners.filter((line) => line.endsWith(`pid=${String(item.pid)}`)) })),
     addedGlobalListeners,
+    internalDockerAdapterListeners,
     forbiddenProcesses,
     unsafeListeners,
     nonLoopbackEgress,
@@ -1444,7 +1561,8 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
   if (!sourceBindingsMatch(aggregateBinding, beforeBinding)) throw new Error(`Source drift before ${step.name}`);
   const stepGlobalListenerBaseline = globalListenerLines();
   const observedIdentities = new Map();
-  const runtimeReceipt = { checked: true, sampleCount: 0, maxDescendantCount: 0, unsafeListeners: [], nonLoopbackEgress: [], forbiddenProcesses: [], proxyPolicyPaths: [], sampleErrors: [] };
+  const runtimeReceipt = { checked: true, sampleCount: 0, maxDescendantCount: 0, unsafeListeners: [],
+    internalDockerAdapterListeners: [], nonLoopbackEgress: [], forbiddenProcesses: [], proxyPolicyPaths: [], sampleErrors: [] };
   const dockerObservation = createDockerObservation();
   const dockerEventMonitor = startDockerEventMonitor(dockerObservation);
   let result;
@@ -1463,11 +1581,12 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
       };
       const sample = () => {
         try {
-          const observed = runtimeBoundarySample(child.pid ?? -1, stepGlobalListenerBaseline);
+          const observed = runtimeBoundarySample(child.pid ?? -1, stepGlobalListenerBaseline, runtimeReceipt.proxyPolicyPaths);
           runtimeReceipt.sampleCount += 1;
           runtimeReceipt.maxDescendantCount = Math.max(runtimeReceipt.maxDescendantCount, observed.descendantCount);
           runtimeReceipt.addedGlobalListeners ??= [];
           runtimeReceipt.addedGlobalListeners.push(...observed.addedGlobalListeners);
+          runtimeReceipt.internalDockerAdapterListeners.push(...observed.internalDockerAdapterListeners);
           runtimeReceipt.unsafeListeners.push(...observed.unsafeListeners);
           runtimeReceipt.nonLoopbackEgress.push(...observed.nonLoopbackEgress);
           runtimeReceipt.forbiddenProcesses.push(...observed.forbiddenProcesses);
@@ -1505,6 +1624,7 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
   }
   runtimeReceipt.unsafeListeners = [...new Set(runtimeReceipt.unsafeListeners)].sort();
   runtimeReceipt.addedGlobalListeners = [...new Set(runtimeReceipt.addedGlobalListeners ?? [])].sort();
+  runtimeReceipt.internalDockerAdapterListeners = [...new Set(runtimeReceipt.internalDockerAdapterListeners)].sort();
   runtimeReceipt.nonLoopbackEgress = [...new Set(runtimeReceipt.nonLoopbackEgress)].sort();
   runtimeReceipt.forbiddenProcesses = [...new Map(runtimeReceipt.forbiddenProcesses.map((item) => [`${String(item.pid)}:${item.identity}`, item])).values()];
   const backupRunsRequired = ['gate0.2b.3', 'gate0.2a-baseline'].includes(step.name);

@@ -26,12 +26,27 @@ const selectedProjects = forwarded.flatMap((argument, index) => {
   return [];
 }).filter((value) => typeof value === 'string');
 const gateA0Live = selectedProjects.includes('gate-a0-live');
+const gate02bEnvironmentNames = [
+  'GENEWAY_GATE02B_EGRESS_GUARD', 'GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY', 'GENEWAY_GATE02B_PROXY_RUN_ROOT',
+  'GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL', 'GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL',
+];
+const gate02bEnvironment = Object.fromEntries(gate02bEnvironmentNames.flatMap((name) =>
+  process.env[name] === undefined ? [] : [[name, process.env[name]]]));
+if (![0, gate02bEnvironmentNames.length].includes(Object.keys(gate02bEnvironment).length)) {
+  throw new Error('Gate 0.2B E2E environment tuple is incomplete');
+}
+const gate02bGuarded = Object.keys(gate02bEnvironment).length === gate02bEnvironmentNames.length;
 const liveAuthFile = process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE;
 const liveConformanceFile = process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE;
 if (gateA0Live && (liveAuthFile === undefined || liveConformanceFile === undefined)) {
   throw new Error('gate-a0-live requires GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE and GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE');
 }
-const runId = process.env.GENEWAY_RUN_ID ?? `gate-0.1-${Date.now()}-${process.pid}`;
+const parentRunId = process.env.GENEWAY_RUN_ID ?? `gate-0.1-${Date.now()}-${process.pid}`;
+const identityHash = createHash('sha256').update(JSON.stringify({ parentRunId, forwarded, selectedProjects })).digest('hex').slice(0, 16);
+const identityLabel = (selectedProjects[0] ?? 'default').toLowerCase().replace(/[^a-z0-9_-]/gu, '-').slice(0, 32);
+const runId = gate02bGuarded
+  ? `${parentRunId.replace(/[^A-Za-z0-9._-]/gu, '-').slice(0, 56)}-${identityLabel}-${identityHash}`
+  : parentRunId;
 const allocatedPorts = new Set();
 const allocatePort = async () => {
   const port = String(await findAvailablePort(allocatedPorts));
@@ -71,8 +86,10 @@ const baseEnvironment = {
   TMPDIR: process.env.TMPDIR ?? '/tmp',
   LANG: process.env.LANG ?? 'C.UTF-8',
   NODE_ENV: 'test',
+  ...(gate02bGuarded ? { GENEWAY_PARENT_RUN_ID: parentRunId } : {}),
   ...(process.env.CI === undefined ? {} : { CI: process.env.CI }),
   ...(process.env.PLAYWRIGHT_BROWSERS_PATH === undefined ? {} : { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH }),
+  ...gate02bEnvironment,
 };
 
 function processIdentityMatches(pid, procStartTicks) {
@@ -117,6 +134,9 @@ function writeSourceBinding() {
   writeFileSync(`/tmp/geneway-runs/${runId}/source-binding.json`, `${JSON.stringify({
     schemaVersion: 'geneway-source-binding/1',
     runId,
+    parentRunId,
+    forwarded,
+    selectedProjects,
     head: head.stdout.trim(),
     workspaceSha256: digest.digest('hex'),
     fileCount: files.length,

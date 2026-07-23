@@ -1,9 +1,15 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isVisiblePersistedStreamingCheckpoint } from './e2e/gate-a0-chat-observability.js';
 import { modelGatewayWorkerEnvironment } from './e2e/model-gateway-worker-environment.js';
 
-interface GateStep { phase: string; name: string; command: readonly string[]; inheritRunId?: boolean }
+interface GateStep { phase: string; name: string; command: readonly string[]; inheritRunId?: boolean;
+  expectedWithStorageInvocations?: number; expectedStorageInvocations?: number;
+  expectedE2eInvocations?: number; expectedBackupCases?: number }
 interface Gate02bModule {
   backupArtifactRoots: (results: readonly unknown[]) => string[];
   childEnvironment: (runId: string, step: GateStep) => { environment: Readonly<Record<string, string>>; dockerIsolationEnvironment: Readonly<Record<string, string>> };
@@ -17,11 +23,22 @@ interface Gate02bModule {
   isForbiddenRuntimeCommandLine: (commandLine: string) => boolean;
   isGateAuthorityPath: (path: string) => boolean;
   isRepositoryDockerScope: (name: string, labels?: Readonly<Record<string, string>>) => boolean;
-  dockerStructuralIsolationReceipt: (state: unknown) => { passed: boolean; violations: string[] };
+  dockerStructuralIsolationReceipt: (state: unknown, backupRunIds?: string[], proxyRoots?: string[], expectation?: unknown) => {
+    passed: boolean; violations: string[];
+  };
   parseSocketLine: (line: string, kind: 'listener' | 'egress') => { local: string; peer: string; pids: number[] };
-  parseBackupRawReceipt: (raw: string, containerId: string, role: string, action: string, allowedPorts: readonly string[]) => {
+  parseBackupRawReceipt: (raw: string, containerId: string, role: string, action: string, allowedPorts: readonly string[],
+    allowedUnix?: readonly string[]) => {
     passed: boolean; reloadCount: number; unknownLines: string[]; unexpected: string[];
   };
+  proxyTargetBindingMatches: (policy: unknown, container: unknown, network: unknown) => boolean;
+  proxyPolicyPathFromCommandLine: (commandLine: string) => string | null;
+  validateProxyPolicy: (policy: unknown, expectedRoot: string) => unknown;
+  validateProxyInventory: (inventory: string[]) => string[];
+  validateProxyIdentityChain: (policy: unknown, ready: unknown, summary: unknown) => boolean;
+  validateProxyRawReceipt: (policy: unknown, summary: unknown, raw: string, attempts?: string) => boolean;
+  validateGate02bInvocationTopology: (packageScripts: Readonly<Record<string, string>>, steps: readonly GateStep[],
+    nestedSources?: Readonly<Record<string, string>>) => readonly unknown[];
   requiredGate02bSteps: readonly GateStep[];
   sourceBindingsMatch: (initial: Readonly<Record<string, unknown>>, final: Readonly<Record<string, unknown>>) => boolean;
   validateArtifactRoots: (roots: unknown) => string[];
@@ -37,12 +54,20 @@ const {
   extractStructuredBackupRunIds,
   findForbiddenEnvironmentNames, gate02bAggregatePassed, gate02bDockerIsolationEnvironment, gateAuthorityRootNames,
   isForbiddenRuntimeCommandLine, isGateAuthorityPath,
-  isRepositoryDockerScope, parseBackupRawReceipt, parseSocketLine, requiredGate02bSteps,
+  isRepositoryDockerScope, parseBackupRawReceipt, parseSocketLine, proxyPolicyPathFromCommandLine,
+  proxyTargetBindingMatches, requiredGate02bSteps,
   sourceBindingsMatch, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
   validateDockerIsolationCommandSafety, validateDockerStructuralIsolationReceipt, validateGate02bStepPlan,
-  validateProcessLifecycleReceipt,
+  validateGate02bInvocationTopology, validateProcessLifecycleReceipt, validateProxyIdentityChain, validateProxyInventory, validateProxyPolicy,
+  validateProxyRawReceipt,
 // @ts-expect-error The executable is native ESM; this test supplies its complete public contract above.
 } = await import('./verify-gate0.2b.mjs') as unknown as Gate02bModule;
+// @ts-expect-error The executable is native ESM; this test consumes its exported pure invocation builder.
+const { controlledDockerInvocation } = await import('./gate02b-loopback-proxy.mjs') as unknown as {
+  controlledDockerInvocation: (args: string[], configPath: string) => {
+    command: string; args: string[]; options: { timeout: number; killSignal: string; env: Record<string, string | undefined> };
+  };
+};
 
 describe('Gate 0.2A executable script contract', () => {
   it('accepts a browser projection ahead of a persisted streaming checkpoint', () => {
@@ -85,6 +110,16 @@ describe('Gate 0.2A executable script contract', () => {
     const runner = await readFile(new URL('./run-e2e.mjs', import.meta.url), 'utf8');
     expect(runner).toContain('scripts/e2e-report-gate.ts');
     expect(runner).toContain('cleanupFailed || reportGateFailed');
+    for (const name of ['GENEWAY_GATE02B_EGRESS_GUARD', 'GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY',
+      'GENEWAY_GATE02B_PROXY_RUN_ROOT', 'GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL',
+      'GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL']) expect(runner).toContain(name);
+    expect(runner).toContain('Gate 0.2B E2E environment tuple is incomplete');
+    const partial = spawnSync(process.execPath, ['scripts/run-e2e.mjs'], {
+      cwd: new URL('..', import.meta.url), encoding: 'utf8',
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', GENEWAY_GATE02B_EGRESS_GUARD: 'required' },
+    });
+    expect(partial.status).not.toBe(0);
+    expect(partial.stderr).toContain('Gate 0.2B E2E environment tuple is incomplete');
   });
 
   it('keeps the Gate A0.1 live first-turn oracle in its executable verification command', async () => {
@@ -182,6 +217,15 @@ describe('Gate 0.2B joint aggregate script contract', () => {
       'V7:pnpm verify:gate0.2b.1',
       'V7:pnpm test:e2e -- --project=gate0.2b-fast-chat-local',
     ]);
+    expect(requiredGate02bSteps.slice(6).map((step) => [step.name, step.expectedWithStorageInvocations,
+      step.expectedStorageInvocations, step.expectedE2eInvocations, step.expectedBackupCases ?? 0])).toEqual([
+      ['integration', 1, 1, 0, 0], ['security', 1, 1, 0, 0], ['gate0.2b.2', 4, 2, 2, 0],
+      ['gate0.2b.3', 16, 7, 9, 3], ['gate0.2a-baseline', 7, 3, 4, 3],
+      ['gate0.2b.1-baseline', 3, 2, 1, 0], ['local-a0-no-business-objects', 1, 0, 1, 0],
+    ]);
+    const metadataDrift = requiredGate02bSteps.map((step) => ({ ...step }));
+    metadataDrift[8] = { ...metadataDrift[8]!, expectedWithStorageInvocations: 3 };
+    expect(() => validateGate02bStepPlan(metadataDrift)).toThrow('membership or order');
   });
 
   it('rejects missing command members and forbidden live/auth commands', () => {
@@ -203,6 +247,18 @@ describe('Gate 0.2B joint aggregate script contract', () => {
         'forbidden live/auth command',
       );
     }
+  });
+
+  it('derives the 33 storage invocations and six backup cases from the executable call graph', async () => {
+    const packageManifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    const nestedPath = 'scripts/verify-gate0.2b.3.mjs';
+    const nestedSource = await readFile(new URL('./verify-gate0.2b.3.mjs', import.meta.url), 'utf8');
+    const topology = validateGate02bInvocationTopology(packageManifest.scripts, requiredGate02bSteps,
+      { [nestedPath]: nestedSource }) as Array<{ withStorage: number; backupCases: number }>;
+    expect(topology.reduce((sum, item) => sum + item.withStorage, 0)).toBe(33);
+    expect(topology.reduce((sum, item) => sum + item.backupCases, 0)).toBe(6);
   });
 
   it('expands nested package and verifier commands before applying command safety', () => {
@@ -258,6 +314,8 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     const backupCompose = await readFile(new URL('./backup-restore/docker-compose.yml', import.meta.url), 'utf8');
     const backupRunner = await readFile(new URL('./run-backup-restore.mjs', import.meta.url), 'utf8');
     const storageRunner = await readFile(new URL('./with-storage.sh', import.meta.url), 'utf8');
+    const proxyRunner = await readFile(new URL('./gate02b-loopback-proxy.mjs', import.meta.url), 'utf8');
+    const e2eRunner = await readFile(new URL('./run-e2e.mjs', import.meta.url), 'utf8');
     const guard = await readFile(new URL('./backup-restore/gate02b-egress-guard.c', import.meta.url), 'utf8');
     const verifier = await readFile(new URL('./verify-gate0.2b.mjs', import.meta.url), 'utf8');
     expect(compose).toContain('internal: ${GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL:-false}');
@@ -265,11 +323,31 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     expect(backupCompose).toContain('internal: ${GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL:-false}');
     expect(backupRunner).toContain("gate02bGuardRequired ? ['--pull', 'never'] : []");
     expect(backupRunner).toContain('Gate 0.2B required offline role image is missing');
+    expect(backupRunner).toContain("child.stdin.end('shutdown\\n')");
+    expect(backupRunner).toContain("{ controlPipe: true }");
+    expect(backupRunner).toContain('ignored its private shutdown pipe');
+    expect(backupRunner).toContain('children.set(child, { controlPipe: options.controlPipe === true })');
+    expect(backupRunner).toContain('if (lifecycle.controlPipe) {');
+    expect(backupRunner).toContain('abandonUnresponsiveControlPipeChild(child)');
+    expect(backupRunner).toContain('control-pipe-process-remains');
     expect(storageRunner).toContain('if [[ "${GENEWAY_GATE02B_EGRESS_GUARD:-}" == "required" ]]');
     expect(storageRunner.match(/"\$\{pull_policy\[@\]\}"/gu)).toHaveLength(3);
+    expect(storageRunner).toContain("schemaVersion: 'geneway-gate02b-storage-invocation/1'");
+    expect(storageRunner).toContain("writeFileSync(env.GENEWAY_INVOCATION_PATH");
+    expect(storageRunner.indexOf('writeFileSync(env.GENEWAY_INVOCATION_PATH')).toBeLessThan(storageRunner.indexOf('up -d --wait'));
+    expect(proxyRunner).toContain("['--host', localDockerHost, ...args]");
+    expect(proxyRunner).toContain("timeout: 2_000");
+    expect(proxyRunner).toContain("DOCKER_CONFIG: configPath");
+    expect(proxyRunner).not.toContain('DOCKER_CONTEXT:');
+    expect(e2eRunner).toContain("JSON.stringify({ parentRunId, forwarded, selectedProjects })");
+    expect(e2eRunner).toContain('const runId = gate02bGuarded');
+    expect(e2eRunner).toContain('parentRunId,\n    forwarded,\n    selectedProjects,');
+    expect(verifier).toContain("['cc', '-std=gnu17', '-shared', '-fPIC'");
     for (const call of ['connect(', 'sendto(', 'sendmsg(', 'sendmmsg(']) expect(guard).toContain(call);
     expect(guard).toContain('== 0x7f000001U');
     expect(guard).toContain('offsetof(struct sockaddr_un, sun_path)');
+    expect(guard).toContain('GENEWAY_GATE02B_EGRESS_ALLOWED_TARGET_IPV4');
+    expect(guard).toContain('GENEWAY_GATE02B_EGRESS_ALLOWED_TARGET_PORT');
     expect(guard).toContain("memchr(unix_address->sun_path, '\\0', path_length)");
     expect(backupRunner).toContain('geneway.backup.run=');
     expect(backupRunner).toContain("invokeRole('provision-docker', 'source', sourceStack)");
@@ -282,11 +360,18 @@ describe('Gate 0.2B joint aggregate script contract', () => {
       GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL: 'true',
       GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL: 'true',
       GENEWAY_GATE02B_EGRESS_GUARD: 'required',
+      DOCKER_HOST: 'unix:///var/run/docker.sock',
     });
     const child = childEnvironment('contract-run', requiredGate02bSteps[0]!);
     expect(child.dockerIsolationEnvironment).toMatchObject(gate02bDockerIsolationEnvironment);
     expect(child.dockerIsolationEnvironment.GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY).toContain('/tmp/geneway-runs/contract/');
     expect(child.environment).toMatchObject(gate02bDockerIsolationEnvironment);
+    expect(child.environment.DOCKER_HOST).toBe('unix:///var/run/docker.sock');
+    const v7WithoutRunId = childEnvironment('contract-run', requiredGate02bSteps.find((step) => step.name === 'gate0.2a-baseline')!);
+    expect(v7WithoutRunId.environment.GENEWAY_RUN_ID).toBeUndefined();
+    expect(v7WithoutRunId.environment.GENEWAY_GATE02B_PROXY_RUN_ROOT).toBe(
+      '/tmp/geneway-runs/contract-run-v7-gate0.2a-baseline-proxies',
+    );
     expect(validateDockerIsolationCommandSafety(['pnpm test:integration'])).toBe(true);
     expect(() => validateDockerIsolationCommandSafety(['GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL=false pnpm test'])).toThrow(
       'override/removal',
@@ -294,6 +379,202 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     expect(() => validateDockerIsolationCommandSafety(['env -u GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL pnpm test'])).toThrow(
       'override/removal',
     );
+  });
+
+  it('shuts controllers down only through an unlinked private control pipe', async () => {
+    const storageRunner = await readFile(new URL('./with-storage.sh', import.meta.url), 'utf8');
+    const functionStart = storageRunner.indexOf('stop_proxies() {');
+    const functionEnd = storageRunner.indexOf('\n\ncompose=(', functionStart);
+    expect(functionStart).toBeGreaterThanOrEqual(0);
+    expect(functionEnd).toBeGreaterThan(functionStart);
+    const probeRoot = await mkdtemp(join(tmpdir(), 'geneway-gate02b-control-pipe-'));
+    try {
+      const probe = spawnSync('bash', ['-c', `
+set -uo pipefail
+${storageRunner.slice(functionStart, functionEnd)}
+fifo="$1/control"
+mkfifo -m 0600 "$fifo"
+bash -c 'IFS= read -r command; [[ "$command" == shutdown ]]' <"$fifo" &
+controller=$!
+exec {control_fd}>"$fifo"
+unlink "$fifo"
+for _ in $(seq 1 100); do
+  controller_ppid="$(ps -o ppid= -p "$controller" | tr -d ' ')"
+  [[ "$controller_ppid" == "$$" ]] && break
+  sleep 0.01
+done
+proxy_pids=("$controller")
+proxy_start_ticks=("$(awk '{print $22}' "/proc/$controller/stat")")
+proxy_pgids=("$(ps -o pgid= -p "$controller" | tr -d ' ')")
+proxy_sids=("$(ps -o sid= -p "$controller" | tr -d ' ')")
+proxy_control_fds=("$control_fd")
+proxy_logs=()
+stop_proxies
+
+fifo="$1/already-exited-control"
+mkfifo -m 0600 "$fifo"
+bash -c ':' <"$fifo" &
+exited_controller=$!
+exec {closed_control_fd}>"$fifo"
+unlink "$fifo"
+wait "$exited_controller"
+proxy_pids=("$exited_controller")
+proxy_start_ticks=('1')
+proxy_pgids=('1')
+proxy_sids=('1')
+proxy_control_fds=("$closed_control_fd")
+proxy_logs=()
+set +e
+stop_proxies
+closed_status=$?
+set -e
+[[ "$closed_status" -eq 1 ]]
+`, 'gate02b-control-pipe-probe', probeRoot], { encoding: 'utf8', timeout: 15_000 });
+      expect(probe.status, `${probe.stdout}\n${probe.stderr}\n${String(probe.error)} signal=${String(probe.signal)}`).toBe(0);
+      expect(storageRunner).toContain('mkfifo -m 0600 "$control_fifo"');
+      expect(storageRunner).toContain('unlink "$control_fifo"');
+      expect(storageRunner).toContain("printf 'shutdown\\n' >&\"$control_fd\"");
+      expect(storageRunner).not.toMatch(/kill -(?:TERM|KILL)/u);
+      expect(storageRunner).not.toContain('signal_verified_controller');
+    } finally {
+      await rm(probeRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('abandons an unresponsive backup proxy without a numeric signal fallback', async () => {
+    const backupRunner = await readFile(new URL('./run-backup-restore.mjs', import.meta.url), 'utf8');
+    const functionStart = backupRunner.indexOf('function abandonUnresponsiveControlPipeChild(child) {');
+    const functionEnd = backupRunner.indexOf('\n\nfunction isolatedRoleMounts', functionStart);
+    expect(functionStart).toBeGreaterThanOrEqual(0);
+    expect(functionEnd).toBeGreaterThan(functionStart);
+    const probe = spawnSync(process.execPath, ['--input-type=module', '-e', `
+${backupRunner.slice(functionStart, functionEnd)}
+const calls = [];
+const stream = (name) => ({ destroy: () => calls.push(name) });
+abandonUnresponsiveControlPipeChild({ stdin: stream('stdin'), stdout: stream('stdout'), stderr: stream('stderr'),
+  unref: () => calls.push('unref') });
+if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref'])) process.exit(1);
+`], { encoding: 'utf8', timeout: 5_000 });
+    expect(probe.status, `${probe.stdout}\n${probe.stderr}`).toBe(0);
+    const branchStart = backupRunner.indexOf('if (lifecycle.controlPipe) {');
+    const branchEnd = backupRunner.indexOf('\n      try {', branchStart);
+    const controlPipeBranch = backupRunner.slice(branchStart, branchEnd);
+    expect(controlPipeBranch).not.toContain('kill(');
+    expect(controlPipeBranch).not.toContain('process.kill');
+    expect(controlPipeBranch).toContain('children.delete(child)');
+  });
+
+  it('binds loopback proxy policy, Docker target and raw receipt exactly', () => {
+    const runRoot = '/tmp/geneway-runs/proxy-contract';
+    const target = {
+      containerId: 'a'.repeat(64), project: 'geneway-e2e-proxy-contract', service: 'postgres',
+      networkName: 'geneway-e2e-proxy-contract_default', networkId: 'b'.repeat(64), networkInternal: true,
+      ip: '172.30.0.2', port: 5432, containerPort: 5432,
+    };
+    const stem = `${target.project}-postgres`;
+    const unhashedPolicy = { schemaVersion: 'geneway-gate02b-loopback-proxy/1', name: stem,
+      dockerHost: 'unix:///var/run/docker.sock', dockerConfigPath: `${runRoot}/docker-client`,
+      policyPath: `${runRoot}/loopback-proxies/${stem}.policy.json`,
+      rawPath: `${runRoot}/loopback-proxies/${stem}.raw`, readyPath: `${runRoot}/loopback-proxies/${stem}.ready.json`,
+      attemptsPath: `${runRoot}/loopback-proxies/${stem}.attempts.jsonl`,
+      controller: { pid: 1, parentPid: 2, startTicks: '42', processGroupId: 1, sessionId: 1, hostname: 'host' },
+      listen: { host: '127.0.0.1', port: 55433 }, target };
+    const policy = { ...unhashedPolicy, policyHash: createHash('sha256').update(JSON.stringify(unhashedPolicy)).digest('hex') };
+    expect(validateProxyPolicy(policy, runRoot)).toEqual(policy);
+    const container = { Id: target.containerId, Config: { Labels: {
+      'com.docker.compose.project': target.project, 'com.docker.compose.service': target.service,
+    } }, NetworkSettings: { Networks: { [target.networkName]: { NetworkID: target.networkId, IPAddress: target.ip } } } };
+    const network = { Id: target.networkId, Name: target.networkName, Internal: true,
+      Labels: { 'com.docker.compose.project': target.project } };
+    expect(proxyTargetBindingMatches(policy, container, network)).toBe(true);
+    expect(proxyTargetBindingMatches(policy, { ...container, Id: 'c'.repeat(64) }, network)).toBe(false);
+    expect(proxyTargetBindingMatches(policy, container, { ...network, Internal: false })).toBe(false);
+    expect(proxyTargetBindingMatches(policy, container, { ...network,
+      Labels: { 'com.docker.compose.project': 'geneway-e2e-wrong' } })).toBe(false);
+    expect(proxyTargetBindingMatches({ ...policy, target: { ...target, port: 7070, containerPort: 7070 } }, container, network)).toBe(false);
+    const raw = `START pid=1 startTicks=42 hostname=host\nALLOW attempt=1 call=connect family=2 address=${target.ip} port=5432\n`;
+    const attempts = `${JSON.stringify({ seq: 1, schemaVersion: policy.schemaVersion, policyHash: policy.policyHash,
+      serve: { pid: 1, startTicks: '42', hostname: 'host' }, binding: { ...target, running: true } })}\n`;
+    const summary = { passed: true, rawSha256: createHash('sha256').update(raw).digest('hex'), rawLineCount: 2,
+      attemptsSha256: createHash('sha256').update(attempts).digest('hex'), attemptLineCount: 1,
+      denyLines: [], unknownLines: [],
+      startIdentities: [{ pid: 1, startTicks: '42', hostname: 'host' }],
+      readyIdentity: { pid: 1, startTicks: '42', hostname: 'host' },
+      exit: { status: 0, signal: null } };
+    expect(validateProxyRawReceipt(policy, summary, raw, attempts)).toBe(true);
+    expect(validateProxyRawReceipt(policy, summary, `${raw}DENY call=connect family=2 address=8.8.8.8 port=53\n`, attempts)).toBe(false);
+    expect(validateProxyRawReceipt(policy, summary, `${raw}UNKNOWN payload\n`, attempts)).toBe(false);
+    expect(validateProxyRawReceipt(policy, summary, `START pid=1 startTicks=42 hostname=host\n${raw}`, attempts)).toBe(false);
+    expect(validateProxyRawReceipt(policy, summary, raw.replace('family=2', 'family=10'), attempts)).toBe(false);
+    expect(validateProxyRawReceipt(policy, summary, raw.replace('call=connect', 'call=sendmsg'), attempts)).toBe(false);
+    expect(validateProxyRawReceipt(policy, summary, raw, `${attempts}${attempts}`)).toBe(false);
+    const receiptFor = (attemptText: string, rawText = raw) => ({ ...summary,
+      rawSha256: createHash('sha256').update(rawText).digest('hex'),
+      rawLineCount: rawText.trim().split('\n').filter(Boolean).length,
+      attemptsSha256: createHash('sha256').update(attemptText).digest('hex'),
+      attemptLineCount: attemptText.trim().split('\n').filter(Boolean).length,
+    });
+    const attemptObject = JSON.parse(attempts) as Record<string, unknown>;
+    for (const invalid of [
+      { ...attemptObject, seq: 0 }, { ...attemptObject, seq: 2 },
+      { ...attemptObject, seq: Number.MAX_SAFE_INTEGER + 1 },
+      { ...attemptObject, schemaVersion: 'wrong' },
+      { ...attemptObject, serve: { pid: 1, startTicks: '42', hostname: 'wrong' } },
+      { ...attemptObject, serve: { pid: 1, startTicks: '42', hostname: 'host', extra: true } },
+      { ...attemptObject, extra: true },
+    ]) {
+      const text = `${JSON.stringify(invalid)}\n`;
+      expect(validateProxyRawReceipt(policy, receiptFor(text), raw, text)).toBe(false);
+    }
+    const nonCanonical = attempts.replace('"seq":1', '"seq": 1');
+    expect(validateProxyRawReceipt(policy, receiptFor(nonCanonical), raw, nonCanonical)).toBe(false);
+    const rawLeadingZero = raw.replace('attempt=1', 'attempt=01');
+    expect(validateProxyRawReceipt(policy, receiptFor(attempts, rawLeadingZero), rawLeadingZero, attempts)).toBe(false);
+    const connectedBeforeAttempt = `START pid=1 startTicks=42 hostname=host\nALLOW call=sendmsg family=CONNECTED\n${raw.split('\n')[1]}\n`;
+    expect(validateProxyRawReceipt(policy, receiptFor(attempts, connectedBeforeAttempt), connectedBeforeAttempt, attempts)).toBe(false);
+    expect(validateProxyRawReceipt(policy, { ...summary, readyIdentity: { pid: 2, startTicks: '42', hostname: 'host' } }, raw, attempts)).toBe(false);
+    const ready = { schemaVersion: policy.schemaVersion, policyPath: policy.policyPath, policyHash: policy.policyHash,
+      pid: 1, startTicks: '42', hostname: 'host' };
+    const identitySummary = { readyIdentity: ready, stdoutReady: { ready: true, ...ready },
+      spawnIdentity: { pid: 1, startTicks: '42', hostname: 'host' } };
+    expect(validateProxyIdentityChain(policy, ready, identitySummary)).toBe(true);
+    expect(validateProxyIdentityChain(policy, ready, { ...identitySummary,
+      stdoutReady: { ...identitySummary.stdoutReady, pid: 2 } })).toBe(false);
+    expect(validateProxyIdentityChain(policy, ready, { ...identitySummary,
+      spawnIdentity: { ...identitySummary.spawnIdentity, startTicks: '43' } })).toBe(false);
+    expect(() => validateProxyPolicy({ ...policy, policyPath: '/tmp/escape.policy.json' }, runRoot)).toThrow('unsafe');
+    expect(proxyPolicyPathFromCommandLine(
+      `node /home/gewu/work/geneway/scripts/gate02b-loopback-proxy.mjs --serve ${policy.policyPath}`,
+    )).toBe(policy.policyPath);
+    expect(proxyPolicyPathFromCommandLine(`node scripts/not-proxy.mjs --serve ${policy.policyPath}`)).toBeNull();
+    expect(proxyPolicyPathFromCommandLine(
+      `node /home/gewu/work/geneway/scripts/gate02b-loopback-proxy.mjs --serve ${policy.policyPath} extra`,
+    )).toBeNull();
+    const files = (stem: string) => [`${stem}.policy.json`, `${stem}.raw`, `${stem}.ready.json`,
+      `${stem}.attempts.jsonl`, `${stem}.json`, `${stem}.controller.log`];
+    const twoProjects = [...files('geneway-e2e-one-postgres'), ...files('geneway-e2e-two-postgres')];
+    expect(validateProxyInventory(twoProjects)).toEqual([
+      'geneway-e2e-one-postgres.policy.json', 'geneway-e2e-two-postgres.policy.json',
+    ]);
+    expect(() => validateProxyInventory(twoProjects.slice(1))).toThrow('incomplete');
+    expect(() => validateProxyInventory([...twoProjects, 'orphan.raw'])).toThrow('orphan');
+    const backupFiles = files('geneway-br-source-abcdef123456-postgres').filter((name) => !name.endsWith('.controller.log'));
+    expect(validateProxyInventory(backupFiles)).toEqual(['geneway-br-source-abcdef123456-postgres.policy.json']);
+    expect(() => validateProxyInventory([...backupFiles, 'geneway-br-source-abcdef123456-postgres.controller.log'])).toThrow('orphan');
+  });
+
+  it('pins every proxy Docker lookup to the local Unix daemon and an empty bounded client home', () => {
+    const invocation = controlledDockerInvocation(['inspect', 'a'.repeat(64)], '/tmp/geneway-runs/proxy-contract/docker-client');
+    expect(invocation.command).toBe('docker');
+    expect(invocation.args).toEqual(['--host', 'unix:///var/run/docker.sock', 'inspect', 'a'.repeat(64)]);
+    expect(invocation.options).toMatchObject({ timeout: 2_000, killSignal: 'SIGKILL' });
+    expect(invocation.options.env).toMatchObject({
+      HOME: '/tmp/geneway-runs/proxy-contract/docker-client',
+      DOCKER_CONFIG: '/tmp/geneway-runs/proxy-contract/docker-client',
+    });
+    for (const ambient of ['DOCKER_CONTEXT', 'DOCKER_HOST', 'DOCKER_TLS_VERIFY', 'SSH_AUTH_SOCK']) {
+      expect(invocation.options.env).not.toHaveProperty(ambient);
+    }
   });
 
   it('fails Docker structural isolation on non-internal networks, forbidden modes, or missing receipts', () => {
@@ -346,18 +627,29 @@ describe('Gate 0.2B joint aggregate script contract', () => {
         requested: true, signal: 'SIGTERM', requestSucceeded: true, exit: { status: 137, signal: null },
       },
     }).passed).toBe(false);
+    expect(dockerStructuralIsolationReceipt({ ...cleanState, monitorExit: { status: 0, signal: null } }, [], [],
+      { expectedWithStorageInvocations: 1 }).passed).toBe(false);
   });
 
   it('requires exact structured backup child run membership', () => {
+    const runs = ['success', 'missing-object', 'manifest-mismatch'].map((name, index) => {
+      const runId = `backup-restore-suite-${name}-123-${String(index)}`;
+      const projectSuffix = createHash('sha256').update(runId).digest('hex').slice(0, 12);
+      return { schemaVersion: 'geneway-backup-restore-summary/1', case: name, runId,
+        projectSuffix, sourceProject: `geneway-br-source-${projectSuffix}`,
+        targetProject: `geneway-br-target-${projectSuffix}`, exitCode: name === 'success' ? 0 : 1,
+        outcome: name === 'success' ? 'passed' : 'expected-integrity-failure',
+        artifactRoot: `/tmp/geneway-runs/${runId}/backup-restore` };
+    });
     const log = `${JSON.stringify({ outcome: 'passed', results: [
-      { runId: 'backup-success' }, { runId: 'backup-missing' }, { runId: 'backup-mismatch' },
+      ...runs,
     ] })}\n`;
-    expect(extractStructuredBackupRunIds(log, true)).toEqual(['backup-mismatch', 'backup-missing', 'backup-success']);
+    expect(extractStructuredBackupRunIds(log, true)).toEqual(runs.map((item) => item.runId));
     expect(() => extractStructuredBackupRunIds('{"outcome":"passed","results":[]}\n', true)).toThrow('missing or duplicated');
     expect(() => extractStructuredBackupRunIds(`${log}${log}`, true)).toThrow('missing or duplicated');
     expect(() => extractStructuredBackupRunIds(JSON.stringify({ outcome: 'passed', results: [
-      { runId: '../escape' }, { runId: 'safe-1' }, { runId: 'safe-2' },
-    ] }), true)).toThrow('unsafe');
+      runs[1], runs[0], runs[2],
+    ] }), true)).toThrow('invalid for success');
     expect(backupArtifactRoots([{ runtimeBoundary: { structuralIsolation: {
       expectedBackupRunIds: ['backup-success', 'backup-missing', 'backup-mismatch'],
     } } }])).toEqual([
@@ -411,17 +703,21 @@ describe('Gate 0.2B joint aggregate script contract', () => {
   });
 
   it('independently parses raw backup guard identities, reloads, attempts, and violations', () => {
-    const id = 'abcdef1234567890';
+    const hostname = 'abcdef123456';
     const raw = [
       'START pid=1 startTicks=42 hostname=abcdef123456',
       'START pid=1 startTicks=42 hostname=abcdef123456',
       'ALLOW call=connect family=2 address=127.0.0.1 port=3100',
     ].join('\n');
-    expect(parseBackupRawReceipt(raw, id, 'online', 'open', ['3100'])).toMatchObject({
+    expect(parseBackupRawReceipt(raw, hostname, 'online', 'open', ['3100'])).toMatchObject({
       passed: true, reloadCount: 1, unknownLines: [], unexpected: [],
     });
-    expect(parseBackupRawReceipt(`${raw}\nDENY call=connect family=2 address=127.0.0.2 port=3100`, id, 'online', 'open', ['3100']).passed).toBe(false);
-    expect(parseBackupRawReceipt(`${raw}\nUNKNOWN payload`, id, 'online', 'open', ['3100']).passed).toBe(false);
+    expect(parseBackupRawReceipt(`${raw}\nALLOW call=connect family=AF_UNIX path=/tmp/tsx-1000/18.pipe`,
+      hostname, 'online', 'open', ['3100'], ['tsx-pipe:/tmp/tsx-1000']).passed).toBe(true);
+    expect(parseBackupRawReceipt(`${raw}\nALLOW call=connect family=AF_UNIX path=/var/run/docker.sock`,
+      hostname, 'online', 'open', ['3100'], ['tsx-pipe:/tmp/tsx-1000']).passed).toBe(false);
+    expect(parseBackupRawReceipt(`${raw}\nDENY call=connect family=2 address=127.0.0.2 port=3100`, hostname, 'online', 'open', ['3100']).passed).toBe(false);
+    expect(parseBackupRawReceipt(`${raw}\nUNKNOWN payload`, hostname, 'online', 'open', ['3100']).passed).toBe(false);
   });
 
   it('rejects unbounded or scalar artifact roots', () => {

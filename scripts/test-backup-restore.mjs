@@ -29,7 +29,8 @@ async function run(testCase) {
   const exitCode = await new Promise((resolveExit, reject) => {
     const child = spawn(process.execPath, [runner, testCase.name], {
       cwd: resolve(scriptDirectory, '..'),
-      env: { ...process.env, GENEWAY_RUN_ID: runId },
+      env: { ...process.env, GENEWAY_RUN_ID: runId,
+        GENEWAY_GATE02B_PROXY_RUN_ROOT: `/tmp/geneway-runs/${runId}-proxies` },
       stdio: 'inherit',
     });
     child.once('error', reject);
@@ -41,7 +42,11 @@ async function run(testCase) {
   const root = join('/tmp/geneway-runs', runId, 'backup-restore');
   const projectSuffix = createHash('sha256').update(runId).digest('hex').slice(0, 12);
   const summary = JSON.parse(await readFile(join(root, 'summary.json'), 'utf8'));
-  if (summary.case !== testCase.name || summary.outcome !== testCase.expectedOutcome
+  if (summary.schemaVersion !== 'geneway-backup-restore-summary/1' || summary.runId !== runId
+    || summary.artifactRoot !== root || summary.projectSuffix !== projectSuffix
+    || summary.sourceProject !== `geneway-br-source-${projectSuffix}`
+    || summary.targetProject !== `geneway-br-target-${projectSuffix}`
+    || summary.case !== testCase.name || summary.outcome !== testCase.expectedOutcome
     || summary.exitCode !== exitCode || summary.sourceDestroyedBeforeTargetRestore !== true
     || summary.targetDestroyedAfterVerification !== true) {
     throw new Error(`${testCase.name} summary does not prove the expected destructive rehearsal: ${JSON.stringify(summary)}`);
@@ -77,6 +82,16 @@ async function run(testCase) {
       || receipt.controlPlaneObservedOnlineByCoordinator !== true
       || receipt.directRouteSucceeded !== false)) {
     throw new Error(`${testCase.name} lacks source/target proof that backup cannot reach an online Control Plane`);
+  }
+  if (process.env.GENEWAY_GATE02B_EGRESS_GUARD === 'required') {
+    const proxyRoot = join('/tmp/geneway-runs', `${runId}-proxies`, 'loopback-proxies');
+    const proxyNames = (await readdir(proxyRoot)).filter((name) => name.endsWith('.policy.json'));
+    const summaries = await Promise.all(proxyNames.map(async (name) =>
+      JSON.parse(await readFile(join(proxyRoot, name.replace(/\.policy\.json$/u, '.json')), 'utf8'))));
+    if (proxyNames.length !== 4 || summaries.some((receipt) => receipt.passed !== true
+      || receipt.listen?.host !== '127.0.0.1' || receipt.target?.networkInternal !== true)) {
+      throw new Error(`${testCase.name} lacks four clean source-bound loopback proxy receipts`);
+    }
   }
   for (const path of [join('/tmp/gw-br-secrets', projectSuffix), join('/tmp/gw-br-runtime', projectSuffix)]) {
     try {
@@ -122,7 +137,10 @@ async function run(testCase) {
       throw new Error('manifest-mismatch did not prove both database and object hash divergence');
     }
   }
-  return { case: testCase.name, runId, exitCode, outcome: summary.outcome, artifactRoot: root };
+  return { schemaVersion: summary.schemaVersion, case: summary.case, runId: summary.runId,
+    artifactRoot: summary.artifactRoot, projectSuffix: summary.projectSuffix,
+    sourceProject: summary.sourceProject, targetProject: summary.targetProject,
+    exitCode: summary.exitCode, outcome: summary.outcome };
 }
 
 const results = [];

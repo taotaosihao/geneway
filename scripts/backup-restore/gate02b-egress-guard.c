@@ -17,6 +17,7 @@
 
 static int receipt_fd = -1;
 static __thread int inside_guard = 0;
+static __thread int authorized_connection = 0;
 
 static void write_receipt(const char *format, ...) {
   if (receipt_fd < 0 || inside_guard) return;
@@ -72,11 +73,53 @@ static int allowed_port(unsigned int port) {
   return strstr(wrapped, expected) != NULL;
 }
 
+static int parse_canonical_decimal(const char *text, unsigned long long maximum, unsigned long long *value) {
+  if (text == NULL || text[0] < '1' || text[0] > '9') return 0;
+  unsigned long long parsed = 0;
+  for (const unsigned char *cursor = (const unsigned char *) text; *cursor != '\0'; cursor += 1) {
+    if (*cursor < '0' || *cursor > '9') return 0;
+    unsigned int digit = (unsigned int) (*cursor - '0');
+    if (parsed > (maximum - digit) / 10ULL) return 0;
+    parsed = parsed * 10ULL + digit;
+  }
+  *value = parsed;
+  return 1;
+}
+
+static int allowed_unix_path(const char *allowed, const char *path, size_t path_length) {
+  if (allowed == NULL) return 0;
+  const char prefix[] = "tsx-pipe:";
+  if (strncmp(allowed, prefix, sizeof(prefix) - 1) != 0) {
+    return strlen(allowed) == path_length && memcmp(path, allowed, path_length) == 0;
+  }
+  const char *directory = allowed + sizeof(prefix) - 1;
+  size_t directory_length = strlen(directory);
+  if (path_length <= directory_length + 6 || memcmp(path, directory, directory_length) != 0
+    || path[directory_length] != '/') return 0;
+  size_t cursor = directory_length + 1;
+  size_t suffix = path_length - 5;
+  if (cursor >= suffix || memcmp(path + suffix, ".pipe", 5) != 0) return 0;
+  for (; cursor < suffix; cursor += 1) if (path[cursor] < '0' || path[cursor] > '9') return 0;
+  return 1;
+}
+
+static int allowed_proxy_target(const char *rendered, unsigned int port) {
+  const char *address = getenv("GENEWAY_GATE02B_EGRESS_ALLOWED_TARGET_IPV4");
+  const char *port_text = getenv("GENEWAY_GATE02B_EGRESS_ALLOWED_TARGET_PORT");
+  if (address == NULL || port_text == NULL || strcmp(address, rendered) != 0) return 0;
+  unsigned long long expected = 0;
+  return parse_canonical_decimal(port_text, 65535ULL, &expected) && expected == port;
+}
+
 static int authorize(const char *call, const struct sockaddr *address, socklen_t length) {
   if (address == NULL || length < sizeof(sa_family_t)) {
-    /* Connected sends have no destination here; their endpoint was already authorized by connect(). */
-    write_receipt("ALLOW call=%s family=CONNECTED\n", call);
-    return 1;
+    if (authorized_connection && strcmp(call, "connect") != 0) {
+      write_receipt("ALLOW call=%s family=CONNECTED\n", call);
+      return 1;
+    }
+    write_receipt("DENY call=%s family=CONNECTED\n", call);
+    errno = EPERM;
+    return 0;
   }
   if (address->sa_family == AF_UNIX) {
     const struct sockaddr_un *unix_address = (const struct sockaddr_un *) address;
@@ -85,13 +128,14 @@ static int authorize(const char *call, const struct sockaddr *address, socklen_t
     size_t path_length = length > offset ? (size_t) length - offset : 0;
     const void *terminator = path_length > 0 ? memchr(unix_address->sun_path, '\0', path_length) : NULL;
     size_t actual_length = terminator == NULL ? path_length : (size_t) ((const char *) terminator - unix_address->sun_path);
-    size_t allowed_length = allowed == NULL ? 0 : strlen(allowed);
     if (allowed != NULL && path_length > 0 && unix_address->sun_path[0] != '\0'
-      && actual_length == allowed_length && memcmp(unix_address->sun_path, allowed, allowed_length) == 0) {
+      && allowed_unix_path(allowed, unix_address->sun_path, actual_length)) {
       write_receipt("ALLOW call=%s family=AF_UNIX path=%.*s\n", call, (int) actual_length, unix_address->sun_path);
       return 1;
     }
-    write_receipt("DENY call=%s family=AF_UNIX path=invalid-or-forbidden\n", call);
+    if (path_length > 0 && unix_address->sun_path[0] != '\0') {
+      write_receipt("DENY call=%s family=AF_UNIX path=%.*s\n", call, (int) actual_length, unix_address->sun_path);
+    } else write_receipt("DENY call=%s family=AF_UNIX path=abstract-or-invalid\n", call);
     errno = EPERM;
     return 0;
   }
@@ -113,6 +157,17 @@ static int authorize(const char *call, const struct sockaddr *address, socklen_t
       loopback = bytes[12] == 127 && bytes[13] == 0 && bytes[14] == 0 && bytes[15] == 1;
     }
   }
+  if (strcmp(call, "connect") == 0 && address->sa_family == AF_INET && allowed_proxy_target(rendered, port)) {
+    const char *attempt = getenv("GENEWAY_GATE02B_EGRESS_ATTEMPT_ID");
+    unsigned long long attempt_number = 0;
+    if (parse_canonical_decimal(attempt, 9007199254740991ULL, &attempt_number)) {
+      write_receipt("ALLOW attempt=%s call=connect family=2 address=%s port=%u\n", attempt, rendered, port);
+      return 1;
+    }
+    write_receipt("DENY call=connect family=2 address=%s port=%u reason=missing-attempt\n", rendered, port);
+    errno = EPERM;
+    return 0;
+  }
   if (loopback && allowed_port(port)) {
     write_receipt("ALLOW call=%s family=%d address=%s port=%u\n", call, address->sa_family, rendered, port);
     return 1;
@@ -127,7 +182,9 @@ int connect(int socket_fd, const struct sockaddr *address, socklen_t length) {
   if (real_connect == NULL) real_connect = dlsym(RTLD_NEXT, "connect");
   if (real_connect == NULL) { write_receipt("DENY call=connect reason=dlsym\n"); errno = ENOSYS; return -1; }
   if (!authorize("connect", address, length)) return -1;
-  return real_connect(socket_fd, address, length);
+  int result = real_connect(socket_fd, address, length);
+  if (result == 0) authorized_connection = 1;
+  return result;
 }
 
 ssize_t sendto(int socket_fd, const void *buffer, size_t size, int flags,

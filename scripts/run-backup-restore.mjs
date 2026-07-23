@@ -15,7 +15,7 @@ import { closeSync, createWriteStream, openSync } from 'node:fs';
 import { chmod, mkdir, readFile, rm, stat, writeFile, appendFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
 import { createServer } from 'node:net';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
@@ -47,9 +47,17 @@ const credentialsRunRoot = join('/tmp/gw-br-secrets', projectSuffix);
 const runtimeRunRoot = join('/tmp/gw-br-runtime', projectSuffix);
 const roleImage = `geneway-backup-role:${sha256(Buffer.from('node-22.21.1-postgres-17-v2')).slice(0, 16)}`;
 const gate02bGuardRequired = process.env.GENEWAY_GATE02B_EGRESS_GUARD === 'required';
+const gate02bCoordinator = process.env.GENEWAY_BACKUP_RESTORE_ROLE === undefined;
 const gate02bGuardLibrary = process.env.GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY;
+const gate02bProxyRunRoot = process.env.GENEWAY_GATE02B_PROXY_RUN_ROOT ?? runRoot;
+if (gate02bGuardRequired && gate02bCoordinator
+  && (gate02bProxyRunRoot !== `/tmp/geneway-runs/${requestedRunId}-proxies`
+  || typeof gate02bGuardLibrary !== 'string' || !isAbsolute(gate02bGuardLibrary))) {
+  throw new Error('Gate 0.2B backup proxy boundary requires the exact run root and guard library');
+}
+const gate02bAllowedRoleUnix = `tsx-pipe:/tmp/tsx-${String(process.getuid?.() ?? 1000)}`;
 const bucket = 'geneway-artifacts';
-const children = new Set();
+const children = new Map();
 const activeServiceHandles = new Set();
 const storageClients = new Set();
 const roleContainers = new Set();
@@ -232,7 +240,7 @@ async function createRoleContainer({ name, role, action, networkMode, mounts, en
     }
     await mkdir(egressRoot, { recursive: true, mode: 0o700 });
   }
-  const args = ['create', '--name', name,
+  const args = ['create', '--name', name, '--hostname', name,
     '--label', `geneway.backup.run=${requestedRunId}`,
     '--label', `geneway.backup.role=${role}`,
     '--label', `geneway.backup.action=${action}`,
@@ -240,11 +248,13 @@ async function createRoleContainer({ name, role, action, networkMode, mounts, en
     '--user', `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`,
     '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pids-limit', '256',
     '--workdir', '/workspace', '--env', 'HOME=/tmp', '--env', 'TMPDIR=/tmp', '--env', 'NODE_ENV=test'];
+  if (gate02bGuardRequired) args.push('--env', 'GENEWAY_GATE02B_EGRESS_GUARD=required');
   if (gate02bGuardRequired && networkMode === 'host') {
     args.push('--label', `geneway.gate02b.egress_receipt=${summaryPath}`,
       '--env', `LD_PRELOAD=${gate02bGuardLibrary}`,
       '--env', `GENEWAY_GATE02B_EGRESS_RECEIPT=${rawReceipt}`,
-      '--env', `GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS=${egressPorts.join(',')}`);
+      '--env', `GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS=${egressPorts.join(',')}`,
+      '--env', `GENEWAY_GATE02B_EGRESS_ALLOWED_UNIX=${gate02bAllowedRoleUnix}`);
   }
   if ((role === 'provision' && !gate02bGuardRequired) || role === 'provision-docker') {
     args.push('--group-add', String((await stat('/var/run/docker.sock')).gid));
@@ -255,6 +265,7 @@ async function createRoleContainer({ name, role, action, networkMode, mounts, en
   }
   if (gate02bGuardRequired && networkMode === 'host') {
     args.push('--mount', `type=bind,src=${gate02bGuardLibrary},dst=${gate02bGuardLibrary},readonly`);
+    args.push('--mount', `type=bind,src=${egressRoot},dst=${egressRoot}`);
   }
   args.push(roleImage, ...command);
   await runCommand('docker', args);
@@ -263,11 +274,12 @@ async function createRoleContainer({ name, role, action, networkMode, mounts, en
   if (gate02bGuardRequired) await writeJson(policyPath, {
     schemaVersion: 'geneway-backup-egress-boundary/1', runId: requestedRunId, containerId: inspection.Id,
     pidStartTicks: null, role, action, networkMode, allowedPorts: egressPorts,
-    allowedUnix: [], rawReceipt,
+    allowedUnix: networkMode === 'host' ? [gate02bAllowedRoleUnix] : [], rawReceipt, hostname: name,
     policyComplete: networkMode !== 'host' || egressPorts.length > 0,
   });
   if (gate02bGuardRequired && networkMode === 'host') roleEgressPolicies.set(name, {
-    rawReceipt, policyPath, summaryPath, containerId: inspection.Id, role, action, networkMode, allowedPorts: egressPorts,
+    rawReceipt, policyPath, summaryPath, containerId: inspection.Id, hostname: name,
+    allowedUnix: [gate02bAllowedRoleUnix], role, action, networkMode, allowedPorts: egressPorts,
   });
   const actualMounts = inspection.Mounts.map((mount) => ({
     source: mount.Source,
@@ -275,7 +287,7 @@ async function createRoleContainer({ name, role, action, networkMode, mounts, en
     readWrite: mount.RW,
   }));
   const allowedSources = new Set([...mounts.map((mount) => mount.source),
-    ...(gate02bGuardRequired && networkMode === 'host' ? [gate02bGuardLibrary] : [])]);
+    ...(gate02bGuardRequired && networkMode === 'host' ? [gate02bGuardLibrary, egressRoot] : [])]);
   const dockerAuthoritySources = ['/usr/bin/docker', '/usr/libexec/docker/cli-plugins/docker-compose', '/var/run/docker.sock'];
   const dockerAuthorityAllowed = (!gate02bGuardRequired && role === 'provision')
     || (gate02bGuardRequired && role === 'provision-docker');
@@ -328,12 +340,13 @@ async function removeRoleContainer(name) {
     const identitiesValid = uniqueIdentities.length >= minimumStarts
       && new Set(uniqueIdentities.map((identity) => identity.pid)).size === uniqueIdentities.length
       && startIdentities.every((identity) => identity.pid > 0 && identity.pidStartTicks !== null
-        && identity.pidStartTicks !== 'unknown' && identity.hostname === policy.containerId.slice(0, 12));
+        && identity.pidStartTicks !== 'unknown' && identity.hostname === policy.hostname);
     const receipt = {
       schemaVersion: 'geneway-backup-egress-boundary/1', runId: requestedRunId, containerId: policy.containerId,
       startIdentities: uniqueIdentities,
       reloadCount: startIdentities.length - uniqueIdentities.length,
       role: policy.role, action: policy.action, networkMode: policy.networkMode, policyComplete: identitiesValid,
+      hostname: policy.hostname, allowedUnix: policy.allowedUnix,
       allowedIpAddresses: ['127.0.0.1', '::1', '::ffff:127.0.0.1'],
       allowed: policy.allowedPorts.flatMap((port) => [
         `127.0.0.1:${String(port)}`, `[::1]:${String(port)}`, `[::ffff:127.0.0.1]:${String(port)}`,
@@ -402,7 +415,7 @@ async function proveBackupCannotReachOnlineControlPlane(stack) {
   provenBackupNetworkBoundaries.add(stack.label);
 }
 
-async function startChild(label, command, args, env, ready) {
+async function startChild(label, command, args, env, ready, options = {}) {
   const logPath = join(rehearsalRoot, 'processes', `${label}.log`);
   await mkdir(dirname(logPath), { recursive: true });
   const log = createWriteStream(logPath, { flags: 'w', mode: 0o600 });
@@ -410,7 +423,7 @@ async function startChild(label, command, args, env, ready) {
   const child = spawn(command, args, {
     cwd: repositoryRoot,
     env,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: [options.controlPipe === true ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
   });
   const signalTree = (signal) => {
@@ -428,7 +441,7 @@ async function startChild(label, command, args, env, ready) {
   };
   child.stdout.on('data', consume);
   child.stderr.on('data', consume);
-  children.add(child);
+  children.set(child, { controlPipe: options.controlPipe === true });
   const close = new Promise((resolveClose) => child.once('close', (code, signal) => {
     children.delete(child);
     log.end();
@@ -439,6 +452,15 @@ async function startChild(label, command, args, env, ready) {
     child,
     output: () => output,
     async stop() {
+      if (options.controlPipe === true) {
+        if (child.exitCode === null && child.signalCode === null) child.stdin.end('shutdown\n');
+        await Promise.race([close, new Promise((resolveWait) => setTimeout(resolveWait, 5_000))]);
+        if (child.exitCode === null && child.signalCode === null) {
+          throw new Error(`${label} ignored its private shutdown pipe`);
+        }
+        await record('process.stopped', { label, pid: child.pid });
+        return;
+      }
       signalTree('SIGTERM');
       await Promise.race([close, new Promise((resolveWait) => setTimeout(resolveWait, 5_000))]);
       if (child.exitCode === null && child.signalCode === null) {
@@ -461,6 +483,13 @@ async function startChild(label, command, args, env, ready) {
   }
   await record('process.started', { label, pid: child.pid });
   return handle;
+}
+
+function abandonUnresponsiveControlPipeChild(child) {
+  child.stdin?.destroy();
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  child.unref();
 }
 
 function isolatedRoleMounts(stack, roleFile, options = {}) {
@@ -552,6 +581,8 @@ async function createStack(label) {
   const s3Port = await pickPort();
   const storageAdapterPort = await pickPort();
   const controlPlanePort = await pickPort();
+  const composePostgresPort = gate02bGuardRequired ? await pickPort() : postgresPort;
+  const composeS3Port = gate02bGuardRequired ? await pickPort() : s3Port;
   const project = `geneway-br-${label}-${projectSuffix}`;
   const dataNetwork = `${project}_default`;
   const runtimeRoot = join(runtimeRunRoot, label);
@@ -573,6 +604,8 @@ async function createStack(label) {
     runId: requestedRunId,
     postgresPort,
     s3Port,
+    composePostgresPort,
+    composeS3Port,
     storageAdapterPort,
     controlPlanePort,
     socketPath,
@@ -593,17 +626,44 @@ async function compose(stack, args, options = {}) {
   composeArgs.push('-f', composeFile, '--project-name', stack.project, ...args);
   return await runCommand('docker', composeArgs, {
     ...options,
-    env: process.env,
+    env: gate02bGuardRequired ? { ...process.env,
+      GENEWAY_BACKUP_POSTGRES_PORT: String(stack.composePostgresPort),
+      GENEWAY_BACKUP_S3_PORT: String(stack.composeS3Port),
+    } : process.env,
   });
+}
+
+async function startStackProxy(stack, service, network, listenPort, targetPort) {
+  return await startChild(`loopback-proxy-${stack.label}-${service}`, process.execPath, [
+    join(scriptDirectory, 'gate02b-loopback-proxy.mjs'), '--control', gate02bProxyRunRoot, service, stack.project,
+    service, `${stack.project}_${network}`, String(listenPort), String(targetPort), gate02bGuardLibrary,
+  ], isolatedEnvironment(), async (handle) => handle.output().includes('"ready":true'), { controlPipe: true });
 }
 
 async function startStack(stack) {
   const pullPolicy = gate02bGuardRequired ? ['--pull', 'never'] : [];
   await compose(stack, ['up', '-d', '--wait', ...pullPolicy, 'postgres', 'versitygw']);
+  if (gate02bGuardRequired) {
+    stack.proxyHandles = [];
+    try {
+      stack.proxyHandles.push(await startStackProxy(stack, 'postgres', 'default', stack.postgresPort, 5432));
+      stack.proxyHandles.push(await startStackProxy(stack, 'versitygw', 'default', stack.s3Port, 7070));
+    } catch (cause) {
+      for (const handle of stack.proxyHandles) await handle.stop();
+      stack.proxyHandles = [];
+      throw cause;
+    }
+  }
   await record('stack.started', { label: stack.label, project: stack.project });
 }
 
+async function stopStackProxies(stack) {
+  for (const handle of stack.proxyHandles ?? []) await handle.stop();
+  stack.proxyHandles = [];
+}
+
 async function destroyStack(stack, receiptName) {
+  await stopStackProxies(stack);
   await compose(stack, ['down', '--volumes', '--remove-orphans']);
   const queries = await Promise.all([
     runCommand('docker', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${stack.project}`]),
@@ -1819,11 +1879,21 @@ if (process.env.GENEWAY_BACKUP_RESTORE_ROLE !== undefined) {
     for (const handle of [...activeServiceHandles]) {
       try { await handle.stop(); } catch (error) { cleanupProblems.push(`service:${handle.label}:${safeError(error)}`); }
     }
+    for (const stack of [sourceStack, targetStack]) {
+      if (stack === undefined) continue;
+      try { await stopStackProxies(stack); } catch (error) { cleanupProblems.push(`proxy:${stack.label}:${safeError(error)}`); }
+    }
     for (const name of [...roleContainers]) {
       try { await removeRoleContainer(name); } catch (error) { cleanupProblems.push(`container:${name}:${safeError(error)}`); }
     }
-    for (const child of [...children]) {
+    for (const [child, lifecycle] of [...children]) {
       if (child.exitCode !== null || child.signalCode !== null) continue;
+      if (lifecycle.controlPipe) {
+        abandonUnresponsiveControlPipeChild(child);
+        children.delete(child);
+        cleanupProblems.push(`control-pipe-process-remains:${child.pid}`);
+        continue;
+      }
       try {
         if (process.platform === 'win32') child.kill('SIGKILL');
         else process.kill(-child.pid, 'SIGKILL');
@@ -1835,7 +1905,7 @@ if (process.env.GENEWAY_BACKUP_RESTORE_ROLE !== undefined) {
     while (children.size > 0 && Date.now() < processDeadline) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 50));
     }
-    if (children.size > 0) cleanupProblems.push(`process-groups-remain:${[...children].map((child) => child.pid).join(',')}`);
+    if (children.size > 0) cleanupProblems.push(`process-groups-remain:${[...children.keys()].map((child) => child.pid).join(',')}`);
     for (const client of storageClients) client.destroy();
     if (sourceStack !== undefined && sourceDestructionReceipt === undefined) {
       try {
@@ -1884,7 +1954,12 @@ if (process.env.GENEWAY_BACKUP_RESTORE_ROLE !== undefined) {
     }
   }
   const summary = {
+    schemaVersion: 'geneway-backup-restore-summary/1',
     runId: requestedRunId,
+    artifactRoot: rehearsalRoot,
+    projectSuffix,
+    sourceProject: `geneway-br-source-${projectSuffix}`,
+    targetProject: `geneway-br-target-${projectSuffix}`,
     case: selectedCase,
     outcome,
     exitCode,
@@ -1897,7 +1972,6 @@ if (process.env.GENEWAY_BACKUP_RESTORE_ROLE !== undefined) {
     targetIntegrityClean: integrityResult?.clean ?? null,
     integrityFindings: integrityResult?.findings ?? [],
     error: errorMessage,
-    artifactRoot: rehearsalRoot,
   };
   try { await writeJson(join(rehearsalRoot, 'summary.json'), summary); }
   catch (error) { process.stderr.write(`could not write backup/restore summary: ${safeError(error)}\n`); }

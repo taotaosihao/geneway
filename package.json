@@ -20,6 +20,8 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "dev-up": "node scripts/dev-up.mjs",
     "generate:gate-a0-schemas": "tsx scripts/generate-gate-a0-schemas.ts",
+    "gate-a0:deferred-scan": "node scripts/gate-a0-deferred-scan.mjs",
+    "gate-a0:lan": "node scripts/run-gate-a0-lan.mjs",
     "gate-a0:secret-scan": "node scripts/gate-a0-secret-scan.mjs",
     "model-gateway:conformance": "tsx services/model-gateway/src/conformance.ts",
     "test:model-gateway": "vitest run services/model-gateway/src",
@@ -33,6 +35,7 @@
     "verify:gate0.2b.1": "pnpm lint && pnpm typecheck && pnpm test:contracts && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate0.2b-success gate-0.2b-task-workflow-routes.spec.ts",
     "verify:gate-a0.1": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:model-gateway && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate-a0-live gate-a0-fast-chat.spec.ts",
     "verify:gate-a0.2": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:model-gateway && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate-a0-live gate-a0-context-cancel.spec.ts && pnpm gate-a0:secret-scan",
+    "verify:gate-a0": "node scripts/verify-gate-a0.mjs",
     "test:e2e": "node scripts/check-e2e-authenticity.mjs && node scripts/run-e2e.mjs",
     "dev:web": "pnpm --filter @geneway/web dev"
   },

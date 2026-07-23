@@ -269,13 +269,18 @@ describe('Gate A0.2 context, cancellation, failure and cursor authority', () => 
     expect(claim).not.toBeNull();
     if (claim === null) throw new Error('Expected cursor claim');
     await controlPlane.chatRepository.chatStarted(claim);
-    await controlPlane.chatRepository.chatDelta(claim, '一');
-    await controlPlane.chatRepository.chatDelta(claim, '二');
+    for (let index = 0; index < 105; index += 1) {
+      await controlPlane.chatRepository.chatDelta(claim, '序');
+    }
     await controlPlane.chatRepository.chatCompleted(claim, receipt(claim, 'completed'), invocationSecret);
     const all = await controlPlane.chatRepository.getEvents({
       tenantId: 'tenant_local', userId: 'user_local', trust: 'trusted-local',
     }, conversationId, run.modelInvocationId, 0);
-    expect(all.length).toBeGreaterThanOrEqual(4);
+    expect(all.length).toBe(107);
+    expect(all.map((event) => event.sequence)).toEqual(Array.from({ length: 107 }, (_, index) => index + 1));
+    for (let index = 1; index < all.length; index += 1) {
+      expect(all[index]?.cursor).toBeGreaterThan(all[index - 1]?.cursor ?? 0);
+    }
     const cursor = all[1]?.cursor ?? 0;
     const replay = await controlPlane.app.inject({
       method: 'GET', url: `/api/conversations/${conversationId}/chat-runs/${run.modelInvocationId}/events?cursor=${String(cursor)}`,
@@ -283,6 +288,8 @@ describe('Gate A0.2 context, cancellation, failure and cursor authority', () => 
     });
     expect(replay.statusCode, replay.body).toBe(200);
     expect(replay.body).not.toContain(`id: ${String(cursor)}\n`);
+    const replayCursors = [...replay.body.matchAll(/^id: (\d+)$/gmu)].map((match) => Number(match[1]));
+    expect(replayCursors).toEqual(all.filter((candidate) => candidate.cursor > cursor).map((event) => event.cursor));
     for (const event of all.filter((candidate) => candidate.cursor > cursor)) {
       expect(replay.body).toContain(`id: ${String(event.cursor)}\nevent: ${event.eventType}\n`);
     }

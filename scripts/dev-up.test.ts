@@ -3,6 +3,32 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { parseLanHosts, readConfiguration } from './dev-up.mjs';
 
+type Environment = Readonly<Record<string, string | undefined>>;
+type InternalConfiguration = ReturnType<typeof readConfiguration> & Readonly<{
+  modelGatewayBindHost: '127.0.0.1';
+  modelGatewayPort: number;
+  releaseHelperBindHost: '127.0.0.1';
+  releaseHelperPort: number;
+}>;
+type ControlPlaneStackPlan = Readonly<{ arguments: readonly string[]; releaseHealthUrl: string | null }>;
+const devUpInternals = await import('./dev-up.mjs') as unknown as Readonly<{
+  buildControlPlaneStackPlan: (input: Readonly<{
+    configuration: InternalConfiguration;
+    runId: string;
+    socketPath: string;
+    tokenFile: string;
+    gatewayServiceTokenFile: string;
+    gatewayInvocationSecretFile: string;
+    liveProvider?: Readonly<{ authFilePath: string; conformanceFilePath: string }>;
+  }>) => ControlPlaneStackPlan;
+  controlPlaneEnvironment: (environment?: Environment) => Readonly<Record<string, string | undefined>>;
+  minimalEnvironment: (environment?: Environment) => Readonly<Record<string, string>>;
+  modelGatewayProviderEnvironment: (environment?: Environment) => Readonly<Record<string, string>>;
+}>;
+const {
+  buildControlPlaneStackPlan, controlPlaneEnvironment, minimalEnvironment, modelGatewayProviderEnvironment,
+} = devUpInternals;
+
 const repositoryRoot = new URL('..', import.meta.url);
 
 function runDevUp(arguments_: readonly string[], environment: Readonly<Record<string, string>>) {
@@ -25,11 +51,13 @@ describe('dev-up command contract', () => {
     expect(manifest.scripts?.['dev-up']).toBe('node scripts/dev-up.mjs');
   });
 
-  it('builds 192.168/16 and 10/8 Web entries while keeping Control Plane on loopback', () => {
-    expect(readConfiguration({
+  it('builds exact query-free 192.168/16 and 10/8 entries while keeping internal listeners on loopback', () => {
+    const configuration = readConfiguration({
       GENEWAY_WEB_PORT: '4320',
       GENEWAY_CONTROL_PLANE_PORT: '4310',
-    }, ['192.168.10.25', '10.20.30.40'])).toEqual({
+      GENEWAY_GATE_A0_RELEASE_PORT: '4360',
+    }, ['192.168.10.25', '10.20.30.40']) as InternalConfiguration;
+    expect(configuration).toEqual({
       lanHosts: ['192.168.10.25', '10.20.30.40'],
       webBindHosts: ['192.168.10.25', '10.20.30.40'],
       webPort: 4320,
@@ -37,6 +65,8 @@ describe('dev-up command contract', () => {
       controlPlanePort: 4310,
       modelGatewayBindHost: '127.0.0.1',
       modelGatewayPort: 3150,
+      releaseHelperBindHost: '127.0.0.1',
+      releaseHelperPort: 4360,
       allowedWebOrigins: [
         'http://localhost:4320',
         'http://127.0.0.1:4320',
@@ -48,6 +78,64 @@ describe('dev-up command contract', () => {
         'http://10.20.30.40:4320/conversations/new',
       ],
     });
+    expect(configuration.webBindHosts).not.toContain('0.0.0.0');
+    expect(configuration.publicUrls.map((value) => {
+      const url = new URL(value);
+      return { pathname: url.pathname, search: url.search };
+    })).toEqual([
+      { pathname: '/conversations/new', search: '' },
+      { pathname: '/conversations/new', search: '' },
+    ]);
+  });
+
+  it('binds the disposable release helper to the same run and keeps Worker authority on UDS', () => {
+    const configuration = readConfiguration({}, ['192.168.0.104', '10.0.0.8']) as InternalConfiguration;
+    const plan = buildControlPlaneStackPlan({
+      configuration,
+      runId: 'dev-123-456',
+      socketPath: '/tmp/geneway-dev-test/worker.sock',
+      tokenFile: '/tmp/geneway-dev-test/worker.token',
+      gatewayServiceTokenFile: '/tmp/geneway-dev-test/model-gateway-service.token',
+      gatewayInvocationSecretFile: '/tmp/geneway-dev-test/model-gateway-invocation.token',
+      liveProvider: {
+        authFilePath: '/home/gewu/.codex/auth.json',
+        conformanceFilePath: '/tmp/geneway-conformance.json',
+      },
+    });
+    expect(plan.releaseHealthUrl).toBe('http://127.0.0.1:3160/health');
+    expect(plan.arguments).toContain('GENEWAY_RUN_ID=dev-123-456');
+    expect(plan.arguments).toContain('GENEWAY_GATE_A0_LIVE_VALIDATION_RUN_ID=dev-123-456');
+    expect(plan.arguments).toContain('GENEWAY_GATE_A0_RELEASE_PORT=3160');
+    expect(plan.arguments).toContain('GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE=/home/gewu/.codex/auth.json');
+    expect(plan.arguments).toContain('GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE=/tmp/geneway-conformance.json');
+    expect(plan.arguments).toContain('GENEWAY_WORKER_SOCKET_PATH=/tmp/geneway-dev-test/worker.sock');
+    const stackCommand = plan.arguments.at(-1);
+    expect(stackCommand).toContain('scripts/e2e/start-gate-a0-release.ts');
+    expect(stackCommand).toContain('env -u GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE');
+    expect(stackCommand).not.toContain('0.0.0.0');
+  });
+
+  it('projects provider credential paths only to Model Gateway and the release helper', () => {
+    const environment = {
+      PATH: '/usr/bin',
+      HOME: '/home/example',
+      GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE: '/home/gewu/.codex/auth.json',
+      GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE: '/tmp/geneway-conformance.json',
+    };
+    expect(modelGatewayProviderEnvironment(environment)).toEqual({
+      PATH: '/usr/bin',
+      HOME: '/home/example',
+      TMPDIR: '/tmp',
+      LANG: 'C.UTF-8',
+      GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE: '/home/gewu/.codex/auth.json',
+      GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE: '/tmp/geneway-conformance.json',
+    });
+    expect(minimalEnvironment(environment)).not.toHaveProperty('GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE');
+    expect(controlPlaneEnvironment(environment)).not.toHaveProperty('GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE');
+    expect(controlPlaneEnvironment(environment)).not.toHaveProperty('GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE');
+    expect(() => modelGatewayProviderEnvironment({
+      GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE: '/home/gewu/.codex/auth.json',
+    })).toThrow('must be configured together');
   });
 
   it('discovers physical and WireGuard LAN addresses while excluding virtual bridges', () => {

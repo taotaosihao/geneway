@@ -213,6 +213,7 @@ export class ChatRepository {
 
   async getConversation(principal: Principal, conversationId: string): Promise<ConversationProjection> {
     return this.withTransaction(async (client) => {
+      await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
       const conversation = await client.query<{ id: string; created_at: Date }>(`SELECT id,created_at FROM conversations
         WHERE tenant_id=$1 AND id=$2 AND user_id=$3`, [principal.tenantId, conversationId, principal.userId]);
       const row = conversation.rows[0];
@@ -269,7 +270,7 @@ export class ChatRepository {
         sequence: string; event_type: ChatRunEvent['eventType']; payload: Readonly<Record<string, unknown>>; occurred_at: Date;
       }>(`SELECT cursor::text,id,conversation_id,model_invocation_id,assistant_message_id,sequence::text,event_type,payload,occurred_at
         FROM chat_run_events WHERE tenant_id=$1 AND conversation_id=$2 AND model_invocation_id=$3 AND cursor>$4
-        ORDER BY cursor`, [principal.tenantId, conversationId, invocationId, cursor]);
+        ORDER BY chat_run_events.cursor`, [principal.tenantId, conversationId, invocationId, cursor]);
       return events.rows.map((event) => chatRunEventSchema.parse({
         schemaVersion: 'chat-run-event/1',
         eventId: event.id,

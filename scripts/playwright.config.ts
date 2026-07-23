@@ -106,7 +106,7 @@ export default defineConfig({
     },
     {
       command: `cd .. && exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${process.env.TMPDIR ?? '/tmp'}" LANG="${process.env.LANG ?? 'C.UTF-8'}" NODE_ENV=test GENEWAY_RUN_ID=${runId} GENEWAY_WEB_PORT=${String(webPort)} GENEWAY_CONTROL_PLANE_PORT=${String(controlPlanePort)} ./node_modules/.bin/tsx scripts/e2e/start-e2e-service.ts vite`,
-      url: `http://127.0.0.1:${String(webPort)}/conversations/new?capability=solution.analysis.v1`,
+      url: `http://127.0.0.1:${String(webPort)}/conversations/new`,
       timeout: 60_000,
       reuseExistingServer: false,
       stdout: 'pipe',

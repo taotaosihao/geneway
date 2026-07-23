@@ -65,6 +65,20 @@ describe('Gate 0.2A executable script contract', () => {
     ]);
   });
 
+  it('keeps the Gate A0 aggregate, actual dev-up LAN oracle, baseline regression and deferred scan executable', async () => {
+    const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as Readonly<{
+      scripts?: Readonly<Record<string, string>>;
+    }>;
+    expect(manifest.scripts?.['verify:gate-a0']).toBe('node scripts/verify-gate-a0.mjs');
+    expect(manifest.scripts?.['gate-a0:lan']).toBe('node scripts/run-gate-a0-lan.mjs');
+    expect(manifest.scripts?.['gate-a0:deferred-scan']).toBe('node scripts/gate-a0-deferred-scan.mjs');
+    const aggregate = await readFile(new URL('./verify-gate-a0.mjs', import.meta.url), 'utf8');
+    expect(aggregate).toContain("command: ['pnpm', 'test:e2e', '--', '--project=gate-a0-live']");
+    expect(aggregate).toContain("command: ['pnpm', 'gate-a0:lan']");
+    expect(aggregate).toContain("command: ['pnpm', 'verify:gate0.2b.1']");
+    expect(aggregate).toContain("command: ['pnpm', 'gate-a0:deferred-scan']");
+  });
+
   it('passes only the loopback Gateway client configuration through the E2E Worker supervisor', async () => {
     expect(modelGatewayWorkerEnvironment({
       GENEWAY_MODEL_GATEWAY_URL: 'http://127.0.0.1:3150',

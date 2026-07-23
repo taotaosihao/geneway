@@ -10,12 +10,20 @@ const HELP = `用法: pnpm dev-up
 启动一次性的 geneway 本地验收栈，并把 Web 暴露到本机可用的 192.168/16 与 10/8 网络：
   Web                  <局域网 IPv4>:3200（全部入口共用，占用时自动顺延）
   Control Plane        127.0.0.1:3100（默认，占用时自动顺延）
+  Model Gateway        127.0.0.1:3150（默认，占用时自动顺延）
   PostgreSQL / storage 随机 loopback 端口
   Worker               本机 Unix-domain socket
 
 环境变量：
   GENEWAY_WEB_PORT               覆盖 Web 端口
   GENEWAY_CONTROL_PLANE_PORT     覆盖 Control Plane 端口
+  GENEWAY_MODEL_GATEWAY_PORT     覆盖 Model Gateway 端口
+  GENEWAY_GATE_A0_RELEASE_PORT   覆盖 loopback release helper 端口
+
+同时提供已授权的 GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE 与尚未过期的
+GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE 时，会通过 loopback release helper
+为本次 disposable run 临时开放真实聊天；仅提供其中一项会安全失败，
+两项都未提供时真实聊天保持 NOT_OPEN。
 
 按 Ctrl+C 停止全部进程并删除本次临时数据库、对象存储和 Worker 凭据。
 `;
@@ -68,7 +76,14 @@ export function readConfiguration(environment, lanHosts = detectLanHosts()) {
   const webPort = parsePort(environment, 'GENEWAY_WEB_PORT', 3200);
   const controlPlanePort = parsePort(environment, 'GENEWAY_CONTROL_PLANE_PORT', 3100);
   const modelGatewayPort = parsePort(environment, 'GENEWAY_MODEL_GATEWAY_PORT', 3150);
-  if (new Set([webPort, controlPlanePort, modelGatewayPort]).size !== 3) throw new Error('Web, Control Plane, and Model Gateway ports must be different');
+  const releaseHelperPort = parsePort(environment, 'GENEWAY_GATE_A0_RELEASE_PORT', 3160);
+  if (new Set([webPort, controlPlanePort, modelGatewayPort]).size !== 3) {
+    throw new Error('Web, Control Plane, and Model Gateway ports must be different');
+  }
+  if (environment.GENEWAY_GATE_A0_RELEASE_PORT !== undefined
+    && new Set([webPort, controlPlanePort, modelGatewayPort, releaseHelperPort]).size !== 4) {
+    throw new Error('Web, Control Plane, Model Gateway, and release helper ports must be different');
+  }
   const localOrigins = [`http://localhost:${String(webPort)}`, `http://127.0.0.1:${String(webPort)}`];
   const publicOrigins = lanHosts.map((host) => `http://${host}:${String(webPort)}`);
   return {
@@ -79,25 +94,102 @@ export function readConfiguration(environment, lanHosts = detectLanHosts()) {
     controlPlanePort,
     modelGatewayBindHost: '127.0.0.1',
     modelGatewayPort,
+    releaseHelperBindHost: '127.0.0.1',
+    releaseHelperPort,
     allowedWebOrigins: [...localOrigins, ...publicOrigins],
     publicUrls: publicOrigins.map((origin) => `${origin}/conversations/new`),
   };
 }
 
-function minimalEnvironment() {
+export function minimalEnvironment(environment = process.env) {
   return {
-    PATH: process.env.PATH ?? '/usr/bin:/bin',
-    HOME: process.env.HOME ?? '/tmp',
-    TMPDIR: process.env.TMPDIR ?? '/tmp',
-    LANG: process.env.LANG ?? 'C.UTF-8',
+    PATH: environment.PATH ?? '/usr/bin:/bin',
+    HOME: environment.HOME ?? '/tmp',
+    TMPDIR: environment.TMPDIR ?? '/tmp',
+    LANG: environment.LANG ?? 'C.UTF-8',
   };
 }
 
-function controlPlaneEnvironment() {
-  return Object.fromEntries(Object.entries(process.env).filter(([name]) => ![
+export function controlPlaneEnvironment(environment = process.env) {
+  return Object.fromEntries(Object.entries(environment).filter(([name]) => ![
     'GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE',
     'GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE',
   ].includes(name)));
+}
+
+function readLiveProviderPaths(environment) {
+  const authFilePath = environment.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE;
+  const conformanceFilePath = environment.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE;
+  if ((authFilePath === undefined) !== (conformanceFilePath === undefined)) {
+    throw new Error('GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE and GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE must be configured together');
+  }
+  return authFilePath === undefined ? undefined : { authFilePath, conformanceFilePath };
+}
+
+export function modelGatewayProviderEnvironment(environment = process.env) {
+  const liveProvider = readLiveProviderPaths(environment);
+  return {
+    ...minimalEnvironment(environment),
+    ...(liveProvider === undefined ? {} : {
+      GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE: liveProvider.authFilePath,
+      GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE: liveProvider.conformanceFilePath,
+    }),
+  };
+}
+
+const CONTROL_PLANE_WITH_RELEASE_COMMAND = `set -euo pipefail
+control_plane_pid=''
+release_helper_pid=''
+stop_stack() {
+  trap - EXIT INT TERM
+  [[ -z "$release_helper_pid" ]] || kill "$release_helper_pid" 2>/dev/null || true
+  [[ -z "$control_plane_pid" ]] || kill "$control_plane_pid" 2>/dev/null || true
+  [[ -z "$release_helper_pid" ]] || wait "$release_helper_pid" 2>/dev/null || true
+  [[ -z "$control_plane_pid" ]] || wait "$control_plane_pid" 2>/dev/null || true
+}
+trap stop_stack EXIT INT TERM
+env -u GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE -u GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE -u GENEWAY_GATE_A0_RELEASE_PORT \
+  ./node_modules/.bin/tsx apps/control-plane/src/main.ts &
+control_plane_pid=$!
+./node_modules/.bin/tsx scripts/e2e/start-gate-a0-release.ts &
+release_helper_pid=$!
+wait -n "$control_plane_pid" "$release_helper_pid"`;
+
+export function buildControlPlaneStackPlan({
+  configuration,
+  runId,
+  socketPath,
+  tokenFile,
+  gatewayServiceTokenFile,
+  gatewayInvocationSecretFile,
+  liveProvider,
+}) {
+  const environmentArguments = [
+    `GENEWAY_WEB_ALLOWED_ORIGINS=${configuration.allowedWebOrigins.join(',')}`,
+    `GENEWAY_WORKER_SOCKET_PATH=${socketPath}`,
+    `GENEWAY_WORKER_TOKEN_FILE=${tokenFile}`,
+    `GENEWAY_MODEL_GATEWAY_URL=http://${configuration.modelGatewayBindHost}:${String(configuration.modelGatewayPort)}`,
+    `GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE=${gatewayServiceTokenFile}`,
+    `GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE=${gatewayInvocationSecretFile}`,
+    `GENEWAY_RUN_ID=${runId}`,
+    `GENEWAY_GATE_A0_LIVE_VALIDATION_RUN_ID=${runId}`,
+    'GENEWAY_WORKER_LEASE_MS=1000',
+  ];
+  if (liveProvider === undefined) {
+    return {
+      arguments: ['scripts/with-storage.sh', 'env', ...environmentArguments, './node_modules/.bin/tsx', 'apps/control-plane/src/main.ts'],
+      releaseHealthUrl: null,
+    };
+  }
+  environmentArguments.push(
+    `GENEWAY_GATE_A0_RELEASE_PORT=${String(configuration.releaseHelperPort)}`,
+    `GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE=${liveProvider.authFilePath}`,
+    `GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE=${liveProvider.conformanceFilePath}`,
+  );
+  return {
+    arguments: ['scripts/with-storage.sh', 'env', ...environmentArguments, 'bash', '-c', CONTROL_PLANE_WITH_RELEASE_COMMAND],
+    releaseHealthUrl: `http://${configuration.releaseHelperBindHost}:${String(configuration.releaseHelperPort)}/health`,
+  };
 }
 
 async function portIsAvailable(host, port) {
@@ -126,6 +218,15 @@ async function resolvePort(hosts, preferredPort, explicit, label) {
   if (explicit) throw new Error(`${label} port ${hosts.join(', ')}:${String(preferredPort)} is unavailable`);
   for (let port = preferredPort + 1; port <= Math.min(preferredPort + 99, 65_535); port += 1) {
     if (await portIsAvailableOnAll(hosts, port)) return port;
+  }
+  throw new Error(`No available ${label} port found from ${String(preferredPort)} to ${String(preferredPort + 99)}`);
+}
+
+async function resolveUnreservedPort(hosts, preferredPort, reservedPorts, explicit, label) {
+  if (!reservedPorts.has(preferredPort) && await portIsAvailableOnAll(hosts, preferredPort)) return preferredPort;
+  if (explicit) throw new Error(`${label} port ${hosts.join(', ')}:${String(preferredPort)} is unavailable`);
+  for (let port = preferredPort + 1; port <= Math.min(preferredPort + 99, 65_535); port += 1) {
+    if (!reservedPorts.has(port) && await portIsAvailableOnAll(hosts, port)) return port;
   }
   throw new Error(`No available ${label} port found from ${String(preferredPort)} to ${String(preferredPort + 99)}`);
 }
@@ -191,6 +292,7 @@ async function main() {
   if (arguments_.some((argument) => argument !== '--print-config')) throw new Error(`Unknown argument: ${arguments_.join(' ')}`);
 
   let configuration = readConfiguration(process.env);
+  const liveProvider = readLiveProviderPaths(process.env);
   if (arguments_.includes('--print-config')) {
     process.stdout.write(`${JSON.stringify(configuration)}\n`);
     return;
@@ -201,12 +303,24 @@ async function main() {
     resolvePort(['127.0.0.1'], configuration.modelGatewayPort, process.env.GENEWAY_MODEL_GATEWAY_PORT !== undefined, 'Model Gateway'),
     resolvePort(configuration.webBindHosts, configuration.webPort, process.env.GENEWAY_WEB_PORT !== undefined, 'Web'),
   ]);
-  configuration = readConfiguration({
-    ...process.env,
-    GENEWAY_CONTROL_PLANE_PORT: String(controlPlanePort),
-    GENEWAY_MODEL_GATEWAY_PORT: String(modelGatewayPort),
-    GENEWAY_WEB_PORT: String(webPort),
-  });
+  const releaseHelperPort = liveProvider === undefined
+    ? configuration.releaseHelperPort
+    : await resolveUnreservedPort(
+      [configuration.releaseHelperBindHost],
+      configuration.releaseHelperPort,
+      new Set([controlPlanePort, modelGatewayPort, webPort]),
+      process.env.GENEWAY_GATE_A0_RELEASE_PORT !== undefined,
+      'Gate A0 release helper',
+    );
+  configuration = {
+    ...readConfiguration({
+      ...process.env,
+      GENEWAY_CONTROL_PLANE_PORT: String(controlPlanePort),
+      GENEWAY_MODEL_GATEWAY_PORT: String(modelGatewayPort),
+      GENEWAY_WEB_PORT: String(webPort),
+    }),
+    releaseHelperPort,
+  };
 
   const runId = `dev-${String(Date.now())}-${String(process.pid)}`;
   const authorityDirectory = mkdtempSync('/tmp/geneway-dev-');
@@ -274,18 +388,12 @@ async function main() {
   try {
     process.stdout.write('启动 loopback Model Gateway…\n');
     modelGateway = startProcess('./node_modules/.bin/tsx', ['services/model-gateway/src/main.ts'], {
-      ...minimalEnvironment(),
+      ...modelGatewayProviderEnvironment(process.env),
       NODE_ENV: 'development',
       GENEWAY_MODEL_GATEWAY_PORT: String(configuration.modelGatewayPort),
       GENEWAY_CONTROL_PLANE_URL: `http://127.0.0.1:${String(configuration.controlPlanePort)}`,
       GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: gatewayServiceTokenFile,
       GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE: gatewayInvocationSecretFile,
-      ...(process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE === undefined ? {} : {
-        GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE: process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE,
-      }),
-      ...(process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE === undefined ? {} : {
-        GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE: process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE,
-      }),
     });
     watch('Model Gateway', modelGateway);
     if (await waitForLifecycle(waitFor(
@@ -293,20 +401,17 @@ async function main() {
       'Model Gateway', 30_000, modelGateway,
     )) === 'shutdown') return;
 
+    const controlPlaneStack = buildControlPlaneStackPlan({
+      configuration,
+      runId,
+      socketPath,
+      tokenFile,
+      gatewayServiceTokenFile,
+      gatewayInvocationSecretFile,
+      liveProvider,
+    });
     process.stdout.write(`启动 Control Plane 与临时基础设施（run ${runId}）…\n`);
-    controlPlane = startProcess('bash', [
-      'scripts/with-storage.sh',
-      'env',
-      `GENEWAY_WEB_ALLOWED_ORIGINS=${configuration.allowedWebOrigins.join(',')}`,
-      `GENEWAY_WORKER_SOCKET_PATH=${socketPath}`,
-      `GENEWAY_WORKER_TOKEN_FILE=${tokenFile}`,
-      `GENEWAY_MODEL_GATEWAY_URL=http://127.0.0.1:${String(configuration.modelGatewayPort)}`,
-      `GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE=${gatewayServiceTokenFile}`,
-      `GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE=${gatewayInvocationSecretFile}`,
-      'GENEWAY_WORKER_LEASE_MS=1000',
-      './node_modules/.bin/tsx',
-      'apps/control-plane/src/main.ts',
-    ], {
+    controlPlane = startProcess('bash', controlPlaneStack.arguments, {
       ...controlPlaneEnvironment(),
       GENEWAY_STORAGE_TARGET_ROLE: 'control-plane',
       GENEWAY_START_STORAGE_RECONCILER: '1',
@@ -322,9 +427,19 @@ async function main() {
       controlPlane,
     )) === 'shutdown') return;
 
+    if (controlPlaneStack.releaseHealthUrl !== null) {
+      process.stdout.write('等待本次 disposable chat release 进入 internal…\n');
+      if (await waitForLifecycle(waitFor(async () => {
+        const response = await fetch(controlPlaneStack.releaseHealthUrl);
+        if (!response.ok) return false;
+        const body = await response.json();
+        return body.ready === true && body.state === 'internal';
+      }, 'Gate A0 release helper', 60_000, controlPlane)) === 'shutdown') return;
+    }
+
     process.stdout.write('启动独立 Worker…\n');
     worker = startProcess('./node_modules/.bin/tsx', ['apps/worker/src/main.ts'], {
-      ...minimalEnvironment(),
+      ...minimalEnvironment(process.env),
       NODE_ENV: 'test',
       GENEWAY_RUN_ID: runId,
       GENEWAY_WORKER_SOCKET_PATH: socketPath,
@@ -332,7 +447,7 @@ async function main() {
       GENEWAY_WORKER_INSTANCE_ID: workerInstanceId,
       GENEWAY_WORKER_CONSUMER: 'gate0.2a-worker',
       GENEWAY_WORKER_DEPLOYMENT: 'gate0.2a-local',
-      GENEWAY_MODEL_GATEWAY_URL: `http://127.0.0.1:${String(configuration.modelGatewayPort)}`,
+      GENEWAY_MODEL_GATEWAY_URL: `http://${configuration.modelGatewayBindHost}:${String(configuration.modelGatewayPort)}`,
       GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: gatewayServiceTokenFile,
     });
     watch('Worker', worker);
@@ -344,7 +459,7 @@ async function main() {
 
     process.stdout.write(`启动 ${String(configuration.webBindHosts.length)} 个局域网 Web 入口…\n`);
     webs = configuration.webBindHosts.map((host) => startProcess('./node_modules/.bin/vite', [], {
-      ...minimalEnvironment(),
+      ...minimalEnvironment(process.env),
       NODE_ENV: 'development',
       GENEWAY_RUN_ID: runId,
       GENEWAY_WEB_HOST: host,

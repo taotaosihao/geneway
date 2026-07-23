@@ -41,7 +41,11 @@ export type Conversation = ConversationProjection;
 export type Workflow = WorkflowDetailProjection;
 export type Approval = ApprovalProjection;
 
-const key = (prefix: string): string => `${prefix}-${crypto.randomUUID()}`;
+const key = (prefix: string): string => {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const nonce = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+  return `${prefix}-${nonce}`;
+};
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);

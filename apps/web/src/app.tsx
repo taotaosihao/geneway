@@ -48,10 +48,36 @@ const convertConversationMessage = (message: Conversation['messages'][number]): 
 
 export function ConversationExperience({ conversationId: explicitConversationId, forceOpen = false }: Readonly<{ conversationId?: string; forceOpen?: boolean }>) {
   const selectedCapability = new URLSearchParams(window.location.search).get('capability');
-  if (selectedCapability !== 'solution.analysis.v1' && !forceOpen) {
-    return <FastChatExperience {...(explicitConversationId === undefined ? {} : { conversationId: explicitConversationId })} />;
+  if (selectedCapability === 'solution.analysis.v1' || forceOpen) {
+    return <AnalysisConversationExperience {...(explicitConversationId === undefined ? {} : { conversationId: explicitConversationId })} />;
   }
-  const capabilityOpen = selectedCapability === 'solution.analysis.v1' || forceOpen;
+  if (explicitConversationId === undefined) return <FastChatExperience />;
+  return <ExistingConversationExperience conversationId={explicitConversationId} />;
+}
+
+function ExistingConversationExperience({ conversationId }: Readonly<{ conversationId: string }>) {
+  const [hasBusinessTask, setHasBusinessTask] = useState<boolean>();
+  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    let active = true;
+    void api.getConversation(conversationId).then((snapshot) => {
+      if (active) setHasBusinessTask(snapshot.latestTaskId !== null);
+    }).catch((cause: unknown) => {
+      if (active) setError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => { active = false; };
+  }, [conversationId]);
+
+  if (error !== undefined) return <main className="not-open"><h1>会话加载失败</h1><p>{error}</p></main>;
+  if (hasBusinessTask === undefined) return <main className="not-open"><p>正在加载会话…</p></main>;
+  return hasBusinessTask
+    ? <AnalysisConversationExperience conversationId={conversationId} />
+    : <FastChatExperience conversationId={conversationId} />;
+}
+
+function AnalysisConversationExperience({ conversationId: explicitConversationId }: Readonly<{ conversationId?: string }>) {
+  const capabilityOpen = true;
   const [route, setRoute] = useState('auto');
   const [conversation, setConversation] = useState<Conversation>();
   const [task, setTask] = useState<TaskSnapshot>();

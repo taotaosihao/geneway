@@ -22,6 +22,7 @@ describe('E2E report gate', () => {
     ).expectedCount).toBe(13);
     expect(validateE2eReport(reportFor('gate0.2b-success'), ['--project=gate0.2b-success']).expectedCount).toBe(1);
     expect(validateE2eReport(reportFor('gate-a0-live'), ['--project=gate-a0-live']).expectedCount).toBe(2);
+    expect(validateE2eReport(reportFor('gate-a0-lan'), ['--project=gate-a0-lan']).expectedCount).toBe(1);
   });
 
   it('rejects a skipped test even when Playwright would exit zero', () => {

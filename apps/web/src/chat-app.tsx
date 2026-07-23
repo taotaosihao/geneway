@@ -25,12 +25,15 @@ export function FastChatExperience({ conversationId: explicitConversationId }: R
   const [canceling, setCanceling] = useState(false);
   const [error, setError] = useState<string>();
   const mounted = useRef(true);
+  const initialConversation = useRef<Promise<Conversation> | undefined>(undefined);
 
   const load = useCallback(async (): Promise<Conversation> => {
     if (explicitConversationId !== undefined) return api.getConversation(explicitConversationId);
-    const created = await api.createConversation();
-    window.history.replaceState({}, '', `/conversations/${created.id}`);
-    return api.getConversation(created.id);
+    initialConversation.current ??= api.createConversation().then(async (created) => {
+      window.history.replaceState({}, '', `/conversations/${created.id}`);
+      return api.getConversation(created.id);
+    });
+    return initialConversation.current;
   }, [explicitConversationId]);
 
   const follow = useCallback(async (conversationId: string, invocation: ChatRunProjection) => {

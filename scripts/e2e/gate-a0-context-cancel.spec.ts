@@ -95,25 +95,20 @@ test('真实 served Fast Chat 追问上下文并用停止生成完成 cancel fen
     ]);
 
     const failedBrowserRequests: string[] = [];
+    const successfulBrowserEventResponses: string[] = [];
     page.on('requestfailed', (failedRequest) => {
       if (failedRequest.failure()?.errorText.includes('INTERNET_DISCONNECTED') === true) {
         failedBrowserRequests.push(failedRequest.url());
       }
     });
+    page.on('response', (response) => {
+      if (response.status() === 200 && response.request().method() === 'GET'
+        && response.url().includes('/chat-runs/') && response.url().includes('/events?cursor=')) {
+        successfulBrowserEventResponses.push(response.url());
+      }
+    });
     const followupInvocationId = await send('刚才要求你记住的唯一短标记是什么？请只回复该标记。', firstInvocationId);
-    try {
-      await page.context().setOffline(true);
-      await expect.poll(() => failedBrowserRequests.filter((url) => url.includes(
-        `/chat-runs/${followupInvocationId}/events`,
-      )).length, { timeout: 5_000, intervals: [25, 50, 100] }).toBeGreaterThan(0);
-    } finally {
-      await page.context().setOffline(false);
-    }
     const followupSnapshot = await waitForStatus(followupInvocationId, 'completed');
-    const injectedReconnectFailures = failedBrowserRequests.filter((url) => url.includes(
-      `/chat-runs/${followupInvocationId}/events`,
-    )).length;
-    expect(injectedReconnectFailures).toBeGreaterThan(0);
     const followupInvocation = followupSnapshot.latestModelInvocation as { assistantMessageId?: string };
     const followupMessages = followupSnapshot.messages as readonly { id: string; author: string; body: string }[];
     const followupAnswer = followupMessages.find((message) => message.id === followupInvocation.assistantMessageId);
@@ -137,6 +132,49 @@ test('真实 served Fast Chat 追问上下文并用停止生成完成 cancel fen
       '从下一字符开始，连续输出汉字“巡”直到达到输出上限。不要解释、不要换行、不要省略、不要提前停止。',
       followupInvocationId,
     );
+    let longAssistantMessageId: string | undefined;
+    await expect.poll(async () => {
+      const response = await request.get(`/api/conversations/${conversationId}`);
+      const snapshot = await response.json() as {
+        latestModelInvocation?: { id?: string; assistantMessageId?: string } | null;
+      };
+      if (snapshot.latestModelInvocation?.id === longInvocationId) {
+        longAssistantMessageId = snapshot.latestModelInvocation.assistantMessageId;
+      }
+      return longAssistantMessageId;
+    }, { timeout: 10_000, intervals: [10, 20, 40] }).toMatch(/^message_/u);
+    const longAnswer = page.locator(`[data-message-id="${longAssistantMessageId ?? ''}"]`);
+    await expect(longAnswer).toBeVisible();
+    const invocationCountBeforeReconnect = await pool.query<{ count: number }>(`SELECT count(*)::int count FROM model_invocations
+      WHERE tenant_id='tenant_local' AND conversation_id=$1`, [conversationId]);
+    let browserTextAtDisconnect = '';
+    let successfulResponsesBeforeReconnect = 0;
+    try {
+      await page.context().setOffline(true);
+      await expect.poll(() => failedBrowserRequests.filter((url) => url.includes(
+        `/chat-runs/${longInvocationId}/events`,
+      )).length, { timeout: 10_000, intervals: [25, 50, 100] }).toBeGreaterThan(0);
+      browserTextAtDisconnect = await longAnswer.textContent() ?? '';
+      successfulResponsesBeforeReconnect = successfulBrowserEventResponses.filter((url) => url.includes(
+        `/chat-runs/${longInvocationId}/events`,
+      )).length;
+    } finally {
+      await page.context().setOffline(false);
+    }
+    const injectedReconnectFailures = failedBrowserRequests.filter((url) => url.includes(
+      `/chat-runs/${longInvocationId}/events`,
+    )).length;
+    expect(injectedReconnectFailures).toBeGreaterThan(0);
+    await expect.poll(() => successfulBrowserEventResponses.filter((url) => url.includes(
+      `/chat-runs/${longInvocationId}/events`,
+    )).length, { timeout: 15_000, intervals: [25, 50, 100] }).toBeGreaterThan(successfulResponsesBeforeReconnect);
+    await expect.poll(async () => await longAnswer.textContent() ?? '', {
+      timeout: 15_000, intervals: [25, 50, 100],
+    }).not.toBe(browserTextAtDisconnect);
+    await expect(longAnswer.locator('p')).not.toBeEmpty();
+    const invocationCountAfterReconnect = await pool.query<{ count: number }>(`SELECT count(*)::int count FROM model_invocations
+      WHERE tenant_id='tenant_local' AND conversation_id=$1`, [conversationId]);
+    expect(invocationCountAfterReconnect.rows).toEqual(invocationCountBeforeReconnect.rows);
     await expect.poll(async () => {
       const checkpoint = await pool.query<{ body_length: number }>(`SELECT length(message.body)::int body_length
         FROM model_invocations invocation

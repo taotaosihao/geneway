@@ -1,7 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test } from '@playwright/test';
 import pg from 'pg';
-import { isVisiblePersistedStreamingCheckpoint } from './gate-a0-chat-observability.js';
 
 const { Pool } = pg;
 const databaseUrl = process.env.GENEWAY_E2E_DATABASE_URL;
@@ -23,6 +22,21 @@ test('真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gate
   const chat = page.getByTestId('geneway-fast-chat');
   await expect(chat).toBeVisible();
   await expect(page.getByTestId('welcome-empty')).toBeVisible();
+  await page.evaluate(() => {
+    const state = { checkpoint: '', messageId: '' };
+    Object.defineProperty(window, '__genewayStreamingOracle', { value: state, configurable: true });
+    const capture = (): void => {
+      const paragraph = document.querySelector('[data-author="xiaowei"][data-message-status="streaming"] p');
+      const text = paragraph?.textContent ?? '';
+      if (text.length > state.checkpoint.length) {
+        state.checkpoint = text;
+        state.messageId = paragraph?.closest('[data-message-id]')?.getAttribute('data-message-id') ?? '';
+      }
+    };
+    new MutationObserver(capture).observe(document.body, {
+      attributes: true, childList: true, characterData: true, subtree: true,
+    });
+  });
   await page.getByLabel('给小纬发消息').fill('你好，请介绍你能做什么');
   await page.getByRole('button', { name: '发送' }).click();
 
@@ -32,27 +46,16 @@ test('真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gate
   expect(conversationId).toMatch(/^conversation_/u);
   expect(modelInvocationId).toMatch(/^model_invocation_/u);
   if (conversationId === null || modelInvocationId === null) throw new Error('Fast Chat did not expose its authority identifiers');
+  expect(new URL(page.url()).pathname).toBe(`/conversations/${conversationId}`);
 
-  const assistantArticle = page.locator('[data-author="xiaowei"][data-message-status="streaming"]');
-  let visiblePersistedCheckpoint = '';
-  await expect.poll(async () => {
-    const response = await request.get(`/api/conversations/${conversationId}`);
-    const snapshot = await response.json() as {
-      latestModelInvocation?: { status?: string } | null;
-      messages?: readonly { author?: string; body?: string; status?: string }[];
-    };
-    const persistedAssistant = snapshot.messages?.find((message) => message.author === 'xiaowei');
-    const browserText = await assistantArticle.locator('p').textContent().catch(() => null);
-    const checkpointMatches = isVisiblePersistedStreamingCheckpoint({
-      invocationStatus: snapshot.latestModelInvocation?.status,
-      persistedStatus: persistedAssistant?.status,
-      persistedBody: persistedAssistant?.body,
-      browserText,
-    });
-    if (checkpointMatches) visiblePersistedCheckpoint = persistedAssistant?.body ?? '';
-    return checkpointMatches;
-  }, { timeout: 90_000, intervals: [50, 100, 150] }).toBe(true);
-  expect(visiblePersistedCheckpoint.length).toBeGreaterThan(0);
+  await expect.poll(() => page.evaluate(() => (
+    window as typeof window & { __genewayStreamingOracle?: { checkpoint?: string } }
+  ).__genewayStreamingOracle?.checkpoint ?? ''), { timeout: 90_000, intervals: [25, 50, 100] }).not.toBe('');
+  const visiblePersistedCheckpoint = await page.evaluate(() => (
+    window as typeof window & { __genewayStreamingOracle?: { checkpoint?: string; messageId?: string } }
+  ).__genewayStreamingOracle ?? { checkpoint: '', messageId: '' });
+  expect(visiblePersistedCheckpoint.checkpoint?.length ?? 0).toBeGreaterThan(0);
+  expect(visiblePersistedCheckpoint.messageId).toMatch(/^message_/u);
 
   await expect.poll(async () => {
     const response = await request.get(`/api/conversations/${conversationId}`);
@@ -75,8 +78,10 @@ test('真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gate
   expect(userMessage).toMatchObject({ body: '你好，请介绍你能做什么', status: 'completed' });
   expect(assistantMessage?.status).toBe('completed');
   expect(assistantMessage?.body.length).toBeGreaterThan(0);
-  expect(assistantMessage?.body.startsWith(visiblePersistedCheckpoint)).toBe(true);
-  await expect(page.locator(`[data-message-id="${assistantMessage?.id ?? ''}"]`)).toContainText(assistantMessage?.body ?? '');
+  expect(assistantMessage?.id).toBe(visiblePersistedCheckpoint.messageId);
+  const completedArticle = page.locator(`[data-message-id="${assistantMessage?.id ?? ''}"]`);
+  await expect(completedArticle).toHaveAttribute('data-message-status', 'completed');
+  await expect(completedArticle.locator('p')).not.toBeEmpty();
 
   const eventsResponse = await request.get(`/api/conversations/${conversationId}/chat-runs/${modelInvocationId}/events?cursor=0`, {
     headers: { accept: 'text/event-stream' },
@@ -86,6 +91,32 @@ test('真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gate
   expect(eventStream).toContain('event: message.delta');
   expect(eventStream).toContain('event: message.completed');
   expect(eventStream).not.toMatch(/auth|token|provider payload|execution_fence|stack/iu);
+  const sseCursors = [...eventStream.matchAll(/^id: (\d+)$/gmu)].map((match) => Number(match[1]));
+  expect(sseCursors.length).toBeGreaterThan(0);
+  for (let index = 1; index < sseCursors.length; index += 1) {
+    expect(sseCursors[index]).toBeGreaterThan(sseCursors[index - 1] ?? 0);
+  }
+  const jsonEventsResponse = await request.get(
+    `/api/conversations/${conversationId}/chat-runs/${modelInvocationId}/events?cursor=0`,
+  );
+  expect(jsonEventsResponse.ok()).toBe(true);
+  const persistedEvents = (await jsonEventsResponse.json() as { events: readonly {
+    eventType?: string; assistantMessageId?: string; checkpoint?: string; contentVersion?: number;
+  }[] }).events;
+  const persistedDeltas = persistedEvents.filter((event) => event.eventType === 'message.delta');
+  expect(persistedDeltas.length).toBeGreaterThan(0);
+  expect(persistedDeltas.map((event) => event.assistantMessageId))
+    .toEqual(persistedDeltas.map(() => assistantMessage?.id));
+  expect(persistedDeltas.every((event) => (event.checkpoint?.length ?? 0) > 0)).toBe(true);
+  expect(persistedDeltas.every((event) => assistantMessage?.body.startsWith(event.checkpoint ?? '') ?? false)).toBe(true);
+  for (let index = 1; index < persistedDeltas.length; index += 1) {
+    expect(persistedDeltas[index]?.contentVersion ?? 0).toBeGreaterThan(persistedDeltas[index - 1]?.contentVersion ?? 0);
+  }
+  const persistedTerminal = persistedEvents.find((event) => event.eventType === 'message.completed');
+  expect(persistedTerminal).toMatchObject({
+    assistantMessageId: assistantMessage?.id,
+    checkpoint: assistantMessage?.body,
+  });
 
   const pool = new Pool({ connectionString: databaseUrl });
   try {

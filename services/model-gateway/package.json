@@ -1,0 +1,28 @@
+{
+  "name": "@geneway/model-gateway",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b --pretty false",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "3.0.41",
+    "@openai/agents": "0.13.4",
+    "@openai/agents-extensions": "0.13.4",
+    "@openai-oauth/ai-sdk": "2.0.0",
+    "@openai-oauth/local": "2.0.0",
+    "ai": "6.0.185",
+    "fastify": "^5.5.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

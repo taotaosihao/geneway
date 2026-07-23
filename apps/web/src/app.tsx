@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocumentSnapshotProjection, EvidenceProjection, ExpertTarget, TaskSnapshot } from '@geneway/contracts';
 import { SimulationNotice, TaskProgress } from '@geneway/ui';
 import { api, type Approval, type Conversation, type Workflow } from './api.js';
+import { FastChatExperience } from './chat-app.js';
 
 const STEP_NAMES: Readonly<Record<string, string>> = {
   document_ingest: '读取脱敏材料', requirement_extract: '提取需求', contradiction_check: '检查矛盾', solution_design: '生成方案',
@@ -46,7 +47,11 @@ const convertConversationMessage = (message: Conversation['messages'][number]): 
 });
 
 export function ConversationExperience({ conversationId: explicitConversationId, forceOpen = false }: Readonly<{ conversationId?: string; forceOpen?: boolean }>) {
-  const capabilityOpen = forceOpen || new URLSearchParams(window.location.search).get('capability') === 'solution.analysis.v1';
+  const selectedCapability = new URLSearchParams(window.location.search).get('capability');
+  if (selectedCapability !== 'solution.analysis.v1' && !forceOpen) {
+    return <FastChatExperience {...(explicitConversationId === undefined ? {} : { conversationId: explicitConversationId })} />;
+  }
+  const capabilityOpen = selectedCapability === 'solution.analysis.v1' || forceOpen;
   const [route, setRoute] = useState('auto');
   const [conversation, setConversation] = useState<Conversation>();
   const [task, setTask] = useState<TaskSnapshot>();

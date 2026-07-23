@@ -2,6 +2,8 @@ import {
   approvalProjectionSchema,
   artifactIngestResponseSchema,
   conversationProjectionSchema,
+  chatRunEventSchema,
+  chatRunProjectionSchema,
   documentSnapshotListSchema,
   evidenceProjectionSchema,
   taskEventProjectionSchema,
@@ -12,6 +14,8 @@ import {
   type ApprovalProjection,
   type ArtifactIngestResponse,
   type ConversationProjection,
+  type ChatRunEvent,
+  type ChatRunProjection,
   type CreateTaskInput,
   type DocumentSnapshotList,
   type EvidenceProjection,
@@ -53,6 +57,26 @@ export const api = {
   }),
   getConversation: async (conversationId: string): Promise<Conversation> =>
     conversationProjectionSchema.parse(await request(`/api/conversations/${conversationId}`)),
+  createChatRun: async (conversationId: string, content: string): Promise<ChatRunProjection> =>
+    chatRunProjectionSchema.parse(await request(`/api/conversations/${conversationId}/chat-runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': key('chat-run') },
+      body: JSON.stringify({ capabilityId: 'xiaowei.chat.v1', content, clientMessageId: key('message') }),
+    })),
+  chatEvents: async (conversationId: string, modelInvocationId: string, cursor: number): Promise<readonly ChatRunEvent[]> => {
+    const response = await fetch(`/api/conversations/${conversationId}/chat-runs/${modelInvocationId}/events?cursor=${String(cursor)}`, {
+      headers: { accept: 'text/event-stream' },
+    });
+    if (!response.ok) {
+      const payload = await response.json() as { error?: { code?: string; message?: string } };
+      throw new Error(`${payload.error?.code ?? 'REQUEST_FAILED'}: ${payload.error?.message ?? response.statusText}`);
+    }
+    const text = await response.text();
+    return text.split('\n\n').flatMap((block) => {
+      const data = block.split('\n').find((line) => line.startsWith('data: '));
+      return data === undefined ? [] : [chatRunEventSchema.parse(JSON.parse(data.slice('data: '.length)))];
+    });
+  },
   uploadArtifact: async (conversationId: string, file: File): Promise<ArtifactIngestResponse> => {
     const form = new FormData();
     form.append('file', file, file.name);

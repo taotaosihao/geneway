@@ -15,6 +15,7 @@
     "@geneway/contracts": "workspace:*",
     "@geneway/evidence": "workspace:*",
     "@geneway/runtime": "workspace:*",
-    "@geneway/workflow": "workspace:*"
+    "@geneway/workflow": "workspace:*",
+    "zod": "4.4.3"
   }
 }

@@ -35,6 +35,8 @@ describe('dev-up command contract', () => {
       webPort: 4320,
       controlPlaneBindHost: '127.0.0.1',
       controlPlanePort: 4310,
+      modelGatewayBindHost: '127.0.0.1',
+      modelGatewayPort: 3150,
       allowedWebOrigins: [
         'http://localhost:4320',
         'http://127.0.0.1:4320',
@@ -42,8 +44,8 @@ describe('dev-up command contract', () => {
         'http://10.20.30.40:4320',
       ],
       publicUrls: [
-        'http://192.168.10.25:4320/conversations/new?capability=solution.analysis.v1',
-        'http://10.20.30.40:4320/conversations/new?capability=solution.analysis.v1',
+        'http://192.168.10.25:4320/conversations/new',
+        'http://10.20.30.40:4320/conversations/new',
       ],
     });
   });

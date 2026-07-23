@@ -19,6 +19,17 @@ async function findAvailablePort(excludedPorts = new Set()) {
 }
 
 const forwarded = process.argv.slice(2).filter((argument, index) => !(argument === '--' && index === 0));
+const selectedProjects = forwarded.flatMap((argument, index) => {
+  if (argument.startsWith('--project=')) return [argument.slice('--project='.length)];
+  if (argument === '--project') return [forwarded[index + 1]];
+  return [];
+}).filter((value) => typeof value === 'string');
+const gateA0Live = selectedProjects.includes('gate-a0-live');
+const liveAuthFile = process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE;
+const liveConformanceFile = process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE;
+if (gateA0Live && (liveAuthFile === undefined || liveConformanceFile === undefined)) {
+  throw new Error('gate-a0-live requires GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE and GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE');
+}
 const runId = process.env.GENEWAY_RUN_ID ?? `gate-0.1-${Date.now()}-${process.pid}`;
 const allocatedPorts = new Set();
 const allocatePort = async () => {
@@ -38,6 +49,8 @@ const storageAdapterPort = await allocatePort();
 const reconciliationAdapterPort = await allocatePort();
 const workerHealthPort = await allocatePort();
 const controlPlaneSupervisorPort = await allocatePort();
+const modelGatewayPort = await allocatePort();
+const gateA0ReleasePort = await allocatePort();
 const composeRunId = runId.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 const composeProjectName = `geneway-e2e-${composeRunId}`;
 const databaseUrl = `postgres://geneway:geneway@127.0.0.1:${postgresPort}/geneway_test`;
@@ -46,6 +59,9 @@ const workerAuthorityDirectory = mkdtempSync('/tmp/gw-uds-');
 const workerSocketPath = `${workerAuthorityDirectory}/worker.sock`;
 const workerTokenFile = `${workerAuthorityDirectory}/token`;
 const workerInstanceId = `e2e-worker-${process.pid}-${Date.now()}`;
+const modelGatewayAuthorityDirectory = gateA0Live ? mkdtempSync('/tmp/gw-mgw-') : undefined;
+const modelGatewayServiceTokenFile = modelGatewayAuthorityDirectory === undefined ? undefined : `${modelGatewayAuthorityDirectory}/service-token`;
+const modelGatewayInvocationSecretFile = modelGatewayAuthorityDirectory === undefined ? undefined : `${modelGatewayAuthorityDirectory}/invocation-secret`;
 const baseEnvironment = {
   PATH: process.env.PATH ?? '/usr/bin:/bin',
   HOME: process.env.HOME ?? '/tmp',
@@ -90,6 +106,12 @@ try {
   if ((statSync(workerTokenFile).mode & 0o777) !== 0o600 || Buffer.byteLength(workerSocketPath, 'utf8') > 100) {
     throw new Error('E2E Worker authority did not satisfy the 0600 token or short UDS boundary');
   }
+  if (modelGatewayServiceTokenFile !== undefined && modelGatewayInvocationSecretFile !== undefined) {
+    writeFileSync(modelGatewayServiceTokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
+    writeFileSync(modelGatewayInvocationSecretFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
+    chmodSync(modelGatewayServiceTokenFile, 0o600);
+    chmodSync(modelGatewayInvocationSecretFile, 0o600);
+  }
   result = spawnSync('pnpm', ['exec', 'playwright', 'test', '-c', 'scripts/playwright.config.ts', ...forwarded], {
     cwd: new URL('..', import.meta.url),
     env: {
@@ -103,10 +125,19 @@ try {
       GENEWAY_RECONCILIATION_ADAPTER_PORT: reconciliationAdapterPort,
       GENEWAY_WORKER_HEALTH_PORT: workerHealthPort,
       GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT: controlPlaneSupervisorPort,
+      GENEWAY_MODEL_GATEWAY_PORT: modelGatewayPort,
+      GENEWAY_GATE_A0_RELEASE_PORT: gateA0ReleasePort,
       GENEWAY_WORKER_SOCKET_PATH: workerSocketPath,
       GENEWAY_WORKER_TOKEN_FILE: workerTokenFile,
       GENEWAY_WORKER_INSTANCE_ID: workerInstanceId,
       GENEWAY_MANAGED_TEST_INFRA: '1',
+      ...(gateA0Live ? {
+        GENEWAY_GATE_A0_LIVE: '1',
+        GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE: liveAuthFile,
+        GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE: liveConformanceFile,
+        GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: modelGatewayServiceTokenFile,
+        GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE: modelGatewayInvocationSecretFile,
+      } : {}),
       DATABASE_URL: databaseUrl,
       GENEWAY_E2E_DATABASE_URL: databaseUrl,
       GENEWAY_S3_ENDPOINT: s3Endpoint,
@@ -238,6 +269,12 @@ try {
   if (!workerAuthorityDirectory.startsWith('/tmp/gw-uds-')) throw new Error('Refusing to clean an unexpected Worker authority directory');
   rmSync(workerAuthorityDirectory, { recursive: true, force: true });
   const authorityCleaned = !existsSync(workerTokenFile) && !existsSync(workerSocketPath) && !existsSync(workerAuthorityDirectory);
+  let modelGatewayAuthorityCleaned = true;
+  if (modelGatewayAuthorityDirectory !== undefined) {
+    if (!modelGatewayAuthorityDirectory.startsWith('/tmp/gw-mgw-')) throw new Error('Refusing to clean an unexpected Model Gateway authority directory');
+    rmSync(modelGatewayAuthorityDirectory, { recursive: true, force: true });
+    modelGatewayAuthorityCleaned = !existsSync(modelGatewayAuthorityDirectory);
+  }
   mkdirSync(`/tmp/geneway-runs/${runId}`, { recursive: true });
   writeFileSync(`/tmp/geneway-runs/${runId}/worker-authority-cleanup.json`, `${JSON.stringify({
     workerReceiptFound,
@@ -261,11 +298,12 @@ try {
       procStartTicks: receipt.procStartTicks,
     })),
     authorityCleaned,
+    modelGatewayAuthorityCleaned,
     tokenRemoved: !existsSync(workerTokenFile),
     socketRemoved: !existsSync(workerSocketPath),
     socketRemovedByControlPlane,
   })}\n`, { mode: 0o600 });
-  if (!authorityCleaned) cleanupFailed = true;
+  if (!authorityCleaned || !modelGatewayAuthorityCleaned) cleanupFailed = true;
 }
 console.log(`geneway served-test artifacts: /tmp/geneway-runs/${runId}/`);
 process.exit(cleanupFailed || reportGateFailed ? 1 : (result?.status ?? 1));

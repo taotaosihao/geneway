@@ -6,7 +6,7 @@ title: geneway Gate A0 Fast Chat 无材料真实对话纵切
 contract_status: final
 current_authoritative_contract: doc/plans/atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md
 created: 2026-07-23
-contract_semantics_version: 2
+contract_semantics_version: 3
 finding_scope_admission: controller_current_required_only
 safe_fallback_authority: goal:A0-SAFETY
 work_type: implementation
@@ -45,6 +45,7 @@ product_ui_not_applicable_reason:
 3. Gate A0 关闭后恢复 Gate 0.2B.2–0.2B.3；原 Gate A 继续负责真实材料分析与 GearJob 单工单只读查询。
 4. 本合同与 Gate 0.2B 合同发生冲突时，只有 Gate A0 owned paths 和本合同 Goal 范围由本合同控制；异常、fixture、认领、异常分析绑定与 0.2B 恢复矩阵仍由原合同控制。
 5. 文档支持材料不能扩大本合同；未列入 Goal 的发现只记录为 follow-up，除非由当前 controller 正式准入为 `current-required`。
+6. 用户在 `thread:019f8b7f-06b3-73e0-9b15-2bab812db6a7` 明确裁决保持 `/home/gewu/.codex` 当前权限并授权本机开发 Model Gateway 访问 `/home/gewu/.codex/auth.json`；本裁决只替换下述 credential parent mode 规则，不扩大客户生产、凭据复制/刷新、其他路径或其他进程权限。
 
 ## Product And API Contract
 
@@ -105,7 +106,7 @@ GET /api/conversations/:conversationId
 - Control Plane 通过现有本机 Worker 命令边界派发 `execute_chat_turn`；Worker 使用 `packages/runtime` 的 ChatRuntimeAdapter 调用 Model Gateway facade/RPC。业务终态只能由 Control Plane transaction 提交。
 - Model Gateway 是独立 loopback/UDS 服务，provider plugin 是唯一可读取仓库外 auth-file 的进程；Runtime、Worker 与 Control Plane 只传逻辑策略和短期 invocation token。
 - Gate A0 只开放逻辑策略 `general.chat.standard`，固定 data class 为 C0/C1；C2/C3、文件正文、企业数据和工具结果不得进入该路由。
-- `codex_subscription_dev` 固定为 trusted-local-only、单具名 owner、单 active invocation、`subscription_included/unpriced`。auth 目录必须为 `0700`、文件 `0600`、同一 OS owner、非 symlink；凭据检查失败时 live route 不启动。
+- `codex_subscription_dev` 固定为 trusted-local-only、单具名 owner、单 active invocation、`subscription_included/unpriced`。auth-file 默认边界是父目录 `0700`、文件 `0600`、均为当前 OS owner、非 symlink；唯一例外固定为 manifest 绑定的 `/home/gewu/.codex/auth.json`，用户明确授权其 owner-owned、非 symlink 父目录保持当前 `0775`，文件仍必须为 owner-owned、非 symlink、非空且有界的 `0600` regular file。该例外不得由环境变量迁移到其他路径，不授权读取之外的复制或 refresh；任一检查失败时 live route 不启动。
 - 迁移复现基线沿用技术附录固定版本；接触 auth-file 的第三方 OAuth bridge 必须在 live route 开启前具有 immutable provider manifest。manifest 至少固定 package name@version、registry、pnpm lock resolution/integrity、tarball/source SHA-256、upstream repository/commit、license、approval actor/time 和允许的 install/lifecycle policy；manifest 作为仓库内受审查 artifact 与实际 lockfile/package bytes 做机器校验。缺少、过期、不匹配、来源/许可证/完整性失败或 live conformance 未通过时，`xiaowei.chat.v1` 保持 `NOT_OPEN` 且 provider 进程不得读取 auth-file；不自研 OAuth/PKCE/token refresh，也不调用 Codex CLI。
 - Model Gateway 必须支持并验证 stream、cancel、deadline、quota/retryNotBefore、usage/unpriced、provider error 映射和 secret redaction。A0 `tool_choice=none`；任何 tool call 输出均作为协议违规终止。
 - 没有可用 live route 时 UI 显示“真实模型通道未配置或不可用”，不得调用 FakeRuntime、静态模板或浏览器 mock 生成成功回答。
@@ -147,7 +148,7 @@ GET /api/conversations/:conversationId
 - browser_entrypoint: http://localhost:3200/conversations/new
 - served_ui_validation_action: Playwright 使用 `page.goto("http://localhost:3200/conversations/new")` 访问真实 Vite HTTP 服务并完成首问、真实持久化 delta、追问、停止生成，再从页面点击可见“分析材料”入口完成材料门回归；主 HTML、JS/CSS、Control Plane API、SSE 与模型回答必须全部来自真实服务和 live provider，禁止合成主文档、应用 bundle、API 响应或模型回答。
 - ui_data_mode: 真实 Vite Web、Control Plane/Postgres、UDS Worker、loopback/UDS Model Gateway 与 `codex_subscription_dev` live provider；普通聊天无工具、无材料，材料分析回归继续使用既有受控 fixture/FakeRuntime 且醒目标记模拟。
-- required_safety_gates: 服务端固定共享 `tenant_local/user_local`、客户端 tenant/principal 覆盖无效、当前 Conversation 上下文不串线、Zod wire、幂等、单 active invocation、Model Gateway 唯一出口、auth-file 权限与 secret redaction、C0/C1、tool_choice=none、budget/deadline/cancel fencing、无 FakeRuntime fallback、普通聊天零 BusinessTask/Workflow/Evidence/Artifact、材料分析门不退化。
+- required_safety_gates: 服务端固定共享 `tenant_local/user_local`、客户端 tenant/principal 覆盖无效、当前 Conversation 上下文不串线、Zod wire、幂等、单 active invocation、Model Gateway 唯一出口、manifest 绑定的 auth-file 默认 `0700/0600` 或唯一授权 `0775/0600` 边界与 secret redaction、C0/C1、tool_choice=none、budget/deadline/cancel fencing、无 FakeRuntime fallback、普通聊天零 BusinessTask/Workflow/Evidence/Artifact、材料分析门不退化。
 - allowed_headless_only_until: `A0.1` 的 migration、contracts、Model Gateway conformance 与 API integration 首次通过；同一首个逻辑实现结果必须提供真实 served UI + live provider 首问。
 - stop_if_no_ui_by_phase: `A0.1 real first-turn chat` 首个逻辑提交。
 - Served UI evidence: 主文档、bundle、API 与 SSE 来自真实服务；live provider 回答的 invocation ID、终态和 redacted route audit 可在浏览器外重验。
@@ -197,7 +198,7 @@ GET /api/conversations/:conversationId
 | 客户端提交 tenant/principal 或 forwarded identity 覆盖 | 服务端继续使用固定 `tenant_local/user_local`，覆盖值不能创建新身份或改变数据范围 | yes | goal:A0-CONTEXT |
 | 上下文超过 24 条或 64 KiB | 从最旧完整轮次开始截断并审计 `contextTruncated=true`，不生成隐藏长期记忆 | yes | goal:A0-CONTEXT |
 | 用户在 stream 中取消 | CAS/fence 使 invocation 收敛为 canceled；迟到 delta/completion 被拒绝，部分内容不进入后续上下文 | yes | goal:A0-FAILURE |
-| auth-file 权限、owner、symlink 或 conformance 不合法 | Model Gateway live profile 不启动，UI 明确提示 route unavailable，零 provider 调用 | yes | goal:A0-MODEL |
+| auth-file 不满足 manifest 绑定路径、默认 `0700/0600` 或唯一授权 `0775/0600` mode、owner、non-symlink、bounded regular file，或 conformance 不合法 | Model Gateway live profile 不启动，UI 明确提示 route unavailable，零 provider 调用 | yes | goal:A0-MODEL |
 | provider 返回 tool call | 作为 `MODEL_PROTOCOL_VIOLATION` 失败，不执行、不展示为成功、不调用 Tool Gateway | yes | goal:A0-SAFETY |
 | quota、timeout、流中断或 Gateway/Worker 退出 | 映射稳定错误并结束当前 invocation；不自动切账号/API key/FakeRuntime，不产生第二 completed 回答 | yes | goal:A0-FAILURE |
 | 用户显式进入材料分析但无合格材料 | 保持现有材料门与错误，不改走普通聊天绕过 Task/Approval/Evidence | yes | goal:A0-ROUTING |

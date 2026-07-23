@@ -359,11 +359,172 @@ export const conversationProjectionSchema = z.object({
     id: z.string().min(1),
     author: z.enum(['user', 'xiaowei']),
     body: z.string(),
+    status: z.enum(['completed', 'streaming', 'failed', 'canceled']).default('completed'),
+    contentVersion: z.number().int().nonnegative().default(0),
     createdAt: z.string().datetime(),
   }).strict()),
+  latestModelInvocation: z.object({
+    id: z.string().min(1),
+    assistantMessageId: z.string().min(1),
+    status: z.enum(['pending', 'running', 'completed', 'cancel_requested', 'canceled', 'failed']),
+    errorClass: z.enum([
+      'MODEL_ROUTE_UNAVAILABLE',
+      'MODEL_AUTH_FAILED',
+      'MODEL_QUOTA',
+      'MODEL_TIMEOUT',
+      'MODEL_STREAM_INTERRUPTED',
+      'MODEL_PROTOCOL_VIOLATION',
+      'CHAT_BUSY',
+    ]).nullable(),
+    lastEventCursor: eventCursorSchema,
+    createdAt: z.string().datetime(),
+    terminalAt: z.string().datetime().nullable(),
+  }).strict().nullable().default(null),
+  eventWatermark: eventCursorSchema.default(0),
 }).strict();
 
 export type ConversationProjection = z.infer<typeof conversationProjectionSchema>;
+
+export const chatErrorClassSchema = z.enum([
+  'MODEL_ROUTE_UNAVAILABLE',
+  'MODEL_AUTH_FAILED',
+  'MODEL_QUOTA',
+  'MODEL_TIMEOUT',
+  'MODEL_STREAM_INTERRUPTED',
+  'MODEL_PROTOCOL_VIOLATION',
+  'CHAT_BUSY',
+]);
+
+export type ChatErrorClass = z.infer<typeof chatErrorClassSchema>;
+
+const modelGatewayReceiptCommonShape = {
+  schemaVersion: z.literal('model-gateway-receipt/1'),
+  issuer: z.literal('geneway-model-gateway'),
+  audience: z.literal('geneway-control-plane'),
+  receiptJti: z.string().uuid(),
+  conversationId: z.string().min(1),
+  modelInvocationId: z.string().min(1),
+  fence: z.number().int().positive(),
+  issuedAt: z.string().datetime(),
+};
+
+export const modelGatewayReceiptPayloadSchema = z.discriminatedUnion('outcome', [
+  z.object({
+    ...modelGatewayReceiptCommonShape,
+    outcome: z.literal('completed'),
+    providerRevision: z.string().min(1).max(200),
+    modelRevision: z.string().min(1).max(200),
+    usage: z.record(z.string(), z.unknown()),
+  }).strict(),
+  z.object({
+    ...modelGatewayReceiptCommonShape,
+    outcome: chatErrorClassSchema,
+    providerRevision: z.string().min(1).max(200).nullable(),
+    modelRevision: z.string().min(1).max(200).nullable(),
+    usage: z.null(),
+  }).strict(),
+]);
+
+export const modelGatewayReceiptSchema = z.object({
+  payload: modelGatewayReceiptPayloadSchema,
+  signature: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
+}).strict();
+
+export type ModelGatewayReceiptPayload = z.infer<typeof modelGatewayReceiptPayloadSchema>;
+export type ModelGatewayReceipt = z.infer<typeof modelGatewayReceiptSchema>;
+
+export const chatInvocationStatusSchema = z.enum([
+  'pending',
+  'running',
+  'completed',
+  'cancel_requested',
+  'canceled',
+  'failed',
+]);
+
+const chatContentSchema = z.string().min(1).max(16 * 1024)
+  .refine((value) => value.normalize('NFC').trim().length > 0, 'content must contain non-whitespace text')
+  .refine((value) => !value.includes('\0'), 'content must not contain NUL')
+  .refine((value) => new TextEncoder().encode(value.normalize('NFC').trim()).byteLength <= 16 * 1024, 'content exceeds 16 KiB');
+
+export const createChatRunInputSchema = z.object({
+  capabilityId: z.literal('xiaowei.chat.v1'),
+  content: chatContentSchema,
+  clientMessageId: z.string().min(1).max(200),
+});
+
+export type CreateChatRunInput = z.infer<typeof createChatRunInputSchema>;
+
+export const chatRunProjectionSchema = z.object({
+  conversationId: z.string().min(1),
+  userMessageId: z.string().min(1),
+  assistantMessageId: z.string().min(1),
+  modelInvocationId: z.string().min(1),
+  eventCursor: eventCursorSchema,
+  status: chatInvocationStatusSchema,
+}).strict();
+
+export type ChatRunProjection = z.infer<typeof chatRunProjectionSchema>;
+
+const chatRunEventCommonShape = {
+  schemaVersion: z.literal('chat-run-event/1'),
+  eventId: z.string().min(1),
+  cursor: eventCursorSchema,
+  conversationId: z.string().min(1),
+  modelInvocationId: z.string().min(1),
+  assistantMessageId: z.string().min(1),
+  sequence: z.number().int().positive(),
+  occurredAt: z.string().datetime(),
+};
+
+export const chatRunEventSchema = z.discriminatedUnion('eventType', [
+  z.object({
+    ...chatRunEventCommonShape,
+    eventType: z.literal('run.started'),
+    status: z.literal('running'),
+  }).strict(),
+  z.object({
+    ...chatRunEventCommonShape,
+    eventType: z.literal('message.delta'),
+    delta: z.string().min(1),
+    checkpoint: z.string(),
+    contentLength: z.number().int().nonnegative(),
+    contentVersion: z.number().int().positive(),
+  }).strict(),
+  z.object({
+    ...chatRunEventCommonShape,
+    eventType: z.literal('message.completed'),
+    status: z.literal('completed'),
+    checkpoint: z.string(),
+    contentLength: z.number().int().nonnegative(),
+    contentVersion: z.number().int().positive(),
+  }).strict(),
+  z.object({
+    ...chatRunEventCommonShape,
+    eventType: z.literal('run.canceled'),
+    status: z.literal('canceled'),
+    reason: z.literal('USER_CANCELED'),
+  }).strict(),
+  z.object({
+    ...chatRunEventCommonShape,
+    eventType: z.literal('run.failed'),
+    status: z.literal('failed'),
+    errorClass: chatErrorClassSchema,
+    retryNotBefore: z.string().datetime().optional(),
+  }).strict(),
+]);
+
+export type ChatRunEvent = z.infer<typeof chatRunEventSchema>;
+
+export const chatRunEventListSchema = z.object({ events: z.array(chatRunEventSchema) }).strict();
+
+export const cancelChatRunProjectionSchema = z.object({
+  modelInvocationId: z.string().min(1),
+  status: z.enum(['cancel_requested', 'canceled']),
+  eventCursor: eventCursorSchema,
+}).strict();
+
+export type CancelChatRunProjection = z.infer<typeof cancelChatRunProjectionSchema>;
 
 export const workflowListItemSchema = z.object({
   id: z.string().min(1),
@@ -692,6 +853,11 @@ export type WorkerCommandResponse = z.infer<typeof workerCommandResponseSchema>;
 
 export const createTaskInputJsonSchema = z.toJSONSchema(createTaskInputSchema);
 export const conversationProjectionJsonSchema = z.toJSONSchema(conversationProjectionSchema);
+export const createChatRunInputJsonSchema = z.toJSONSchema(createChatRunInputSchema);
+export const chatRunProjectionJsonSchema = z.toJSONSchema(chatRunProjectionSchema);
+export const chatRunEventJsonSchema = z.toJSONSchema(chatRunEventSchema);
+export const chatRunEventListJsonSchema = z.toJSONSchema(chatRunEventListSchema);
+export const cancelChatRunProjectionJsonSchema = z.toJSONSchema(cancelChatRunProjectionSchema);
 export const taskListQueryJsonSchema = z.toJSONSchema(taskListQuerySchema);
 export const taskListResponseJsonSchema = z.toJSONSchema(taskListResponseSchema);
 export const taskSnapshotJsonSchema = z.toJSONSchema(taskSnapshotSchema);

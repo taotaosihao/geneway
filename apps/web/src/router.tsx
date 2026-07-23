@@ -31,7 +31,7 @@ export function App() {
   if (segments.length === 2 && segments[0] === 'conversations') {
     if (segments[1] === 'new') return <ConversationExperience />;
     const conversationId = decodePathSegment(segments[1] ?? '');
-    return conversationId === undefined ? <NotFoundPage /> : <ConversationExperience conversationId={conversationId} forceOpen />;
+    return conversationId === undefined ? <NotFoundPage /> : <ConversationExperience conversationId={conversationId} />;
   }
 
   if (segments.length === 1 && segments[0] === 'tasks') return <TaskListPage />;

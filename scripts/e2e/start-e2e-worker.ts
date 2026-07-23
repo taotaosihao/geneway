@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { appendFile, chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { type Readable } from 'node:stream';
+import { modelGatewayWorkerEnvironment } from './model-gateway-worker-environment.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -40,6 +41,7 @@ const workerEnvironmentBase = {
   GENEWAY_WORKER_STEP_DELAY_MS: process.env.GENEWAY_WORKER_STEP_DELAY_MS ?? '40',
   GENEWAY_E2E_HOOK_URL: `http://127.0.0.1:${String(healthPort)}`,
   GENEWAY_E2E_HOOK_TOKEN_FILE: tokenFile,
+  ...modelGatewayWorkerEnvironment(process.env),
 };
 
 type WorkerReceipt = Readonly<{

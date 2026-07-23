@@ -1,0 +1,108 @@
+{
+  "schemaVersion": "geneway-provider-manifest/1",
+  "profile": "codex_subscription_dev",
+  "logicalModelPolicy": "general.chat.standard",
+  "providerModel": "gpt-5.4-mini",
+  "transport": "ai-sdk-openai-oauth",
+  "approval": {
+    "actor": "user@source-thread:019f880e-bac8-7412-a129-68db9bf6506a",
+    "authorizationRef": "source-thread:019f880e-bac8-7412-a129-68db9bf6506a",
+    "recordedAt": "2026-07-22T20:47:29.000Z",
+    "scope": "trusted-local development only"
+  },
+  "lifecyclePolicy": {
+    "installScriptsAllowed": false,
+    "runtimeNetworkInstallAllowed": false,
+    "credentialRefreshOwner": "named local provider process only"
+  },
+  "credentialBoundary": {
+    "policy": "owner-private-default-with-explicit-trusted-local-override",
+    "defaultParentMode": "0700",
+    "fileMode": "0600",
+    "authorizedOverride": {
+      "authFilePath": "/home/gewu/.codex/auth.json",
+      "parentDirectory": "/home/gewu/.codex",
+      "parentMode": "0775",
+      "owner": "current-process-uid",
+      "symlinksAllowed": false,
+      "scope": "trusted-local development only",
+      "decision": {
+        "actor": "user@thread:019f8b7f-06b3-73e0-9b15-2bab812db6a7",
+        "authorizationRef": "thread:019f8b7f-06b3-73e0-9b15-2bab812db6a7",
+        "recordedAt": "2026-07-23T01:56:19.000Z"
+      }
+    }
+  },
+  "packages": [
+    {
+      "name": "@openai/agents",
+      "version": "0.13.4",
+      "registry": "https://registry.npmjs.org",
+      "integrity": "sha512-rW8Z+/gueHRyH4GyQzgjlG1FWFdf0DJuLqzpBnugSVYIAaLRfkeagh90m/S1Tt+Fy8bj4sYIUyovz6oFOF2k3A==",
+      "repository": "https://github.com/openai/openai-agents-js",
+      "reviewedProvenance": { "upstreamCommit": "4e1f842f63673db59018a7fa4a441c64c274caf2", "assurance": "reviewed-not-machine-attested-from-package-bytes" },
+      "license": "MIT",
+      "packageBytesSha256": "572c35604c738421b8e62a48ce1d1ac2dff71b46131dd01ed079f6ffb578d349"
+    },
+    {
+      "name": "@openai/agents-extensions",
+      "version": "0.13.4",
+      "registry": "https://registry.npmjs.org",
+      "integrity": "sha512-BOIFGoUWCs4W21GPwPzml8JrNXG/CfW6TWKgqdi9jWTazPzbC3jIZtqspaX5kcsqyksBTAJag7MFacxJdvUnHg==",
+      "repository": "https://github.com/openai/openai-agents-js",
+      "reviewedProvenance": { "upstreamCommit": "4e1f842f63673db59018a7fa4a441c64c274caf2", "assurance": "reviewed-not-machine-attested-from-package-bytes" },
+      "license": "MIT",
+      "packageBytesSha256": "53efefbf0f6218104d0bff90413e62f6331f3af540b853d691280bbcd004cee4"
+    },
+    {
+      "name": "@openai-oauth/ai-sdk",
+      "version": "2.0.0",
+      "registry": "https://registry.npmjs.org",
+      "integrity": "sha512-hw7gm4e6pME+/wkPVvFVgRb7CijI7wXropPxbUoFn7dajjfmkTJ/hNobp/xP1Gx09ncF6BJ6N7rRRHvG1dJb/A==",
+      "repository": "https://github.com/EvanZhouDev/openai-oauth",
+      "reviewedProvenance": { "upstreamCommit": "4be9c04ccfcaa8fc0982044d17a29a82cb131374", "assurance": "reviewed-not-machine-attested-from-package-bytes" },
+      "license": "Apache-2.0",
+      "packageBytesSha256": "0648534046c565dcddfccd22c968f114000368bbb5d03ad2daf22983c9abf7a4"
+    },
+    {
+      "name": "@openai-oauth/local",
+      "version": "2.0.0",
+      "registry": "https://registry.npmjs.org",
+      "integrity": "sha512-eRKrcw0ZzgZsh3VjApWeOghF+AtS+EaoTyxzsL8i2hAsHCMJYVPjwVhOL+caGHPJpY7+oOiHDW7NK/qh1i9+Jw==",
+      "repository": "https://github.com/EvanZhouDev/openai-oauth",
+      "reviewedProvenance": { "upstreamCommit": "4be9c04ccfcaa8fc0982044d17a29a82cb131374", "assurance": "reviewed-not-machine-attested-from-package-bytes" },
+      "license": "Apache-2.0",
+      "packageBytesSha256": "2bd2d6127f8bbce84fe7a0ee3ab214c52caf25b507e4489926ddb3b31c77d18f"
+    },
+    {
+      "name": "@ai-sdk/openai",
+      "version": "3.0.41",
+      "registry": "https://registry.npmjs.org",
+      "integrity": "sha512-IZ42A+FO+vuEQCVNqlnAPYQnnUpUfdJIwn1BEDOBywiEHa23fw7PahxVtlX9zm3/zMvTW4JKPzWyvAgDu+SQ2A==",
+      "repository": "https://github.com/vercel/ai",
+      "reviewedProvenance": { "upstreamCommit": "035d5ad533901406c81cfe58494d6ea8579d68d4", "assurance": "reviewed-not-machine-attested-from-package-bytes" },
+      "license": "Apache-2.0",
+      "packageBytesSha256": "68787e6b611a12a1c6cf9163c9ebb96a1b08ebaafefcbfe1e4641bbcaba24c48"
+    },
+    {
+      "name": "ai",
+      "version": "6.0.185",
+      "registry": "https://registry.npmjs.org",
+      "integrity": "sha512-oGsqscREaTlo75KHZLtwZxRyI+ZBwHV2wRX9B8smHjgOs13WwoCvUyr5aPUWpIBRz406wmIKy1RzoUEq0/WKJw==",
+      "repository": "https://github.com/vercel/ai",
+      "reviewedProvenance": { "upstreamCommit": "4a989451c5ef8c1b04d8a91e4e9301dc81708cfa", "assurance": "reviewed-not-machine-attested-from-package-bytes" },
+      "license": "Apache-2.0",
+      "packageBytesSha256": "810eee579d50a1761fc56c27eaae31a2158a0f38fb99382a0888a60ea6c31109"
+    },
+    {
+      "name": "zod",
+      "version": "4.4.3",
+      "registry": "https://registry.npmjs.org",
+      "integrity": "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==",
+      "repository": "https://github.com/colinhacks/zod",
+      "reviewedProvenance": { "upstreamCommit": "f3c9ec03ba7a28ae72d25cc295f38674bee0f559", "assurance": "reviewed-not-machine-attested-from-package-bytes" },
+      "license": "MIT",
+      "packageBytesSha256": "908ef9d403b3986b5b1e35e37df338308c82110f620823efe749058e031ecb9a"
+    }
+  ]
+}

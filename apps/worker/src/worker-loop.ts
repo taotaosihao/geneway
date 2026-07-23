@@ -10,6 +10,8 @@ import {
 } from '@geneway/workflow';
 import type { WorkerCommandClient } from './command-client.js';
 import { WorkflowInterpreter, type ClaimedStepHook } from './interpreter.js';
+import { ChatRuntimeError, type ChatRuntimeAdapter } from '@geneway/runtime';
+import type { ChatWorkerCommandClient, ChatTurnClaim } from './chat-command-client.js';
 
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
@@ -21,6 +23,7 @@ export type WorkerLoopOptions = Readonly<{
   onDeliveryAbandoned?: (delivery: WorkerDelivery, error: GenewayError) => void | Promise<void>;
   onAfterDeliveryClaim?: (delivery: WorkerDelivery) => Promise<void>;
   onBeforeCompleteStep?: (delivery: WorkerDelivery, step: Parameters<ClaimedStepHook>[0]) => Promise<void>;
+  chat?: Readonly<{ client: ChatWorkerCommandClient; runtime: ChatRuntimeAdapter }>;
 }>;
 
 const AUTHORITY_LOSS_CODES = new Set([
@@ -125,6 +128,13 @@ export async function runWorkerLoop(client: WorkerCommandClient, options: Worker
   if (isAborted(options.signal)) return;
   await options.onReady?.();
   while (!isAborted(options.signal)) {
+    if (options.chat !== undefined) {
+      const claim = await options.chat.client.claim(options.signal);
+      if (claim !== null) {
+        await executeChatTurn(options.chat.client, options.chat.runtime, claim, options.signal);
+        continue;
+      }
+    }
     let delivery: WorkerDelivery | null;
     try {
       delivery = await client.claimDelivery(options.signal);
@@ -145,6 +155,33 @@ export async function runWorkerLoop(client: WorkerCommandClient, options: Worker
       continue;
     }
     await wait(pollIntervalMs, options.signal);
+  }
+}
+
+async function executeChatTurn(
+  client: ChatWorkerCommandClient,
+  runtime: ChatRuntimeAdapter,
+  claim: ChatTurnClaim,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    await client.execute(claim);
+    await client.started(claim);
+    const terminal = await runtime.stream({
+      conversationId: claim.conversationId,
+      modelInvocationId: claim.modelInvocationId,
+      fence: claim.fence,
+      invocationToken: claim.invocationToken,
+      logicalModelPolicy: claim.logicalModelPolicy,
+      promptPolicyVersion: claim.promptPolicyVersion,
+      systemPrompt: claim.systemPrompt,
+      context: claim.context,
+      deadline: claim.deadline,
+    }, (delta) => client.delta(claim, delta), signal);
+    await client.completed(claim, terminal);
+  } catch (error) {
+    if (!(error instanceof ChatRuntimeError) || error.receipt === undefined) throw error;
+    await client.failed(claim, error.receipt);
   }
 }
 

@@ -8,6 +8,8 @@ import {
 } from '@geneway/evidence';
 
 export { parseE2eHookEndpoint, postE2eHook, type E2eHookAction } from './e2e-hook-client.js';
+export { ChatRuntimeAdapter, ChatRuntimeError } from './chat-runtime.js';
+export type { ChatRuntimeInput, ChatRuntimeResult } from './chat-runtime.js';
 
 export type FakeRuntimeContext = Readonly<{
   inputRef: ResolvedTaskInputRef;

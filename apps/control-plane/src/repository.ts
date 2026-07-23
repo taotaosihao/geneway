@@ -237,6 +237,8 @@ export class ControlPlaneRepository {
     await this.pool.query(`TRUNCATE TABLE
       platform_write_barriers,backup_sets,storage_orphan_tombstones,
       query_snapshot_items,query_snapshots,
+      model_gateway_audit,chat_run_events,chat_turn_outbox,model_invocation_token_authorizations,chat_turn_dispatches,chat_idempotency_records,model_invocations,
+      capability_active_releases,capability_release_records,prompt_policy_versions,
       report_publish_intents,lineage_records,evidence_links,evidence_items,claims,worker_command_receipts,attempt_output_candidates,
       inbox_events,outbox_deliveries,execution_attempts,
       audit_events,document_snapshots,artifact_states,artifact_manifests,artifacts,artifact_ingest_intents,
@@ -246,6 +248,27 @@ export class ControlPlaneRepository {
       capability_versions,messages,conversations,resource_scopes,roles,users,tenants
       RESTART IDENTITY CASCADE`);
     await this.ensureSystemSeed();
+    await this.ensureChatSeed();
+  }
+
+  private async ensureChatSeed(): Promise<void> {
+    await this.pool.query(`INSERT INTO capability_versions(tenant_id,id,capability_id,version,spec)
+      VALUES ('tenant_local','capability_xiaowei_chat_v1','xiaowei.chat.v1',1,
+        '{"logicalModelPolicy":"general.chat.standard","dataClasses":["C0","C1"],"toolChoice":"none","context":{"maxMessages":24,"maxBytes":65536}}')
+      ON CONFLICT DO NOTHING`);
+    await this.pool.query(`INSERT INTO prompt_policy_versions(tenant_id,id,policy_id,version,policy)
+      VALUES ('tenant_local','prompt_xiaowei_chat_system_v1','xiaowei.chat.system',1,
+        '{"system":"你是小纬，geneway 的制造业数字员工。清晰、诚实地回答普通文本问题；不得声称使用工具、企业知识、联网搜索或执行生产写操作。"}')
+      ON CONFLICT DO NOTHING`);
+    await this.pool.query(`INSERT INTO capability_release_records
+      (tenant_id,id,capability_version_id,prompt_policy_version_id,state,sequence,previous_release_id,actor,gate_evidence,gate_evidence_digest)
+      VALUES ('tenant_local','release_xiaowei_chat_v1_draft','capability_xiaowei_chat_v1','prompt_xiaowei_chat_system_v1','draft',1,NULL,
+        'user@source-thread:019f880e-bac8-7412-a129-68db9bf6506a',
+        '{"kind":"authority-document","document":"gate-a0-fast-chat/brief.md","authorizationRef":"source-thread:019f880e-bac8-7412-a129-68db9bf6506a","sha256":"a6225da9a53c99583ce8459e6fb2e1d5af6366db859e415307e1c6b4994556ca"}',
+        'a6225da9a53c99583ce8459e6fb2e1d5af6366db859e415307e1c6b4994556ca')
+      ON CONFLICT DO NOTHING`);
+    await this.pool.query(`INSERT INTO capability_active_releases(tenant_id,capability_id,release_id,pointer_version)
+      VALUES ('tenant_local','xiaowei.chat.v1','release_xiaowei_chat_v1_draft',1) ON CONFLICT DO NOTHING`);
   }
 
   async createConversation(principal: Principal, idempotencyKey: string): Promise<{ id: string }> {
@@ -270,7 +293,7 @@ export class ControlPlaneRepository {
       const conversation = await client.query<{ id: string; created_at: Date }>('SELECT id,created_at FROM conversations WHERE tenant_id=$1 AND id=$2 AND user_id=$3', [principal.tenantId, conversationId, principal.userId]);
       const row = conversation.rows[0];
       if (row === undefined) throw new GenewayError('CONVERSATION_NOT_FOUND', 'Conversation was not found', 404);
-      const messages = await client.query<{ id: string; author: 'user' | 'xiaowei'; body: string; created_at: Date }>('SELECT id,author,body,created_at FROM messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY created_at,id', [principal.tenantId, conversationId]);
+      const messages = await client.query<{ id: string; author: 'user' | 'xiaowei'; body: string; created_at: Date }>('SELECT id,author,body,created_at FROM messages WHERE tenant_id=$1 AND conversation_id=$2 ORDER BY sequence', [principal.tenantId, conversationId]);
       const taskCandidates = await client.query<{ id: string }>(`SELECT id FROM business_tasks
         WHERE tenant_id=$1 AND conversation_id=$2 AND requester_id=$3 ORDER BY updated_at DESC,id ASC`, [
         principal.tenantId, conversationId, principal.userId,

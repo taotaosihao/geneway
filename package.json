@@ -9,16 +9,19 @@
   "scripts": {
     "build": "pnpm -r build",
     "lint": "eslint -c scripts/eslint.config.mjs . --max-warnings=0",
-    "typecheck": "pnpm exec tsc -b packages/contracts/tsconfig.json packages/authorization/tsconfig.json packages/evidence/tsconfig.json packages/ingestion/tsconfig.json packages/runtime/tsconfig.json packages/storage/tsconfig.json packages/ui/tsconfig.json packages/workflow/tsconfig.json apps/control-plane/tsconfig.json apps/web/tsconfig.json apps/worker/tsconfig.json scripts/tsconfig.json --force --pretty false",
+    "typecheck": "pnpm exec tsc -b packages/contracts/tsconfig.json packages/authorization/tsconfig.json packages/evidence/tsconfig.json packages/ingestion/tsconfig.json packages/runtime/tsconfig.json packages/storage/tsconfig.json packages/ui/tsconfig.json packages/workflow/tsconfig.json services/model-gateway/tsconfig.json apps/control-plane/tsconfig.json apps/web/tsconfig.json apps/worker/tsconfig.json scripts/tsconfig.json --force --pretty false",
     "test": "vitest run --exclude '**/*.integration.test.ts' --exclude '**/*.security.test.ts' --exclude 'scripts/e2e/**'",
     "test:contracts": "vitest run packages --exclude '**/*.integration.test.ts' --exclude '**/*.security.test.ts'",
-    "test:integration": "env GENEWAY_MANAGED_TEST_INFRA=0 DATABASE_URL=postgres://forbidden:forbidden@192.0.2.1/forbidden GENEWAY_S3_ENDPOINT=http://192.0.2.1:9 bash scripts/with-storage.sh vitest run --no-file-parallelism apps/control-plane/src/gate0.2a-migration.integration.test.ts apps/control-plane/src/control-plane.integration.test.ts apps/control-plane/src/recovery.integration.test.ts",
+    "test:integration": "env GENEWAY_MANAGED_TEST_INFRA=0 DATABASE_URL=postgres://forbidden:forbidden@192.0.2.1/forbidden GENEWAY_S3_ENDPOINT=http://192.0.2.1:9 bash scripts/with-storage.sh vitest run --no-file-parallelism apps/control-plane/src/gate0.2a-migration.integration.test.ts apps/control-plane/src/control-plane.integration.test.ts apps/control-plane/src/recovery.integration.test.ts apps/control-plane/src/capability-release.integration.test.ts apps/control-plane/src/chat.integration.test.ts",
     "test:security": "env GENEWAY_MANAGED_TEST_INFRA=0 DATABASE_URL=postgres://forbidden:forbidden@192.0.2.1/forbidden GENEWAY_S3_ENDPOINT=http://192.0.2.1:9 GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY=ambient-canary GENEWAY_S3_APP_SECRET_ACCESS_KEY=ambient-canary GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY=ambient-canary bash scripts/with-storage.sh vitest run --no-file-parallelism apps/control-plane/src/control-plane.security.test.ts apps/control-plane/src/artifact.security.test.ts",
     "test:storage": "env GENEWAY_MANAGED_TEST_INFRA=0 DATABASE_URL=postgres://forbidden:forbidden@192.0.2.1/forbidden GENEWAY_S3_ENDPOINT=http://192.0.2.1:9 GENEWAY_S3_ADMIN_SECRET_ACCESS_KEY=ambient-canary GENEWAY_S3_APP_SECRET_ACCESS_KEY=ambient-canary GENEWAY_E2E_S3_ORACLE_SECRET_ACCESS_KEY=ambient-canary bash scripts/with-storage.sh vitest run --no-file-parallelism packages/storage apps/control-plane/src/artifact.storage.integration.test.ts apps/control-plane/src/storage-reconciler.integration.test.ts",
     "test:recovery": "node scripts/test-recovery.mjs",
     "test:backup-restore": "node scripts/test-backup-restore.mjs",
     "db:migrate": "tsx scripts/migrate.ts",
     "dev-up": "node scripts/dev-up.mjs",
+    "generate:gate-a0-schemas": "tsx scripts/generate-gate-a0-schemas.ts",
+    "model-gateway:conformance": "tsx services/model-gateway/src/conformance.ts",
+    "test:model-gateway": "vitest run services/model-gateway/src",
     "dev:control-plane": "pnpm --filter @geneway/control-plane dev",
     "verify:foundation": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:integration && pnpm test:security && pnpm build",
     "verify:gate0.1": "pnpm verify:foundation && pnpm test:e2e -- --project=gate0.1",
@@ -27,6 +30,7 @@
     "verify:gate0.2a.3": "pnpm test:recovery && pnpm test:backup-restore && pnpm test:e2e -- --project=gate0.2a-success && pnpm test:e2e -- --project=gate0.2a-negative",
     "verify:gate0.2a": "pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm test:contracts && pnpm test:integration && pnpm test:storage && pnpm test:security && pnpm test:recovery && pnpm test:backup-restore && pnpm test:e2e -- --project=gate0.2a-success && pnpm test:e2e -- --project=gate0.2a-negative && pnpm test:e2e -- --project=gate0.1",
     "verify:gate0.2b.1": "pnpm lint && pnpm typecheck && pnpm test:contracts && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate0.2b-success gate-0.2b-task-workflow-routes.spec.ts",
+    "verify:gate-a0.1": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:model-gateway && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate-a0-live gate-a0-fast-chat.spec.ts",
     "test:e2e": "node scripts/check-e2e-authenticity.mjs && node scripts/run-e2e.mjs",
     "dev:web": "pnpm --filter @geneway/web dev"
   },
@@ -39,7 +43,7 @@
     "fastify": "^5.5.0",
     "json-canonicalize": "^2.0.0",
     "pg": "^8.16.3",
-    "zod": "^4.1.11"
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

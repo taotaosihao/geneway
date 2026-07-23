@@ -67,7 +67,8 @@ function detectLanHosts() {
 export function readConfiguration(environment, lanHosts = detectLanHosts()) {
   const webPort = parsePort(environment, 'GENEWAY_WEB_PORT', 3200);
   const controlPlanePort = parsePort(environment, 'GENEWAY_CONTROL_PLANE_PORT', 3100);
-  if (webPort === controlPlanePort) throw new Error('GENEWAY_WEB_PORT and GENEWAY_CONTROL_PLANE_PORT must be different');
+  const modelGatewayPort = parsePort(environment, 'GENEWAY_MODEL_GATEWAY_PORT', 3150);
+  if (new Set([webPort, controlPlanePort, modelGatewayPort]).size !== 3) throw new Error('Web, Control Plane, and Model Gateway ports must be different');
   const localOrigins = [`http://localhost:${String(webPort)}`, `http://127.0.0.1:${String(webPort)}`];
   const publicOrigins = lanHosts.map((host) => `http://${host}:${String(webPort)}`);
   return {
@@ -76,8 +77,10 @@ export function readConfiguration(environment, lanHosts = detectLanHosts()) {
     webPort,
     controlPlaneBindHost: '127.0.0.1',
     controlPlanePort,
+    modelGatewayBindHost: '127.0.0.1',
+    modelGatewayPort,
     allowedWebOrigins: [...localOrigins, ...publicOrigins],
-    publicUrls: publicOrigins.map((origin) => `${origin}/conversations/new?capability=solution.analysis.v1`),
+    publicUrls: publicOrigins.map((origin) => `${origin}/conversations/new`),
   };
 }
 
@@ -88,6 +91,13 @@ function minimalEnvironment() {
     TMPDIR: process.env.TMPDIR ?? '/tmp',
     LANG: process.env.LANG ?? 'C.UTF-8',
   };
+}
+
+function controlPlaneEnvironment() {
+  return Object.fromEntries(Object.entries(process.env).filter(([name]) => ![
+    'GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE',
+    'GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE',
+  ].includes(name)));
 }
 
 async function portIsAvailable(host, port) {
@@ -186,25 +196,34 @@ async function main() {
     return;
   }
 
-  const [controlPlanePort, webPort] = await Promise.all([
+  const [controlPlanePort, modelGatewayPort, webPort] = await Promise.all([
     resolvePort(['127.0.0.1'], configuration.controlPlanePort, process.env.GENEWAY_CONTROL_PLANE_PORT !== undefined, 'Control Plane'),
+    resolvePort(['127.0.0.1'], configuration.modelGatewayPort, process.env.GENEWAY_MODEL_GATEWAY_PORT !== undefined, 'Model Gateway'),
     resolvePort(configuration.webBindHosts, configuration.webPort, process.env.GENEWAY_WEB_PORT !== undefined, 'Web'),
   ]);
   configuration = readConfiguration({
     ...process.env,
     GENEWAY_CONTROL_PLANE_PORT: String(controlPlanePort),
+    GENEWAY_MODEL_GATEWAY_PORT: String(modelGatewayPort),
     GENEWAY_WEB_PORT: String(webPort),
   });
 
   const runId = `dev-${String(Date.now())}-${String(process.pid)}`;
   const authorityDirectory = mkdtempSync('/tmp/geneway-dev-');
   const tokenFile = `${authorityDirectory}/worker.token`;
+  const gatewayServiceTokenFile = `${authorityDirectory}/model-gateway-service.token`;
+  const gatewayInvocationSecretFile = `${authorityDirectory}/model-gateway-invocation.token`;
   const socketPath = `${authorityDirectory}/worker.sock`;
   const workerInstanceId = `dev-worker-${String(process.pid)}-${String(Date.now())}`;
   const receiptPath = `/tmp/geneway-runs/${runId}/process-boundaries/worker.json`;
   writeFileSync(tokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
   chmodSync(tokenFile, 0o600);
+  writeFileSync(gatewayServiceTokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
+  writeFileSync(gatewayInvocationSecretFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
+  chmodSync(gatewayServiceTokenFile, 0o600);
+  chmodSync(gatewayInvocationSecretFile, 0o600);
 
+  let modelGateway;
   let controlPlane;
   let worker;
   let webs = [];
@@ -245,6 +264,7 @@ async function main() {
     for (const web of [...webs].reverse()) await stopProcess(web, 5_000);
     await stopProcess(worker, 5_000);
     await stopProcess(controlPlane, 20_000);
+    await stopProcess(modelGateway, 5_000);
     if (!authorityDirectory.startsWith('/tmp/geneway-dev-')) throw new Error('Refusing to clean an unexpected authority directory');
     rmSync(authorityDirectory, { recursive: true, force: true });
     const runDirectory = `/tmp/geneway-runs/${runId}`;
@@ -252,6 +272,27 @@ async function main() {
   };
 
   try {
+    process.stdout.write('启动 loopback Model Gateway…\n');
+    modelGateway = startProcess('./node_modules/.bin/tsx', ['services/model-gateway/src/main.ts'], {
+      ...minimalEnvironment(),
+      NODE_ENV: 'development',
+      GENEWAY_MODEL_GATEWAY_PORT: String(configuration.modelGatewayPort),
+      GENEWAY_CONTROL_PLANE_URL: `http://127.0.0.1:${String(configuration.controlPlanePort)}`,
+      GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: gatewayServiceTokenFile,
+      GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE: gatewayInvocationSecretFile,
+      ...(process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE === undefined ? {} : {
+        GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE: process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE,
+      }),
+      ...(process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE === undefined ? {} : {
+        GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE: process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE,
+      }),
+    });
+    watch('Model Gateway', modelGateway);
+    if (await waitForLifecycle(waitFor(
+      async () => (await fetch(`http://127.0.0.1:${String(configuration.modelGatewayPort)}/health`)).ok,
+      'Model Gateway', 30_000, modelGateway,
+    )) === 'shutdown') return;
+
     process.stdout.write(`启动 Control Plane 与临时基础设施（run ${runId}）…\n`);
     controlPlane = startProcess('bash', [
       'scripts/with-storage.sh',
@@ -259,11 +300,14 @@ async function main() {
       `GENEWAY_WEB_ALLOWED_ORIGINS=${configuration.allowedWebOrigins.join(',')}`,
       `GENEWAY_WORKER_SOCKET_PATH=${socketPath}`,
       `GENEWAY_WORKER_TOKEN_FILE=${tokenFile}`,
+      `GENEWAY_MODEL_GATEWAY_URL=http://127.0.0.1:${String(configuration.modelGatewayPort)}`,
+      `GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE=${gatewayServiceTokenFile}`,
+      `GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE=${gatewayInvocationSecretFile}`,
       'GENEWAY_WORKER_LEASE_MS=1000',
       './node_modules/.bin/tsx',
       'apps/control-plane/src/main.ts',
     ], {
-      ...process.env,
+      ...controlPlaneEnvironment(),
       GENEWAY_STORAGE_TARGET_ROLE: 'control-plane',
       GENEWAY_START_STORAGE_RECONCILER: '1',
       GENEWAY_RUN_ID: runId,
@@ -288,6 +332,8 @@ async function main() {
       GENEWAY_WORKER_INSTANCE_ID: workerInstanceId,
       GENEWAY_WORKER_CONSUMER: 'gate0.2a-worker',
       GENEWAY_WORKER_DEPLOYMENT: 'gate0.2a-local',
+      GENEWAY_MODEL_GATEWAY_URL: `http://127.0.0.1:${String(configuration.modelGatewayPort)}`,
+      GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: gatewayServiceTokenFile,
     });
     watch('Worker', worker);
     if (await waitForLifecycle(waitFor(() => {

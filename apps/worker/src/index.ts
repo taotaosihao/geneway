@@ -3,6 +3,7 @@ export {
   readWorkerToken,
   type WorkerIdentity,
 } from './command-client.js';
+export { ChatWorkerCommandClient, type ChatTurnClaim } from './chat-command-client.js';
 export {
   WorkflowInterpreter,
   type ExecutionCommandPort,

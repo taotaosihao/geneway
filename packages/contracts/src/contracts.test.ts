@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   createTaskInputSchema,
+  createChatRunInputSchema,
+  chatRunEventJsonSchema,
+  chatRunEventSchema,
   taskEventProjectionSchema,
   taskListQuerySchema,
   taskListResponseJsonSchema,
@@ -29,6 +32,28 @@ const taskListItem = {
 } as const;
 
 describe('wire contracts', () => {
+  it('defines the Gate A0 chat input and versioned event union from Zod', () => {
+    expect(createChatRunInputSchema.parse({
+      capabilityId: 'xiaowei.chat.v1',
+      content: '  你好  ',
+      clientMessageId: 'client-message-1',
+      tenantId: 'forged',
+      provider: 'forged',
+    })).toEqual({ capabilityId: 'xiaowei.chat.v1', content: '  你好  ', clientMessageId: 'client-message-1' });
+    expect(createChatRunInputSchema.safeParse({
+      capabilityId: 'xiaowei.chat.v1', content: '\0bad', clientMessageId: 'client-message-2',
+    }).success).toBe(false);
+    const event = {
+      schemaVersion: 'chat-run-event/1', eventId: 'event_1', cursor: 1,
+      conversationId: 'conversation_1', modelInvocationId: 'invocation_1', assistantMessageId: 'message_2',
+      sequence: 1, occurredAt: '2026-07-23T00:00:00.000Z', eventType: 'message.delta',
+      delta: '你', checkpoint: '你', contentLength: 3, contentVersion: 1,
+    } as const;
+    expect(chatRunEventSchema.parse(event)).toEqual(event);
+    expect(chatRunEventSchema.safeParse({ ...event, invocationToken: 'secret' }).success).toBe(false);
+    expect(Array.isArray((chatRunEventJsonSchema as unknown as { oneOf?: unknown }).oneOf)).toBe(true);
+  });
+
   it('rejects client-owned identity and unknown fields', () => {
     expect(() => createTaskInputSchema.parse({
       conversationId: 'conv_1',

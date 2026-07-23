@@ -1,5 +1,6 @@
 import { WorkerCommandClient, readWorkerToken } from './command-client.js';
-import { parseE2eHookEndpoint, postE2eHook } from '@geneway/runtime';
+import { ChatRuntimeAdapter, parseE2eHookEndpoint, postE2eHook } from '@geneway/runtime';
+import { ChatWorkerCommandClient } from './chat-command-client.js';
 import { createWorkerProcessReceipt, readWorkerProcessConfiguration } from './process-receipt.js';
 import { runWorkerLoop } from './worker-loop.js';
 
@@ -7,6 +8,15 @@ const configuration = readWorkerProcessConfiguration(process.env);
 const processReceipt = await createWorkerProcessReceipt(configuration);
 const token = await readWorkerToken(configuration.tokenFile);
 const client = new WorkerCommandClient(configuration.socketPath, token, configuration.identity);
+const modelGatewayUrl = process.env.GENEWAY_MODEL_GATEWAY_URL;
+const modelGatewayServiceTokenFile = process.env.GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE;
+if ((modelGatewayUrl === undefined) !== (modelGatewayServiceTokenFile === undefined)) {
+  throw new Error('Model Gateway URL and service token file must be configured together');
+}
+const chat = modelGatewayUrl === undefined || modelGatewayServiceTokenFile === undefined ? undefined : {
+  client: new ChatWorkerCommandClient(configuration.socketPath, token, configuration.identity.workerInstanceId),
+  runtime: new ChatRuntimeAdapter(modelGatewayUrl, await readWorkerToken(modelGatewayServiceTokenFile)),
+};
 const e2eHookUrl = process.env.GENEWAY_E2E_HOOK_URL;
 const e2eHookTokenFile = process.env.GENEWAY_E2E_HOOK_TOKEN_FILE;
 if ((e2eHookUrl === undefined) !== (e2eHookTokenFile === undefined)) throw new Error('E2E hook URL and token file must be configured together');
@@ -32,6 +42,7 @@ try {
   await runWorkerLoop(client, {
     signal: shutdown.signal,
     stepPacingMs: configuration.stepDelayMs,
+    ...(chat === undefined ? {} : { chat }),
     onReady: async () => {
       await processReceipt.markReady();
       process.stdout.write(`GENEWAY_WORKER_READY pid=${String(process.pid)} instance=${configuration.identity.workerInstanceId} consumer=${configuration.identity.consumer} deployment=${configuration.identity.deploymentId}\n`);

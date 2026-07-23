@@ -1,9 +1,11 @@
 import cors from '@fastify/cors';
+import { timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { deriveTrustedLocalPrincipal } from '@geneway/authorization';
 import {
   createTaskInputSchema,
+  createChatRunInputSchema,
   eventCursorSchema,
   evidenceProjectionSchema,
   GenewayError,
@@ -29,6 +31,7 @@ import {
   extractVerifiedDocumentEvidence,
 } from '@geneway/evidence';
 import { ControlPlaneRepository } from './repository.js';
+import { ChatRepository } from './chat-repository.js';
 import { ArtifactRepository } from './artifact-repository.js';
 import { ArtifactService, type ArtifactServiceHooks } from './artifact-service.js';
 
@@ -46,6 +49,13 @@ const idempotencyKey = (request: FastifyRequest): string => {
   return typeof value === 'string' ? value : '';
 };
 
+const bearerMatches = (header: string | undefined, expected: string): boolean => {
+  if (header === undefined || !header.startsWith('Bearer ')) return false;
+  const supplied = Buffer.from(header.slice('Bearer '.length), 'utf8');
+  const wanted = Buffer.from(expected, 'utf8');
+  return supplied.byteLength === wanted.byteLength && timingSafeEqual(supplied, wanted);
+};
+
 const requireMutationOrigin = (request: FastifyRequest, allowedOrigins: ReadonlySet<string>): void => {
   if (request.method !== 'GET' && request.method !== 'HEAD' && request.method !== 'OPTIONS') {
     const origin = request.headers.origin;
@@ -59,6 +69,7 @@ export type ControlPlane = Readonly<{
   repository: ControlPlaneRepository;
   artifactRepository: ArtifactRepository;
   artifactService: ArtifactService | null;
+  chatRepository: ChatRepository;
 }>;
 
 export async function createControlPlane(options: Readonly<{
@@ -69,11 +80,15 @@ export async function createControlPlane(options: Readonly<{
   objectStorage?: ObjectStorage | null;
   principalResolver?: PrincipalResolver;
   artifactServiceHooks?: ArtifactServiceHooks;
+  chatRouteAvailable?: () => Promise<boolean>;
+  modelGatewayAuthority?: Readonly<{ serviceToken: string; invocationTokenSecret: string }>;
+  liveValidationRunId?: string;
 }>): Promise<ControlPlane> {
   const cursorHmacSecret = options.cursorHmacSecret ?? process.env.GENEWAY_CURSOR_HMAC_SECRET;
   if (cursorHmacSecret === undefined) throw new Error('GENEWAY_CURSOR_HMAC_SECRET is required');
   const repository = new ControlPlaneRepository(options.databaseUrl, cursorHmacSecret);
   const artifactRepository = new ArtifactRepository(repository.pool);
+  const chatRepository = new ChatRepository(repository.pool, options.liveValidationRunId);
   const objectStorage = options.objectStorage === undefined ? createObjectStorageFromEnv() : options.objectStorage;
   const artifactService = objectStorage === null
     ? null
@@ -182,6 +197,17 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/health', () => ({ ok: true, service: 'geneway-control-plane' }));
 
+  if (options.modelGatewayAuthority !== undefined) {
+    app.post('/internal/model-gateway/v1/introspect', async (request, reply) => {
+      if (request.headers.origin !== undefined || !bearerMatches(request.headers.authorization, options.modelGatewayAuthority!.serviceToken)) {
+        return reply.status(401).send({ active: false });
+      }
+      const body = z.object({ invocationToken: z.string().min(40).max(8_192) }).strict().parse(request.body);
+      const active = await chatRepository.consumeInvocationToken(body.invocationToken, options.modelGatewayAuthority!.invocationTokenSecret);
+      return active ? { active: true } : reply.status(401).send({ active: false });
+    });
+  }
+
   app.post('/api/conversations', async (request, reply) => {
     const result = await repository.createConversation(request.principal, idempotencyKey(request));
     return reply.status(201).send(result);
@@ -196,7 +222,38 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/conversations/:id', async (request) => {
     const params = z.object({ id: z.string().min(1) }).parse(request.params);
-    return repository.getConversation(request.principal, params.id);
+    return chatRepository.getConversation(request.principal, params.id);
+  });
+
+  app.post('/api/conversations/:id/chat-runs', async (request, reply) => {
+    const params = z.object({ id: z.string().min(1) }).parse(request.params);
+    const input = createChatRunInputSchema.parse(request.body);
+    await chatRepository.assertInternalRelease(request.principal);
+    if (options.chatRouteAvailable === undefined || !await options.chatRouteAvailable()) {
+      throw new GenewayError('MODEL_ROUTE_UNAVAILABLE', '真实模型通道未配置或不可用', 503);
+    }
+    const result = await chatRepository.createChatRun(request.principal, params.id, input, idempotencyKey(request));
+    return reply.status(202).send(result);
+  });
+
+  app.get('/api/conversations/:conversationId/chat-runs/:modelInvocationId/events', async (request, reply) => {
+    const params = z.object({ conversationId: z.string().min(1), modelInvocationId: z.string().min(1) }).parse(request.params);
+    const query = z.object({ cursor: eventCursorSchema.default(0) }).strict().parse(request.query);
+    const events = await chatRepository.getEvents(request.principal, params.conversationId, params.modelInvocationId, query.cursor);
+    if (request.headers.accept?.includes('text/event-stream') === true) {
+      reply.raw.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache, no-store',
+        connection: 'keep-alive',
+        'x-accel-buffering': 'no',
+      });
+      for (const event of events) {
+        reply.raw.write(`id: ${String(event.cursor)}\nevent: ${event.eventType}\ndata: ${JSON.stringify(event)}\n\n`);
+      }
+      reply.raw.end();
+      return reply;
+    }
+    return { events };
   });
 
   app.post('/api/conversations/:id/uploads', async (request, reply) => {
@@ -222,13 +279,28 @@ export async function createControlPlane(options: Readonly<{
     return { documentSnapshots: await artifactService.listSnapshots(request.principal, params.id) };
   });
 
-  app.get('/api/capabilities', () => ([{
-    id: 'solution.analysis.v1', version: 1, name: '方案分析', fixtureOnly: true,
-    simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false,
-  }]));
+  app.get('/api/capabilities', async () => {
+    const chatAvailable = options.chatRouteAvailable !== undefined
+      && await chatRepository.isInternalRelease('tenant_local')
+      && await options.chatRouteAvailable();
+    return [{
+      id: 'xiaowei.chat.v1', version: 1, name: '小纬聊天', status: chatAvailable ? 'internal' : 'NOT_OPEN',
+      simulation: false, toolChoice: 'none', dataClasses: ['C0', 'C1'],
+    }, {
+      id: 'solution.analysis.v1', version: 1, name: '方案分析', fixtureOnly: true,
+      simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false,
+    }];
+  });
 
   app.get('/api/capabilities/:id', async (request, reply) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (params.id === 'xiaowei.chat.v1') {
+      const available = options.chatRouteAvailable !== undefined
+        && await chatRepository.isInternalRelease('tenant_local')
+        && await options.chatRouteAvailable();
+      if (!available) return reply.status(503).send({ error: { code: 'MODEL_ROUTE_UNAVAILABLE', message: '真实模型通道未配置或不可用' } });
+      return { id: params.id, version: 1, logicalModelPolicy: 'general.chat.standard', toolChoice: 'none', status: 'internal' };
+    }
     if (params.id !== 'solution.analysis.v1') return reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'Capability is not open in Gate 0.1' } });
     return { id: params.id, version: 1, workflowNodeCount: 7, fixtureRef: 'fixture:solution-analysis:v1', simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false };
   });
@@ -392,10 +464,11 @@ export async function createControlPlane(options: Readonly<{
   app.all('/api/runtime/:kind', notOpen);
 
   app.addHook('onClose', async () => repository.close());
-  return { app, repository, artifactRepository, artifactService };
+  return { app, repository, artifactRepository, artifactService, chatRepository };
 }
 
 export { ControlPlaneRepository } from './repository.js';
 export { ArtifactRepository } from './artifact-repository.js';
 export { ArtifactService } from './artifact-service.js';
+export { ChatRepository } from './chat-repository.js';
 export { createWorkerCommandApp, WorkerCommandService } from './worker-command-server.js';

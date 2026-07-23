@@ -39,6 +39,8 @@ import {
 } from '@geneway/storage';
 import { hashCanonical, readStoredWorkflowVersion } from '@geneway/workflow';
 import { buildApprovalSubject, type ControlPlaneRepository } from './repository.js';
+import type { ChatRepository } from './chat-repository.js';
+import { registerChatWorkerCommands } from './chat-worker-command.js';
 
 const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
 const CONSUMER = 'gate0.2a-worker' as const;
@@ -1442,10 +1444,23 @@ export function createWorkerCommandApp(input: Readonly<{
   logger?: boolean;
   leaseDurationMs?: number;
   hooks?: WorkerCommandHooks;
+  chatRepository?: ChatRepository;
+  invocationTokenSecret?: string;
 }>): FastifyInstance {
   if (input.token.length < 32) throw new Error('Worker service token must contain at least 32 characters');
   const service = new WorkerCommandService(input.repository, input.storage, input.leaseDurationMs, input.hooks);
   const app = Fastify({ logger: input.logger ?? false, trustProxy: false, bodyLimit: 256 * 1024 });
+  if ((input.chatRepository === undefined) !== (input.invocationTokenSecret === undefined)) {
+    throw new Error('Chat repository and invocation token secret must be configured together');
+  }
+  if (input.chatRepository !== undefined && input.invocationTokenSecret !== undefined) {
+    registerChatWorkerCommands(app, {
+      repository: input.chatRepository,
+      workerToken: input.token,
+      invocationTokenSecret: input.invocationTokenSecret,
+      leaseDurationMs: input.leaseDurationMs ?? 300_000,
+    });
+  }
   app.addHook('onRequest', (request, _reply, done) => {
     if (request.headers.origin !== undefined) {
       done(new GenewayError('WORKER_BROWSER_ORIGIN_DENIED', 'Browser-originated Worker commands are not allowed', 403));

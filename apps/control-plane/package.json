@@ -19,8 +19,9 @@
     "@geneway/storage": "workspace:*",
     "@geneway/workflow": "workspace:*",
     "fastify": "^5.5.0",
+    "json-canonicalize": "^2.0.0",
     "pg": "^8.16.3",
-    "zod": "^4.1.11"
+    "zod": "4.4.3"
   },
   "devDependencies": { "@types/pg": "^8.15.5", "vitest": "^3.2.4" }
 }

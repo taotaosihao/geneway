@@ -772,9 +772,9 @@ export function readProcNetSnapshot(path, pid, expectedStartTicks, dependencies 
   const observeIdentity = dependencies.observeIdentity ?? processIdentityObservation;
   const wait = dependencies.wait ?? (() => Atomics.wait(procNetRetrySignal, 0, 0, 1));
   const identityDisposition = (identity) => {
+    if (identity?.status === 'missing' || (identity?.status === 'present' && identity.state?.startsWith('Z'))) return 'exited';
     if (!/^[1-9][0-9]*$/u.test(expectedStartTicks ?? '') || identity?.status === 'error') return 'error';
-    if (identity?.status === 'missing' || (identity?.status === 'present'
-      && (identity.state?.startsWith('Z') || identity.startTicks !== expectedStartTicks))) return 'exited';
+    if (identity?.status === 'present' && identity.startTicks !== expectedStartTicks) return 'exited';
     return identity?.status === 'present' ? 'bound' : 'error';
   };
   const identityFailure = () => new Error('proc-net process identity could not be bound');

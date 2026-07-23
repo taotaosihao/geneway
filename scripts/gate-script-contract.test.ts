@@ -907,6 +907,28 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
       read: () => { throw new Error('must not read'); }, observeIdentity: () => ({ status: 'missing' }),
       wait: () => { throw new Error('no wait'); },
     })).toEqual({ text: null, failure: null, exited: true, attempts: 1 });
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, null as unknown as string, {
+      read: () => { throw new Error('must not read'); }, observeIdentity: () => ({ status: 'missing' }),
+      wait: () => { throw new Error('no wait'); },
+    })).toEqual({ text: null, failure: null, exited: true, attempts: 1 });
+    for (const startTicks of ['42', '43']) {
+      const unboundLiveIdentity = readProcNetSnapshot('/proc/7/net/udp', 7, null as unknown as string, {
+        read: () => { throw new Error('must not read'); },
+        observeIdentity: () => ({ status: 'present', state: 'S', startTicks }), wait: () => {},
+      });
+      expect(unboundLiveIdentity).toMatchObject({ text: null, exited: false, attempts: 1 });
+      expect(unboundLiveIdentity.failure).toBeInstanceOf(Error);
+    }
+    const unboundIdentityError = readProcNetSnapshot('/proc/7/net/udp', 7, null as unknown as string, {
+      read: () => { throw new Error('must not read'); },
+      observeIdentity: () => ({ status: 'error' }), wait: () => {},
+    });
+    expect(unboundIdentityError).toMatchObject({ text: null, exited: false, attempts: 1 });
+    expect(unboundIdentityError.failure).toBeInstanceOf(Error);
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, null as unknown as string, {
+      read: () => { throw new Error('must not read'); },
+      observeIdentity: () => ({ status: 'present', state: 'Z', startTicks: '42' }), wait: () => {},
+    })).toEqual({ text: null, failure: null, exited: true, attempts: 1 });
     expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
       read: () => { throw new Error('must not read'); },
       observeIdentity: () => ({ status: 'present', state: 'Z', startTicks: '42' }), wait: () => {},

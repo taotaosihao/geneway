@@ -590,6 +590,24 @@ export function isInternalDockerAdapterListener(line, context, commandLines) {
   return scopedIpv6 !== null && context.interfaceNames.includes(scopedIpv6[2]);
 }
 
+export function unreachableCachedDockerNetworkContext(network, liveLinks) {
+  const assignedAddresses = new Set(liveLinks.flatMap((link) => (link.addr_info ?? [])
+    .flatMap((address) => typeof address.local === 'string' ? [address.local] : [])));
+  const identityIsAbsent = (name, identity) => identity !== undefined && !liveLinks.some((link) =>
+    link.ifname === name || link.ifname === `if${String(identity.ifindex)}`
+      || link.ifindex === identity.ifindex || link.address === identity.address);
+  const gatewayAddresses = [...(network.gatewayAddresses ?? [])]
+    .filter((gateway) => !assignedAddresses.has(gateway));
+  const interfaceNames = [];
+  if (typeof network.bridgeName === 'string' && identityIsAbsent(network.bridgeName, network.bridgeIdentity)) {
+    interfaceNames.push(network.bridgeName, `if${String(network.bridgeIdentity.ifindex)}`);
+  }
+  for (const [name, identity] of network.memberIdentities ?? []) {
+    if (identityIsAbsent(name, identity)) interfaceNames.push(name, `if${String(identity.ifindex)}`);
+  }
+  return { gatewayAddresses: [...new Set(gatewayAddresses)].sort(), interfaceNames: [...new Set(interfaceNames)].sort() };
+}
+
 export function unresolvedUnsafeListeners(observations) {
   return [...new Set(observations.flatMap((observation) => observation.unsafe))].sort();
 }
@@ -1578,14 +1596,18 @@ export function proxyEgressMatchesPolicy(processItem, line) {
 function internalDockerListenerContext(processes, knownPolicyPaths = [], dockerObservation) {
   const gatewayAddresses = new Set();
   const interfaceNames = new Set();
+  const allLinkResult = capture(['ip', '-j', 'address', 'show']);
+  let allLiveLinks = null;
+  if (allLinkResult.status === 0 && typeof allLinkResult.stdout === 'string') {
+    try { allLiveLinks = JSON.parse(allLinkResult.stdout); } catch { allLiveLinks = null; }
+  }
   for (const network of dockerObservation?.networks?.values() ?? []) {
     if (!network.inspectObserved || !network.internal || network.driver !== 'bridge'
       || typeof network.bridgeName !== 'string' || network.identityConflict) continue;
     const addressResult = capture(['ip', '-j', 'address', 'show', 'dev', network.bridgeName]);
     const memberResult = capture(['ip', '-j', 'link', 'show', 'master', network.bridgeName]);
-    if (addressResult.status !== 0 || typeof addressResult.stdout !== 'string'
-      || memberResult.status !== 0 || typeof memberResult.stdout !== 'string') continue;
-    try {
+    if (addressResult.status === 0 && typeof addressResult.stdout === 'string'
+      && memberResult.status === 0 && typeof memberResult.stdout === 'string') try {
       const addresses = JSON.parse(addressResult.stdout);
       const members = JSON.parse(memberResult.stdout);
       const bridge = addresses.find((link) => link.ifname === network.bridgeName);
@@ -1605,6 +1627,11 @@ function internalDockerListenerContext(processes, knownPolicyPaths = [], dockerO
       }
     } catch {
       // Unparseable live link evidence cannot earn an adapter-listener exemption.
+    }
+    if (allLiveLinks !== null) {
+      const unreachable = unreachableCachedDockerNetworkContext(network, allLiveLinks);
+      for (const gateway of unreachable.gatewayAddresses) gatewayAddresses.add(gateway);
+      for (const name of unreachable.interfaceNames) interfaceNames.add(name);
     }
   }
   const policyPaths = [...new Set([

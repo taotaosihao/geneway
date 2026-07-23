@@ -47,6 +47,12 @@ interface Gate02bModule {
     wait: () => void;
   }) => { text: string | null; failure: unknown; exited: boolean; attempts: number };
   unresolvedUnsafeListeners: (observations: Array<{ sample: number; unsafe: string[]; validated: string[] }>) => string[];
+  unreachableCachedDockerNetworkContext: (network: {
+    bridgeName: string; bridgeIdentity: { ifindex: number; address: string }; gatewayAddresses: Set<string>;
+    memberIdentities: Map<string, { ifindex: number; address: string }>;
+  }, liveLinks: Array<{ ifname: string; ifindex: number; address: string; addr_info?: Array<{ local?: string }> }>) => {
+    gatewayAddresses: string[]; interfaceNames: string[];
+  };
   stableProcessCommandLine: (pid: number, dependencies: {
     observeIdentity: (pid: number) => { status: string; state?: string; startTicks?: string };
     readCommandLine: (pid: number) => string | null; readExecutable: (pid: number) => string;
@@ -79,7 +85,7 @@ const {
   isRepositoryDockerScope, parseBackupRawReceipt, parseProcNetSockets, parseSocketLine, proxyPolicyPathFromCommandLine,
   networkAttachmentsAfterInspect, observedDockerContainer, processIdentityMatchesProof, proxyTargetBindingMatches, publishedPortsAfterInspect,
   readProcNetSnapshot, requiredGate02bSteps, unresolvedUnsafeListeners,
-  stableProcessCommandLine, storeObservedDockerContainer,
+  stableProcessCommandLine, storeObservedDockerContainer, unreachableCachedDockerNetworkContext,
   sourceBindingsMatch, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
   validateDockerIsolationCommandSafety, validateDockerStructuralIsolationReceipt, validateGate02bStepPlan,
   validateGate02bInvocationTopology, validateProcessLifecycleReceipt, validateProxyIdentityChain, validateProxyInventory, validateProxyPolicy,
@@ -929,6 +935,28 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     ])).toEqual(['adapter', 'lan']);
     expect(unresolvedUnsafeListeners([{ sample: 1, unsafe: ['descendant-only'], validated: [] }]))
       .toEqual(['descendant-only']);
+  });
+
+  it('accepts cached Docker endpoints as unreachable only while no live link reuses their identity or address', () => {
+    const network = {
+      bridgeName: 'br-proof', bridgeIdentity: { ifindex: 40, address: '02:00:00:00:00:40' },
+      gatewayAddresses: new Set(['192.168.96.1']),
+      memberIdentities: new Map([['veth-proof', { ifindex: 41, address: '02:00:00:00:00:41' }]]),
+    };
+    expect(unreachableCachedDockerNetworkContext(network, [])).toEqual({
+      gatewayAddresses: ['192.168.96.1'], interfaceNames: ['br-proof', 'if40', 'if41', 'veth-proof'],
+    });
+    expect(unreachableCachedDockerNetworkContext(network, [
+      { ifname: 'unrelated', ifindex: 90, address: '02:00:00:00:00:90', addr_info: [{ local: '192.168.96.1' }] },
+      { ifname: 'veth-proof', ifindex: 91, address: '02:00:00:00:00:91' },
+      { ifname: 'other-bridge', ifindex: 40, address: '02:00:00:00:00:99' },
+    ])).toEqual({ gatewayAddresses: [], interfaceNames: [] });
+    expect(unreachableCachedDockerNetworkContext(network, [
+      { ifname: 'if41', ifindex: 91, address: '02:00:00:00:00:91' },
+    ]).interfaceNames).not.toContain('if41');
+    expect(unreachableCachedDockerNetworkContext(network, [
+      { ifname: 'if40', ifindex: 90, address: '02:00:00:00:00:90' },
+    ]).interfaceNames).not.toContain('if40');
   });
 
   it('accepts rygel only while one process start identity remains bound around command and executable reads', () => {

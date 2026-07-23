@@ -9,7 +9,20 @@ const { Pool } = pg;
 const databaseUrl = process.env.GENEWAY_E2E_DATABASE_URL;
 const composeProject = process.env.COMPOSE_PROJECT_NAME;
 const s3Port = process.env.GENEWAY_S3_PORT;
-if (databaseUrl === undefined || composeProject === undefined || s3Port === undefined) {
+const forbiddenBrowserPorts = {
+  s3: process.env.GENEWAY_S3_PORT,
+  storageAdapter: process.env.GENEWAY_STORAGE_ADAPTER_PORT,
+  reconciliationAdapter: process.env.GENEWAY_RECONCILIATION_ADAPTER_PORT,
+  postgres: process.env.GENEWAY_POSTGRES_PORT,
+  controlPlane: process.env.GENEWAY_CONTROL_PLANE_PORT,
+  controlPlaneSupervisor: process.env.GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT,
+  workerHealth: process.env.GENEWAY_WORKER_HEALTH_PORT,
+  modelGateway: process.env.GENEWAY_MODEL_GATEWAY_PORT,
+  modelGatewaySupervisor: process.env.GENEWAY_MODEL_GATEWAY_SUPERVISOR_PORT,
+  gateA0Release: process.env.GENEWAY_GATE_A0_RELEASE_PORT,
+};
+if (databaseUrl === undefined || composeProject === undefined || s3Port === undefined
+  || Object.values(forbiddenBrowserPorts).some((port) => port === undefined)) {
   throw new Error('Gate 0.2A storage thin test requires disposable Postgres and storage orchestration');
 }
 
@@ -33,7 +46,15 @@ function storageOracle(action: 'get', key: string): Readonly<{ bytesBase64?: str
   return JSON.parse(executed.stdout) as Readonly<{ bytesBase64?: string; contentSha256?: string | null }>;
 }
 
-test('served UI uploads, verifies, recovers and downloads one private source artifact', async ({ page, request }) => {
+test('served UI uploads, verifies, recovers and downloads one private source artifact', async ({ context, page, request }) => {
+  const privatePorts = new Set(Object.values(forbiddenBrowserPorts));
+  const privateProductRequests: string[] = [];
+  context.on('request', (browserRequest) => {
+    const target = new URL(browserRequest.url());
+    if (['127.0.0.1', '::1', '[::1]'].includes(target.hostname) && privatePorts.has(target.port)) {
+      privateProductRequests.push(target.href);
+    }
+  });
   for (const role of ['browser', 'control-plane', 'vite'] as const) {
     const receipt = JSON.parse(await readFile(`/tmp/geneway-runs/${runId}/process-boundaries/${role}.json`, 'utf8')) as unknown;
     expect(receipt).toEqual(expect.objectContaining({ role, checked: true, forbiddenNamesPresent: [] }));
@@ -148,11 +169,14 @@ test('served UI uploads, verifies, recovers and downloads one private source art
   await expect(page.getByTestId('artifact-hash')).toHaveText(`sha256:${expectedHash}`);
   await expect(page.getByTestId('task-card')).toHaveCount(0);
 
-  const browserCanReachS3 = await page.evaluate(async (port) => {
-    try {
-      await fetch(`http://127.0.0.1:${port}/`, { mode: 'no-cors', signal: AbortSignal.timeout(1_000) });
-      return true;
-    } catch { return false; }
-  }, s3Port);
-  expect(browserCanReachS3).toBe(false);
+  expect(privateProductRequests).toEqual([]);
+  const browserReachability = await page.evaluate<Record<string, boolean>, Readonly<Record<string, string>>>(async (targets) =>
+    Object.fromEntries(await Promise.all(Object.entries(targets).map(async ([role, port]) => {
+      try {
+        await fetch(`http://127.0.0.1:${port}/`, { mode: 'no-cors', signal: AbortSignal.timeout(1_000) });
+        return [role, true] as const;
+      } catch { return [role, false] as const; }
+    }))), forbiddenBrowserPorts as Readonly<Record<string, string>>);
+  expect(browserReachability).toEqual(Object.fromEntries(Object.keys(forbiddenBrowserPorts).map((role) => [role, false])));
+  expect(new Set(privateProductRequests.map((requestUrl) => new URL(requestUrl).port))).toEqual(privatePorts);
 });

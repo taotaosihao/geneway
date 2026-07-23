@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -106,6 +106,15 @@ const { controlledDockerInvocation } = await import('./gate02b-loopback-proxy.mj
 const { assertSecureRunDirectories, e2eRunIdentity } = await import('./e2e-run-identity.mjs') as unknown as {
   assertSecureRunDirectories: (paths: string[]) => void;
   e2eRunIdentity: (parentRunId: string, forwarded: string[], guarded: boolean) => { runId: string; selectedProjects: string[] };
+};
+// @ts-expect-error The executable helper is native ESM; this test consumes its pure receipt parser.
+const { parseBrowserEgressReceipt } = await import('./browser-egress-receipt.mjs') as unknown as {
+  parseBrowserEgressReceipt: (raw: string, expected: { webPort: number; forbiddenPorts: number[]; policyHash: string;
+    requireForbiddenDenials?: boolean; browserExecutableIdentities: Array<{ device: number; inode: number }>;
+    guardLibraryDevice: number; guardLibraryInode: number }) => {
+    passed: boolean; unknownLines: string[]; missingDeniedPorts: number[]; unexpectedAllows: string[];
+    sharedNetworkIdentities: string[];
+  };
 };
 
 describe('Gate 0.2A executable script contract', () => {
@@ -856,6 +865,98 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
       hostname, 'online', 'open', ['3100'], ['tsx-pipe:/tmp/tsx-1000']).passed).toBe(false);
     expect(parseBackupRawReceipt(`${raw}\nDENY call=connect family=2 address=127.0.0.2 port=3100`, hostname, 'online', 'open', ['3100']).passed).toBe(false);
     expect(parseBackupRawReceipt(`${raw}\nUNKNOWN payload`, hostname, 'online', 'open', ['3100']).passed).toBe(false);
+  });
+
+  it('binds browser allow and deny events to one kernel-enforced process identity', () => {
+    const policyHash = 'a'.repeat(64);
+    const expectedIdentity = {
+      browserExecutableIdentities: [{ device: 1, inode: 2 }], guardLibraryDevice: 3, guardLibraryInode: 4,
+    };
+    const raw = [
+      'START pid=101 startTicks=42 hostname=browser-host',
+      `BROWSER_KERNEL pid=101 ppid=90 startTicks=42 policyHash=${policyHash} exeDev=1 exeIno=2 guardDev=3 guardIno=4 status=ENFORCED landlockAbi=7 tcp=allowlisted udp=blocked`,
+      `BROWSER_EVENT pid=101 ppid=90 startTicks=42 policyHash=${policyHash} fd=12 ALLOW call=connect family=2 address=127.0.0.1 port=3200`,
+      `BROWSER_EVENT pid=101 ppid=90 startTicks=42 policyHash=${policyHash} fd=13 DENY call=connect family=2 address=127.0.0.1 port=3300`,
+      `BROWSER_EVENT pid=101 ppid=90 startTicks=42 policyHash=${policyHash} fd=14 DENY call=connect family=10 address=::1 port=3400`,
+    ].join('\n');
+    expect(parseBrowserEgressReceipt(raw, {
+      webPort: 3200, forbiddenPorts: [3300, 3400], policyHash, requireForbiddenDenials: true, ...expectedIdentity,
+    })).toMatchObject({
+      passed: true, unknownLines: [], missingDeniedPorts: [], unexpectedAllows: [], sharedNetworkIdentities: ['101:42'],
+    });
+    expect(parseBrowserEgressReceipt(raw.replace('port=3200', 'port=3300'), {
+      webPort: 3200, forbiddenPorts: [3300, 3400], policyHash, requireForbiddenDenials: true, ...expectedIdentity,
+    }).passed).toBe(false);
+    expect(parseBrowserEgressReceipt(raw.replace(`policyHash=${policyHash} fd=14`, `policyHash=${'b'.repeat(64)} fd=14`), {
+      webPort: 3200, forbiddenPorts: [3300, 3400], policyHash, requireForbiddenDenials: true, ...expectedIdentity,
+    }).passed).toBe(false);
+    expect(parseBrowserEgressReceipt(`${raw}\nMALFORMED`, {
+      webPort: 3200, forbiddenPorts: [3300, 3400], policyHash, requireForbiddenDenials: true, ...expectedIdentity,
+    }).passed).toBe(false);
+    expect(parseBrowserEgressReceipt(raw.replaceAll('pid=101 ppid=90 startTicks=42 policyHash=',
+      'pid=101 ppid=90 startTicks=43 policyHash='), {
+      webPort: 3200, forbiddenPorts: [3300, 3400], policyHash, requireForbiddenDenials: true, ...expectedIdentity,
+    }).passed).toBe(false);
+    const forgedChild = `${raw}\nBROWSER_CHILD pid=102 ppid=101 startTicks=50 inheritedFrom=101 inheritedFromStartTicks=999 kernel=inherited policyHash=${policyHash}`
+      .replaceAll('BROWSER_EVENT pid=101 ppid=90 startTicks=42', 'BROWSER_EVENT pid=102 ppid=101 startTicks=50');
+    expect(parseBrowserEgressReceipt(forgedChild, {
+      webPort: 3200, forbiddenPorts: [3300, 3400], policyHash, requireForbiddenDenials: true, ...expectedIdentity,
+    }).passed).toBe(false);
+  });
+
+  it('enforces the browser TCP allowlist and UDP block against direct kernel syscalls', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'geneway-browser-egress-kernel-'));
+    try {
+      await chmod(root, 0o700);
+      const guard = join(root, 'guard.so');
+      const probe = join(root, 'probe');
+      const receipt = join(root, 'receipt.raw');
+      await writeFile(receipt, '', { mode: 0o600 });
+      const compileGuard = spawnSync('cc', ['-std=gnu17', '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror', '-ldl',
+        '-o', guard, 'scripts/backup-restore/gate02b-egress-guard.c'], { encoding: 'utf8' });
+      expect(compileGuard.status, compileGuard.stderr).toBe(0);
+      const compileProbe = spawnSync('cc', ['-std=gnu17', '-O2', '-Wall', '-Wextra', '-Werror', '-o', probe,
+        'scripts/e2e/browser-egress-kernel-conformance.c'], { encoding: 'utf8' });
+      expect(compileProbe.status, compileProbe.stderr).toBe(0);
+      const policyHash = 'c'.repeat(64);
+      const executed = spawnSync(probe, ['9', '10'], {
+        encoding: 'utf8',
+        env: {
+          PATH: process.env.PATH,
+          LD_PRELOAD: guard,
+          GENEWAY_GATE02B_BROWSER_EGRESS_GUARD: 'required',
+          GENEWAY_GATE02B_BROWSER_POLICY_HASH: policyHash,
+          GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS: '9',
+          GENEWAY_GATE02B_EGRESS_RECEIPT: receipt,
+        },
+      });
+      expect(executed.status, `${executed.stdout}\n${executed.stderr}`).toBe(0);
+      expect(executed.stdout).toMatch(/allowedErrno=(?:0|111) forbiddenErrno=13 udp4Errno=1 udp6Errno=1 rawErrno=1 seqpacketErrno=1 streamUdpErrno=1/u);
+      expect(await readFile(receipt, 'utf8')).toMatch(new RegExp(`policyHash=${policyHash} .*status=ENFORCED`, 'u'));
+      await chmod(receipt, 0o644);
+      const unsafeReceipt = spawnSync(probe, ['9', '10'], { env: {
+        PATH: process.env.PATH, LD_PRELOAD: guard, GENEWAY_GATE02B_BROWSER_EGRESS_GUARD: 'required',
+        GENEWAY_GATE02B_BROWSER_POLICY_HASH: policyHash, GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS: '9',
+        GENEWAY_GATE02B_EGRESS_RECEIPT: receipt,
+      } });
+      expect(unsafeReceipt.status).toBe(126);
+      await chmod(receipt, 0o600);
+      const symlinkReceipt = join(root, 'receipt-link.raw');
+      await symlink(receipt, symlinkReceipt);
+      const linkedReceipt = spawnSync(probe, ['9', '10'], { env: {
+        PATH: process.env.PATH, LD_PRELOAD: guard, GENEWAY_GATE02B_BROWSER_EGRESS_GUARD: 'required',
+        GENEWAY_GATE02B_BROWSER_POLICY_HASH: policyHash, GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS: '9',
+        GENEWAY_GATE02B_EGRESS_RECEIPT: symlinkReceipt,
+      } });
+      expect(linkedReceipt.status).toBe(126);
+      const missingReceipt = spawnSync(probe, ['9', '10'], { env: {
+        PATH: process.env.PATH, LD_PRELOAD: guard, GENEWAY_GATE02B_BROWSER_EGRESS_GUARD: 'required',
+        GENEWAY_GATE02B_BROWSER_POLICY_HASH: policyHash, GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS: '9',
+      } });
+      expect(missingReceipt.status).toBe(126);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects unbounded or scalar artifact roots', () => {

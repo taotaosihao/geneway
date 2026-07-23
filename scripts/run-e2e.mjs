@@ -1,9 +1,11 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { chromium } from '@playwright/test';
 import { assertSecureRunDirectories, e2eRunIdentity, gate02bEnvironmentNames } from './e2e-run-identity.mjs';
+import { browserEgressPolicyHash, parseBrowserEgressReceipt } from './browser-egress-receipt.mjs';
 
 async function findAvailablePort(excludedPorts = new Set()) {
   while (true) {
@@ -85,6 +87,14 @@ const baseEnvironment = {
   ...(process.env.PLAYWRIGHT_BROWSERS_PATH === undefined ? {} : { PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH }),
   ...gate02bEnvironment,
 };
+const browserEgressRawPath = `/tmp/geneway-runs/${runId}/process-boundaries/browser-egress.raw`;
+const browserEgressSummaryPath = `/tmp/geneway-runs/${runId}/process-boundaries/browser-egress.json`;
+const browserForbiddenPorts = [s3Port, storageAdapterPort, reconciliationAdapterPort, postgresPort, controlPlanePort,
+  controlPlaneSupervisorPort, workerHealthPort, modelGatewayPort, modelGatewaySupervisorPort, gateA0ReleasePort]
+  .map(Number);
+const browserEgressConformanceRequired = selectedProjects.includes('gate0.2a-success')
+  && (forwarded.some((argument) => argument.endsWith('gate-0.2a-storage-thin.spec.ts'))
+    || !forwarded.some((argument) => argument.endsWith('.spec.ts')));
 
 function processIdentityMatches(pid, procStartTicks) {
   try {
@@ -137,11 +147,80 @@ function writeSourceBinding() {
   })}\n`, { mode: 0o600 });
 }
 
+function prepareBrowserEgressBoundary() {
+  if (!gate02bGuarded) return null;
+  const libraryPath = gate02bEnvironment.GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY;
+  const libraryStat = lstatSync(libraryPath);
+  if (!libraryPath.startsWith('/') || !libraryStat.isFile() || libraryStat.isSymbolicLink()
+    || libraryStat.uid !== process.getuid() || (libraryStat.mode & 0o022) !== 0 || realpathSync(libraryPath) !== libraryPath) {
+    throw new Error('Guarded browser egress library is unsafe');
+  }
+  const librarySha256 = createHash('sha256').update(readFileSync(libraryPath)).digest('hex');
+  const browserExecutable = chromium.executablePath();
+  const browserExecutables = [browserExecutable, join(dirname(browserExecutable), 'chrome_crashpad_handler')].map((executable) => {
+    const stat = statSync(executable);
+    return { executable, device: stat.dev, inode: stat.ino, sha256: createHash('sha256').update(readFileSync(executable)).digest('hex') };
+  });
+  const policyHash = browserEgressPolicyHash(runId, Number(webPort), librarySha256, browserExecutables);
+  const boundaryDirectory = `/tmp/geneway-runs/${runId}/process-boundaries`;
+  mkdirSync(boundaryDirectory, { recursive: true, mode: 0o700 });
+  chmodSync(`/tmp/geneway-runs/${runId}`, 0o700);
+  chmodSync(boundaryDirectory, 0o700);
+  writeFileSync(browserEgressRawPath, '', { flag: 'wx', mode: 0o600 });
+  const rawReceiptStat = lstatSync(browserEgressRawPath);
+  return { libraryPath, librarySha256, libraryDevice: libraryStat.dev, libraryInode: libraryStat.ino,
+    policyHash, browserExecutable, browserExecutables,
+    rawReceiptDevice: rawReceiptStat.dev, rawReceiptInode: rawReceiptStat.ino };
+}
+
+function verifyBrowserEgressBoundary(prepared) {
+  if (!gate02bGuarded || prepared === null) return { checked: false, passed: true, reason: 'not-guarded' };
+  const rawStat = lstatSync(browserEgressRawPath);
+  if (!rawStat.isFile() || rawStat.isSymbolicLink() || rawStat.uid !== process.getuid()
+    || (rawStat.mode & 0o777) !== 0o600 || rawStat.nlink !== 1
+    || rawStat.dev !== prepared.rawReceiptDevice || rawStat.ino !== prepared.rawReceiptInode
+    || realpathSync(browserEgressRawPath) !== browserEgressRawPath) {
+    throw new Error('Guarded browser egress raw receipt is unsafe');
+  }
+  const browserBoundary = JSON.parse(readFileSync(`/tmp/geneway-runs/${runId}/process-boundaries/browser.json`, 'utf8'));
+  if (browserBoundary?.egressGuard?.required !== true
+    || browserBoundary.egressGuard.receipt !== browserEgressRawPath
+    || browserBoundary.egressGuard.librarySha256 !== prepared.librarySha256
+    || browserBoundary.egressGuard.browserExecutable !== prepared.browserExecutable
+    || JSON.stringify(browserBoundary.egressGuard.browserExecutables) !== JSON.stringify(prepared.browserExecutables)
+    || browserBoundary.egressGuard.policyHash !== prepared.policyHash
+    || JSON.stringify(browserBoundary.egressGuard.allowedPorts) !== JSON.stringify([Number(webPort)])) {
+    throw new Error('Guarded browser policy receipt does not match the runner policy');
+  }
+  const parsed = parseBrowserEgressReceipt(readFileSync(browserEgressRawPath, 'utf8'), {
+    webPort: Number(webPort), forbiddenPorts: browserForbiddenPorts, policyHash: prepared.policyHash,
+    requireForbiddenDenials: browserEgressConformanceRequired,
+    browserExecutableIdentities: prepared.browserExecutables,
+    guardLibraryDevice: prepared.libraryDevice,
+    guardLibraryInode: prepared.libraryInode,
+  });
+  const summary = {
+    ...parsed,
+    runId,
+    rawReceipt: browserEgressRawPath,
+    guardLibrary: prepared.libraryPath,
+    guardLibrarySha256: prepared.librarySha256,
+    allowedWebPort: Number(webPort),
+    forbiddenPorts: browserForbiddenPorts,
+  };
+  writeFileSync(browserEgressSummaryPath, `${JSON.stringify(summary, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+  return summary;
+}
+
 let result;
 let cleanupFailed = false;
 let reportGateFailed = false;
+let browserEgressFailed = false;
+let preparedBrowserEgress = null;
 try {
-  mkdirSync(`/tmp/geneway-runs/${runId}`, { recursive: true });
+  mkdirSync(`/tmp/geneway-runs/${runId}`, { recursive: true, mode: 0o700 });
+  chmodSync(`/tmp/geneway-runs/${runId}`, 0o700);
+  preparedBrowserEgress = prepareBrowserEgressBoundary();
   writeSourceBinding();
   writeFileSync(workerTokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
   chmodSync(workerTokenFile, 0o600);
@@ -189,7 +268,15 @@ try {
     },
     stdio: 'inherit',
   });
-  if (result.status === 0) {
+  try {
+    const browserEgress = verifyBrowserEgressBoundary(preparedBrowserEgress);
+    browserEgressFailed = browserEgress.passed !== true;
+    if (browserEgressFailed) console.error('guarded browser egress receipt failed');
+  } catch (error) {
+    browserEgressFailed = gate02bGuarded;
+    if (gate02bGuarded) console.error(`unable to verify guarded browser egress receipt: ${String(error)}`);
+  }
+  if (result.status === 0 && !browserEgressFailed) {
     const reportGate = spawnSync('pnpm', ['exec', 'tsx', 'scripts/e2e-report-gate.ts',
       `/tmp/geneway-runs/${runId}/playwright-report.json`, JSON.stringify(forwarded)], {
       cwd: new URL('..', import.meta.url), env: baseEnvironment, stdio: 'inherit',
@@ -349,7 +436,7 @@ try {
   })}\n`, { mode: 0o600 });
   if (!authorityCleaned || !modelGatewayAuthorityCleaned) cleanupFailed = true;
 }
-const exitCode = cleanupFailed || reportGateFailed ? 1 : (result?.status ?? 1);
+const exitCode = cleanupFailed || reportGateFailed || browserEgressFailed ? 1 : (result?.status ?? 1);
 if (invocationResultPath !== undefined) {
   assertSecureRunDirectories([
     '/tmp/geneway-runs',

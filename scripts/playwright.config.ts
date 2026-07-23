@@ -1,5 +1,7 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { defineConfig, devices } from '@playwright/test';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { chromium, defineConfig, devices } from '@playwright/test';
 
 const runId = process.env.GENEWAY_RUN_ID ?? 'gate-0.1-local';
 if (!/^[a-zA-Z0-9._-]+$/.test(runId)) throw new Error('GENEWAY_RUN_ID contains unsafe path characters');
@@ -49,18 +51,55 @@ const workerGatewayEnvironment = gateA0Live
     + ` GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE=${shellQuote(modelGatewayServiceTokenFile ?? '')}`
   : '';
 const outputRoot = `/tmp/geneway-runs/${runId}`;
+const gate02bGuarded = process.env.GENEWAY_GATE02B_EGRESS_GUARD === 'required';
+const gate02bGuardLibrary = process.env.GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY;
+if (gate02bGuarded && (gate02bGuardLibrary === undefined || !gate02bGuardLibrary.startsWith('/'))) {
+  throw new Error('Guarded browser launch requires an absolute egress guard library path');
+}
+const browserEgressReceipt = `${outputRoot}/process-boundaries/browser-egress.raw`;
+const browserGuardLibrarySha256 = gate02bGuarded
+  ? createHash('sha256').update(readFileSync(gate02bGuardLibrary ?? '')).digest('hex')
+  : null;
+const browserExecutable = chromium.executablePath();
+const browserExecutables = [browserExecutable, join(dirname(browserExecutable), 'chrome_crashpad_handler')].map((executable) => {
+  const stat = statSync(executable);
+  return { executable, device: stat.dev, inode: stat.ino, sha256: createHash('sha256').update(readFileSync(executable)).digest('hex') };
+});
+const browserPolicyHash = gate02bGuarded
+  ? createHash('sha256').update(JSON.stringify({
+    runId, webPort, browserGuardLibrarySha256, browserExecutables,
+  })).digest('hex')
+  : null;
 const browserEnvironment = {
   PATH: process.env.PATH ?? '/usr/bin:/bin',
   HOME: process.env.HOME ?? '/tmp',
   TMPDIR: process.env.TMPDIR ?? '/tmp',
   LANG: process.env.LANG ?? 'C.UTF-8',
+  ...(gate02bGuarded ? {
+    LD_PRELOAD: gate02bGuardLibrary ?? '',
+    GENEWAY_GATE02B_BROWSER_EGRESS_GUARD: 'required',
+    GENEWAY_GATE02B_BROWSER_POLICY_HASH: browserPolicyHash ?? '',
+    GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS: String(webPort),
+    GENEWAY_GATE02B_EGRESS_RECEIPT: browserEgressReceipt,
+  } : {}),
 };
 const browserEnvironmentNames = Object.keys(browserEnvironment);
 if (browserEnvironmentNames.some((name) => name.startsWith('GENEWAY_S3_') || name.startsWith('GENEWAY_STORAGE_') || name.startsWith('AWS_'))) {
   throw new Error('Browser launch environment contains a forbidden storage credential source');
 }
 mkdirSync(`${outputRoot}/process-boundaries`, { recursive: true });
-writeFileSync(`${outputRoot}/process-boundaries/browser.json`, `${JSON.stringify({ role: 'browser', checked: true, forbiddenNamesPresent: [] })}\n`, { mode: 0o600 });
+writeFileSync(`${outputRoot}/process-boundaries/browser.json`, `${JSON.stringify({
+  role: 'browser', checked: true, forbiddenNamesPresent: [],
+  egressGuard: {
+    required: gate02bGuarded,
+    allowedPorts: gate02bGuarded ? [webPort] : [],
+    receipt: gate02bGuarded ? browserEgressReceipt : null,
+    librarySha256: browserGuardLibrarySha256,
+    browserExecutable,
+    browserExecutables,
+    policyHash: browserPolicyHash,
+  },
+})}\n`, { mode: 0o600 });
 
 export default defineConfig({
   testDir: './e2e',
@@ -75,7 +114,7 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
-    launchOptions: { env: browserEnvironment },
+    launchOptions: { env: browserEnvironment, ...(gate02bGuarded ? { executablePath: browserExecutable } : {}) },
   },
   projects: [
     { name: 'gate0.1', testMatch: /gate-0\.1\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },

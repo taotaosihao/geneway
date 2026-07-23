@@ -11,16 +11,22 @@ const STEP_NAMES: Readonly<Record<string, string>> = {
   solution_design: '生成方案',
   evidence_verify: '核验证据',
   result_quality_check: '检查质量',
+  exception_snapshot_load: '读取异常快照',
+  deterministic_baseline: '计算确定性基线',
+  expert_route_resolve: '解析专家路线',
+  impact_analysis: '分析异常影响',
+  action_recommendation: '生成处置建议',
+  evidence_quality_check: '检查证据质量',
   report_publish: '发布结果',
 };
 
-type RouteState = 'loading' | 'ready' | 'empty' | 'server-error';
+export type RouteState = 'loading' | 'ready' | 'empty' | 'server-error';
 
 function navigationClass(current: string, target: string): string | undefined {
   return current === target ? 'nav-active' : undefined;
 }
 
-function ProductShell({
+export function ProductShell({
   active,
   title,
   subtitle,
@@ -28,7 +34,7 @@ function ProductShell({
   children,
   inspector,
 }: Readonly<{
-  active: 'tasks' | 'workflows';
+  active: 'exceptions' | 'tasks' | 'workflows';
   title: string;
   subtitle: string;
   state: RouteState;
@@ -42,14 +48,15 @@ function ProductShell({
       <nav>
         <b>工作区</b>
         <a href="/conversations/new?capability=solution.analysis.v1">小纬</a>
+        <a className={navigationClass(active, 'exceptions')} href="/exceptions">异常与待办</a>
         <a className={navigationClass(active, 'tasks')} href="/tasks">我的任务</a>
         <a className={navigationClass(active, 'workflows')} href="/workflows">Workflow</a>
         <span>生产日报 · 即将开放</span>
       </nav>
       <section className="operations-preview" aria-label="制造业状态入口">
         <h3>现场动态</h3>
-        <button disabled><span className="signal danger" />设备异常待处理<small>即将开放</small></button>
-        <button disabled><span className="signal warning" />产能进度落后<small>即将开放</small></button>
+        <a href="/exceptions?exceptionType=equipment_alarm"><span className="signal danger" />设备异常待处理<small>模拟数据</small></a>
+        <a href="/exceptions?exceptionType=capacity_progress_lag"><span className="signal warning" />产能进度落后<small>模拟数据</small></a>
       </section>
     </aside>
     <section className="product-pane">
@@ -63,11 +70,11 @@ function ProductShell({
   </main>;
 }
 
-function LoadingState() {
+export function LoadingState() {
   return <section className="route-state route-loading" data-testid="route-loading"><span className="route-spinner" /><div><b>正在读取权威状态</b><p>数据来自 Control Plane，不使用浏览器夹具。</p></div></section>;
 }
 
-function ErrorState({ message }: Readonly<{ message: string }>) {
+export function ErrorState({ message }: Readonly<{ message: string }>) {
   return <section className="route-state route-error" role="alert" data-testid="route-error"><span>!</span><div><b>暂时无法读取</b><p>{message}</p><button type="button" className="secondary" onClick={() => location.reload()}>重新加载</button></div></section>;
 }
 
@@ -75,7 +82,7 @@ function EmptyState({ kind }: Readonly<{ kind: 'task' | 'workflow' }>) {
   return <section className="route-state route-empty" data-testid="route-empty"><span>◇</span><div><b>{kind === 'task' ? '还没有任务' : '还没有 Workflow'}</b><p>{kind === 'task' ? '先与小纬开始一个方案分析任务。' : 'Workflow 会在任务创建并编译后出现在这里。'}</p><a className="primary route-action" href="/conversations/new?capability=solution.analysis.v1">与小纬对话</a></div></section>;
 }
 
-function Fact({ label, value, testId }: Readonly<{ label: string; value: ReactNode; testId?: string }>) {
+export function Fact({ label, value, testId }: Readonly<{ label: string; value: ReactNode; testId?: string }>) {
   return <div><dt>{label}</dt><dd data-testid={testId}>{value}</dd></div>;
 }
 

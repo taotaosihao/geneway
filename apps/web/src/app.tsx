@@ -10,6 +10,8 @@ import { FastChatExperience } from './chat-app.js';
 const STEP_NAMES: Readonly<Record<string, string>> = {
   document_ingest: '读取脱敏材料', requirement_extract: '提取需求', contradiction_check: '检查矛盾', solution_design: '生成方案',
   evidence_verify: '核验来源', result_quality_check: '检查结果质量', report_publish: '发布模拟结论',
+  exception_snapshot_load: '读取异常快照', deterministic_baseline: '计算确定性基线', expert_route_resolve: '解析专家路线',
+  impact_analysis: '分析异常影响', action_recommendation: '生成处置建议', evidence_quality_check: '检查证据质量',
 };
 
 const ROUTES: readonly Readonly<{ value: string; label: string; target: ExpertTarget }>[] = [
@@ -20,6 +22,22 @@ const ROUTES: readonly Readonly<{ value: string; label: string; target: ExpertTa
 
 const TASK_ID_KEY = 'geneway.gate02a.taskId';
 const TASK_CURSOR_KEY = 'geneway.gate02a.cursor';
+
+function taskInputLabel(inputRef: TaskSnapshot['inputRef']): string {
+  if (inputRef.kind === 'document_snapshot') return inputRef.documentSnapshotId;
+  if (inputRef.kind === 'fixture') return inputRef.fixtureRef;
+  return `${inputRef.businessExceptionId} · ${inputRef.sourceVersionId}`;
+}
+
+function taskInputProfile(inputRef: TaskSnapshot['inputRef']): string {
+  if (inputRef.kind === 'document_snapshot') return inputRef.simulationProfile;
+  if (inputRef.kind === 'fixture') return 'legacy fixture';
+  return inputRef.fixtureVersion;
+}
+
+function evidenceAudienceLabel(audience: EvidenceProjection['audience']): string {
+  return `${audience.kind}:${audience.conversationId}`;
+}
 
 let conversationBootstrap: Promise<Conversation> | undefined;
 
@@ -262,6 +280,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
   const taskSourceProjection = documentSnapshots.find((projection) => projection.documentSnapshot.id === taskDocumentSnapshotId);
   const evidenceDocumentSnapshotId = displayedEvidence?.source.kind === 'document_snapshot' ? displayedEvidence.source.documentSnapshotId : undefined;
   const evidenceSourceProjection = documentSnapshots.find((projection) => projection.documentSnapshot.id === evidenceDocumentSnapshotId);
+  const isExceptionTask = task?.capabilityId === 'operations.exception-assist.v1';
 
   const openEvidence = (evidenceId?: string | null) => {
     const targetId = evidenceId ?? task?.evidence[0]?.id;
@@ -282,22 +301,22 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">纬</span><div><strong>geneway</strong><small>制造业数字员工</small></div></div>
         <a className="new-task" href="/conversations/new?capability=solution.analysis.v1" onClick={() => localStorage.clear()}>＋ 新建会话</a>
-        <nav><b>工作区</b><a className="nav-active" href="/conversations/new?capability=solution.analysis.v1">小纬</a><a href="/tasks">我的任务</a><a href="/workflows">Workflow</a><span>生产日报 · 即将开放</span></nav>
+        <nav><b>工作区</b><a className="nav-active" href="/conversations/new?capability=solution.analysis.v1">小纬</a><a href="/exceptions">异常与待办</a><a href="/tasks">我的任务</a><a href="/workflows">Workflow</a><span>生产日报 · 即将开放</span></nav>
         <section className="operations-preview" aria-label="制造业状态入口">
           <h3>现场动态</h3>
-          <button disabled><span className="signal danger" />设备异常待处理<small>即将开放</small></button>
-          <button disabled><span className="signal warning" />产能进度落后<small>即将开放</small></button>
+          <a href="/exceptions?exceptionType=equipment_alarm"><span className="signal danger" />设备异常待处理<small>模拟数据</small></a>
+          <a href="/exceptions?exceptionType=capacity_progress_lag"><span className="signal warning" />产能进度落后<small>模拟数据</small></a>
         </section>
       </aside>
 
       <section className="conversation-pane">
         <header className="topbar"><div><h1>小纬</h1><p>通用数字员工 · 当前为模拟运行</p></div><SimulationNotice /></header>
         <div className="thread" data-testid="message-thread">
-          {(conversation?.messages.length ?? 0) === 0 && <section className="welcome-empty" data-testid="welcome-empty"><div className="avatar">纬</div><div><b>你好，我是小纬</b><p>请上传并明确选择一份只读材料，也可以指定专家或专家团。任何 Workflow 都会先展示并等待批准。</p></div></section>}
+          {(conversation?.messages.length ?? 0) === 0 && <section className="welcome-empty" data-testid="welcome-empty"><div className="avatar">纬</div><div><b>你好，我是小纬</b><p>{isExceptionTask ? '这个私有会话由异常分析任务创建。来源、专家路线、Workflow 与审批均已绑定服务端权威版本。' : '请上传并明确选择一份只读材料，也可以指定专家或专家团。任何 Workflow 都会先展示并等待批准。'}</p></div></section>}
           {conversation?.messages.map((message) => <article className={`message ${message.author}`} key={message.id} data-author={message.author}>
             <div className="avatar">{message.author === 'xiaowei' ? '纬' : '你'}</div><div><b>{message.author === 'xiaowei' ? '小纬' : '你'}</b><p>{message.body}</p></div>
           </article>)}
-          <section className="upload-card" data-testid="artifact-upload-card">
+          {!isExceptionTask && <section className="upload-card" data-testid="artifact-upload-card">
             <div><span className="eyebrow">私有材料库</span><h2>上传分析材料</h2><p>仅接收不超过 1 MiB 的 UTF-8 .txt / .md。上传后请明确选择一份已匹配 Profile 的材料。</p></div>
             <label className={`upload-action${uploading ? ' disabled' : ''}`}>
               {uploading ? '正在校验…' : '选择文件'}
@@ -307,7 +326,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
                 event.target.value = '';
               }} />
             </label>
-          </section>
+          </section>}
           {snapshotReadUnavailable && <section className="artifact-card artifact-card-unavailable" data-testid="artifact-unavailable-card">
             <div className="artifact-title"><div><span className="eyebrow">安全降级</span><h2>材料对象不可用或完整性异常</h2></div><span className="integrity-badge integrity-badge-error">不可用</span></div>
             <p>已隐藏材料名称、标识和摘要。下载与模拟任务均已禁用，请等待管理员完成存储对账。</p>
@@ -327,11 +346,11 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
             </div>
           </section>; })}
           {task !== undefined && <section className="task-card" data-testid="task-card" data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}>
-            <div className="task-title"><div><span className="eyebrow">小纬任务 · simulation=true</span><h2>方案分析流程</h2></div><span className={`status status-${task.status}`}>{task.status}</span></div>
-            <p>本次仅记录路线：{ROUTES.find((item) => item.value === route)?.label ?? task.expertTarget.mode}。本次由统一模拟 Runtime 执行，未调用真实专家；客户消息仍只由小纬发出。</p>
+            <div className="task-title"><div><span className="eyebrow">小纬任务 · simulation=true</span><h2>{task.title}</h2></div><span className={`status status-${task.status}`}>{task.status}</span></div>
+            <p>{isExceptionTask ? '任务绑定版本固定的异常来源与 Evidence。' : `本次仅记录路线：${ROUTES.find((item) => item.value === route)?.label ?? task.expertTarget.mode}。`} 本次由统一模拟 Runtime 执行，专家只作为后端协作者；客户消息仍只由小纬发出。</p>
             <dl className="task-bindings">
-              <div><dt>Snapshot</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.documentSnapshotId : task.inputRef.fixtureRef}</dd></div>
-              <div><dt>Profile</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.simulationProfile : 'legacy fixture'}</dd></div>
+              <div><dt>Snapshot</dt><dd>{taskInputLabel(task.inputRef)}</dd></div>
+              <div><dt>Profile</dt><dd>{taskInputProfile(task.inputRef)}</dd></div>
               <div><dt>Workflow</dt><dd>{task.workflowVersion.id}</dd></div>
               <div><dt>运行边界</dt><dd>simulation={String(task.simulation)} · runtimeMode={task.runtimeMode} · businessDecisionAllowed={String(task.businessDecisionAllowed)}</dd></div>
             </dl>
@@ -348,7 +367,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
             <span className="eyebrow">小纬任务 · 已停止</span><h2>模拟任务已取消</h2><p>不会发布 Claim 或模拟报告。刷新页面后仍可查看该终态。</p>
           </section>}
           {task?.status === 'completed' && <section className="result-card" data-testid="result-card">
-            <span className="eyebrow">小纬结论 · 模拟结果 · 不可用于业务决策</span><h2>方案分析完成</h2>
+            <span className="eyebrow">小纬结论 · 模拟结果 · 不可用于业务决策</span><h2>{isExceptionTask ? '异常分析完成' : '方案分析完成'}</h2>
             {published !== undefined && <div className="claim published" data-testid="published-claim"><b>已核验结论</b><p>{published.text}</p>{evidence !== undefined && <div className="claim-evidence" data-evidence-id={evidence.id}><span>已绑定 Evidence · {evidence.id}</span><button className="secondary" type="button" onClick={() => openEvidence(evidence.id)}>查看证据</button></div>}</div>}
             {rejected !== undefined && <div className="claim rejected" data-testid="rejected-claim"><b>未发布候选</b><p>{rejected.text}</p><small>缺少可访问来源，已由 Evidence publish guard 拒绝。</small></div>}
           </section>}
@@ -371,16 +390,16 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
           </section>}
           {error !== undefined && <div className="error" role="alert">{error}</div>}
         </div>
-        <div className="composer-zone">
+        {!isExceptionTask && <div className="composer-zone">
           <div className="composer-tools"><label>专家路线<select aria-label="专家路线" value={route} disabled={task !== undefined || working} onChange={(event) => setRoute(event.target.value)}>{ROUTES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></label><span>{selectedSnapshot === undefined ? '请先选择一份可执行材料' : `已选：${selectedSnapshot.documentSnapshot.displayName} · 执行前仍需审批`}</span></div>
           <ComposerPrimitive.Root className="composer"><ComposerPrimitive.Input aria-label="给小纬发消息" placeholder={selectedSnapshot === undefined ? '请先在上方选择可执行材料' : '请小纬分析这份脱敏材料…'} disabled={task !== undefined || working || selectedSnapshot === undefined} /><ComposerPrimitive.Send className="send" disabled={task !== undefined || working || selectedSnapshot === undefined}>{working ? '处理中' : '发送'}</ComposerPrimitive.Send></ComposerPrimitive.Root>
-        </div>
+        </div>}
       </section>
 
       <aside className="inspector">
         <div className="inspector-head"><span>任务检查器</span><button onClick={() => setWorkflowOpen((value) => !value)}>{workflowOpen ? '收起' : '展开'}</button></div>
         {task === undefined && snapshotReadUnavailable ? <div className="snapshot-inspector" data-testid="snapshot-unavailable-inspector"><span className="eyebrow">材料权威状态</span><h2>对象不可用 / 完整性异常</h2><p>敏感元数据已隐藏，下载与执行已禁用。</p></div> : task === undefined && documentSnapshots.length === 0 ? <div className="empty-inspector"><span>◇</span><p>上传材料或发送问题后，这里会显示存储校验、Workflow、审批、证据和安全边界。</p></div> : task === undefined ? <div className="snapshot-inspector" data-testid="snapshot-inspector"><span className="eyebrow">材料权威状态</span><h2>{documentSnapshots.length} 份已校验材料</h2>{documentSnapshots.map(({ documentSnapshot: snapshot, artifactState }) => <dl className="facts" key={snapshot.id}><div><dt>Artifact</dt><dd>{snapshot.artifactId}</dd></div><div><dt>Manifest</dt><dd>{snapshot.manifestId}</dd></div><div><dt>Snapshot</dt><dd>{snapshot.id}</dd></div><div><dt>Integrity</dt><dd>{artifactState.integrity}</dd></div></dl>)}</div> : <>
-          <dl className="facts"><div><dt>Task</dt><dd data-testid="task-id">{task.id}</dd></div><div><dt>Approval</dt><dd data-testid="approval-id">{task.approval.id}</dd></div><div><dt>Approval digest</dt><dd data-testid="conversation-approval-digest">{task.approval.subjectDigest}</dd></div><div><dt>输入</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.documentSnapshotId : task.inputRef.fixtureRef}</dd></div><div><dt>Profile</dt><dd>{task.inputRef.kind === 'document_snapshot' ? task.inputRef.simulationProfile : 'legacy fixture'}</dd></div><div><dt>状态</dt><dd>{task.status}</dd></div><div><dt>事件游标</dt><dd data-testid="sse-cursor">{cursor}</dd></div></dl>
+          <dl className="facts"><div><dt>Task</dt><dd data-testid="task-id">{task.id}</dd></div><div><dt>Approval</dt><dd data-testid="approval-id">{task.approval.id}</dd></div><div><dt>Approval digest</dt><dd data-testid="conversation-approval-digest">{task.approval.subjectDigest}</dd></div><div><dt>输入</dt><dd>{taskInputLabel(task.inputRef)}</dd></div><div><dt>Profile</dt><dd>{taskInputProfile(task.inputRef)}</dd></div><div><dt>状态</dt><dd>{task.status}</dd></div><div><dt>事件游标</dt><dd data-testid="sse-cursor">{cursor}</dd></div></dl>
           <SimulationNotice />
           <Dialog.Root open={workflowOpen} onOpenChange={setWorkflowOpen}><Dialog.Trigger className="secondary">打开流程图</Dialog.Trigger><Dialog.Portal><Dialog.Backdrop className="dialog-backdrop" /><Dialog.Popup className="workflow-dialog"><Dialog.Title>固定 Workflow</Dialog.Title><Dialog.Description>只读图来自 Control Plane 中不可变 WorkflowVersion；审批与 Interpreter 使用同一 id + hash。</Dialog.Description><div className="workflow-meta"><code data-testid="workflow-id">{workflow?.id}</code><code data-testid="workflow-hash">{workflow?.hash}</code></div><div className="flow-wrap" data-testid="workflow-graph"><ReactFlow nodes={graph.nodes} edges={graph.edges} fitView nodesDraggable={false} nodesConnectable={false} elementsSelectable><Background /><Controls showInteractive={false} /></ReactFlow></div><Dialog.Close className="primary">关闭</Dialog.Close></Dialog.Popup></Dialog.Portal></Dialog.Root>
         </>}
@@ -397,7 +416,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
                 <div><dt>Evidence</dt><dd>{displayedEvidence.id}</dd></div>
                 <div><dt>数据范围</dt><dd>{displayedEvidence.resourceScope}</dd></div>
                 <div><dt>数据等级</dt><dd>{displayedEvidence.dataClass}</dd></div>
-                <div><dt>受众</dt><dd>{displayedEvidence.audience}</dd></div>
+                <div><dt>受众</dt><dd>{evidenceAudienceLabel(displayedEvidence.audience)}</dd></div>
               </dl>
               <section className="evidence-excerpt"><span>来源片段</span><p>{displayedEvidence.excerpt ?? '正在从权威原件重新读取…'}</p><code>excerpt sha256:{displayedEvidence.excerptSha256}</code></section>
               {displayedEvidence.source.kind === 'document_snapshot' ? <section className="evidence-source">
@@ -410,7 +429,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
                   <div><dt>Snapshot hash</dt><dd>{displayedEvidence.source.snapshotSha256}</dd></div>
                 </dl>
                 {evidenceSourceProjection?.artifactState.downloadAllowed === true && <a className="evidence-download" href={evidenceSourceProjection.downloadUrl}>下载并核对原件</a>}
-              </section> : <section className="evidence-source"><h3>Legacy fixture 定位</h3><dl className="evidence-facts"><div><dt>Fixture</dt><dd>{displayedEvidence.source.fixtureRef} v{displayedEvidence.source.fixtureVersion}</dd></div><div><dt>Source</dt><dd>{displayedEvidence.source.sourceId}</dd></div></dl></section>}
+              </section> : displayedEvidence.source.kind === 'legacy_fixture' ? <section className="evidence-source"><h3>Legacy fixture 定位</h3><dl className="evidence-facts"><div><dt>Fixture</dt><dd>{displayedEvidence.source.fixtureRef} v{displayedEvidence.source.fixtureVersion}</dd></div><div><dt>Source</dt><dd>{displayedEvidence.source.sourceId}</dd></div></dl></section> : <section className="evidence-source"><h3>BusinessExceptionSourceSnapshot 定位</h3><dl className="evidence-facts"><div><dt>BusinessException</dt><dd>{displayedEvidence.source.businessExceptionId}</dd></div><div><dt>Source version</dt><dd>{displayedEvidence.source.sourceVersionId}</dd></div><div><dt>JSON pointer</dt><dd>{displayedEvidence.source.jsonPointer}</dd></div><div><dt>Canonicalization</dt><dd>{displayedEvidence.source.canonicalizationVersion}</dd></div><div><dt>Source hash</dt><dd>{displayedEvidence.source.sourceSha256}</dd></div><div><dt>Value hash</dt><dd>{displayedEvidence.source.valueSha256}</dd></div></dl></section>}
               <section className="lineage-list"><h3>Lineage</h3>{evidenceLineage.length === 0 ? <p>当前投影没有关联血缘记录。</p> : evidenceLineage.map((item) => <div key={item.id}><code>{item.fromKind}:{item.fromId}</code><span>{item.relation}</span><code>{item.toKind}:{item.toId}</code></div>)}</section>
             </>}
           </Dialog.Popup>

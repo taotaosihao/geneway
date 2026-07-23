@@ -82,7 +82,7 @@ export default defineConfig({
     { name: 'gate0.2a-success', testMatch: /gate-0\.2a-(?:storage-thin|evidence|recovery)\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate0.2a-negative', testMatch: /gate-0\.2a-negative\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate0.2a-recovery-multiprocess', testMatch: /gate-0\.2a-recovery(?:-matrix)?\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
-    { name: 'gate0.2b-success', testMatch: /gate-0\.2b-task-workflow-routes\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
+    { name: 'gate0.2b-success', testMatch: /gate-0\.2b-(?:task-workflow-routes|exception-flow)\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate-a0-live', testMatch: /gate-a0-(?:fast-chat|context-cancel)\.spec\.ts/u, use: {
       ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, trace: 'on',
     } },

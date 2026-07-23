@@ -1,0 +1,1790 @@
+{
+  "schemaVersion": "geneway-gate-0.2b-public-wire/1",
+  "schemas": {
+    "BusinessExceptionRef": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "exceptionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceVersionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceSystem": {
+          "type": "string",
+          "const": "fixture-manufacturing"
+        },
+        "exceptionType": {
+          "type": "string",
+          "enum": [
+            "capacity_progress_lag",
+            "equipment_alarm"
+          ]
+        },
+        "sourceObjectRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "detectionWindow": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fixtureVersion": {
+          "type": "string",
+          "enum": [
+            "gate0.2b-capacity-lag/1",
+            "gate0.2b-equipment-alarm/1"
+          ]
+        },
+        "fixtureSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "canonicalizationVersion": {
+          "type": "string",
+          "const": "rfc8785-jcs/1"
+        },
+        "resourceScope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dataClass": {
+          "type": "string",
+          "const": "C1"
+        }
+      },
+      "required": [
+        "exceptionId",
+        "sourceVersionId",
+        "sourceSystem",
+        "exceptionType",
+        "sourceObjectRef",
+        "detectionWindow",
+        "fixtureVersion",
+        "fixtureSha256",
+        "canonicalizationVersion",
+        "resourceScope",
+        "dataClass"
+      ],
+      "additionalProperties": false
+    },
+    "BusinessExceptionSourceSnapshot": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "businessExceptionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceVersionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonicalBytes": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonicalSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "canonicalizationVersion": {
+          "type": "string",
+          "const": "rfc8785-jcs/1"
+        },
+        "fixtureVersion": {
+          "type": "string",
+          "enum": [
+            "gate0.2b-capacity-lag/1",
+            "gate0.2b-equipment-alarm/1"
+          ]
+        },
+        "sourceSystem": {
+          "type": "string",
+          "const": "fixture-manufacturing"
+        },
+        "sourceObjectRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "detectionWindow": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resourceScope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dataClass": {
+          "type": "string",
+          "const": "C1"
+        },
+        "audience": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resource_exception"
+            },
+            "businessExceptionId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "resourceScope": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dataClass": {
+              "type": "string",
+              "const": "C1"
+            }
+          },
+          "required": [
+            "kind",
+            "businessExceptionId",
+            "resourceScope",
+            "dataClass"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "businessExceptionId",
+        "sourceVersionId",
+        "canonicalBytes",
+        "canonicalSha256",
+        "canonicalizationVersion",
+        "fixtureVersion",
+        "sourceSystem",
+        "sourceObjectRef",
+        "detectionWindow",
+        "resourceScope",
+        "dataClass",
+        "audience"
+      ],
+      "additionalProperties": false
+    },
+    "ExceptionAudience": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "resource_exception"
+            },
+            "businessExceptionId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "resourceScope": {
+              "type": "string",
+              "minLength": 1
+            },
+            "dataClass": {
+              "type": "string",
+              "const": "C1"
+            }
+          },
+          "required": [
+            "kind",
+            "businessExceptionId",
+            "resourceScope",
+            "dataClass"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "private_conversation"
+            },
+            "conversationId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "conversationId"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "BusinessExceptionListQuery": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "acknowledged"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "exceptionType": {
+          "type": "string",
+          "enum": [
+            "capacity_progress_lag",
+            "equipment_alarm"
+          ]
+        },
+        "resourceScope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sort": {
+          "default": "detectedAt",
+          "type": "string",
+          "enum": [
+            "detectedAt",
+            "severity"
+          ]
+        },
+        "direction": {
+          "default": "desc",
+          "type": "string",
+          "const": "desc"
+        },
+        "limit": {
+          "default": 25,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "sort",
+        "direction",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "BusinessExceptionListResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "exceptions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "exceptionType": {
+                "type": "string",
+                "enum": [
+                  "capacity_progress_lag",
+                  "equipment_alarm"
+                ]
+              },
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "acknowledged"
+                ]
+              },
+              "resourceScope": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dataClass": {
+                "type": "string",
+                "const": "C1"
+              },
+              "detectedAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              },
+              "aggregateVersion": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "simulation": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "id",
+              "exceptionType",
+              "summary",
+              "severity",
+              "status",
+              "resourceScope",
+              "dataClass",
+              "detectedAt",
+              "aggregateVersion",
+              "simulation"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 32,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "asOf": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "queryVersion": {
+          "type": "string",
+          "const": "business-exceptions.list.v1"
+        }
+      },
+      "required": [
+        "exceptions",
+        "nextCursor",
+        "asOf",
+        "queryVersion"
+      ],
+      "additionalProperties": false
+    },
+    "BusinessExceptionDetail": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exceptionType": {
+          "type": "string",
+          "enum": [
+            "capacity_progress_lag",
+            "equipment_alarm"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "acknowledged"
+          ]
+        },
+        "resourceScope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dataClass": {
+          "type": "string",
+          "const": "C1"
+        },
+        "detectedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "aggregateVersion": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "simulation": {
+          "type": "boolean",
+          "const": true
+        },
+        "sourceObjectRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "detectionWindow": {
+          "type": "string",
+          "minLength": 1
+        },
+        "acknowledgedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ownerDisplayState": {
+          "type": "string",
+          "enum": [
+            "unassigned",
+            "mine",
+            "assigned"
+          ]
+        },
+        "analysisDisplayState": {
+          "type": "string",
+          "enum": [
+            "not_requested",
+            "task_bound"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sourceVersionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sourceSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "canonicalizationVersion": {
+                "type": "string",
+                "const": "rfc8785-jcs/1"
+              },
+              "jsonPointer": {
+                "type": "string",
+                "pattern": "^\\/.*"
+              },
+              "value": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "valueSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "sourceVersionId",
+              "sourceSha256",
+              "canonicalizationVersion",
+              "jsonPointer",
+              "value",
+              "valueSha256"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "id",
+        "exceptionType",
+        "summary",
+        "severity",
+        "status",
+        "resourceScope",
+        "dataClass",
+        "detectedAt",
+        "aggregateVersion",
+        "simulation",
+        "sourceObjectRef",
+        "detectionWindow",
+        "acknowledgedAt",
+        "ownerDisplayState",
+        "analysisDisplayState",
+        "evidence"
+      ],
+      "additionalProperties": false
+    },
+    "AcknowledgeBusinessExceptionInput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "aggregateVersion": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "aggregateVersion"
+      ],
+      "additionalProperties": false
+    },
+    "CreateExceptionAnalysisTaskInput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "aggregateVersion": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "requestedExpertTarget": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "auto"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "expert"
+                },
+                "expertId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "mode",
+                "expertId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "team"
+                },
+                "teamId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "mode",
+                "teamId"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "aggregateVersion",
+        "requestedExpertTarget",
+        "idempotencyKey"
+      ],
+      "additionalProperties": false
+    },
+    "CreateExceptionAnalysisTaskResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "conversationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workflowVersion": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "id",
+            "hash"
+          ],
+          "additionalProperties": false
+        },
+        "approvalSubjectDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "simulation": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "taskId",
+        "conversationId",
+        "workflowVersion",
+        "approvalSubjectDigest",
+        "simulation"
+      ],
+      "additionalProperties": false
+    },
+    "WorkerDelivery": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "tenantId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "consumer": {
+          "type": "string",
+          "const": "gate0.2a-worker"
+        },
+        "deploymentId": {
+          "type": "string",
+          "const": "gate0.2a-local"
+        },
+        "workerInstanceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "lease": {
+          "type": "object",
+          "properties": {
+            "eventId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "deliveryId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "attemptId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "fencingToken": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "eventId",
+            "deliveryId",
+            "attemptId",
+            "fencingToken"
+          ],
+          "additionalProperties": false
+        },
+        "inputRef": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "fixture"
+                },
+                "fixtureRef": {
+                  "type": "string",
+                  "const": "fixture:solution-analysis:v1"
+                },
+                "fixtureVersion": {
+                  "type": "number",
+                  "const": 1
+                }
+              },
+              "required": [
+                "kind",
+                "fixtureRef",
+                "fixtureVersion"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "document_snapshot"
+                },
+                "documentSnapshotId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "artifactId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "manifestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "contentSha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "simulationProfile": {
+                  "type": "string",
+                  "const": "solution-analysis-demo/v2"
+                },
+                "profileRegistryVersion": {
+                  "type": "string",
+                  "const": "gate0.2a-profile-registry/1"
+                },
+                "resourceScope": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dataClass": {
+                  "type": "string",
+                  "const": "C1"
+                },
+                "audience": {
+                  "type": "string",
+                  "pattern": "^conversation:.*"
+                }
+              },
+              "required": [
+                "kind",
+                "documentSnapshotId",
+                "artifactId",
+                "manifestId",
+                "contentSha256",
+                "simulationProfile",
+                "profileRegistryVersion",
+                "resourceScope",
+                "dataClass",
+                "audience"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "business_exception_snapshot"
+                },
+                "businessExceptionId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sourceVersionId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sourceSha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "canonicalizationVersion": {
+                  "type": "string",
+                  "const": "rfc8785-jcs/1"
+                },
+                "fixtureVersion": {
+                  "type": "string",
+                  "enum": [
+                    "gate0.2b-capacity-lag/1",
+                    "gate0.2b-equipment-alarm/1"
+                  ]
+                },
+                "sourceSystem": {
+                  "type": "string",
+                  "const": "fixture-manufacturing"
+                },
+                "sourceObjectRef": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "detectionWindow": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "resourceScope": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dataClass": {
+                  "type": "string",
+                  "const": "C1"
+                },
+                "sourceAudience": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "resource_exception"
+                    },
+                    "businessExceptionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "resourceScope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "dataClass": {
+                      "type": "string",
+                      "const": "C1"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "businessExceptionId",
+                    "resourceScope",
+                    "dataClass"
+                  ],
+                  "additionalProperties": false
+                },
+                "taskAudience": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "private_conversation"
+                    },
+                    "conversationId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "conversationId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "kind",
+                "businessExceptionId",
+                "sourceVersionId",
+                "sourceSha256",
+                "canonicalizationVersion",
+                "fixtureVersion",
+                "sourceSystem",
+                "sourceObjectRef",
+                "detectionWindow",
+                "resourceScope",
+                "dataClass",
+                "sourceAudience",
+                "taskAudience"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "workflow": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "canonicalizationVersion": {
+              "type": "string",
+              "const": "RFC8785/JCS-1"
+            },
+            "canonicalPayload": {}
+          },
+          "required": [
+            "id",
+            "hash",
+            "canonicalizationVersion",
+            "canonicalPayload"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "tenantId",
+        "taskId",
+        "consumer",
+        "deploymentId",
+        "workerInstanceId",
+        "lease",
+        "inputRef",
+        "workflow"
+      ],
+      "additionalProperties": false
+    },
+    "WorkerInputContent": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "fixture"
+            },
+            "inputRef": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "fixture"
+                },
+                "fixtureRef": {
+                  "type": "string",
+                  "const": "fixture:solution-analysis:v1"
+                },
+                "fixtureVersion": {
+                  "type": "number",
+                  "const": 1
+                }
+              },
+              "required": [
+                "kind",
+                "fixtureRef",
+                "fixtureVersion"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "kind",
+            "inputRef"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "document_snapshot"
+            },
+            "inputRef": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "document_snapshot"
+                },
+                "documentSnapshotId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "artifactId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "manifestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "contentSha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "simulationProfile": {
+                  "type": "string",
+                  "const": "solution-analysis-demo/v2"
+                },
+                "profileRegistryVersion": {
+                  "type": "string",
+                  "const": "gate0.2a-profile-registry/1"
+                },
+                "resourceScope": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dataClass": {
+                  "type": "string",
+                  "const": "C1"
+                },
+                "audience": {
+                  "type": "string",
+                  "pattern": "^conversation:.*"
+                }
+              },
+              "required": [
+                "kind",
+                "documentSnapshotId",
+                "artifactId",
+                "manifestId",
+                "contentSha256",
+                "simulationProfile",
+                "profileRegistryVersion",
+                "resourceScope",
+                "dataClass",
+                "audience"
+              ],
+              "additionalProperties": false
+            },
+            "bytesBase64": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "inputRef",
+            "bytesBase64"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "business_exception_snapshot"
+            },
+            "inputRef": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "business_exception_snapshot"
+                },
+                "businessExceptionId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sourceVersionId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sourceSha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "canonicalizationVersion": {
+                  "type": "string",
+                  "const": "rfc8785-jcs/1"
+                },
+                "fixtureVersion": {
+                  "type": "string",
+                  "enum": [
+                    "gate0.2b-capacity-lag/1",
+                    "gate0.2b-equipment-alarm/1"
+                  ]
+                },
+                "sourceSystem": {
+                  "type": "string",
+                  "const": "fixture-manufacturing"
+                },
+                "sourceObjectRef": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "detectionWindow": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "resourceScope": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dataClass": {
+                  "type": "string",
+                  "const": "C1"
+                },
+                "sourceAudience": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "resource_exception"
+                    },
+                    "businessExceptionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "resourceScope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "dataClass": {
+                      "type": "string",
+                      "const": "C1"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "businessExceptionId",
+                    "resourceScope",
+                    "dataClass"
+                  ],
+                  "additionalProperties": false
+                },
+                "taskAudience": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "private_conversation"
+                    },
+                    "conversationId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "conversationId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "kind",
+                "businessExceptionId",
+                "sourceVersionId",
+                "sourceSha256",
+                "canonicalizationVersion",
+                "fixtureVersion",
+                "sourceSystem",
+                "sourceObjectRef",
+                "detectionWindow",
+                "resourceScope",
+                "dataClass",
+                "sourceAudience",
+                "taskAudience"
+              ],
+              "additionalProperties": false
+            },
+            "canonicalBytes": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "inputRef",
+            "canonicalBytes"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AttemptOutputCandidatePayload": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "document_snapshot"
+                  },
+                  "candidateKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "documentSnapshotId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "startByte": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "endByteExclusive": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "kind",
+                  "candidateKey",
+                  "documentSnapshotId",
+                  "startByte",
+                  "endByteExclusive"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "legacy_fixture"
+                  },
+                  "candidateKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "fixtureRef": {
+                    "type": "string",
+                    "const": "fixture:solution-analysis:v1"
+                  },
+                  "fixtureVersion": {
+                    "type": "number",
+                    "const": 1
+                  },
+                  "sourceId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "candidateKey",
+                  "fixtureRef",
+                  "fixtureVersion",
+                  "sourceId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "business_exception_snapshot"
+                  },
+                  "candidateKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "businessExceptionId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sourceVersionId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sourceSha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "canonicalizationVersion": {
+                    "type": "string",
+                    "const": "rfc8785-jcs/1"
+                  },
+                  "jsonPointer": {
+                    "type": "string",
+                    "pattern": "^\\/.*"
+                  },
+                  "valueSha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "candidateKey",
+                  "businessExceptionId",
+                  "sourceVersionId",
+                  "sourceSha256",
+                  "canonicalizationVersion",
+                  "jsonPointer",
+                  "valueSha256"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "claims": {
+          "minItems": 1,
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "candidateKey": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "evidenceCandidateKey": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "candidateKey",
+              "text",
+              "evidenceCandidateKey"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "result": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "completed"
+                },
+                "summary": {
+                  "type": "string"
+                },
+                "stepSummaries": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "simulation": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "runtimeMode": {
+                  "type": "string",
+                  "const": "fake"
+                },
+                "businessDecisionAllowed": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "kind",
+                "summary",
+                "stepSummaries",
+                "simulation",
+                "runtimeMode",
+                "businessDecisionAllowed"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "failed"
+                },
+                "code": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "simulation": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "runtimeMode": {
+                  "type": "string",
+                  "const": "fake"
+                },
+                "businessDecisionAllowed": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "simulation",
+                "runtimeMode",
+                "businessDecisionAllowed"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "canceled"
+                },
+                "code": {
+                  "type": "string",
+                  "const": "USER_CANCELED"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "simulation": {
+                  "type": "boolean",
+                  "const": true
+                },
+                "runtimeMode": {
+                  "type": "string",
+                  "const": "fake"
+                },
+                "businessDecisionAllowed": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "kind",
+                "code",
+                "message",
+                "simulation",
+                "runtimeMode",
+                "businessDecisionAllowed"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "evidence",
+        "claims",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    "EvidenceLocatorCandidate": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "document_snapshot"
+            },
+            "candidateKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "documentSnapshotId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "startByte": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "endByteExclusive": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "candidateKey",
+            "documentSnapshotId",
+            "startByte",
+            "endByteExclusive"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "legacy_fixture"
+            },
+            "candidateKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "fixtureRef": {
+              "type": "string",
+              "const": "fixture:solution-analysis:v1"
+            },
+            "fixtureVersion": {
+              "type": "number",
+              "const": 1
+            },
+            "sourceId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "candidateKey",
+            "fixtureRef",
+            "fixtureVersion",
+            "sourceId"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "business_exception_snapshot"
+            },
+            "candidateKey": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100
+            },
+            "businessExceptionId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourceVersionId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourceSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "canonicalizationVersion": {
+              "type": "string",
+              "const": "rfc8785-jcs/1"
+            },
+            "jsonPointer": {
+              "type": "string",
+              "pattern": "^\\/.*"
+            },
+            "valueSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "kind",
+            "candidateKey",
+            "businessExceptionId",
+            "sourceVersionId",
+            "sourceSha256",
+            "canonicalizationVersion",
+            "jsonPointer",
+            "valueSha256"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "EvidenceSource": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "legacy_fixture"
+            },
+            "fixtureRef": {
+              "type": "string",
+              "const": "fixture:solution-analysis:v1"
+            },
+            "fixtureVersion": {
+              "type": "number",
+              "const": 1
+            },
+            "sourceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "excerptSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "kind",
+            "fixtureRef",
+            "fixtureVersion",
+            "sourceId",
+            "excerptSha256"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "document_snapshot"
+            },
+            "documentSnapshotId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "artifactId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "startByte": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "endByteExclusive": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "snapshotSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "excerptSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "extractionVersion": {
+              "type": "string",
+              "const": "raw-utf8-byte-range/1"
+            }
+          },
+          "required": [
+            "kind",
+            "documentSnapshotId",
+            "artifactId",
+            "startByte",
+            "endByteExclusive",
+            "snapshotSha256",
+            "excerptSha256",
+            "extractionVersion"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "business_exception_snapshot"
+            },
+            "businessExceptionId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourceVersionId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sourceSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "canonicalizationVersion": {
+              "type": "string",
+              "const": "rfc8785-jcs/1"
+            },
+            "jsonPointer": {
+              "type": "string",
+              "pattern": "^\\/.*"
+            },
+            "valueSha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "kind",
+            "businessExceptionId",
+            "sourceVersionId",
+            "sourceSha256",
+            "canonicalizationVersion",
+            "jsonPointer",
+            "valueSha256"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

@@ -177,7 +177,7 @@ describe('Gate 0.2A Control Plane delivery and Evidence integration', () => {
       inputRef: { kind: string; documentSnapshotId: string };
       steps: Array<{ status: string }>;
       claims: Array<{ id: string; status: string; evidenceRefId: string | null }>;
-      evidence: Array<{ id: string; excerpt: null | string }>;
+      evidence: Array<{ id: string; excerpt: null | string; audience: { kind: string; conversationId: string } }>;
       artifacts: Array<{ id: string; kind: string; contentSha256: string }>;
       lineage: unknown[];
     }>();
@@ -189,6 +189,9 @@ describe('Gate 0.2A Control Plane delivery and Evidence integration', () => {
     expect(snapshot.claims.filter((claim) => claim.status === 'rejected')).toHaveLength(1);
     expect(snapshot.evidence).toHaveLength(1);
     expect(snapshot.evidence[0]?.excerpt).toBeNull();
+    expect(snapshot.evidence[0]?.audience).toEqual({
+      kind: 'private_conversation', conversationId: created.conversationId,
+    });
     expect(snapshot.artifacts.map((artifact) => artifact.kind).sort()).toEqual(['simulation_report', 'source_document']);
     expect(snapshot.lineage.length).toBeGreaterThanOrEqual(7);
 

@@ -7,12 +7,13 @@ import {
   type WorkerCommand,
   type WorkerDelivery,
 } from '@geneway/contracts';
-import { compileWorkflow, createSolutionAnalysisDocumentDraft, createSolutionAnalysisDraft } from '@geneway/workflow';
+import { compileWorkflow, createExceptionAssistDraft, createSolutionAnalysisDocumentDraft, createSolutionAnalysisDraft } from '@geneway/workflow';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WorkerCommandClient } from './command-client.js';
 import type { ChatRuntimeAdapter } from '@geneway/runtime';
 import type { ChatWorkerCommandClient, ChatTurnClaim } from './chat-command-client.js';
-import { executeChatTurn, runWorkerLoop } from './worker-loop.js';
+import { executeChatTurn, executeDelivery, runWorkerLoop } from './worker-loop.js';
+import type { ExecutionCommandPort } from './interpreter.js';
 
 const TOKEN = 'worker-loop-token-0123456789';
 const identity = {
@@ -82,7 +83,75 @@ function documentDelivery(): WorkerDelivery {
   };
 }
 
+const capacityBytes = '{"dataClass":"C1","detectedAt":"2026-07-21T08:30:00.000Z","detectionWindow":"2026-07-21T08:00:00.000Z/2026-07-21T09:00:00.000Z","exceptionType":"capacity_progress_lag","fixtureVersion":"gate0.2b-capacity-lag/1","resourceScope":"factory-01/workshop-machining/line-02","severity":"high","sourceObjectRef":"work-order:WO-GATE02B-001","sourceSystem":"fixture-manufacturing","summary":"二号机加工线工单进度落后","values":{"completedQty":48,"elapsedPct":75,"planQty":100,"progressPct":48,"thresholdPct":60}}';
+
+function exceptionDelivery(): WorkerDelivery {
+  const resourceScope = 'factory-01/workshop-machining/line-02';
+  const workflow = compileWorkflow(createExceptionAssistDraft(resourceScope));
+  return {
+    tenantId: 'tenant-loop', taskId: 'task-exception-loop', consumer: identity.consumer,
+    deploymentId: identity.deploymentId, workerInstanceId: identity.workerInstanceId,
+    lease: { eventId: 'event-exception', deliveryId: 'delivery-exception', attemptId: 'attempt-exception', fencingToken: 29 },
+    inputRef: {
+      kind: 'business_exception_snapshot', businessExceptionId: 'exception_capacity', sourceVersionId: 'source_capacity_v1',
+      sourceSha256: '0aaf071f5cb062251011970b382e239d3ae5fdcdc4f977b96f325825723b2ed6',
+      canonicalizationVersion: 'rfc8785-jcs/1', fixtureVersion: 'gate0.2b-capacity-lag/1',
+      sourceSystem: 'fixture-manufacturing', sourceObjectRef: 'work-order:WO-GATE02B-001',
+      detectionWindow: '2026-07-21T08:00:00.000Z/2026-07-21T09:00:00.000Z', resourceScope, dataClass: 'C1',
+      sourceAudience: { kind: 'resource_exception', businessExceptionId: 'exception_capacity', resourceScope, dataClass: 'C1' },
+      taskAudience: { kind: 'private_conversation', conversationId: 'conversation_capacity' },
+    },
+    workflow: { id: workflow.id, hash: workflow.hash, canonicalizationVersion: workflow.canonicalizationVersion, canonicalPayload: workflow.payload },
+  };
+}
+
 describe('independent worker loop', () => {
+  it('validates and executes the fixed exception workflow from canonical source bytes', async () => {
+    const claimedDelivery = exceptionDelivery();
+    const completedSteps: string[] = [];
+    let submitted: Parameters<ExecutionCommandPort['submitCandidate']>[0] | undefined;
+    const port: ExecutionCommandPort = {
+      claimStep: (stepId) => Promise.resolve({ state: 'claimed', lease: { attemptId: `step-${stepId}`, fencingToken: 1 } }),
+      completeStep: (stepId) => { completedSteps.push(stepId); return Promise.resolve(); },
+      submitCandidate: (candidate) => { submitted = candidate; return Promise.resolve(); },
+      fail: (code, message) => Promise.reject(new Error(`unexpected failure ${code}: ${message}`)),
+    };
+    const client = {
+      bind: () => port,
+      readInput: () => Promise.resolve({ kind: 'business_exception_snapshot', inputRef: claimedDelivery.inputRef, canonicalBytes: capacityBytes }),
+    } as unknown as WorkerCommandClient;
+
+    await executeDelivery(client, claimedDelivery);
+    expect(completedSteps).toEqual([
+      'exception_snapshot_load', 'deterministic_baseline', 'expert_route_resolve', 'impact_analysis',
+      'action_recommendation', 'evidence_quality_check', 'report_publish',
+    ]);
+    expect(submitted?.evidence).toHaveLength(1);
+    expect(submitted?.evidence[0]).toMatchObject({ kind: 'business_exception_snapshot', sourceVersionId: 'source_capacity_v1' });
+    expect(submitted?.claims).toEqual([
+      expect.objectContaining({ candidateKey: 'capacity-progress-observation', evidenceCandidateKey: 'capacity-progress-fact' }),
+      expect.objectContaining({ candidateKey: 'exception-cause-unknown', evidenceCandidateKey: null }),
+    ]);
+    expect(submitted?.result).toMatchObject({ simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false });
+  });
+
+  it('fails exception delivery validation before claiming a step when canonical bytes drift', async () => {
+    const claimedDelivery = exceptionDelivery();
+    const outcomes: string[] = [];
+    const port: ExecutionCommandPort = {
+      claimStep: () => { outcomes.push('claim'); return Promise.reject(new Error('must not claim')); },
+      completeStep: () => Promise.reject(new Error('must not complete')),
+      submitCandidate: () => Promise.reject(new Error('must not submit')),
+      fail: (code) => { outcomes.push(code); return Promise.resolve(); },
+    };
+    const client = {
+      bind: () => port,
+      readInput: () => Promise.resolve({ kind: 'business_exception_snapshot', inputRef: claimedDelivery.inputRef, canonicalBytes: `${capacityBytes} ` }),
+    } as unknown as WorkerCommandClient;
+    await executeDelivery(client, claimedDelivery);
+    expect(outcomes).toEqual(['DELIVERY_VALIDATION_FAILED']);
+  });
+
   it('aborts a running Gateway stream and reports canceled with the incremented fence', async () => {
     const lifecycle: string[] = [];
     const claim: ChatTurnClaim = {

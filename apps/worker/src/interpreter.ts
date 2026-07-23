@@ -86,7 +86,9 @@ export class WorkflowInterpreter {
         claims,
         result: {
           kind: 'completed',
-          summary: '小纬已完成模拟方案分析，结论仅供演示，不能用于业务决策。',
+          summary: input.inputRef.kind === 'business_exception_snapshot'
+            ? '小纬已完成模拟异常分析，结论仅供演示，不能用于业务决策。'
+            : '小纬已完成模拟方案分析，结论仅供演示，不能用于业务决策。',
           stepSummaries: summaries,
           simulation: true,
           runtimeMode: 'fake',

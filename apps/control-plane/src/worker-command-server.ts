@@ -446,6 +446,11 @@ export class WorkerCommandService {
       await this.finalizeInputRead(command, context);
       return { kind: 'fixture', inputRef: context.inputRef };
     }
+    if (context.inputRef.kind === 'business_exception_snapshot') {
+      const canonicalBytes = await this.readAuthorizedExceptionSource(context);
+      await this.finalizeInputRead(command, context);
+      return { kind: 'business_exception_snapshot', inputRef: context.inputRef, canonicalBytes };
+    }
     const source = await this.repository.pool.query<{
       storage_bucket: string;
       storage_key: string;
@@ -618,11 +623,82 @@ export class WorkerCommandService {
     await this.publishCandidate(context, candidateId, candidate);
   }
 
+  private async readAuthorizedExceptionSource(context: AttemptContext): Promise<string> {
+    if (context.inputRef.kind !== 'business_exception_snapshot') {
+      throw new GenewayError('BUSINESS_EXCEPTION_INPUT_REQUIRED', 'Worker input is not a BusinessException snapshot', 500);
+    }
+    const source = await this.repository.pool.query<{ canonical_bytes: Buffer; canonical_sha256: string }>(`SELECT
+      snapshot.canonical_bytes,snapshot.canonical_sha256
+      FROM business_exception_source_snapshots snapshot
+      JOIN business_exception_analysis_bindings binding
+        ON binding.tenant_id=snapshot.tenant_id AND binding.source_version_id=snapshot.source_version_id
+      JOIN business_tasks task
+        ON task.tenant_id=binding.tenant_id AND task.id=binding.business_task_id
+      WHERE snapshot.tenant_id=$1 AND snapshot.business_exception_id=$2 AND snapshot.source_version_id=$3
+        AND snapshot.canonical_sha256=$4 AND snapshot.canonicalization_version=$5
+        AND snapshot.fixture_version=$6 AND snapshot.source_system=$7 AND snapshot.source_object_ref=$8
+        AND snapshot.detection_window=$9 AND snapshot.resource_scope=$10 AND snapshot.data_class=$11
+        AND snapshot.audience=$12
+        AND binding.business_task_id=$13 AND binding.requester_principal_id=$14
+        AND binding.private_conversation_id=$15 AND binding.task_audience=$16
+        AND task.id=$13 AND task.requester_id=$14 AND task.conversation_id=$15
+        AND task.input_snapshot=$17 AND task.permission_scope=$18 AND task.audience_scope=$19
+        AND EXISTS (SELECT 1 FROM roles role_binding WHERE role_binding.tenant_id=task.tenant_id
+          AND role_binding.user_id=task.requester_id AND role_binding.role='solution_reviewer')
+        AND EXISTS (SELECT 1 FROM resource_scopes readable_scope WHERE readable_scope.tenant_id=task.tenant_id
+          AND readable_scope.user_id=task.requester_id AND (snapshot.resource_scope=readable_scope.resource_scope
+            OR snapshot.resource_scope LIKE readable_scope.resource_scope || '/%'))`, [
+      context.tenantId,
+      context.inputRef.businessExceptionId,
+      context.inputRef.sourceVersionId,
+      context.inputRef.sourceSha256,
+      context.inputRef.canonicalizationVersion,
+      context.inputRef.fixtureVersion,
+      context.inputRef.sourceSystem,
+      context.inputRef.sourceObjectRef,
+      context.inputRef.detectionWindow,
+      context.inputRef.resourceScope,
+      context.inputRef.dataClass,
+      context.inputRef.sourceAudience,
+      context.taskId,
+      context.requesterId,
+      context.conversationId,
+      context.inputRef.taskAudience,
+      context.inputRef,
+      { actions: ['R0', 'R1', 'A1'], resourceScopes: [context.inputRef.resourceScope], dataClasses: ['C1'] },
+      { kind: 'private-conversation', ids: [`conversation:${context.conversationId}`] },
+    ]);
+    const row = source.rows[0];
+    if (row === undefined || row.canonical_sha256 !== context.inputRef.sourceSha256
+      || sha256TextBytes(row.canonical_bytes) !== row.canonical_sha256) {
+      throw new GenewayError('WORKER_EXCEPTION_SOURCE_NOT_READY', 'Frozen exception source is unavailable or no longer authorized', 409);
+    }
+    return row.canonical_bytes.toString('utf8');
+  }
+
+  private readCanonicalJsonPointer(canonicalBytes: string, jsonPointer: string): string | number | boolean | null {
+    const match = /^\/values\/([^/]+)$/u.exec(jsonPointer);
+    if (match?.[1] === undefined) {
+      throw new GenewayError('BUSINESS_EXCEPTION_EVIDENCE_POINTER_INVALID', 'Exception Evidence pointer is outside the fixed values allowlist', 422);
+    }
+    const key = match[1].replaceAll('~1', '/').replaceAll('~0', '~');
+    const parsed = JSON.parse(canonicalBytes) as Readonly<{ values?: Readonly<Record<string, unknown>> }>;
+    const value = parsed.values?.[key];
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean' && value !== null) {
+      throw new GenewayError('BUSINESS_EXCEPTION_EVIDENCE_POINTER_INVALID', 'Exception Evidence pointer does not identify a scalar fact', 422);
+    }
+    return value;
+  }
+
   private async publishCandidate(context: AttemptContext, candidateId: string, candidate: AttemptOutputCandidatePayload): Promise<void> {
     const completedResult = taskResultSchema.parse(candidate.result);
     if (completedResult.kind !== 'completed') throw new GenewayError('CANDIDATE_RESULT_INVALID', 'Terminal candidate must contain a completed result', 422);
-    const supported = candidate.claims.find((claim) => claim.text === POSITIVE_CLAIM_TEXT);
-    const rejected = candidate.claims.find((claim) => claim.text === UNSUPPORTED_CLAIM_TEXT);
+    const supported = context.inputRef.kind === 'business_exception_snapshot'
+      ? candidate.claims.find((claim) => claim.evidenceCandidateKey !== null)
+      : candidate.claims.find((claim) => claim.text === POSITIVE_CLAIM_TEXT);
+    const rejected = context.inputRef.kind === 'business_exception_snapshot'
+      ? candidate.claims.find((claim) => claim.evidenceCandidateKey === null)
+      : candidate.claims.find((claim) => claim.text === UNSUPPORTED_CLAIM_TEXT);
     if (supported?.evidenceCandidateKey === null || supported === undefined || rejected?.evidenceCandidateKey !== null) {
       throw new GenewayError('CANDIDATE_CLAIMS_INVALID', 'Candidate does not contain the fixed supported and rejected claims', 422);
     }
@@ -641,6 +717,85 @@ export class WorkerCommandService {
         excerpt: FIXTURE_EXCERPT,
         excerptSha256: FIXTURE_CONTENT_HASH,
         report: null,
+      });
+      return;
+    }
+
+    if (context.inputRef.kind === 'business_exception_snapshot') {
+      if (locator.kind !== 'business_exception_snapshot'
+        || locator.businessExceptionId !== context.inputRef.businessExceptionId
+        || locator.sourceVersionId !== context.inputRef.sourceVersionId
+        || locator.sourceSha256 !== context.inputRef.sourceSha256
+        || locator.canonicalizationVersion !== context.inputRef.canonicalizationVersion) {
+        throw new GenewayError('BUSINESS_EXCEPTION_EVIDENCE_LOCATOR_MISMATCH', 'Evidence locator does not match the approved exception source', 409);
+      }
+      const canonicalBytes = await this.readAuthorizedExceptionSource(context);
+      const value = this.readCanonicalJsonPointer(canonicalBytes, locator.jsonPointer);
+      if (hashCanonical(value) !== locator.valueSha256) {
+        throw new GenewayError('BUSINESS_EXCEPTION_EVIDENCE_VALUE_MISMATCH', 'Evidence locator value hash is not current', 409);
+      }
+      const renderInput = {
+        templateId: 'gate0.2b-exception-report/v1',
+        taskId: context.taskId,
+        workflowVersionId: context.workflowVersionId,
+        workflowHash: context.workflowHash,
+        businessExceptionId: context.inputRef.businessExceptionId,
+        sourceVersionId: context.inputRef.sourceVersionId,
+        sourceSha256: context.inputRef.sourceSha256,
+        jsonPointer: locator.jsonPointer,
+        valueSha256: locator.valueSha256,
+        claimText: supported.text,
+        simulation: true,
+        runtimeMode: 'fake',
+        businessDecisionAllowed: false,
+      } as const;
+      const reportBytes = Buffer.from([
+        '# 小纬模拟异常分析报告',
+        '',
+        '> 模拟数据与模拟分析，不可用于业务决策。',
+        '',
+        `- Exception: ${context.inputRef.businessExceptionId}`,
+        `- Source version: ${context.inputRef.sourceVersionId}`,
+        `- Source hash: ${context.inputRef.sourceSha256}`,
+        `- Fact: ${locator.jsonPointer} = ${JSON.stringify(value)}`,
+        `- Simulated claim: ${supported.text}`,
+        '',
+      ].join('\n'), 'utf8');
+      const reportSha256 = sha256TextBytes(reportBytes);
+      const intent = await this.prepareReportIntent(
+        context, candidateId, reportBytes.byteLength, reportSha256, hashCanonical(renderInput),
+      );
+      const verifiedNow = await this.ensureReportObject(context, candidateId, intent, reportBytes, reportSha256);
+      if (verifiedNow) {
+        await this.hooks.afterReportObjectVerified?.({
+          taskId: context.taskId,
+          workerInstanceId: context.workerInstanceId,
+          deliveryId: context.deliveryId,
+          eventId: context.eventId,
+          executionAttemptId: context.attemptId,
+          fencingToken: context.fencingToken,
+          reportIntentId: intent.id,
+          artifactId: intent.artifactId,
+          storageKey: intent.storageKey,
+          contentSha256: reportSha256,
+        });
+      }
+      await this.publishTerminal({
+        context,
+        candidateId,
+        candidate,
+        source: {
+          kind: 'business_exception_snapshot',
+          businessExceptionId: context.inputRef.businessExceptionId,
+          sourceVersionId: context.inputRef.sourceVersionId,
+          sourceSha256: context.inputRef.sourceSha256,
+          canonicalizationVersion: context.inputRef.canonicalizationVersion,
+          jsonPointer: locator.jsonPointer,
+          valueSha256: locator.valueSha256,
+        },
+        excerpt: JSON.stringify(value),
+        excerptSha256: locator.valueSha256,
+        report: { intent, bytes: reportBytes, sha256: reportSha256, renderInput },
       });
       return;
     }
@@ -913,19 +1068,25 @@ export class WorkerCommandService {
         const intentId = id('report_intent');
         const manifestId = id('manifest');
         const storageKey = `tenants/${context.tenantId}/artifacts/${artifactId}/report.md`;
+        const templateId = context.inputRef.kind === 'business_exception_snapshot'
+          ? 'gate0.2b-exception-report/v1' : REPORT_TEMPLATE_ID;
+        const templateSha256 = context.inputRef.kind === 'business_exception_snapshot'
+          ? hashCanonical({ templateId }) : REPORT_TEMPLATE_SHA256;
         await client.query(`INSERT INTO report_publish_intents
           (tenant_id,id,business_task_id,execution_attempt_id,candidate_id,source_document_snapshot_id,root_artifact_id,
+           business_exception_source_version_id,
            conversation_id,owner_user_id,resource_scope,data_class,audience,artifact_id,manifest_id,storage_bucket,storage_key,
            template_id,template_sha256,render_input_sha256,size_bytes,content_sha256,status)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'C1',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'prepared')
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'C1',$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,'prepared')
           ON CONFLICT (tenant_id,business_task_id) DO NOTHING`, [
           context.tenantId, intentId, context.taskId, context.attemptId, candidateId,
-          context.inputRef.kind === 'document_snapshot' ? context.inputRef.documentSnapshotId : '',
-          context.inputRef.kind === 'document_snapshot' ? context.inputRef.artifactId : '',
+          context.inputRef.kind === 'document_snapshot' ? context.inputRef.documentSnapshotId : null,
+          context.inputRef.kind === 'document_snapshot' ? context.inputRef.artifactId : null,
+          context.inputRef.kind === 'business_exception_snapshot' ? context.inputRef.sourceVersionId : null,
           context.conversationId, context.requesterId,
-          context.inputRef.kind === 'document_snapshot' ? context.inputRef.resourceScope : '',
+          context.inputRef.kind === 'fixture' ? FIXTURE_REF : context.inputRef.resourceScope,
           `conversation:${context.conversationId}`, artifactId, manifestId, this.storage.bucket, storageKey,
-          REPORT_TEMPLATE_ID, REPORT_TEMPLATE_SHA256, renderInputSha256, sizeBytes, contentSha256,
+          templateId, templateSha256, renderInputSha256, sizeBytes, contentSha256,
         ]);
         const created = await client.query<ReportIntentRow>('SELECT id,artifact_id,manifest_id,storage_bucket,storage_key,content_sha256,execution_attempt_id,candidate_id,status FROM report_publish_intents WHERE tenant_id=$1 AND business_task_id=$2 FOR UPDATE', [context.tenantId, context.taskId]);
         row = created.rows[0];
@@ -991,7 +1152,7 @@ export class WorkerCommandService {
       const approval = await client.query<{ status: string; subject_digest: string; expires_at: Date; subject: unknown }>('SELECT status,subject_digest,expires_at,subject FROM approval_versions WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY version DESC LIMIT 1 FOR UPDATE', [context.tenantId, context.taskId]);
       const approvalRow = approval.rows[0];
       if (approvalRow === undefined || approvalRow.status !== 'approved' || approvalRow.expires_at.getTime() <= Date.now()) throw new GenewayError('APPROVAL_REQUIRED', 'Current approval is not valid at terminal publish', 409);
-      const task = await client.query<{ status: string; conversation_id: string; requester_id: string; workflow_version_id: string; workflow_hash: string; input_snapshot: unknown; expert_catalog_version_id: string; harness_version_id: string; expert_target: unknown; permission_scope: unknown; audience_scope: unknown; budget: unknown }>('SELECT * FROM business_tasks WHERE tenant_id=$1 AND id=$2 FOR UPDATE', [context.tenantId, context.taskId]);
+      const task = await client.query<{ status: string; conversation_id: string; requester_id: string; workflow_version_id: string; workflow_hash: string; input_snapshot: unknown; input_digest: string | null; expert_catalog_version_id: string; harness_version_id: string; expert_target: unknown; permission_scope: unknown; audience_scope: unknown; budget: unknown }>('SELECT * FROM business_tasks WHERE tenant_id=$1 AND id=$2 FOR UPDATE', [context.tenantId, context.taskId]);
       const taskRow = task.rows[0];
       if (taskRow === undefined || taskRow.status !== 'running') throw new GenewayError('TASK_TERMINAL_CONFLICT', 'Task is no longer publishable', 409);
       const currentInputRef = resolvedTaskInputRefSchema.parse(taskRow.input_snapshot);
@@ -1004,6 +1165,7 @@ export class WorkerCommandService {
         taskId: context.taskId,
         requesterId: taskRow.requester_id,
         inputSnapshot: currentInputRef,
+        inputDigest: taskRow.input_digest,
         expertTarget: taskRow.expert_target as Readonly<Record<string, unknown>>,
         expertCatalogVersionId: taskRow.expert_catalog_version_id,
         harnessVersionId: taskRow.harness_version_id,
@@ -1020,6 +1182,15 @@ export class WorkerCommandService {
       const evidenceId = id('evidence');
       const positiveClaimId = id('claim');
       const rejectedClaimId = id('claim');
+      const supportedClaim = context.inputRef.kind === 'business_exception_snapshot'
+        ? input.candidate.claims.find((claim) => claim.evidenceCandidateKey !== null)
+        : input.candidate.claims.find((claim) => claim.text === POSITIVE_CLAIM_TEXT);
+      const rejectedClaim = context.inputRef.kind === 'business_exception_snapshot'
+        ? input.candidate.claims.find((claim) => claim.evidenceCandidateKey === null)
+        : input.candidate.claims.find((claim) => claim.text === UNSUPPORTED_CLAIM_TEXT);
+      if (supportedClaim === undefined || rejectedClaim === undefined) {
+        throw new GenewayError('CANDIDATE_CLAIMS_INVALID', 'Terminal publish requires supported and rejected claim projections', 422);
+      }
       const resourceScope = context.inputRef.kind === 'fixture' ? FIXTURE_REF : context.inputRef.resourceScope;
       const audience = `conversation:${context.conversationId}`;
       await client.query(`INSERT INTO evidence_items
@@ -1033,8 +1204,8 @@ export class WorkerCommandService {
         (tenant_id,id,business_task_id,candidate_id,text,status,rejection_code,resource_scope,data_class,audience,simulation,runtime_mode,business_decision_allowed)
         VALUES ($1,$2,$3,$4,$5,'published',null,$6,'C1',$7,true,'fake',false),
                ($1,$8,$3,$4,$9,'rejected','CLAIM_EVIDENCE_REQUIRED',$6,'C1',$7,true,'fake',false)`, [
-        context.tenantId, positiveClaimId, context.taskId, input.candidateId, POSITIVE_CLAIM_TEXT,
-        resourceScope, audience, rejectedClaimId, UNSUPPORTED_CLAIM_TEXT,
+        context.tenantId, positiveClaimId, context.taskId, input.candidateId, supportedClaim.text,
+        resourceScope, audience, rejectedClaimId, rejectedClaim.text,
       ]);
       await client.query("INSERT INTO evidence_links (tenant_id,id,business_task_id,claim_id,evidence_id,relation) VALUES ($1,$2,$3,$4,$5,'supports')", [
         context.tenantId, id('evidence_link'), context.taskId, positiveClaimId, evidenceId,
@@ -1043,37 +1214,56 @@ export class WorkerCommandService {
       const lineage: Array<readonly [string, string, string, string, string, Readonly<Record<string, unknown>>]> = [];
       if (context.inputRef.kind === 'fixture') {
         lineage.push(['legacy_fixture', FIXTURE_SOURCE_ID, 'evidence', evidenceId, 'verified_as', {}]);
-      } else {
+      } else if (context.inputRef.kind === 'document_snapshot') {
         lineage.push(['artifact', context.inputRef.artifactId, 'document_snapshot', context.inputRef.documentSnapshotId, 'frozen_as', {}]);
         lineage.push(['document_snapshot', context.inputRef.documentSnapshotId, 'candidate', input.candidateId, 'read_by', {}]);
         lineage.push(['candidate', input.candidateId, 'evidence', evidenceId, 'verified_as', { startByte: DEMO_EVIDENCE_START_BYTE, endByteExclusive: DEMO_EVIDENCE_END_BYTE_EXCLUSIVE }]);
+      } else {
+        lineage.push(['business_exception_snapshot', context.inputRef.sourceVersionId, 'candidate', input.candidateId, 'read_by', {
+          sourceSha256: context.inputRef.sourceSha256,
+        }]);
+        lineage.push(['business_exception_snapshot', context.inputRef.sourceVersionId, 'evidence', evidenceId, 'verified_as', {
+          sourceSha256: input.source.sourceSha256,
+          jsonPointer: input.source.jsonPointer,
+          valueSha256: input.source.valueSha256,
+        }]);
       }
       lineage.push(['evidence', evidenceId, 'claim', positiveClaimId, 'supports', {}]);
       lineage.push(['workflow_version', context.workflowVersionId, 'claim', positiveClaimId, 'produced', { workflowHash: context.workflowHash }]);
 
-      if (input.report !== null && context.inputRef.kind === 'document_snapshot') {
+      if (input.report !== null && context.inputRef.kind !== 'fixture') {
         const report = input.report;
         const intentState = await client.query<{ status: string }>('SELECT status FROM report_publish_intents WHERE tenant_id=$1 AND id=$2 FOR UPDATE', [context.tenantId, report.intent.id]);
         if (intentState.rows[0]?.status !== 'object_verified') throw new GenewayError('REPORT_NOT_VERIFIED', 'Report object has not been verified', 409);
         await client.query(`INSERT INTO artifacts
           (tenant_id,id,conversation_id,owner_user_id,kind,display_name,media_type,size_bytes,content_sha256,business_task_id,
-           root_artifact_id,data_class,audience,resource_scope)
-          VALUES ($1,$2,$3,$4,'simulation_report','小纬模拟方案分析报告.md','text/markdown',$5,$6,$7,$8,'C1',$9,$10)`, [
+           root_artifact_id,business_exception_source_version_id,data_class,audience,resource_scope)
+          VALUES ($1,$2,$3,$4,'simulation_report',$5,'text/markdown',$6,$7,$8,$9,$10,'C1',$11,$12)`, [
           context.tenantId, report.intent.artifactId, context.conversationId, context.requesterId,
-          report.bytes.byteLength, report.sha256, context.taskId, context.inputRef.artifactId,
+          context.inputRef.kind === 'business_exception_snapshot' ? '小纬模拟异常分析报告.md' : '小纬模拟方案分析报告.md',
+          report.bytes.byteLength, report.sha256, context.taskId,
+          context.inputRef.kind === 'document_snapshot' ? context.inputRef.artifactId : null,
+          context.inputRef.kind === 'business_exception_snapshot' ? context.inputRef.sourceVersionId : null,
           { kind: 'private-conversation', conversationId: context.conversationId }, context.inputRef.resourceScope,
         ]);
         await client.query(`INSERT INTO artifact_manifests
           (tenant_id,id,artifact_id,storage_bucket,storage_key,display_name,media_type,size_bytes,content_sha256,retention_policy)
-          VALUES ($1,$2,$3,$4,$5,'小纬模拟方案分析报告.md','text/markdown',$6,$7,'gate0.2a-internal/v1')`, [
+          VALUES ($1,$2,$3,$4,$5,$6,'text/markdown',$7,$8,'gate0.2a-internal/v1')`, [
           context.tenantId, report.intent.manifestId, report.intent.artifactId, report.intent.storageBucket,
-          report.intent.storageKey, report.bytes.byteLength, report.sha256,
+          report.intent.storageKey,
+          context.inputRef.kind === 'business_exception_snapshot' ? '小纬模拟异常分析报告.md' : '小纬模拟方案分析报告.md',
+          report.bytes.byteLength, report.sha256,
         ]);
         await client.query(`INSERT INTO artifact_states
           (tenant_id,artifact_id,availability,integrity,retention_status,retention_expires_at,reconcile_status,last_checked_at,last_verified_at)
           VALUES ($1,$2,'active','verified','active',now()+interval '30 days','in_sync',now(),now())`, [context.tenantId, report.intent.artifactId]);
         lineage.push(['claim', positiveClaimId, 'artifact', report.intent.artifactId, 'rendered_into', { renderInput: report.renderInput }]);
-        lineage.push(['report_template', REPORT_TEMPLATE_ID, 'artifact', report.intent.artifactId, 'rendered_with', { templateSha256: REPORT_TEMPLATE_SHA256 }]);
+        const templateId = context.inputRef.kind === 'business_exception_snapshot'
+          ? 'gate0.2b-exception-report/v1' : REPORT_TEMPLATE_ID;
+        lineage.push(['report_template', templateId, 'artifact', report.intent.artifactId, 'rendered_with', {
+          templateSha256: context.inputRef.kind === 'business_exception_snapshot'
+            ? hashCanonical({ templateId }) : REPORT_TEMPLATE_SHA256,
+        }]);
         const reportPublished = await client.query("UPDATE report_publish_intents SET status='published',state_version=state_version+1,updated_at=now() WHERE tenant_id=$1 AND id=$2 AND status='object_verified'", [context.tenantId, report.intent.id]);
         if (reportPublished.rowCount !== 1) throw new GenewayError('REPORT_PUBLISH_CAS_CONFLICT', 'Report publish intent is no longer publishable', 409);
       }
@@ -1095,7 +1285,12 @@ export class WorkerCommandService {
         throw new GenewayError('TERMINAL_PUBLISH_CAS_CONFLICT', 'Terminal publish lost the execution compare-and-set race', 409);
       }
       await client.query("INSERT INTO messages (tenant_id,id,conversation_id,author,body) VALUES ($1,$2,$3,'xiaowei',$4)", [
-        context.tenantId, id('message'), context.conversationId, '小纬已完成模拟方案分析。结果仅供演示，不能用于业务决策。',
+        context.tenantId,
+        id('message'),
+        context.conversationId,
+        context.inputRef.kind === 'business_exception_snapshot'
+          ? '小纬已完成模拟异常分析。结果仅供演示，不能用于业务决策。'
+          : '小纬已完成模拟方案分析。结果仅供演示，不能用于业务决策。',
       ]);
       await this.appendEvent(client, context.tenantId, context.taskId, 'business_task.completed', { result, candidateId: input.candidateId });
     });
@@ -1174,6 +1369,7 @@ export class WorkerCommandService {
       workflow_version_id: string;
       workflow_hash: string;
       input_snapshot: unknown;
+      input_digest: string | null;
       event_id: string;
       delivery_id: string;
       attempt_id: string;
@@ -1258,6 +1454,7 @@ export class WorkerCommandService {
     const authority = await client.query<{
       requester_id: string;
       input_snapshot: unknown;
+      input_digest: string | null;
       expert_target: unknown;
       expert_catalog_version_id: string;
       harness_version_id: string;
@@ -1275,7 +1472,7 @@ export class WorkerCommandService {
       capability_resource_scopes: unknown;
       capability_audience_scope: unknown;
       capability_expires_at: Date;
-    }>(`SELECT t.requester_id,t.input_snapshot,t.expert_target,t.expert_catalog_version_id,t.harness_version_id,
+    }>(`SELECT t.requester_id,t.input_snapshot,t.input_digest,t.expert_target,t.expert_catalog_version_id,t.harness_version_id,
       t.workflow_version_id,t.workflow_hash,t.permission_scope,t.audience_scope,t.budget,
       approval.status approval_status,approval.subject approval_subject,approval.subject_digest approval_subject_digest,
       approval.expires_at approval_expires_at,capability.principal_id capability_principal_id,
@@ -1313,6 +1510,7 @@ export class WorkerCommandService {
       taskId,
       requesterId: row.requester_id,
       inputSnapshot: inputRef,
+      inputDigest: row.input_digest,
       expertTarget: row.expert_target as Readonly<Record<string, unknown>>,
       expertCatalogVersionId: row.expert_catalog_version_id,
       harnessVersionId: row.harness_version_id,

@@ -80,9 +80,10 @@ export type WorkflowRegistry = Readonly<{
   harnessVersionIds: ReadonlySet<string>;
   deterministicHandlers: ReadonlySet<string>;
   verificationPolicies: ReadonlySet<string>;
+  routingPolicyVersions: ReadonlySet<string>;
 }>;
 
-const FIXED_NODE_IDS = [
+const SOLUTION_NODE_IDS = [
   'document_ingest',
   'requirement_extract',
   'contradiction_check',
@@ -92,8 +93,21 @@ const FIXED_NODE_IDS = [
   'report_publish',
 ] as const;
 
+const EXCEPTION_ASSIST_NODE_IDS = [
+  'exception_snapshot_load',
+  'deterministic_baseline',
+  'expert_route_resolve',
+  'impact_analysis',
+  'action_recommendation',
+  'evidence_quality_check',
+  'report_publish',
+] as const;
+
 export const SOLUTION_CAPABILITY_VERSION_ID = 'cap_solution_analysis_v1_1';
 export const SOLUTION_HARNESS_VERSION_ID = 'harness_solution_analysis_v1_1';
+export const EXCEPTION_ASSIST_CAPABILITY_VERSION_ID = 'cap_operations_exception_assist_v1_shadow_1';
+export const EXCEPTION_ASSIST_HARNESS_VERSION_ID = 'harness_operations_exception_assist_fake_v1_1';
+export const EXCEPTION_ASSIST_ROUTING_POLICY_VERSION = 'expert-catalog.gate0.2b/1';
 
 export function createSolutionAnalysisDraft(): WorkflowDraft {
   return {
@@ -110,13 +124,38 @@ export function createSolutionAnalysisDraft(): WorkflowDraft {
       { id: 'result_quality_check', kind: 'verification', policyVersion: 'simulation-quality/1', inputRefs: ['step.evidence_verify.output'], outputSchemaId: 'quality.verdict/1' },
       { id: 'report_publish', kind: 'deterministic', handlerVersion: 'simulation-publisher/1', inputRefs: ['step.result_quality_check.output'], outputSchemaId: 'report.projection/1' },
     ],
-    edges: FIXED_NODE_IDS.slice(0, -1).map((from, index) => ({ from, to: FIXED_NODE_IDS[index + 1] as string })),
+    edges: SOLUTION_NODE_IDS.slice(0, -1).map((from, index) => ({ from, to: SOLUTION_NODE_IDS[index + 1] as string })),
     permissionCeiling: {
       actions: ['R0', 'R1', 'A1'],
       resourceScopes: ['fixture:solution-analysis:v1'],
       dataClasses: ['C0', 'C1'],
     },
   };
+}
+
+export function createExceptionAssistDraft(resourceScope: string): WorkflowDraft {
+  if (resourceScope.length === 0) throw new GenewayError('WORKFLOW_RESOURCE_SCOPE_INVALID', 'Exception workflow requires an exact resource scope');
+  return workflowDraftSchema.parse({
+    schemaVersion: 'workflow-draft.fixed-v1',
+    capabilityVersionId: EXCEPTION_ASSIST_CAPABILITY_VERSION_ID,
+    harnessVersionId: EXCEPTION_ASSIST_HARNESS_VERSION_ID,
+    featureSet: 'fixed-v1',
+    nodes: [
+      { id: 'exception_snapshot_load', kind: 'deterministic', handlerVersion: 'business-exception-source-reader/1', inputRefs: ['workflow.input.businessExceptionRef'], outputSchemaId: 'business-exception.snapshot/1' },
+      { id: 'deterministic_baseline', kind: 'deterministic', handlerVersion: 'exception-baseline-calculator/1', inputRefs: ['step.exception_snapshot_load.output'], outputSchemaId: 'exception.baseline/1' },
+      { id: 'expert_route_resolve', kind: 'deterministic', handlerVersion: 'approved-expert-binding-reader/1', inputRefs: ['step.deterministic_baseline.output'], outputSchemaId: 'expert.routing-projection/1' },
+      { id: 'impact_analysis', kind: 'agent', capabilityVersionId: EXCEPTION_ASSIST_CAPABILITY_VERSION_ID, harnessVersionId: EXCEPTION_ASSIST_HARNESS_VERSION_ID, inputRefs: ['step.deterministic_baseline.output', 'step.expert_route_resolve.output'], outputSchemaId: 'exception.impact-analysis/1' },
+      { id: 'action_recommendation', kind: 'agent', capabilityVersionId: EXCEPTION_ASSIST_CAPABILITY_VERSION_ID, harnessVersionId: EXCEPTION_ASSIST_HARNESS_VERSION_ID, inputRefs: ['step.impact_analysis.output'], outputSchemaId: 'exception.action-recommendation/1' },
+      { id: 'evidence_quality_check', kind: 'verification', policyVersion: 'claim-evidence-minimum/2', inputRefs: ['step.action_recommendation.output'], outputSchemaId: 'evidence.verdict/2' },
+      { id: 'report_publish', kind: 'deterministic', handlerVersion: 'simulation-publisher/2', inputRefs: ['step.evidence_quality_check.output'], outputSchemaId: 'report.projection/2' },
+    ],
+    edges: EXCEPTION_ASSIST_NODE_IDS.slice(0, -1).map((from, index) => ({ from, to: EXCEPTION_ASSIST_NODE_IDS[index + 1] as string })),
+    permissionCeiling: {
+      actions: ['R0', 'R1', 'A1'],
+      resourceScopes: [resourceScope],
+      dataClasses: ['C1'],
+    },
+  });
 }
 
 export function createSolutionAnalysisDocumentDraft(resourceScope: string): WorkflowDraft {
@@ -183,11 +222,19 @@ function assertGraph(draft: WorkflowDraft): void {
   }
   if (visited.length !== ids.size) throw new GenewayError('WORKFLOW_NOT_DAG', 'Workflow must be an acyclic reachable graph');
 
-  const actual = draft.nodes.map((node) => node.id);
-  if (actual.length !== FIXED_NODE_IDS.length || actual.some((id, index) => id !== FIXED_NODE_IDS[index])) {
-    throw new GenewayError('NOT_OPEN', 'Only the fixed solution.analysis.v1 workflow is open in Gate 0.1', 422);
+  const fixedNodeIds = draft.capabilityVersionId === EXCEPTION_ASSIST_CAPABILITY_VERSION_ID
+    ? EXCEPTION_ASSIST_NODE_IDS
+    : draft.capabilityVersionId === SOLUTION_CAPABILITY_VERSION_ID
+      ? SOLUTION_NODE_IDS
+      : null;
+  if (fixedNodeIds === null) {
+    throw new GenewayError('NOT_OPEN', 'Only the two fixed Gate workflows are open', 422);
   }
-  const expectedEdges = FIXED_NODE_IDS.slice(0, -1).map((from, index) => `${from}->${FIXED_NODE_IDS[index + 1] as string}`);
+  const actual = draft.nodes.map((node) => node.id);
+  if (actual.length !== fixedNodeIds.length || actual.some((id, index) => id !== fixedNodeIds[index])) {
+    throw new GenewayError('NOT_OPEN', 'Gate requires an exact fixed seven-step topology', 422);
+  }
+  const expectedEdges = fixedNodeIds.slice(0, -1).map((from, index) => `${from}->${fixedNodeIds[index + 1] as string}`);
   const actualEdges = draft.edges.map((edge) => `${edge.from}->${edge.to}`);
   if (actualEdges.length !== expectedEdges.length || actualEdges.some((edge, index) => edge !== expectedEdges[index])) {
     throw new GenewayError('NOT_OPEN', 'Gate 0.1 requires the exact fixed seven-step topology', 422);
@@ -196,7 +243,7 @@ function assertGraph(draft: WorkflowDraft): void {
   const preceding = new Set<string>();
   for (const node of draft.nodes) {
     for (const ref of node.inputRefs) {
-      if (ref === 'workflow.input.fixtureRef' || ref === 'workflow.input.documentSnapshotId') continue;
+      if (ref === 'workflow.input.fixtureRef' || ref === 'workflow.input.documentSnapshotId' || ref === 'workflow.input.businessExceptionRef') continue;
       const match = /^step\.([a-z][a-z0-9_]*)\.output$/.exec(ref);
       if (match === null || match[1] === undefined || !preceding.has(match[1])) {
         throw new GenewayError('WORKFLOW_UNKNOWN_INPUT_REF', `Node ${node.id} has an unknown or forward input reference: ${ref}`);
@@ -209,6 +256,10 @@ function assertGraph(draft: WorkflowDraft): void {
 function assertRegistry(draft: WorkflowDraft, registry: WorkflowRegistry): void {
   if (!registry.capabilityVersionIds.has(draft.capabilityVersionId)) throw new GenewayError('WORKFLOW_CAPABILITY_NOT_FOUND', 'Capability version is not registered');
   if (!registry.harnessVersionIds.has(draft.harnessVersionId)) throw new GenewayError('WORKFLOW_HARNESS_NOT_FOUND', 'Harness version is not registered');
+  if (draft.capabilityVersionId === EXCEPTION_ASSIST_CAPABILITY_VERSION_ID
+    && !registry.routingPolicyVersions.has(EXCEPTION_ASSIST_ROUTING_POLICY_VERSION)) {
+    throw new GenewayError('WORKFLOW_ROUTING_POLICY_NOT_FOUND', 'Exception expert routing policy version is not registered');
+  }
   for (const node of draft.nodes) {
     if (node.kind === 'agent') {
       if (!registry.capabilityVersionIds.has(node.capabilityVersionId) || !registry.harnessVersionIds.has(node.harnessVersionId)) {
@@ -222,18 +273,55 @@ function assertRegistry(draft: WorkflowDraft, registry: WorkflowRegistry): void 
   }
 }
 
+function assertExactFixedTemplate(draft: WorkflowDraft): void {
+  const resourceScope = draft.permissionCeiling.resourceScopes.length === 1
+    ? draft.permissionCeiling.resourceScopes[0]
+    : undefined;
+  let expected: WorkflowDraft;
+  if (draft.capabilityVersionId === EXCEPTION_ASSIST_CAPABILITY_VERSION_ID) {
+    if (resourceScope === undefined) throw new GenewayError('NOT_OPEN', 'Exception workflow requires one exact resource scope', 422);
+    expected = createExceptionAssistDraft(resourceScope);
+  } else if (draft.capabilityVersionId === SOLUTION_CAPABILITY_VERSION_ID) {
+    const first = draft.nodes[0];
+    if (first?.kind === 'deterministic' && first.handlerVersion === 'document-snapshot-reader/1' && resourceScope !== undefined) {
+      expected = createSolutionAnalysisDocumentDraft(resourceScope);
+    } else {
+      expected = createSolutionAnalysisDraft();
+    }
+  } else {
+    throw new GenewayError('NOT_OPEN', 'Only the two fixed Gate workflows are open', 422);
+  }
+  if (canonicalize(draft) !== canonicalize(expected)) {
+    throw new GenewayError('NOT_OPEN', 'Workflow does not match its exact registered fixed template', 422);
+  }
+}
+
 export const GATE_0_1_WORKFLOW_REGISTRY: WorkflowRegistry = Object.freeze({
   capabilityVersionIds: new Set([SOLUTION_CAPABILITY_VERSION_ID]),
   harnessVersionIds: new Set([SOLUTION_HARNESS_VERSION_ID]),
   deterministicHandlers: new Set(['fixture-reader/1', 'document-snapshot-reader/1', 'simulation-publisher/1']),
   verificationPolicies: new Set(['claim-evidence-minimum/1', 'simulation-quality/1']),
+  routingPolicyVersions: new Set<string>(),
 });
 
-export function compileWorkflow(input: unknown, registry: WorkflowRegistry = GATE_0_1_WORKFLOW_REGISTRY): CompiledWorkflowVersion {
+export const GATE_0_2B_WORKFLOW_REGISTRY: WorkflowRegistry = Object.freeze({
+  capabilityVersionIds: new Set([SOLUTION_CAPABILITY_VERSION_ID, EXCEPTION_ASSIST_CAPABILITY_VERSION_ID]),
+  harnessVersionIds: new Set([SOLUTION_HARNESS_VERSION_ID, EXCEPTION_ASSIST_HARNESS_VERSION_ID]),
+  deterministicHandlers: new Set([
+    'fixture-reader/1', 'document-snapshot-reader/1', 'simulation-publisher/1',
+    'business-exception-source-reader/1', 'exception-baseline-calculator/1',
+    'approved-expert-binding-reader/1', 'simulation-publisher/2',
+  ]),
+  verificationPolicies: new Set(['claim-evidence-minimum/1', 'simulation-quality/1', 'claim-evidence-minimum/2']),
+  routingPolicyVersions: new Set([EXCEPTION_ASSIST_ROUTING_POLICY_VERSION]),
+});
+
+export function compileWorkflow(input: unknown, registry: WorkflowRegistry = GATE_0_2B_WORKFLOW_REGISTRY): CompiledWorkflowVersion {
   assertJsonSafe(input);
   const draft = workflowDraftSchema.parse(input);
   assertGraph(draft);
   assertRegistry(draft, registry);
+  assertExactFixedTemplate(draft);
   const payload = workflowVersionPayloadSchema.parse({
     schemaVersion: 'workflow-version.fixed-v1',
     compilerVersion: 'geneway-workflow-compiler/0.1.0',
@@ -272,6 +360,18 @@ export function readStoredWorkflowVersion(input: Readonly<{
   if (input.canonicalizationVersion !== 'RFC8785/JCS-1' || payload.canonicalizationVersion !== input.canonicalizationVersion) {
     throw new GenewayError('WORKFLOW_CANONICALIZATION_VERSION_MISMATCH', 'Stored workflow canonicalization version is unsupported or inconsistent', 409);
   }
+  const storedDraft = workflowDraftSchema.parse({
+    schemaVersion: 'workflow-draft.fixed-v1',
+    capabilityVersionId: payload.capabilityVersionId,
+    harnessVersionId: payload.harnessVersionId,
+    featureSet: payload.featureSet,
+    nodes: payload.nodes,
+    edges: payload.edges,
+    permissionCeiling: payload.permissionCeiling,
+  });
+  assertGraph(storedDraft);
+  assertRegistry(storedDraft, GATE_0_2B_WORKFLOW_REGISTRY);
+  assertExactFixedTemplate(storedDraft);
   const canonicalJson = canonicalize(payload);
   const hash = createHash('sha256').update(canonicalJson, 'utf8').digest('hex');
   if (hash !== input.hash || input.id !== `workflow_${hash.slice(0, 24)}`) {

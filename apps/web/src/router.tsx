@@ -1,4 +1,5 @@
 import { ConversationExperience } from './app.js';
+import { ExceptionDetailPage, ExceptionListPage } from './exception-routes.js';
 import {
   TaskDetailPage,
   TaskListPage,
@@ -42,6 +43,12 @@ export function App() {
   if (segments.length === 3 && segments[0] === 'tasks' && segments[2] === 'workflow') {
     const taskId = decodePathSegment(segments[1] ?? '');
     return taskId === undefined ? <NotFoundPage /> : <TaskWorkflowPage taskId={taskId} />;
+  }
+
+  if (segments.length === 1 && segments[0] === 'exceptions') return <ExceptionListPage />;
+  if (segments.length === 2 && segments[0] === 'exceptions') {
+    const exceptionId = decodePathSegment(segments[1] ?? '');
+    return exceptionId === undefined ? <NotFoundPage /> : <ExceptionDetailPage exceptionId={exceptionId} />;
   }
 
   if (segments.length === 1 && segments[0] === 'workflows') return <WorkflowListPage />;

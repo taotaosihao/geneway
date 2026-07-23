@@ -10,6 +10,7 @@ const artifact: AuthorizedArtifact = {
   kind: 'source_document',
   businessTaskId: null,
   rootArtifactId: 'artifact_1',
+  businessExceptionSourceVersionId: null,
   conversationId: 'conversation_1',
   ownerUserId: principal.userId,
   displayName: 'source.txt',

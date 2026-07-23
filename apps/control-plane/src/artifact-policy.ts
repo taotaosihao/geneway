@@ -26,8 +26,15 @@ export function assertArtifactMetadataAllowed(input: Readonly<{
   if (audience?.kind !== 'private-conversation' || audience.conversationId !== artifact.conversationId) {
     throw new GenewayError('ARTIFACT_POLICY_DENIED', 'Artifact audience is not allowed', 403);
   }
-  if (artifact.resourceScope !== `artifact:${artifact.rootArtifactId}`) {
+  const sourceBoundExceptionReport = artifact.kind === 'simulation_report'
+    && artifact.businessTaskId !== null
+    && artifact.rootArtifactId === null
+    && artifact.businessExceptionSourceVersionId !== null;
+  if (!sourceBoundExceptionReport && artifact.resourceScope !== `artifact:${artifact.rootArtifactId}`) {
     throw new GenewayError('ARTIFACT_POLICY_DENIED', 'Artifact resource scope is invalid', 403);
+  }
+  if (sourceBoundExceptionReport && artifact.resourceScope.length === 0) {
+    throw new GenewayError('ARTIFACT_POLICY_DENIED', 'Exception report source scope is invalid', 403);
   }
 }
 

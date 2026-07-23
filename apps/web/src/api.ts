@@ -1,7 +1,13 @@
 import {
   approvalProjectionSchema,
+  acknowledgeBusinessExceptionInputSchema,
   artifactIngestResponseSchema,
+  businessExceptionDetailSchema,
+  businessExceptionListQuerySchema,
+  businessExceptionListResponseSchema,
   conversationProjectionSchema,
+  createExceptionAnalysisTaskInputSchema,
+  createExceptionAnalysisTaskResponseSchema,
   chatRunEventSchema,
   chatRunProjectionSchema,
   cancelChatRunProjectionSchema,
@@ -13,12 +19,16 @@ import {
   workflowDetailProjectionSchema,
   workflowListResponseSchema,
   type ApprovalProjection,
+  type BusinessExceptionDetail,
+  type BusinessExceptionListQuery,
+  type BusinessExceptionListResponse,
   type ArtifactIngestResponse,
   type ConversationProjection,
   type ChatRunEvent,
   type ChatRunProjection,
   type CancelChatRunProjection,
   type CreateTaskInput,
+  type CreateExceptionAnalysisTaskResponse,
   type DocumentSnapshotList,
   type EvidenceProjection,
   type ExpertTarget,
@@ -119,6 +129,42 @@ export const api = {
     if (query.cursor !== undefined) params.set('cursor', query.cursor);
     const suffix = params.size === 0 ? '' : `?${params.toString()}`;
     return taskListResponseSchema.parse(await request(`/api/business-tasks${suffix}`));
+  },
+  listBusinessExceptions: async (query: Partial<BusinessExceptionListQuery> = {}): Promise<BusinessExceptionListResponse> => {
+    const parsed = businessExceptionListQuerySchema.parse(query);
+    const params = new URLSearchParams();
+    if (parsed.status !== undefined) params.set('status', parsed.status);
+    if (parsed.severity !== undefined) params.set('severity', parsed.severity);
+    if (parsed.exceptionType !== undefined) params.set('exceptionType', parsed.exceptionType);
+    if (parsed.resourceScope !== undefined) params.set('resourceScope', parsed.resourceScope);
+    params.set('sort', parsed.sort);
+    params.set('direction', parsed.direction);
+    params.set('limit', String(parsed.limit));
+    if (parsed.cursor !== undefined) params.set('cursor', parsed.cursor);
+    return businessExceptionListResponseSchema.parse(await request(`/api/business-exceptions?${params.toString()}`));
+  },
+  getBusinessException: async (exceptionId: string): Promise<BusinessExceptionDetail> =>
+    businessExceptionDetailSchema.parse(await request(`/api/business-exceptions/${encodeURIComponent(exceptionId)}`)),
+  acknowledgeBusinessException: async (exceptionId: string, aggregateVersion: number): Promise<BusinessExceptionDetail> => {
+    const input = acknowledgeBusinessExceptionInputSchema.parse({ aggregateVersion });
+    return businessExceptionDetailSchema.parse(await request(`/api/business-exceptions/${encodeURIComponent(exceptionId)}/acknowledge`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': key('exception-acknowledge') },
+      body: JSON.stringify(input),
+    }));
+  },
+  createExceptionAnalysisTask: async (
+    exceptionId: string,
+    aggregateVersion: number,
+    requestedExpertTarget: ExpertTarget,
+  ): Promise<CreateExceptionAnalysisTaskResponse> => {
+    const idempotencyKey = key('exception-analysis');
+    const input = createExceptionAnalysisTaskInputSchema.parse({ aggregateVersion, requestedExpertTarget, idempotencyKey });
+    return createExceptionAnalysisTaskResponseSchema.parse(await request(`/api/business-exceptions/${encodeURIComponent(exceptionId)}/analysis-task`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': idempotencyKey },
+      body: JSON.stringify(input),
+    }));
   },
   getEvidence: async (evidenceId: string): Promise<EvidenceProjection> => evidenceProjectionSchema.parse(await request(`/api/evidence/${evidenceId}`)),
   getWorkflow: async (id: string): Promise<Workflow> =>

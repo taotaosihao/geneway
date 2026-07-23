@@ -85,7 +85,8 @@ export type AuthorizedArtifact = Readonly<{
   id: string;
   kind: 'source_document' | 'simulation_report';
   businessTaskId: string | null;
-  rootArtifactId: string;
+  rootArtifactId: string | null;
+  businessExceptionSourceVersionId: string | null;
   conversationId: string;
   ownerUserId: string;
   displayName: string;
@@ -352,6 +353,7 @@ export class ArtifactRepository {
             kind: 'source_document',
             businessTaskId: null,
             rootArtifactId: String(row.artifact_id),
+            businessExceptionSourceVersionId: null,
             conversationId: String(row.conversation_id),
             ownerUserId: String(row.owner_user_id),
             displayName: String(row.display_name),
@@ -382,7 +384,8 @@ export class ArtifactRepository {
       id: string;
       kind: 'source_document' | 'simulation_report';
       business_task_id: string | null;
-      root_artifact_id: string;
+      root_artifact_id: string | null;
+      business_exception_source_version_id: string | null;
       conversation_id: string;
       owner_user_id: string;
       display_name: string;
@@ -402,7 +405,8 @@ export class ArtifactRepository {
       data_class: string;
       audience: unknown;
       resource_scope: string;
-    }>(`SELECT a.id,a.kind,a.business_task_id,a.root_artifact_id,a.conversation_id,a.owner_user_id,
+    }>(`SELECT a.id,a.kind,a.business_task_id,a.root_artifact_id,a.business_exception_source_version_id,
+      a.conversation_id,a.owner_user_id,
       a.display_name,a.media_type,a.size_bytes,a.content_sha256,
       m.id manifest_id,m.storage_bucket,m.storage_key,s.availability,s.integrity,s.state_version,
       s.retention_status,s.retention_expires_at,s.reconcile_status,
@@ -415,11 +419,18 @@ export class ArtifactRepository {
       LEFT JOIN artifacts root ON root.tenant_id=a.tenant_id AND root.id=a.root_artifact_id
       LEFT JOIN artifact_states root_state ON root_state.tenant_id=root.tenant_id AND root_state.artifact_id=root.id
       LEFT JOIN document_snapshots root_snapshot ON root_snapshot.tenant_id=root.tenant_id AND root_snapshot.artifact_id=root.id
+      LEFT JOIN business_exception_source_snapshots exception_source
+        ON exception_source.tenant_id=a.tenant_id
+        AND exception_source.source_version_id=a.business_exception_source_version_id
+      LEFT JOIN business_exception_analysis_bindings exception_binding
+        ON exception_binding.tenant_id=exception_source.tenant_id
+        AND exception_binding.source_version_id=exception_source.source_version_id
       WHERE a.tenant_id=$1 AND a.id=$2 AND a.owner_user_id=$3 AND c.user_id=$3
         AND (a.kind='source_document' OR (
           a.kind='simulation_report'
           AND task.id IS NOT NULL AND task.requester_id=$3 AND task.conversation_id=a.conversation_id
-          AND root.id IS NOT NULL AND root.owner_user_id=$3 AND root.conversation_id=a.conversation_id
+          AND ((root.id IS NOT NULL AND a.business_exception_source_version_id IS NULL
+          AND root.owner_user_id=$3 AND root.conversation_id=a.conversation_id
           AND root_snapshot.id=task.input_snapshot->>'documentSnapshotId'
           AND root_snapshot.artifact_id=task.input_snapshot->>'artifactId'
           AND root_snapshot.manifest_id=task.input_snapshot->>'manifestId'
@@ -443,7 +454,33 @@ export class ArtifactRepository {
           AND root_state.availability='active' AND root_state.integrity='verified'
           AND root_state.retention_status='active' AND root_state.retention_expires_at>now()
           AND root_state.reconcile_status='in_sync'
-        ))`, [principal.tenantId, artifactId, principal.userId]);
+          ) OR (root.id IS NULL AND a.business_exception_source_version_id IS NOT NULL
+          AND exception_source.business_exception_id=task.input_snapshot->>'businessExceptionId'
+          AND exception_source.source_version_id=task.input_snapshot->>'sourceVersionId'
+          AND exception_source.canonical_sha256=task.input_snapshot->>'sourceSha256'
+          AND exception_source.canonicalization_version=task.input_snapshot->>'canonicalizationVersion'
+          AND exception_source.resource_scope=task.input_snapshot->>'resourceScope'
+          AND exception_source.data_class=task.input_snapshot->>'dataClass'
+          AND exception_source.audience=task.input_snapshot->'sourceAudience'
+          AND exception_binding.business_task_id=task.id
+          AND exception_binding.requester_principal_id=$3
+          AND exception_binding.private_conversation_id=a.conversation_id
+          AND exception_binding.task_audience=task.input_snapshot->'taskAudience'
+          AND task.permission_scope=jsonb_build_object(
+            'actions',jsonb_build_array('R0','R1','A1'),
+            'resourceScopes',jsonb_build_array(exception_source.resource_scope),
+            'dataClasses',jsonb_build_array('C1'))
+          AND task.audience_scope=jsonb_build_object(
+            'kind','private-conversation','ids',jsonb_build_array('conversation:' || a.conversation_id))
+          AND a.resource_scope=exception_source.resource_scope AND a.data_class='C1'
+          AND a.audience=jsonb_build_object('kind','private-conversation','conversationId',a.conversation_id)
+          AND EXISTS (SELECT 1 FROM roles exception_role WHERE exception_role.tenant_id=task.tenant_id
+            AND exception_role.user_id=$3 AND exception_role.role='solution_reviewer')
+          AND EXISTS (SELECT 1 FROM resource_scopes exception_scope WHERE exception_scope.tenant_id=task.tenant_id
+            AND exception_scope.user_id=$3 AND (exception_source.resource_scope=exception_scope.resource_scope
+              OR exception_source.resource_scope LIKE exception_scope.resource_scope || '/%'))
+          )))
+        )`, [principal.tenantId, artifactId, principal.userId]);
     const row = result.rows[0];
     if (row === undefined) {
       throw new GenewayError('ARTIFACT_NOT_FOUND', 'Artifact was not found', 404);
@@ -455,6 +492,7 @@ export class ArtifactRepository {
       kind: row.kind,
       businessTaskId: row.business_task_id,
       rootArtifactId: row.root_artifact_id,
+      businessExceptionSourceVersionId: row.business_exception_source_version_id,
       conversationId: row.conversation_id,
       ownerUserId: row.owner_user_id,
       displayName: row.display_name,

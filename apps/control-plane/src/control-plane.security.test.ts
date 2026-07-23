@@ -49,7 +49,7 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
       },
     });
     expect(task.statusCode, task.body).toBe(201);
-    return task.json<{ taskId: string; approvalId: string; workflowVersionId: string }>();
+    return { ...task.json<{ taskId: string; approvalId: string; workflowVersionId: string }>(), conversationId };
   }
 
   async function createDocumentTask() {
@@ -140,6 +140,22 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
       WHEN $2 THEN '2026-07-22T00:00:02Z'::timestamptz
       WHEN $3 THEN '2026-07-22T00:00:03Z'::timestamptz END
       WHERE tenant_id='tenant_local' AND id IN ($1,$2,$3)`, [first.taskId, second.taskId, third.taskId]);
+    const fixtureExcerpt = 'fixture projection evidence';
+    const fixtureExcerptSha256 = createHash('sha256').update(fixtureExcerpt).digest('hex');
+    await controlPlane.repository.pool.query(`INSERT INTO evidence_items
+      (tenant_id,id,business_task_id,source_kind,source,source_excerpt,excerpt_sha256,resource_scope,
+       data_class,audience,accessible,simulation,runtime_mode,business_decision_allowed)
+      VALUES ('tenant_local','evidence_fixture_projection',$1,'legacy_fixture',$2,$3,$4,
+        'fixture:solution-analysis:v1','C1',$5,true,true,'fake',false)`, [
+      first.taskId,
+      {
+        kind: 'legacy_fixture', fixtureRef: 'fixture:solution-analysis:v1', fixtureVersion: 1,
+        sourceId: 'fixture-source', excerptSha256: fixtureExcerptSha256,
+      },
+      fixtureExcerpt,
+      fixtureExcerptSha256,
+      `conversation:${first.conversationId}`,
+    ]);
 
     const firstPage = await controlPlane.app.inject({ method: 'GET', url: '/api/business-tasks?limit=1' });
     expect(firstPage.statusCode, firstPage.body).toBe(200);
@@ -203,9 +219,13 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
     const taskPayload = taskDetail.json<Record<string, unknown> & {
       approval: Record<string, unknown>;
       steps: Array<Record<string, unknown>>;
+      evidence: Array<{ audience: unknown }>;
     }>();
     expect(Object.keys(taskPayload.approval).sort()).toEqual(['id', 'status', 'subjectDigest', 'version']);
     expect(taskPayload.steps.every((step) => Object.keys(step).sort().join(',') === 'id,status')).toBe(true);
+    expect(taskPayload.evidence[0]?.audience).toEqual({
+      kind: 'private_conversation', conversationId: first.conversationId,
+    });
     expect(JSON.stringify(taskPayload)).not.toContain('subject_digest');
     expect(JSON.stringify(taskPayload)).not.toContain('"subject"');
     expect(JSON.stringify(taskPayload)).not.toContain('"output"');

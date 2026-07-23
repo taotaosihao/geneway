@@ -147,7 +147,7 @@ export function FastChatExperience({ conversationId: explicitConversationId }: R
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">纬</span><div><strong>geneway</strong><small>制造业数字员工</small></div></div>
       <a className="new-task" href="/conversations/new">＋ 新建会话</a>
-      <nav><b>工作区</b><a className="nav-active" href="/conversations/new">小纬</a><a href="/tasks">我的任务</a><a href="/workflows">Workflow</a></nav>
+      <nav><b>工作区</b><a className="nav-active" href="/conversations/new">小纬</a><a href="/exceptions">异常与待办</a><a href="/tasks">我的任务</a><a href="/workflows">Workflow</a></nav>
       <a className="material-analysis-link" data-testid="material-analysis-link" href="/conversations/new?capability=solution.analysis.v1">分析材料</a>
     </aside>
     <section className="fast-chat-pane">

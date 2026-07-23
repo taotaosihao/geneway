@@ -4,6 +4,7 @@ import { GenewayError } from '@geneway/contracts';
 import type { WorkerDelivery, WorkerInputContent } from '@geneway/contracts';
 import {
   compileWorkflow,
+  createExceptionAssistDraft,
   createSolutionAnalysisDocumentDraft,
   createSolutionAnalysisDraft,
   readStoredWorkflowVersion,
@@ -59,13 +60,48 @@ function decodeDocumentBytes(input: Extract<WorkerInputContent, { kind: 'documen
   return bytes;
 }
 
+const FIXTURE_HASH_BY_VERSION = Object.freeze({
+  'gate0.2b-capacity-lag/1': '0aaf071f5cb062251011970b382e239d3ae5fdcdc4f977b96f325825723b2ed6',
+  'gate0.2b-equipment-alarm/1': 'c8de7202aa3d5a395bbc96df13776fbdc68591687d6e0fbd144d1c9a1e5ea593',
+});
+
+function decodeBusinessExceptionBytes(input: Extract<WorkerInputContent, { kind: 'business_exception_snapshot' }>): Uint8Array {
+  const bytes = Buffer.from(input.canonicalBytes, 'utf8');
+  const hash = createHash('sha256').update(bytes).digest('hex');
+  const expectedFixtureHash = FIXTURE_HASH_BY_VERSION[input.inputRef.fixtureVersion];
+  if (hash !== input.inputRef.sourceSha256 || hash !== expectedFixtureHash) {
+    throw new GenewayError('WORKER_INPUT_HASH_MISMATCH', 'Business exception canonical bytes do not match the frozen source hash', 409);
+  }
+  let snapshot: unknown;
+  try {
+    snapshot = JSON.parse(input.canonicalBytes) as unknown;
+  } catch {
+    throw new GenewayError('WORKER_INPUT_CANONICAL_JSON_INVALID', 'Business exception snapshot is not valid canonical JSON', 409);
+  }
+  if (JSON.stringify(snapshot) !== input.canonicalBytes || typeof snapshot !== 'object' || snapshot === null || Array.isArray(snapshot)) {
+    throw new GenewayError('WORKER_INPUT_CANONICAL_JSON_INVALID', 'Business exception snapshot bytes are not the frozen compact canonical JSON', 409);
+  }
+  const record = snapshot as Readonly<Record<string, unknown>>;
+  const ref = input.inputRef;
+  if (record.fixtureVersion !== ref.fixtureVersion || record.sourceSystem !== ref.sourceSystem
+    || record.sourceObjectRef !== ref.sourceObjectRef || record.detectionWindow !== ref.detectionWindow
+    || record.resourceScope !== ref.resourceScope || record.dataClass !== ref.dataClass
+    || ref.sourceAudience.businessExceptionId !== ref.businessExceptionId
+    || ref.sourceAudience.resourceScope !== ref.resourceScope || ref.sourceAudience.dataClass !== ref.dataClass) {
+    throw new GenewayError('WORKER_INPUT_REF_MISMATCH', 'Business exception snapshot does not match its frozen locator or audiences', 409);
+  }
+  return bytes;
+}
+
 function assertFixedWorkflow(delivery: WorkerDelivery): ReturnType<typeof readStoredWorkflowVersion> {
   const workflow = readStoredWorkflowVersion(delivery.workflow);
   const expected = compileWorkflow(delivery.inputRef.kind === 'fixture'
     ? createSolutionAnalysisDraft()
-    : createSolutionAnalysisDocumentDraft(delivery.inputRef.resourceScope));
+    : delivery.inputRef.kind === 'document_snapshot'
+      ? createSolutionAnalysisDocumentDraft(delivery.inputRef.resourceScope)
+      : createExceptionAssistDraft(delivery.inputRef.resourceScope));
   if (workflow.id !== expected.id || workflow.hash !== expected.hash) {
-    throw new GenewayError('WORKER_WORKFLOW_NOT_OPEN', 'Worker only executes the fixed seven-node Gate 0.2A workflow', 422);
+    throw new GenewayError('WORKER_WORKFLOW_NOT_OPEN', 'Worker only executes an exact fixed seven-node Gate workflow', 422);
   }
   return workflow;
 }
@@ -91,7 +127,11 @@ export async function executeDelivery(
     const executionInput = {
       workflow,
       inputRef: input.inputRef,
-      ...(input.kind === 'document_snapshot' ? { inputBytes: decodeDocumentBytes(input) } : {}),
+      ...(input.kind === 'document_snapshot'
+        ? { inputBytes: decodeDocumentBytes(input) }
+        : input.kind === 'business_exception_snapshot'
+          ? { inputBytes: decodeBusinessExceptionBytes(input) }
+          : {}),
     };
     const interpreter = new WorkflowInterpreter(port, undefined, stepPacingMs, onBeforeCompleteStep === undefined
       ? undefined

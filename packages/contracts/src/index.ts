@@ -1,5 +1,67 @@
 import { z } from 'zod';
 
+const sha256ValueSchema = z.string().regex(/^[a-f0-9]{64}$/);
+
+export const businessExceptionTypeSchema = z.enum(['capacity_progress_lag', 'equipment_alarm']);
+export type BusinessExceptionType = z.infer<typeof businessExceptionTypeSchema>;
+
+export const businessExceptionFixtureVersionSchema = z.enum([
+  'gate0.2b-capacity-lag/1',
+  'gate0.2b-equipment-alarm/1',
+]);
+
+export const resourceExceptionAudienceSchema = z.object({
+  kind: z.literal('resource_exception'),
+  businessExceptionId: z.string().min(1),
+  resourceScope: z.string().min(1),
+  dataClass: z.literal('C1'),
+}).strict();
+
+export const privateConversationAudienceSchema = z.object({
+  kind: z.literal('private_conversation'),
+  conversationId: z.string().min(1),
+}).strict();
+
+export const exceptionAudienceSchema = z.discriminatedUnion('kind', [
+  resourceExceptionAudienceSchema,
+  privateConversationAudienceSchema,
+]);
+
+export type ExceptionAudience = z.infer<typeof exceptionAudienceSchema>;
+
+export const businessExceptionRefSchema = z.object({
+  exceptionId: z.string().min(1),
+  sourceVersionId: z.string().min(1),
+  sourceSystem: z.literal('fixture-manufacturing'),
+  exceptionType: businessExceptionTypeSchema,
+  sourceObjectRef: z.string().min(1),
+  detectionWindow: z.string().min(1),
+  fixtureVersion: businessExceptionFixtureVersionSchema,
+  fixtureSha256: sha256ValueSchema,
+  canonicalizationVersion: z.literal('rfc8785-jcs/1'),
+  resourceScope: z.string().min(1),
+  dataClass: z.literal('C1'),
+}).strict();
+
+export type BusinessExceptionRef = z.infer<typeof businessExceptionRefSchema>;
+
+export const businessExceptionSourceSnapshotSchema = z.object({
+  businessExceptionId: z.string().min(1),
+  sourceVersionId: z.string().min(1),
+  canonicalBytes: z.string().min(1),
+  canonicalSha256: sha256ValueSchema,
+  canonicalizationVersion: z.literal('rfc8785-jcs/1'),
+  fixtureVersion: businessExceptionFixtureVersionSchema,
+  sourceSystem: z.literal('fixture-manufacturing'),
+  sourceObjectRef: z.string().min(1),
+  detectionWindow: z.string().min(1),
+  resourceScope: z.string().min(1),
+  dataClass: z.literal('C1'),
+  audience: resourceExceptionAudienceSchema,
+}).strict();
+
+export type BusinessExceptionSourceSnapshot = z.infer<typeof businessExceptionSourceSnapshotSchema>;
+
 export const simulationEnvelopeSchema = z.object({
   simulation: z.literal(true),
   runtimeMode: z.literal('fake'),
@@ -53,6 +115,21 @@ export const resolvedTaskInputRefSchema = z.discriminatedUnion('kind', [
     dataClass: z.literal('C1'),
     audience: z.string().startsWith('conversation:'),
   }).strict(),
+  z.object({
+    kind: z.literal('business_exception_snapshot'),
+    businessExceptionId: z.string().min(1),
+    sourceVersionId: z.string().min(1),
+    sourceSha256: sha256ValueSchema,
+    canonicalizationVersion: z.literal('rfc8785-jcs/1'),
+    fixtureVersion: businessExceptionFixtureVersionSchema,
+    sourceSystem: z.literal('fixture-manufacturing'),
+    sourceObjectRef: z.string().min(1),
+    detectionWindow: z.string().min(1),
+    resourceScope: z.string().min(1),
+    dataClass: z.literal('C1'),
+    sourceAudience: resourceExceptionAudienceSchema,
+    taskAudience: privateConversationAudienceSchema,
+  }).strict(),
 ]);
 
 export type ResolvedTaskInputRef = z.infer<typeof resolvedTaskInputRefSchema>;
@@ -102,6 +179,16 @@ export const taskResultSchema = z.discriminatedUnion('kind', [
 
 export type TaskResult = z.infer<typeof taskResultSchema>;
 
+export const businessExceptionSnapshotEvidenceSourceSchema = z.object({
+  kind: z.literal('business_exception_snapshot'),
+  businessExceptionId: z.string().min(1),
+  sourceVersionId: z.string().min(1),
+  sourceSha256: sha256ValueSchema,
+  canonicalizationVersion: z.literal('rfc8785-jcs/1'),
+  jsonPointer: z.string().startsWith('/'),
+  valueSha256: sha256ValueSchema,
+}).strict();
+
 export const evidenceSourceSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('legacy_fixture'),
@@ -120,6 +207,7 @@ export const evidenceSourceSchema = z.discriminatedUnion('kind', [
     excerptSha256: z.string().regex(/^[a-f0-9]{64}$/),
     extractionVersion: z.literal('raw-utf8-byte-range/1'),
   }).strict(),
+  businessExceptionSnapshotEvidenceSourceSchema,
 ]);
 
 export type EvidenceSource = z.infer<typeof evidenceSourceSchema>;
@@ -131,7 +219,7 @@ export const evidenceProjectionSchema = z.object({
   excerptSha256: z.string().regex(/^[a-f0-9]{64}$/),
   resourceScope: z.string().min(1),
   dataClass: z.literal('C1'),
-  audience: z.string().startsWith('conversation:'),
+  audience: privateConversationAudienceSchema,
   lineageRecordIds: z.array(z.string().min(1)),
 }).strict();
 
@@ -181,11 +269,103 @@ const listMetadataSchema = z.object({
   asOf: z.string().datetime(),
 }).strict();
 
+export const businessExceptionStatusSchema = z.enum(['open', 'acknowledged']);
+export const businessExceptionSeveritySchema = z.enum(['critical', 'high', 'medium', 'low']);
+
+export const businessExceptionListQuerySchema = z.object({
+  status: businessExceptionStatusSchema.optional(),
+  severity: businessExceptionSeveritySchema.optional(),
+  exceptionType: businessExceptionTypeSchema.optional(),
+  resourceScope: z.string().min(1).optional(),
+  sort: z.enum(['detectedAt', 'severity']).default('detectedAt'),
+  direction: z.literal('desc').default('desc'),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  cursor: paginationCursorSchema.optional(),
+}).strict();
+
+export type BusinessExceptionListQuery = z.infer<typeof businessExceptionListQuerySchema>;
+
+export const businessExceptionListItemSchema = z.object({
+  id: z.string().min(1),
+  exceptionType: businessExceptionTypeSchema,
+  summary: z.string().min(1),
+  severity: businessExceptionSeveritySchema,
+  status: businessExceptionStatusSchema,
+  resourceScope: z.string().min(1),
+  dataClass: z.literal('C1'),
+  detectedAt: z.string().datetime(),
+  aggregateVersion: z.number().int().positive(),
+  simulation: z.literal(true),
+}).strict();
+
+export type BusinessExceptionListItem = z.infer<typeof businessExceptionListItemSchema>;
+
+export const businessExceptionListResponseSchema = z.object({
+  exceptions: z.array(businessExceptionListItemSchema),
+  ...listMetadataSchema.shape,
+  queryVersion: z.literal('business-exceptions.list.v1'),
+}).strict();
+
+export type BusinessExceptionListResponse = z.infer<typeof businessExceptionListResponseSchema>;
+
+const jsonScalarSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+
+export const exceptionSourceProjectionSchema = z.object({
+  sourceVersionId: z.string().min(1),
+  sourceSha256: sha256ValueSchema,
+  canonicalizationVersion: z.literal('rfc8785-jcs/1'),
+  jsonPointer: z.string().startsWith('/'),
+  value: jsonScalarSchema,
+  valueSha256: sha256ValueSchema,
+}).strict();
+
+export type ExceptionSourceProjection = z.infer<typeof exceptionSourceProjectionSchema>;
+
+export const businessExceptionDetailSchema = businessExceptionListItemSchema.extend({
+  sourceObjectRef: z.string().min(1),
+  detectionWindow: z.string().min(1),
+  acknowledgedAt: z.string().datetime().nullable(),
+  ownerDisplayState: z.enum(['unassigned', 'mine', 'assigned']),
+  analysisDisplayState: z.enum(['not_requested', 'task_bound']),
+  evidence: z.array(exceptionSourceProjectionSchema),
+}).strict();
+
+export type BusinessExceptionDetail = z.infer<typeof businessExceptionDetailSchema>;
+
+export const acknowledgeBusinessExceptionInputSchema = z.object({
+  aggregateVersion: z.number().int().positive(),
+}).strict();
+
+export type AcknowledgeBusinessExceptionInput = z.infer<typeof acknowledgeBusinessExceptionInputSchema>;
+
+export const createExceptionAnalysisTaskInputSchema = z.object({
+  aggregateVersion: z.number().int().positive(),
+  requestedExpertTarget: expertTargetSchema,
+  idempotencyKey: z.string().min(8).max(200),
+}).strict();
+
+export type CreateExceptionAnalysisTaskInput = z.infer<typeof createExceptionAnalysisTaskInputSchema>;
+
+export const createExceptionAnalysisTaskResponseSchema = z.object({
+  taskId: z.string().min(1),
+  conversationId: z.string().min(1),
+  workflowVersion: z.object({
+    id: z.string().min(1),
+    hash: sha256ValueSchema,
+  }).strict(),
+  approvalSubjectDigest: sha256ValueSchema,
+  simulation: z.literal(true),
+}).strict();
+
+export type CreateExceptionAnalysisTaskResponse = z.infer<typeof createExceptionAnalysisTaskResponseSchema>;
+
+export const businessTaskCapabilityIdSchema = z.enum(['solution.analysis.v1', 'operations.exception-assist.v1']);
+
 export const taskListItemSchema = z.object({
   id: z.string().min(1),
-  capabilityId: z.literal('solution.analysis.v1'),
+  capabilityId: businessTaskCapabilityIdSchema,
   status: taskStatusSchema,
-  title: z.literal('方案分析'),
+  title: z.enum(['方案分析', '异常分析']),
   conversationId: z.string().min(1),
   workflowVersion: z.object({
     id: z.string().min(1),
@@ -210,7 +390,7 @@ export type TaskListResponse = z.infer<typeof taskListResponseSchema>;
 
 export const taskListQuerySchema = z.object({
   status: taskStatusSchema.optional(),
-  capabilityId: z.literal('solution.analysis.v1').optional(),
+  capabilityId: businessTaskCapabilityIdSchema.optional(),
   sort: z.enum(['createdAt', 'updatedAt']).default('updatedAt'),
   direction: z.literal('desc').default('desc'),
   limit: z.coerce.number().int().min(1).max(100).default(25),
@@ -221,8 +401,8 @@ export type TaskListQuery = z.infer<typeof taskListQuerySchema>;
 
 export const taskSnapshotSchema = z.object({
   id: z.string(),
-  capabilityId: z.literal('solution.analysis.v1'),
-  title: z.literal('方案分析'),
+  capabilityId: businessTaskCapabilityIdSchema,
+  title: z.enum(['方案分析', '异常分析']),
   conversationId: z.string(),
   status: taskStatusSchema,
   approvalStatus: z.enum(['pending', 'approved', 'rejected']),
@@ -593,7 +773,7 @@ export const workflowDetailProjectionSchema = workflowListItemSchema.extend({
 
 export type WorkflowDetailProjection = z.infer<typeof workflowDetailProjectionSchema>;
 
-export const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
+export const sha256Schema = sha256ValueSchema;
 
 export const artifactAudienceSchema = z.object({
   kind: z.literal('private-conversation'),
@@ -786,6 +966,25 @@ export const workerInputContentSchema = z.discriminatedUnion('kind', [
     }).strict(),
     bytesBase64: z.string().min(1),
   }).strict(),
+  z.object({
+    kind: z.literal('business_exception_snapshot'),
+    inputRef: z.object({
+      kind: z.literal('business_exception_snapshot'),
+      businessExceptionId: z.string().min(1),
+      sourceVersionId: z.string().min(1),
+      sourceSha256: sha256ValueSchema,
+      canonicalizationVersion: z.literal('rfc8785-jcs/1'),
+      fixtureVersion: businessExceptionFixtureVersionSchema,
+      sourceSystem: z.literal('fixture-manufacturing'),
+      sourceObjectRef: z.string().min(1),
+      detectionWindow: z.string().min(1),
+      resourceScope: z.string().min(1),
+      dataClass: z.literal('C1'),
+      sourceAudience: resourceExceptionAudienceSchema,
+      taskAudience: privateConversationAudienceSchema,
+    }).strict(),
+    canonicalBytes: z.string().min(1),
+  }).strict(),
 ]);
 
 export type WorkerInputContent = z.infer<typeof workerInputContentSchema>;
@@ -806,9 +1005,21 @@ export const legacyEvidenceLocatorCandidateSchema = z.object({
   sourceId: z.string().min(1),
 }).strict();
 
+export const businessExceptionEvidenceLocatorCandidateSchema = z.object({
+  kind: z.literal('business_exception_snapshot'),
+  candidateKey: z.string().min(1).max(100),
+  businessExceptionId: z.string().min(1),
+  sourceVersionId: z.string().min(1),
+  sourceSha256: sha256ValueSchema,
+  canonicalizationVersion: z.literal('rfc8785-jcs/1'),
+  jsonPointer: z.string().startsWith('/'),
+  valueSha256: sha256ValueSchema,
+}).strict();
+
 export const evidenceLocatorCandidateSchema = z.discriminatedUnion('kind', [
   documentEvidenceLocatorCandidateSchema,
   legacyEvidenceLocatorCandidateSchema,
+  businessExceptionEvidenceLocatorCandidateSchema,
 ]);
 
 export type EvidenceLocatorCandidate = z.infer<typeof evidenceLocatorCandidateSchema>;
@@ -853,6 +1064,15 @@ export const workerCommandResponseSchema = z.discriminatedUnion('command', [
 export type WorkerCommandResponse = z.infer<typeof workerCommandResponseSchema>;
 
 export const createTaskInputJsonSchema = z.toJSONSchema(createTaskInputSchema);
+export const businessExceptionRefJsonSchema = z.toJSONSchema(businessExceptionRefSchema);
+export const businessExceptionSourceSnapshotJsonSchema = z.toJSONSchema(businessExceptionSourceSnapshotSchema);
+export const exceptionAudienceJsonSchema = z.toJSONSchema(exceptionAudienceSchema);
+export const businessExceptionListQueryJsonSchema = z.toJSONSchema(businessExceptionListQuerySchema);
+export const businessExceptionListResponseJsonSchema = z.toJSONSchema(businessExceptionListResponseSchema);
+export const businessExceptionDetailJsonSchema = z.toJSONSchema(businessExceptionDetailSchema);
+export const acknowledgeBusinessExceptionInputJsonSchema = z.toJSONSchema(acknowledgeBusinessExceptionInputSchema);
+export const createExceptionAnalysisTaskInputJsonSchema = z.toJSONSchema(createExceptionAnalysisTaskInputSchema);
+export const createExceptionAnalysisTaskResponseJsonSchema = z.toJSONSchema(createExceptionAnalysisTaskResponseSchema);
 export const conversationProjectionJsonSchema = z.toJSONSchema(conversationProjectionSchema);
 export const createChatRunInputJsonSchema = z.toJSONSchema(createChatRunInputSchema);
 export const chatRunProjectionJsonSchema = z.toJSONSchema(chatRunProjectionSchema);
@@ -869,9 +1089,29 @@ export const workflowListQueryJsonSchema = z.toJSONSchema(workflowListQuerySchem
 export const workflowListResponseJsonSchema = z.toJSONSchema(workflowListResponseSchema);
 export const workflowDetailProjectionJsonSchema = z.toJSONSchema(workflowDetailProjectionSchema);
 export const workerDeliveryJsonSchema = z.toJSONSchema(workerDeliverySchema);
+export const workerInputContentJsonSchema = z.toJSONSchema(workerInputContentSchema);
 export const workerCommandJsonSchema = z.toJSONSchema(workerCommandSchema);
 export const workerCommandResponseJsonSchema = z.toJSONSchema(workerCommandResponseSchema);
 export const attemptOutputCandidatePayloadJsonSchema = z.toJSONSchema(attemptOutputCandidatePayloadSchema);
+export const evidenceLocatorCandidateJsonSchema = z.toJSONSchema(evidenceLocatorCandidateSchema);
+export const evidenceSourceJsonSchema = z.toJSONSchema(evidenceSourceSchema);
+
+export const gate02bPublicWireJsonSchemas = Object.freeze({
+  BusinessExceptionRef: businessExceptionRefJsonSchema,
+  BusinessExceptionSourceSnapshot: businessExceptionSourceSnapshotJsonSchema,
+  ExceptionAudience: exceptionAudienceJsonSchema,
+  BusinessExceptionListQuery: businessExceptionListQueryJsonSchema,
+  BusinessExceptionListResponse: businessExceptionListResponseJsonSchema,
+  BusinessExceptionDetail: businessExceptionDetailJsonSchema,
+  AcknowledgeBusinessExceptionInput: acknowledgeBusinessExceptionInputJsonSchema,
+  CreateExceptionAnalysisTaskInput: createExceptionAnalysisTaskInputJsonSchema,
+  CreateExceptionAnalysisTaskResponse: createExceptionAnalysisTaskResponseJsonSchema,
+  WorkerDelivery: workerDeliveryJsonSchema,
+  WorkerInputContent: workerInputContentJsonSchema,
+  AttemptOutputCandidatePayload: attemptOutputCandidatePayloadJsonSchema,
+  EvidenceLocatorCandidate: evidenceLocatorCandidateJsonSchema,
+  EvidenceSource: evidenceSourceJsonSchema,
+});
 
 export class GenewayError extends Error {
   constructor(

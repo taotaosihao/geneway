@@ -1,11 +1,14 @@
 import cors from '@fastify/cors';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { deriveTrustedLocalPrincipal } from '@geneway/authorization';
 import {
   createTaskInputSchema,
   createChatRunInputSchema,
+  acknowledgeBusinessExceptionInputSchema,
+  businessExceptionListQuerySchema,
+  createExceptionAnalysisTaskInputSchema,
   eventCursorSchema,
   evidenceProjectionSchema,
   GenewayError,
@@ -34,6 +37,7 @@ import { ControlPlaneRepository } from './repository.js';
 import { ChatRepository } from './chat-repository.js';
 import { ArtifactRepository } from './artifact-repository.js';
 import { ArtifactService, type ArtifactServiceHooks } from './artifact-service.js';
+import { BusinessExceptionRepository } from './business-exception-repository.js';
 
 export { StorageReconciler } from './storage-reconciler.js';
 export type { StorageReconciliationFinding, StorageReconciliationResult } from './storage-reconciler.js';
@@ -70,6 +74,7 @@ export type ControlPlane = Readonly<{
   artifactRepository: ArtifactRepository;
   artifactService: ArtifactService | null;
   chatRepository: ChatRepository;
+  businessExceptionRepository: BusinessExceptionRepository;
 }>;
 
 export async function createControlPlane(options: Readonly<{
@@ -90,6 +95,7 @@ export async function createControlPlane(options: Readonly<{
   const repository = new ControlPlaneRepository(options.databaseUrl, cursorHmacSecret);
   const artifactRepository = new ArtifactRepository(repository.pool);
   const chatRepository = new ChatRepository(repository.pool, options.liveValidationRunId);
+  const businessExceptionRepository = new BusinessExceptionRepository(repository.pool, cursorHmacSecret);
   const objectStorage = options.objectStorage === undefined ? createObjectStorageFromEnv() : options.objectStorage;
   const artifactService = objectStorage === null
     ? null
@@ -224,6 +230,32 @@ export async function createControlPlane(options: Readonly<{
   app.get('/api/conversations/:id', async (request) => {
     const params = z.object({ id: z.string().min(1) }).parse(request.params);
     return chatRepository.getConversation(request.principal, params.id);
+  });
+
+  app.get('/api/business-exceptions', async (request) => {
+    const query = businessExceptionListQuerySchema.parse(request.query);
+    return businessExceptionRepository.list(request.principal, query);
+  });
+
+  app.get('/api/business-exceptions/:id', async (request, reply) => {
+    const params = z.object({ id: z.string().min(1) }).strict().parse(request.params);
+    const result = await businessExceptionRepository.get(request.principal, params.id);
+    reply.header('etag', `"${String(result.aggregateVersion)}"`);
+    reply.header('cache-control', 'private, no-store');
+    return result;
+  });
+
+  app.post('/api/business-exceptions/:id/acknowledge', async (request) => {
+    const params = z.object({ id: z.string().min(1) }).strict().parse(request.params);
+    const input = acknowledgeBusinessExceptionInputSchema.parse(request.body);
+    return businessExceptionRepository.acknowledge(request.principal, params.id, input.aggregateVersion);
+  });
+
+  app.post('/api/business-exceptions/:id/analysis-task', async (request, reply) => {
+    const params = z.object({ id: z.string().min(1) }).strict().parse(request.params);
+    const input = createExceptionAnalysisTaskInputSchema.parse(request.body);
+    const result = await businessExceptionRepository.createAnalysisTask(request.principal, params.id, input);
+    return reply.status(201).send(result);
   });
 
   app.post('/api/conversations/:id/chat-runs', async (request, reply) => {
@@ -436,6 +468,32 @@ export async function createControlPlane(options: Readonly<{
         throw new GenewayError('EVIDENCE_INTEGRITY_FAILED', 'Evidence no longer matches its immutable source', 409);
       }
       excerpt = verified.excerpt;
+    } else if (source.kind === 'business_exception_snapshot') {
+      const businessExceptionId = z.string().min(1).parse(source.businessExceptionId);
+      const sourceVersionId = z.string().min(1).parse(source.sourceVersionId);
+      const sourceSha256 = z.string().regex(/^[a-f0-9]{64}$/u).parse(source.sourceSha256);
+      const jsonPointer = z.string().regex(/^\/values\/[^/]+$/u).parse(source.jsonPointer);
+      const snapshot = await repository.pool.query<{ canonical_bytes: Buffer }>(`SELECT snapshot.canonical_bytes
+        FROM business_exception_source_snapshots snapshot
+        WHERE snapshot.tenant_id=$1 AND snapshot.business_exception_id=$2
+          AND snapshot.source_version_id=$3 AND snapshot.canonical_sha256=$4`, [
+        request.principal.tenantId, businessExceptionId, sourceVersionId, sourceSha256,
+      ]);
+      const bytes = snapshot.rows[0]?.canonical_bytes;
+      if (bytes === undefined || createHash('sha256').update(bytes).digest('hex') !== sourceSha256) {
+        throw new GenewayError('EVIDENCE_INTEGRITY_FAILED', 'Evidence no longer matches its immutable exception source', 409);
+      }
+      const key = jsonPointer.slice('/values/'.length).replaceAll('~1', '/').replaceAll('~0', '~');
+      const parsed = JSON.parse(bytes.toString('utf8')) as Readonly<{ values?: Readonly<Record<string, unknown>> }>;
+      const value = parsed.values?.[key];
+      if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean' && value !== null) {
+        throw new GenewayError('EVIDENCE_SOURCE_INVALID', 'Evidence pointer is outside the scalar exception facts allowlist', 409);
+      }
+      excerpt = JSON.stringify(value);
+      const valueSha256 = createHash('sha256').update(excerpt).digest('hex');
+      if (valueSha256 !== source.valueSha256 || valueSha256 !== raw.excerpt_sha256 || excerpt !== raw.source_excerpt) {
+        throw new GenewayError('EVIDENCE_INTEGRITY_FAILED', 'Evidence value no longer matches its immutable exception source', 409);
+      }
     } else {
       throw new GenewayError('EVIDENCE_SOURCE_INVALID', 'Evidence source is not supported', 409);
     }
@@ -450,7 +508,10 @@ export async function createControlPlane(options: Readonly<{
       excerptSha256: raw.excerpt_sha256,
       resourceScope: raw.resource_scope,
       dataClass: raw.data_class,
-      audience: raw.audience,
+      audience: {
+        kind: 'private_conversation',
+        conversationId: z.string().startsWith('conversation:').parse(raw.audience).slice('conversation:'.length),
+      },
       lineageRecordIds: lineage.rows.map((row) => row.id),
     });
   });
@@ -470,7 +531,6 @@ export async function createControlPlane(options: Readonly<{
 
   const notOpen = async (_request: FastifyRequest, reply: FastifyReply) => reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'This capability is not open in Gate 0.1' } });
   app.post('/api/uploads', notOpen);
-  app.get('/api/business-exceptions', notOpen);
   app.all('/api/runtime/:kind', notOpen);
 
   const chatReaperIntervalMs = options.chatReaperIntervalMs ?? 250;
@@ -491,11 +551,12 @@ export async function createControlPlane(options: Readonly<{
     await chatReaperRun;
     await repository.close();
   });
-  return { app, repository, artifactRepository, artifactService, chatRepository };
+  return { app, repository, artifactRepository, artifactService, chatRepository, businessExceptionRepository };
 }
 
 export { ControlPlaneRepository } from './repository.js';
 export { ArtifactRepository } from './artifact-repository.js';
 export { ArtifactService } from './artifact-service.js';
 export { ChatRepository } from './chat-repository.js';
+export { BusinessExceptionRepository, GATE_0_2B_EXCEPTION_FIXTURES } from './business-exception-repository.js';
 export { createWorkerCommandApp, WorkerCommandService } from './worker-command-server.js';

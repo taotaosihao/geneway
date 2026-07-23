@@ -35,6 +35,7 @@ import {
 import {
   SOLUTION_CAPABILITY_VERSION_ID,
   SOLUTION_HARNESS_VERSION_ID,
+  EXCEPTION_ASSIST_CAPABILITY_VERSION_ID,
   compileWorkflow,
   createSolutionAnalysisDocumentDraft,
   createSolutionAnalysisDraft,
@@ -45,6 +46,14 @@ import {
 
 const { Pool } = pg;
 const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
+
+function projectPrivateConversationAudience(value: string, conversationId: string) {
+  const expected = `conversation:${conversationId}`;
+  if (value !== expected) {
+    throw new GenewayError('TASK_PROJECTION_INVALID', 'Evidence audience is not bound to the task conversation', 500);
+  }
+  return { kind: 'private_conversation' as const, conversationId };
+}
 
 type JsonObject = Readonly<Record<string, unknown>>;
 export type ApprovalSubjectInput = Readonly<{
@@ -59,9 +68,15 @@ export type ApprovalSubjectInput = Readonly<{
   permissionScope: JsonObject;
   audienceScope: JsonObject;
   budget: JsonObject;
+  inputDigest?: string | null;
 }>;
 
 export function buildApprovalSubject(input: ApprovalSubjectInput): JsonObject {
+  const frozenExceptionInput = input.inputDigest === undefined || input.inputDigest === null ? {} : {
+    requestedExpertTarget: input.expertTarget.requested,
+    resolvedExpertTarget: input.expertTarget.resolved,
+    inputDigest: input.inputDigest,
+  };
   return {
     kind: 'workflow-execution',
     subjectType: 'business-task',
@@ -69,7 +84,9 @@ export function buildApprovalSubject(input: ApprovalSubjectInput): JsonObject {
     subjectVersion: 1,
     requesterId: input.requesterId,
     resolvedInputRef: input.inputSnapshot,
-    resolvedExpertTarget: input.expertTarget,
+    ...(input.inputDigest === undefined || input.inputDigest === null
+      ? { resolvedExpertTarget: input.expertTarget }
+      : frozenExceptionInput),
     expertCatalogVersionId: input.expertCatalogVersionId,
     harnessVersionId: input.harnessVersionId,
     workflowVersionId: input.workflowVersionId,
@@ -93,6 +110,7 @@ type TaskRow = {
   workflow_hash: string;
   requester_id: string;
   input_snapshot: JsonObject;
+  input_digest: string | null;
   expert_target: JsonObject;
   permission_scope: JsonObject;
   audience_scope: JsonObject;
@@ -192,6 +210,35 @@ const TASK_PROJECTION_AUTHORIZATION_SQL = `
           AND readable_artifact.owner_user_id=$2
       )
     )
+    OR (
+      t.input_snapshot->>'kind'='business_exception_snapshot'
+      AND t.input_snapshot->'taskAudience'=jsonb_build_object(
+        'kind','private_conversation','conversationId',t.conversation_id)
+      AND EXISTS (
+        SELECT 1
+        FROM business_exception_source_snapshots readable_exception_source
+        JOIN business_exception_analysis_bindings readable_exception_binding
+          ON readable_exception_binding.tenant_id=readable_exception_source.tenant_id
+          AND readable_exception_binding.source_version_id=readable_exception_source.source_version_id
+        JOIN resource_scopes readable_scope
+          ON readable_scope.tenant_id=readable_exception_source.tenant_id
+          AND readable_scope.user_id=$2
+        WHERE readable_exception_source.tenant_id=t.tenant_id
+          AND readable_exception_source.business_exception_id=t.input_snapshot->>'businessExceptionId'
+          AND readable_exception_source.source_version_id=t.input_snapshot->>'sourceVersionId'
+          AND readable_exception_source.canonical_sha256=t.input_snapshot->>'sourceSha256'
+          AND readable_exception_source.canonicalization_version=t.input_snapshot->>'canonicalizationVersion'
+          AND readable_exception_source.resource_scope=t.input_snapshot->>'resourceScope'
+          AND readable_exception_source.data_class=t.input_snapshot->>'dataClass'
+          AND readable_exception_source.audience=t.input_snapshot->'sourceAudience'
+          AND readable_exception_binding.business_task_id=t.id
+          AND readable_exception_binding.requester_principal_id=$2
+          AND readable_exception_binding.private_conversation_id=t.conversation_id
+          AND readable_exception_binding.task_audience=t.input_snapshot->'taskAudience'
+          AND (readable_exception_source.resource_scope=readable_scope.resource_scope
+            OR readable_exception_source.resource_scope LIKE readable_scope.resource_scope || '/%')
+      )
+    )
   )`;
 
 export type CreatedTask = Readonly<{
@@ -205,7 +252,9 @@ export type ExecutionResponse = Readonly<{ taskId: string; status: 'accepted' | 
 export type CancellationResponse = Readonly<{ taskId: string; status: 'canceled' }>;
 
 function normalizeStoredInput(value: JsonObject): ResolvedTaskInputRef {
-  if (value.kind === 'fixture' || value.kind === 'document_snapshot') return resolvedTaskInputRefSchema.parse(value);
+  if (value.kind === 'fixture' || value.kind === 'document_snapshot' || value.kind === 'business_exception_snapshot') {
+    return resolvedTaskInputRefSchema.parse(value);
+  }
   if (value.fixtureRef === FIXTURE_REF) {
     return { kind: 'fixture', fixtureRef: FIXTURE_REF, fixtureVersion: FIXTURE_VERSION };
   }
@@ -499,7 +548,20 @@ export class ControlPlaneRepository {
                 AND current_state.availability='active' AND current_state.integrity='verified'
                 AND current_state.retention_status='active' AND current_state.retention_expires_at>now()
                 AND current_state.reconcile_status='in_sync'
-            ))
+            ) OR (linked_evidence.source_kind='business_exception_snapshot' AND EXISTS (
+              SELECT 1 FROM business_exception_source_snapshots current_exception_source
+              JOIN business_exception_analysis_bindings current_exception_binding
+                ON current_exception_binding.tenant_id=current_exception_source.tenant_id
+                AND current_exception_binding.source_version_id=current_exception_source.source_version_id
+              WHERE current_exception_source.tenant_id=linked_evidence.tenant_id
+                AND current_exception_source.business_exception_id=linked_evidence.source->>'businessExceptionId'
+                AND current_exception_source.source_version_id=linked_evidence.source->>'sourceVersionId'
+                AND current_exception_source.canonical_sha256=linked_evidence.source->>'sourceSha256'
+                AND current_exception_source.resource_scope=linked_evidence.resource_scope
+                AND current_exception_source.data_class=linked_evidence.data_class
+                AND current_exception_binding.business_task_id=linked_evidence.business_task_id
+                AND linked_evidence.audience='conversation:' || current_exception_binding.private_conversation_id
+            )))
           ))
         ORDER BY c.created_at,c.id`, [principal.tenantId, taskId]);
       const evidence = await client.query<{ id: string; source: unknown; excerpt_sha256: string; resource_scope: string; data_class: 'C1'; audience: string; lineage_ids: string[] }>(`SELECT e.id,e.source,e.excerpt_sha256,e.resource_scope,e.data_class,e.audience,
@@ -520,7 +582,20 @@ export class ControlPlaneRepository {
               AND current_state.availability='active' AND current_state.integrity='verified'
               AND current_state.retention_status='active' AND current_state.retention_expires_at>now()
               AND current_state.reconcile_status='in_sync'
-          ))
+          ) OR (e.source_kind='business_exception_snapshot' AND EXISTS (
+            SELECT 1 FROM business_exception_source_snapshots current_exception_source
+            JOIN business_exception_analysis_bindings current_exception_binding
+              ON current_exception_binding.tenant_id=current_exception_source.tenant_id
+              AND current_exception_binding.source_version_id=current_exception_source.source_version_id
+            WHERE current_exception_source.tenant_id=e.tenant_id
+              AND current_exception_source.business_exception_id=e.source->>'businessExceptionId'
+              AND current_exception_source.source_version_id=e.source->>'sourceVersionId'
+              AND current_exception_source.canonical_sha256=e.source->>'sourceSha256'
+              AND current_exception_source.resource_scope=e.resource_scope
+              AND current_exception_source.data_class=e.data_class
+              AND current_exception_binding.business_task_id=e.business_task_id
+              AND e.audience='conversation:' || current_exception_binding.private_conversation_id
+          )))
         GROUP BY e.id,e.source,e.excerpt_sha256,e.resource_scope,e.data_class,e.audience
         ORDER BY min(e.created_at),e.id`, [principal.tenantId, taskId]);
       const sourceArtifactId = inputRef.kind === 'document_snapshot' ? inputRef.artifactId : null;
@@ -540,7 +615,7 @@ export class ControlPlaneRepository {
       const snapshot = taskSnapshotSchema.parse({
         id: task.id,
         capabilityId: this.capabilityIdForTask(task),
-        title: '方案分析',
+        title: this.capabilityIdForTask(task) === 'operations.exception-assist.v1' ? '异常分析' : '方案分析',
         conversationId: task.conversation_id,
         status: task.status,
         approvalStatus: approval.status,
@@ -559,7 +634,7 @@ export class ControlPlaneRepository {
           excerptSha256: row.excerpt_sha256,
           resourceScope: row.resource_scope,
           dataClass: row.data_class,
-          audience: row.audience,
+          audience: projectPrivateConversationAudience(row.audience, task.conversation_id),
           lineageRecordIds: row.lineage_ids,
         })),
         artifacts: artifacts.rows.map((row) => ({
@@ -923,7 +998,24 @@ export class ControlPlaneRepository {
             AND current_state.availability='active' AND current_state.integrity='verified'
             AND current_state.retention_status='active' AND current_state.retention_expires_at>now()
             AND current_state.reconcile_status='in_sync'
-        ))))`, [principal.tenantId, claimId, principal.userId]);
+        ) OR (e.source_kind='business_exception_snapshot' AND EXISTS (
+          SELECT 1 FROM business_exception_source_snapshots source_snapshot
+          JOIN business_exception_analysis_bindings source_binding
+            ON source_binding.tenant_id=source_snapshot.tenant_id
+            AND source_binding.source_version_id=source_snapshot.source_version_id
+          JOIN resource_scopes readable_scope ON readable_scope.tenant_id=source_snapshot.tenant_id
+            AND readable_scope.user_id=$3
+          WHERE source_snapshot.tenant_id=e.tenant_id
+            AND source_snapshot.business_exception_id=e.source->>'businessExceptionId'
+            AND source_snapshot.source_version_id=e.source->>'sourceVersionId'
+            AND source_snapshot.canonical_sha256=e.source->>'sourceSha256'
+            AND source_snapshot.resource_scope=e.resource_scope AND source_snapshot.data_class=e.data_class
+            AND source_binding.business_task_id=e.business_task_id
+            AND source_binding.requester_principal_id=$3
+            AND e.audience='conversation:' || source_binding.private_conversation_id
+            AND (source_snapshot.resource_scope=readable_scope.resource_scope
+              OR source_snapshot.resource_scope LIKE readable_scope.resource_scope || '/%')
+        )))))`, [principal.tenantId, claimId, principal.userId]);
       const row = result.rows[0] as (JsonObject & Readonly<{ business_task_id: string }>) | undefined;
       if (row === undefined) throw new GenewayError('CLAIM_NOT_FOUND', 'Claim was not found', 404);
       await this.requireReadableTask(client, principal, row.business_task_id);
@@ -949,7 +1041,24 @@ export class ControlPlaneRepository {
             AND current_state.availability='active' AND current_state.integrity='verified'
             AND current_state.retention_status='active' AND current_state.retention_expires_at>now()
             AND current_state.reconcile_status='in_sync'
-        ))`, [principal.tenantId, evidenceId, principal.userId]);
+        ) OR (e.source_kind='business_exception_snapshot' AND EXISTS (
+          SELECT 1 FROM business_exception_source_snapshots source_snapshot
+          JOIN business_exception_analysis_bindings source_binding
+            ON source_binding.tenant_id=source_snapshot.tenant_id
+            AND source_binding.source_version_id=source_snapshot.source_version_id
+          JOIN resource_scopes readable_scope ON readable_scope.tenant_id=source_snapshot.tenant_id
+            AND readable_scope.user_id=$3
+          WHERE source_snapshot.tenant_id=e.tenant_id
+            AND source_snapshot.business_exception_id=e.source->>'businessExceptionId'
+            AND source_snapshot.source_version_id=e.source->>'sourceVersionId'
+            AND source_snapshot.canonical_sha256=e.source->>'sourceSha256'
+            AND source_snapshot.resource_scope=e.resource_scope AND source_snapshot.data_class=e.data_class
+            AND source_binding.business_task_id=e.business_task_id
+            AND source_binding.requester_principal_id=$3
+            AND e.audience='conversation:' || source_binding.private_conversation_id
+            AND (source_snapshot.resource_scope=readable_scope.resource_scope
+              OR source_snapshot.resource_scope LIKE readable_scope.resource_scope || '/%')
+        )))`, [principal.tenantId, evidenceId, principal.userId]);
       const row = result.rows[0] as (JsonObject & Readonly<{ business_task_id: string }>) | undefined;
       if (row === undefined) throw new GenewayError('EVIDENCE_NOT_FOUND', 'Evidence was not found', 404);
       await this.requireReadableTask(client, principal, row.business_task_id);
@@ -1029,7 +1138,41 @@ export class ControlPlaneRepository {
     if (result.rowCount !== 1) throw new GenewayError('DOCUMENT_SNAPSHOT_NOT_READY', 'Approved document snapshot is no longer execution-ready', 409);
   }
 
-  private capabilityIdForTask(task: TaskRow): 'solution.analysis.v1' {
+  private async assertExceptionInputReady(
+    client: PoolClient,
+    principal: Principal,
+    task: TaskRow,
+    input: ResolvedTaskInputRef,
+  ): Promise<void> {
+    if (input.kind !== 'business_exception_snapshot') return;
+    const result = await client.query(`SELECT 1
+      FROM business_exception_source_snapshots snapshot
+      JOIN business_exception_analysis_bindings binding
+        ON binding.tenant_id=snapshot.tenant_id AND binding.source_version_id=snapshot.source_version_id
+      WHERE snapshot.tenant_id=$1 AND snapshot.business_exception_id=$2 AND snapshot.source_version_id=$3
+        AND snapshot.canonical_sha256=$4 AND snapshot.canonicalization_version=$5
+        AND snapshot.fixture_version=$6 AND snapshot.source_system=$7 AND snapshot.source_object_ref=$8
+        AND snapshot.detection_window=$9 AND snapshot.resource_scope=$10 AND snapshot.data_class=$11
+        AND snapshot.audience=$12 AND binding.business_task_id=$13
+        AND binding.requester_principal_id=$14 AND binding.private_conversation_id=$15
+        AND binding.task_audience=$16
+        AND EXISTS (SELECT 1 FROM roles role_binding WHERE role_binding.tenant_id=snapshot.tenant_id
+          AND role_binding.user_id=$14 AND role_binding.role='solution_reviewer')
+        AND EXISTS (SELECT 1 FROM resource_scopes readable_scope WHERE readable_scope.tenant_id=snapshot.tenant_id
+          AND readable_scope.user_id=$14 AND (snapshot.resource_scope=readable_scope.resource_scope
+            OR snapshot.resource_scope LIKE readable_scope.resource_scope || '/%'))`, [
+      principal.tenantId, input.businessExceptionId, input.sourceVersionId, input.sourceSha256,
+      input.canonicalizationVersion, input.fixtureVersion, input.sourceSystem, input.sourceObjectRef,
+      input.detectionWindow, input.resourceScope, input.dataClass, input.sourceAudience,
+      task.id, principal.userId, task.conversation_id, input.taskAudience,
+    ]);
+    if (result.rowCount !== 1) {
+      throw new GenewayError('BUSINESS_EXCEPTION_SOURCE_NOT_READY', 'Approved exception source is no longer readable', 409);
+    }
+  }
+
+  private capabilityIdForTask(task: TaskRow): 'solution.analysis.v1' | 'operations.exception-assist.v1' {
+    if (task.capability_version_id === EXCEPTION_ASSIST_CAPABILITY_VERSION_ID) return 'operations.exception-assist.v1';
     if (task.capability_version_id !== SOLUTION_CAPABILITY_VERSION_ID) {
       throw new GenewayError('TASK_CAPABILITY_UNSUPPORTED', 'Task capability is not available in this product projection', 500);
     }
@@ -1045,7 +1188,7 @@ export class ControlPlaneRepository {
       id: task.id,
       capabilityId: this.capabilityIdForTask(task),
       status: task.status,
-      title: '方案分析',
+      title: this.capabilityIdForTask(task) === 'operations.exception-assist.v1' ? '异常分析' : '方案分析',
       conversationId: task.conversation_id,
       workflowVersion: { id: task.workflow_version_id, hash: task.workflow_hash },
       approvalStatus: approval.status,
@@ -1300,6 +1443,7 @@ export class ControlPlaneRepository {
       taskId,
       requesterId: task.requester_id,
       inputSnapshot: normalizeStoredInput(task.input_snapshot),
+      inputDigest: task.input_digest,
       expertTarget: task.expert_target,
       expertCatalogVersionId: task.expert_catalog_version_id,
       harnessVersionId: task.harness_version_id,
@@ -1327,11 +1471,16 @@ export class ControlPlaneRepository {
   private assertTaskProjectionContext(task: TaskRow): void {
     const inputRef = normalizeStoredInput(task.input_snapshot);
     const resourceScope = inputRef.kind === 'fixture' ? inputRef.fixtureRef : inputRef.resourceScope;
-    const expectedPermissionScope = { actions: ['R0', 'R1', 'A1'], resourceScopes: [resourceScope], dataClasses: ['C0', 'C1'] };
+    const expectedPermissionScope = {
+      actions: ['R0', 'R1', 'A1'], resourceScopes: [resourceScope],
+      dataClasses: inputRef.kind === 'business_exception_snapshot' ? ['C1'] : ['C0', 'C1'],
+    };
     const expectedAudienceScope = { kind: 'private-conversation', ids: [`conversation:${task.conversation_id}`] };
     if (hashCanonical(task.permission_scope) !== hashCanonical(expectedPermissionScope)
       || hashCanonical(task.audience_scope) !== hashCanonical(expectedAudienceScope)
-      || (inputRef.kind === 'document_snapshot' && inputRef.audience !== `conversation:${task.conversation_id}`)) {
+      || (inputRef.kind === 'document_snapshot' && inputRef.audience !== `conversation:${task.conversation_id}`)
+      || (inputRef.kind === 'business_exception_snapshot'
+        && inputRef.taskAudience.conversationId !== task.conversation_id)) {
       throw new GenewayError('TASK_POLICY_CONTEXT_INVALID', 'Task policy context no longer matches its immutable input', 403);
     }
   }
@@ -1385,14 +1534,20 @@ export class ControlPlaneRepository {
     if (task === undefined) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found', 404);
     const inputRef = normalizeStoredInput(task.input_snapshot);
     const resourceScope = inputRef.kind === 'fixture' ? inputRef.fixtureRef : inputRef.resourceScope;
-    const expectedPermissionScope = { actions: ['R0', 'R1', 'A1'], resourceScopes: [resourceScope], dataClasses: ['C0', 'C1'] };
+    const expectedPermissionScope = {
+      actions: ['R0', 'R1', 'A1'], resourceScopes: [resourceScope],
+      dataClasses: inputRef.kind === 'business_exception_snapshot' ? ['C1'] : ['C0', 'C1'],
+    };
     const expectedAudienceScope = { kind: 'private-conversation', ids: [`conversation:${task.conversation_id}`] };
     if (hashCanonical(task.permission_scope) !== hashCanonical(expectedPermissionScope)
       || hashCanonical(task.audience_scope) !== hashCanonical(expectedAudienceScope)
-      || (inputRef.kind === 'document_snapshot' && inputRef.audience !== `conversation:${task.conversation_id}`)) {
+      || (inputRef.kind === 'document_snapshot' && inputRef.audience !== `conversation:${task.conversation_id}`)
+      || (inputRef.kind === 'business_exception_snapshot'
+        && inputRef.taskAudience.conversationId !== task.conversation_id)) {
       throw new GenewayError('TASK_POLICY_CONTEXT_INVALID', 'Task policy context no longer matches its immutable input', 403);
     }
     if (inputRef.kind === 'document_snapshot') await this.assertDocumentInputReady(client, principal, inputRef);
+    if (inputRef.kind === 'business_exception_snapshot') await this.assertExceptionInputReady(client, principal, task, inputRef);
     return task;
   }
 
@@ -1430,6 +1585,14 @@ export class ControlPlaneRepository {
     const inputRef = normalizeStoredInput(task.input_snapshot);
     if (inputRef.kind === 'document_snapshot') {
       await this.assertDocumentInputReady(client, { tenantId: task.tenant_id, userId: task.requester_id, trust: 'trusted-local' }, inputRef);
+    }
+    if (inputRef.kind === 'business_exception_snapshot') {
+      await this.assertExceptionInputReady(
+        client,
+        { tenantId: task.tenant_id, userId: task.requester_id, trust: 'trusted-local' },
+        task,
+        inputRef,
+      );
     }
   }
 

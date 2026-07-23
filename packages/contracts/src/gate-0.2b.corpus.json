@@ -1,0 +1,104 @@
+[
+  {
+    "schema": "businessExceptionRef",
+    "accepted": true,
+    "value": {
+      "exceptionId": "exception_capacity",
+      "sourceVersionId": "source_capacity_v1",
+      "sourceSystem": "fixture-manufacturing",
+      "exceptionType": "capacity_progress_lag",
+      "sourceObjectRef": "work-order:WO-GATE02B-001",
+      "detectionWindow": "2026-07-21T08:00:00.000Z/2026-07-21T09:00:00.000Z",
+      "fixtureVersion": "gate0.2b-capacity-lag/1",
+      "fixtureSha256": "0aaf071f5cb062251011970b382e239d3ae5fdcdc4f977b96f325825723b2ed6",
+      "canonicalizationVersion": "rfc8785-jcs/1",
+      "resourceScope": "factory-01/workshop-machining/line-02",
+      "dataClass": "C1"
+    }
+  },
+  {
+    "schema": "businessExceptionRef",
+    "accepted": false,
+    "value": {
+      "exceptionId": "exception_capacity",
+      "sourceVersionId": "source_capacity_v1",
+      "sourceSystem": "fixture-manufacturing",
+      "exceptionType": "capacity_progress_lag",
+      "sourceObjectRef": "work-order:WO-GATE02B-001",
+      "detectionWindow": "2026-07-21T08:00:00.000Z/2026-07-21T09:00:00.000Z",
+      "fixtureVersion": "gate0.2b-capacity-lag/1",
+      "fixtureSha256": "0aaf071f5cb062251011970b382e239d3ae5fdcdc4f977b96f325825723b2ed6",
+      "canonicalizationVersion": "rfc8785-jcs/1",
+      "resourceScope": "factory-01/workshop-machining/line-02",
+      "dataClass": "C1",
+      "tenantId": "forged"
+    }
+  },
+  {
+    "schema": "exceptionAudience",
+    "accepted": true,
+    "value": {
+      "kind": "resource_exception",
+      "businessExceptionId": "exception_capacity",
+      "resourceScope": "factory-01/workshop-machining/line-02",
+      "dataClass": "C1"
+    }
+  },
+  {
+    "schema": "exceptionAudience",
+    "accepted": true,
+    "value": {
+      "kind": "private_conversation",
+      "conversationId": "conversation_capacity"
+    }
+  },
+  {
+    "schema": "exceptionAudience",
+    "accepted": false,
+    "value": "conversation:conversation_capacity"
+  },
+  {
+    "schema": "businessExceptionListQuery",
+    "accepted": true,
+    "value": {
+      "status": "open",
+      "exceptionType": "equipment_alarm",
+      "sort": "severity",
+      "direction": "desc",
+      "limit": "25"
+    }
+  },
+  {
+    "schema": "businessExceptionListQuery",
+    "accepted": false,
+    "value": {
+      "sort": "sourceObjectRef"
+    }
+  },
+  {
+    "schema": "businessExceptionSnapshotEvidenceSource",
+    "accepted": true,
+    "value": {
+      "kind": "business_exception_snapshot",
+      "businessExceptionId": "exception_capacity",
+      "sourceVersionId": "source_capacity_v1",
+      "sourceSha256": "0aaf071f5cb062251011970b382e239d3ae5fdcdc4f977b96f325825723b2ed6",
+      "canonicalizationVersion": "rfc8785-jcs/1",
+      "jsonPointer": "/values/progressPct",
+      "valueSha256": "98010bd9270f9b100b6214a21754fd33bdc8d41b2bc9f9dd16ff54d3c34ffd71"
+    }
+  },
+  {
+    "schema": "businessExceptionSnapshotEvidenceSource",
+    "accepted": false,
+    "value": {
+      "kind": "unregistered_source",
+      "businessExceptionId": "exception_capacity",
+      "sourceVersionId": "source_capacity_v1",
+      "sourceSha256": "0aaf071f5cb062251011970b382e239d3ae5fdcdc4f977b96f325825723b2ed6",
+      "canonicalizationVersion": "rfc8785-jcs/1",
+      "jsonPointer": "/values/progressPct",
+      "valueSha256": "98010bd9270f9b100b6214a21754fd33bdc8d41b2bc9f9dd16ff54d3c34ffd71"
+    }
+  }
+]

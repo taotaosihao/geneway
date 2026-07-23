@@ -37,7 +37,7 @@
     "verify:gate0.2b.1": "pnpm lint && pnpm typecheck && pnpm test:contracts && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate0.2b-success gate-0.2b-task-workflow-routes.spec.ts",
     "verify:gate0.2b.2": "pnpm verify:gate0.2b.1 && pnpm exec vitest run apps/worker/src/worker-loop.test.ts && pnpm test:e2e -- --project=gate0.2b-success gate-0.2b-exception-flow.spec.ts",
     "verify:gate0.2b.3": "node scripts/verify-gate0.2b.3.mjs",
-    "verify:gate0.2b": "pnpm verify:gate0.2b.2 && pnpm verify:gate0.2b.3",
+    "verify:gate0.2b": "node scripts/verify-gate0.2b.mjs",
     "verify:gate-a0.1": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:model-gateway && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate-a0-live gate-a0-fast-chat.spec.ts",
     "verify:gate-a0.2": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:model-gateway && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate-a0-live gate-a0-context-cancel.spec.ts && pnpm gate-a0:secret-scan",
     "verify:gate-a0": "node scripts/verify-gate-a0.mjs",

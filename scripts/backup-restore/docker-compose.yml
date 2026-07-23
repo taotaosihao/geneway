@@ -45,3 +45,7 @@ volumes:
   versity_data: {}
   versity_iam: {}
   versity_versions: {}
+
+networks:
+  default:
+    internal: ${GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL:-false}

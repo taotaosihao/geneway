@@ -41,6 +41,7 @@ export const expectedE2eTests: readonly ExpectedE2eTest[] = [
   { project: 'gate0.2b-recovery', file: 'gate-0.2b-state-recovery.spec.ts', title: '运行中 exception 任务在确定性步骤阻塞时取消，SSE 重放保持终态且无结果' },
   { project: 'gate0.2b-visual-desktop', file: 'gate-0.2b-visual.spec.ts', title: '异常列表与详情在固定 viewport 无 body 横向溢出，表格独立滚动' },
   { project: 'gate0.2b-visual-narrow', file: 'gate-0.2b-visual.spec.ts', title: '异常列表与详情在固定 viewport 无 body 横向溢出，表格独立滚动' },
+  { project: 'gate0.2b-fast-chat-local', file: 'gate-0.2b-fast-chat-local.spec.ts', title: '默认 Fast Chat 无需材料且不创建 Gate 0.2B 业务对象' },
   { project: 'gate-a0-live', file: 'gate-a0-fast-chat.spec.ts', title: '真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gateway audit' },
   { project: 'gate-a0-live', file: 'gate-a0-context-cancel.spec.ts', title: '真实 served Fast Chat 追问上下文并用停止生成完成 cancel fencing' },
   { project: 'gate-a0-lan', file: 'gate-a0-lan-regression.spec.ts', title: '实际 LAN 双浏览器共享 Conversation、上下文、取消并保持材料门' },

@@ -46,11 +46,14 @@ const projectSuffix = sha256(Buffer.from(requestedRunId)).slice(0, 12);
 const credentialsRunRoot = join('/tmp/gw-br-secrets', projectSuffix);
 const runtimeRunRoot = join('/tmp/gw-br-runtime', projectSuffix);
 const roleImage = `geneway-backup-role:${sha256(Buffer.from('node-22.21.1-postgres-17-v2')).slice(0, 16)}`;
+const gate02bGuardRequired = process.env.GENEWAY_GATE02B_EGRESS_GUARD === 'required';
+const gate02bGuardLibrary = process.env.GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY;
 const bucket = 'geneway-artifacts';
 const children = new Set();
 const activeServiceHandles = new Set();
 const storageClients = new Set();
 const roleContainers = new Set();
+const roleEgressPolicies = new Map();
 const provenBackupNetworkBoundaries = new Set();
 let sourceStack;
 let targetStack;
@@ -93,12 +96,26 @@ async function record(type, details = {}) {
 }
 
 function isolatedEnvironment(values = {}) {
+  const guardValues = [process.env.LD_PRELOAD, process.env.GENEWAY_GATE02B_EGRESS_RECEIPT,
+    process.env.GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS];
+  if (gate02bGuardRequired && process.env.GENEWAY_BACKUP_RESTORE_ROLE !== undefined
+    && guardValues.some((value) => value === undefined)) {
+    throw new Error('Gate 0.2B role child egress guard environment is incomplete');
+  }
+  const inheritedGuard = guardValues.every((value) => value !== undefined) ? {
+    LD_PRELOAD: process.env.LD_PRELOAD,
+    GENEWAY_GATE02B_EGRESS_RECEIPT: process.env.GENEWAY_GATE02B_EGRESS_RECEIPT,
+    GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS: process.env.GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS,
+    ...(process.env.GENEWAY_GATE02B_EGRESS_ALLOWED_UNIX === undefined ? {}
+      : { GENEWAY_GATE02B_EGRESS_ALLOWED_UNIX: process.env.GENEWAY_GATE02B_EGRESS_ALLOWED_UNIX }),
+  } : {};
   return {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     TMPDIR: process.env.TMPDIR ?? '/tmp',
     LANG: process.env.LANG ?? 'C.UTF-8',
     NODE_ENV: 'test',
+    ...inheritedGuard,
     ...values,
   };
 }
@@ -195,6 +212,7 @@ async function runCommandFromFile(command, args, source, options = {}) {
 async function ensureRoleImage() {
   const present = await runCommand('docker', ['image', 'inspect', roleImage], { allowFailure: true });
   if (present.code === 0) return;
+  if (gate02bGuardRequired) throw new Error(`Gate 0.2B required offline role image is missing: ${roleImage}`);
   await runCommand('docker', ['build', '--tag', roleImage, '--file', roleDockerfile,
     join(scriptDirectory, 'backup-restore')]);
 }
@@ -203,31 +221,71 @@ function roleContainerMount(source, options = {}) {
   return { source, target: options.target ?? source, readonly: options.readonly ?? true };
 }
 
-async function createRoleContainer({ name, role, action, networkMode, mounts, environment, command }) {
+async function createRoleContainer({ name, role, action, networkMode, mounts, environment, command, egressPorts = [] }) {
+  const egressRoot = join(rehearsalRoot, 'egress-boundaries');
+  const rawReceipt = join(egressRoot, `${name}.raw`);
+  const policyPath = join(egressRoot, `${name}.policy.json`);
+  const summaryPath = join(egressRoot, `${name}.json`);
+  if (gate02bGuardRequired) {
+    if (gate02bGuardLibrary === undefined || (networkMode === 'host' && egressPorts.length === 0)) {
+      throw new Error(`Gate 0.2B egress policy is incomplete for ${role}/${action}`);
+    }
+    await mkdir(egressRoot, { recursive: true, mode: 0o700 });
+  }
   const args = ['create', '--name', name,
     '--label', `geneway.backup.run=${requestedRunId}`,
     '--label', `geneway.backup.role=${role}`,
+    '--label', `geneway.backup.action=${action}`,
     '--network', networkMode,
     '--user', `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`,
     '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pids-limit', '256',
     '--workdir', '/workspace', '--env', 'HOME=/tmp', '--env', 'TMPDIR=/tmp', '--env', 'NODE_ENV=test'];
-  if (role === 'provision') args.push('--group-add', String((await stat('/var/run/docker.sock')).gid));
+  if (gate02bGuardRequired && networkMode === 'host') {
+    args.push('--label', `geneway.gate02b.egress_receipt=${summaryPath}`,
+      '--env', `LD_PRELOAD=${gate02bGuardLibrary}`,
+      '--env', `GENEWAY_GATE02B_EGRESS_RECEIPT=${rawReceipt}`,
+      '--env', `GENEWAY_GATE02B_EGRESS_ALLOWED_PORTS=${egressPorts.join(',')}`);
+  }
+  if ((role === 'provision' && !gate02bGuardRequired) || role === 'provision-docker') {
+    args.push('--group-add', String((await stat('/var/run/docker.sock')).gid));
+  }
   for (const [key, value] of Object.entries(environment)) args.push('--env', `${key}=${value}`);
   for (const mount of mounts) {
     args.push('--mount', `type=bind,src=${mount.source},dst=${mount.target}${mount.readonly ? ',readonly' : ''}`);
+  }
+  if (gate02bGuardRequired && networkMode === 'host') {
+    args.push('--mount', `type=bind,src=${gate02bGuardLibrary},dst=${gate02bGuardLibrary},readonly`);
   }
   args.push(roleImage, ...command);
   await runCommand('docker', args);
   roleContainers.add(name);
   const inspection = JSON.parse((await runCommand('docker', ['inspect', name])).stdout)[0];
+  if (gate02bGuardRequired) await writeJson(policyPath, {
+    schemaVersion: 'geneway-backup-egress-boundary/1', runId: requestedRunId, containerId: inspection.Id,
+    pidStartTicks: null, role, action, networkMode, allowedPorts: egressPorts,
+    allowedUnix: [], rawReceipt,
+    policyComplete: networkMode !== 'host' || egressPorts.length > 0,
+  });
+  if (gate02bGuardRequired && networkMode === 'host') roleEgressPolicies.set(name, {
+    rawReceipt, policyPath, summaryPath, containerId: inspection.Id, role, action, networkMode, allowedPorts: egressPorts,
+  });
   const actualMounts = inspection.Mounts.map((mount) => ({
     source: mount.Source,
     destination: mount.Destination,
     readWrite: mount.RW,
   }));
-  const allowedSources = new Set(mounts.map((mount) => mount.source));
+  const allowedSources = new Set([...mounts.map((mount) => mount.source),
+    ...(gate02bGuardRequired && networkMode === 'host' ? [gate02bGuardLibrary] : [])]);
+  const dockerAuthoritySources = ['/usr/bin/docker', '/usr/libexec/docker/cli-plugins/docker-compose', '/var/run/docker.sock'];
+  const dockerAuthorityAllowed = (!gate02bGuardRequired && role === 'provision')
+    || (gate02bGuardRequired && role === 'provision-docker');
+  const observedDockerAuthority = actualMounts.filter((mount) => dockerAuthoritySources.includes(mount.source));
+  const dockerAuthorityPassed = dockerAuthorityAllowed
+    ? dockerAuthoritySources.every((source) => observedDockerAuthority.some((mount) => mount.source === source))
+      && observedDockerAuthority.every((mount) => mount.source === '/var/run/docker.sock' ? mount.readWrite : !mount.readWrite)
+    : observedDockerAuthority.length === 0;
   const forbiddenMounts = actualMounts.filter((mount) => !allowedSources.has(mount.source)
-    || (mount.source === '/var/run/docker.sock' && role !== 'provision'));
+    || (dockerAuthoritySources.includes(mount.source) && !dockerAuthorityAllowed));
   const observedNetworkMode = inspection.HostConfig.NetworkMode;
   const boundary = {
     schemaVersion: 'geneway-backup-container-boundary/1',
@@ -236,8 +294,10 @@ async function createRoleContainer({ name, role, action, networkMode, mounts, en
     containerName: name,
     networkMode: observedNetworkMode,
     mounts: actualMounts,
+    dockerAuthority: { allowed: dockerAuthorityAllowed, expectedSources: dockerAuthorityAllowed ? dockerAuthoritySources : [],
+      observed: observedDockerAuthority, passed: dockerAuthorityPassed },
     forbiddenNamesPresent: forbiddenMounts.map((mount) => mount.source),
-    checked: observedNetworkMode === networkMode && forbiddenMounts.length === 0,
+    checked: observedNetworkMode === networkMode && forbiddenMounts.length === 0 && dockerAuthorityPassed,
   };
   await writeJson(join(rehearsalRoot, 'process-boundaries', `container-${name}.json`), boundary);
   if (!boundary.checked) throw new Error(`${role}/${action} container boundary inspection failed`);
@@ -245,10 +305,56 @@ async function createRoleContainer({ name, role, action, networkMode, mounts, en
 }
 
 async function removeRoleContainer(name) {
+  const policy = roleEgressPolicies.get(name);
+  let egressFailure;
+  if (policy !== undefined) {
+    const inspectionResult = await runCommand('docker', ['inspect', name], { allowFailure: true });
+    const inspection = inspectionResult.code === 0 ? JSON.parse(inspectionResult.stdout)[0] : null;
+    let rawBytes = Buffer.alloc(0);
+    try { rawBytes = await readFile(policy.rawReceipt); } catch {}
+    const lines = rawBytes.toString('utf8').trim().split('\n').filter(Boolean);
+    const starts = lines.filter((line) => line.startsWith('START '));
+    const unexpected = lines.filter((line) => line.startsWith('DENY '));
+    const attempted = lines.filter((line) => line.startsWith('ALLOW ') || line.startsWith('DENY '));
+    const unknownLines = lines.filter((line) => !/^(?:START|ALLOW|DENY) /u.test(line));
+    const startIdentities = starts.map((line) => ({
+      pid: Number(line.match(/pid=(\d+)/u)?.[1] ?? 0),
+      pidStartTicks: line.match(/startTicks=([^\s]+)/u)?.[1] ?? null,
+      hostname: line.match(/hostname=([^\s]+)/u)?.[1] ?? null,
+    }));
+    const minimumStarts = policy.role === 'provision' ? (policy.action === 'source' ? 3 : 2)
+      : ['online-storage', 'control-plane'].includes(policy.role) ? 2 : 1;
+    const uniqueIdentities = [...new Map(startIdentities.map((identity) => [`${String(identity.pid)}:${String(identity.pidStartTicks)}`, identity])).values()];
+    const identitiesValid = uniqueIdentities.length >= minimumStarts
+      && new Set(uniqueIdentities.map((identity) => identity.pid)).size === uniqueIdentities.length
+      && startIdentities.every((identity) => identity.pid > 0 && identity.pidStartTicks !== null
+        && identity.pidStartTicks !== 'unknown' && identity.hostname === policy.containerId.slice(0, 12));
+    const receipt = {
+      schemaVersion: 'geneway-backup-egress-boundary/1', runId: requestedRunId, containerId: policy.containerId,
+      startIdentities: uniqueIdentities,
+      reloadCount: startIdentities.length - uniqueIdentities.length,
+      role: policy.role, action: policy.action, networkMode: policy.networkMode, policyComplete: identitiesValid,
+      allowedIpAddresses: ['127.0.0.1', '::1', '::ffff:127.0.0.1'],
+      allowed: policy.allowedPorts.flatMap((port) => [
+        `127.0.0.1:${String(port)}`, `[::1]:${String(port)}`, `[::ffff:127.0.0.1]:${String(port)}`,
+      ]), attempted, unexpected,
+      unknownLines,
+      rawReceipt: policy.rawReceipt,
+      rawReceiptSha256: sha256(rawBytes),
+      rawLineCount: lines.length,
+      exitStatus: inspection?.State?.ExitCode ?? null,
+      passed: identitiesValid && unexpected.length === 0 && unknownLines.length === 0
+        && Number.isInteger(inspection?.State?.ExitCode),
+    };
+    await writeJson(policy.summaryPath, receipt);
+    roleEgressPolicies.delete(name);
+    if (!receipt.passed) egressFailure = new Error(`${policy.role}/${policy.action} Gate 0.2B egress boundary failed`);
+  }
   await runCommand('docker', ['rm', '--force', name], { allowFailure: true });
   const absent = await runCommand('docker', ['inspect', name], { allowFailure: true });
   if (absent.code === 0) throw new Error(`Role container ${name} survived removal`);
   roleContainers.delete(name);
+  if (egressFailure !== undefined) throw egressFailure;
 }
 
 async function proveBackupCannotReachOnlineControlPlane(stack) {
@@ -374,6 +480,15 @@ function isolatedRoleMounts(stack, roleFile, options = {}) {
   return mounts;
 }
 
+function gate02bHostRolePorts(role, stack) {
+  if (!gate02bGuardRequired) return [];
+  if (role === 'online') return [stack.controlPlanePort];
+  if (role === 'oracle' || role === 'online-storage') return [stack.s3Port];
+  if (role === 'control-plane') return [stack.postgresPort, stack.storageAdapterPort];
+  if (role === 'provision') return [stack.postgresPort, stack.s3Port];
+  return [];
+}
+
 async function startContainerRoleService({ label, role, stack, roleEnvironmentPath, command, args,
   networkMode, runtime = false, token = false, environment = {}, ready }) {
   const containerName = `geneway-br-${projectSuffix}-${label}`.slice(0, 63);
@@ -384,6 +499,7 @@ async function startContainerRoleService({ label, role, stack, roleEnvironmentPa
     networkMode,
     mounts: isolatedRoleMounts(stack, roleEnvironmentPath, { runtime, token }),
     environment,
+    egressPorts: gate02bHostRolePorts(role, stack),
     command: ['node', '/workspace/scripts/backup-restore/role-launcher.mjs', role,
       join(rehearsalRoot, 'process-boundaries', `${label}.json`), roleEnvironmentPath,
       command, ...args],
@@ -482,7 +598,8 @@ async function compose(stack, args, options = {}) {
 }
 
 async function startStack(stack) {
-  await compose(stack, ['up', '-d', '--wait', 'postgres', 'versitygw']);
+  const pullPolicy = gate02bGuardRequired ? ['--pull', 'never'] : [];
+  await compose(stack, ['up', '-d', '--wait', ...pullPolicy, 'postgres', 'versitygw']);
   await record('stack.started', { label: stack.label, project: stack.project });
 }
 
@@ -527,7 +644,7 @@ function s3Client(stack, role = 'backup') {
   return client;
 }
 
-async function provisionStorage(stack) {
+async function provisionStorageIdentities(stack) {
   const identities = [
     [stack.appAccessKeyId, stack.appSecretAccessKey, '1001'],
     [stack.reconcilerAccessKeyId, stack.reconcilerSecretAccessKey, '1002'],
@@ -541,6 +658,14 @@ async function provisionStorage(stack) {
       '--access', access, '--secret', secret, '--role', 'user',
       '--user-id', id, '--group-id', id, '--project-id', id]);
   }
+  const denied = await compose(stack, ['exec', '-T', 'versitygw', 'versitygw', 'admin',
+    '--access', stack.appAccessKeyId, '--secret', stack.appSecretAccessKey,
+    '--endpoint-url', 'http://127.0.0.1:7071', 'list-users'], { allowFailure: true });
+  if (denied.code === 0) throw new Error('Online storage identity unexpectedly accessed the VersityGW admin API');
+  await record('storage.identities-provisioned', { project: stack.project, service: 'versitygw', actions: ['create-user', 'list-users-denied'] });
+}
+
+async function provisionStorageData(stack) {
   await runCommand(join(repositoryRoot, 'node_modules', '.bin', 'tsx'), ['scripts/provision-storage.ts'], {
     env: isolatedEnvironment({
       GENEWAY_S3_ENDPOINT: stack.s3Endpoint,
@@ -554,11 +679,12 @@ async function provisionStorage(stack) {
       GENEWAY_S3_BACKUP_ACCESS_KEY_ID: stack.backupAccessKeyId,
     }),
   });
-  const denied = await compose(stack, ['exec', '-T', 'versitygw', 'versitygw', 'admin',
-    '--access', stack.appAccessKeyId, '--secret', stack.appSecretAccessKey,
-    '--endpoint-url', 'http://127.0.0.1:7071', 'list-users'], { allowFailure: true });
-  if (denied.code === 0) throw new Error('Online storage identity unexpectedly accessed the VersityGW admin API');
   await record('storage.provisioned', { label: stack.label, roles: ['online', 'reconciler', 'oracle', 'backup'] });
+}
+
+async function provisionStorage(stack) {
+  await provisionStorageIdentities(stack);
+  await provisionStorageData(stack);
 }
 
 async function migrateSource(stack) {
@@ -1193,7 +1319,7 @@ async function assertFullChain(stack, taskId) {
 
 function stackForRole(stack, role) {
   if (role === 'online') return { label: stack.label, controlPlaneUrl: stack.controlPlaneUrl };
-  if (['backup', 'oracle', 'worker-command', 'provision'].includes(role)) return {};
+  if (['backup', 'oracle', 'worker-command', 'provision', 'provision-docker'].includes(role)) return {};
   throw new Error(`Unknown backup/restore role ${role}`);
 }
 
@@ -1202,7 +1328,8 @@ async function invokeRole(role, action, stack, data = {}) {
   const invocationId = `${role}-${action}-${randomUUID()}`;
   const inputPath = join(rehearsalRoot, 'role-inputs', `${invocationId}.json`);
   const outputPath = join(rehearsalRoot, 'role-outputs', `${invocationId}.json`);
-  const credentialFile = role === 'online' ? null : stack.roleFiles[role];
+  const credentialFile = role === 'online' ? null
+    : role === 'provision-docker' ? stack.roleFiles.provision : stack.roleFiles[role];
   if (role !== 'online' && credentialFile === undefined) {
     throw new Error(`No credential file is configured for ${role}`);
   }
@@ -1217,19 +1344,20 @@ async function invokeRole(role, action, stack, data = {}) {
   const containerName = `geneway-br-${projectSuffix}-${role}-${action}-${randomUUID().slice(0, 8)}`.slice(0, 63);
   const mounts = isolatedRoleMounts(stack, credentialFile, {
     runtime: role === 'worker-command',
-    compose: role === 'provision',
+    compose: (role === 'provision' && !gate02bGuardRequired) || role === 'provision-docker',
   });
   await createRoleContainer({
     name: containerName,
     role,
     action,
-    networkMode: role === 'worker-command' ? 'none' : role === 'backup' ? stack.dataNetwork : 'host',
+    networkMode: ['worker-command', 'provision-docker'].includes(role) ? 'none' : role === 'backup' ? stack.dataNetwork : 'host',
     mounts,
     environment: {
       GENEWAY_RUN_ID: requestedRunId,
       GENEWAY_BACKUP_RESTORE_ROLE: role,
       GENEWAY_BACKUP_RESTORE_ROLE_INPUT: inputPath,
     },
+    egressPorts: gate02bHostRolePorts(role, stack),
     command: ['node', '/workspace/scripts/run-backup-restore.mjs', selectedCase],
   });
   try {
@@ -1464,17 +1592,25 @@ async function runWorkerCommandRole(action, stack, data) {
 async function runProvisionRole(action, stack) {
   if (action === 'source') {
     await migrateSource(stack);
-    await provisionStorage(stack);
+    await (gate02bGuardRequired ? provisionStorageData(stack) : provisionStorage(stack));
     return { migrated: true, provisioned: true };
   }
   if (action === 'target') {
     const client = s3Client({ ...stack, adminAccessKeyId: stack.adminAccessKeyId,
       adminSecretAccessKey: stack.adminSecretAccessKey }, 'admin');
     try { await proveTargetEmpty(stack, client); } finally { client.destroy(); }
-    await provisionStorage(stack);
+    await (gate02bGuardRequired ? provisionStorageData(stack) : provisionStorage(stack));
     return { empty: true, provisioned: true };
   }
   throw new Error(`Unknown provision role action ${action}`);
+}
+
+async function runProvisionDockerRole(action, stack) {
+  if (!gate02bGuardRequired || !['source', 'target'].includes(action)) {
+    throw new Error(`Unknown provision-docker role action ${action}`);
+  }
+  await provisionStorageIdentities(stack);
+  return { identitiesProvisioned: true };
 }
 
 async function runOracleRole(action, stack, data) {
@@ -1505,6 +1641,7 @@ async function runRoleInvocation() {
     else if (input.role === 'backup') value = await runBackupRole(input.action, roleStack, input.data);
     else if (input.role === 'worker-command') value = await runWorkerCommandRole(input.action, roleStack, input.data);
     else if (input.role === 'provision') value = await runProvisionRole(input.action, roleStack, input.data);
+    else if (input.role === 'provision-docker') value = await runProvisionDockerRole(input.action, roleStack, input.data);
     else if (input.role === 'oracle') value = await runOracleRole(input.action, roleStack, input.data);
     else throw new Error(`Unknown role ${input.role}`);
     await writeJson(input.outputPath, { ok: true, value });
@@ -1563,6 +1700,7 @@ async function runRehearsal() {
   stage = 'source-start';
   await startStack(sourceStack);
   sourceStarted = true;
+  if (gate02bGuardRequired) await invokeRole('provision-docker', 'source', sourceStack);
   await invokeRole('provision', 'source', sourceStack);
   let sourceApplication = await startApplication(sourceStack);
   let sourceWorker = await startWorker(sourceStack, 'main');
@@ -1591,6 +1729,7 @@ async function runRehearsal() {
   stage = 'target-start';
   await startStack(targetStack);
   targetStarted = true;
+  if (gate02bGuardRequired) await invokeRole('provision-docker', 'target', targetStack);
   await invokeRole('provision', 'target', targetStack);
   await invokeRole('backup', 'validate', targetStack, { manifest });
   await invokeRole('backup', 'restore', targetStack, { backupSetId, manifest });

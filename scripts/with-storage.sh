@@ -51,6 +51,10 @@ compose=(docker compose -f scripts/docker-compose.yml)
 if [[ "${GENEWAY_STORAGE_TARGET_ROLE:-test}" != 'control-plane' ]]; then
   compose+=(-f scripts/docker-compose.host-storage.yml)
 fi
+pull_policy=()
+if [[ "${GENEWAY_GATE02B_EGRESS_GUARD:-}" == "required" ]]; then
+  pull_policy=(--pull never)
+fi
 
 cleanup() {
   if [[ "${GENEWAY_KEEP_TEST_INFRA:-0}" == '1' ]]; then
@@ -61,7 +65,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"${compose[@]}" up -d --wait postgres versitygw >/dev/null
+"${compose[@]}" up -d --wait "${pull_policy[@]}" postgres versitygw >/dev/null
 env -i PATH="$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}" LANG="${LANG:-C.UTF-8}" DATABASE_URL="$DATABASE_URL" \
   ./node_modules/.bin/tsx scripts/migrate.ts >/dev/null
 
@@ -91,7 +95,7 @@ if "${compose[@]}" exec -T versitygw \
   exit 1
 fi
 
-"${compose[@]}" up -d --wait storage-adapter storage-reconciliation-adapter storage-oracle >/dev/null
+"${compose[@]}" up -d --wait "${pull_policy[@]}" storage-adapter storage-reconciliation-adapter storage-oracle >/dev/null
 if ! GENEWAY_STORAGE_HEALTH_URL="${GENEWAY_STORAGE_ADAPTER_URL}/health" node --input-type=module - <<'NODE'
 const url = process.env.GENEWAY_STORAGE_HEALTH_URL;
 for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -121,7 +125,7 @@ fi
   storage-oracle ./node_modules/.bin/tsx scripts/verify-reconciliation-adapter.ts >/dev/null
 
 if [[ "${GENEWAY_START_STORAGE_RECONCILER:-0}" == '1' ]]; then
-  "${compose[@]}" up -d storage-reconciler >/dev/null
+  "${compose[@]}" up -d "${pull_policy[@]}" storage-reconciler >/dev/null
 fi
 
 base_env=(

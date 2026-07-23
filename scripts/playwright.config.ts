@@ -87,6 +87,7 @@ export default defineConfig({
     { name: 'gate0.2b-recovery', testMatch: /gate-0\.2b-state-recovery\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate0.2b-visual-desktop', testMatch: /gate-0\.2b-visual\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate0.2b-visual-narrow', testMatch: /gate-0\.2b-visual\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 390, height: 844 } } },
+    { name: 'gate0.2b-fast-chat-local', testMatch: /gate-0\.2b-fast-chat-local\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate-a0-live', testMatch: /gate-a0-(?:fast-chat|context-cancel)\.spec\.ts/u, use: {
       ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, trace: 'on',
     } },

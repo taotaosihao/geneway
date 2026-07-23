@@ -161,6 +161,7 @@ services:
       - storage
 
 networks:
-  default: {}
+  default:
+    internal: ${GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL:-false}
   storage:
-    internal: true
+    internal: ${GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL:-true}

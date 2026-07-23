@@ -52,6 +52,7 @@ async function run(testCase) {
     JSON.parse(await readFile(join(boundaryDirectory, name), 'utf8'))));
   const requiredRoles = ['coordinator', 'provision', 'online', 'backup', 'worker-command',
     'online-storage', 'control-plane', 'worker', 'worker-network', 'backup-network'];
+  if (process.env.GENEWAY_GATE02B_EGRESS_GUARD === 'required') requiredRoles.push('provision-docker');
   if (testCase.name === 'missing-object') requiredRoles.push('oracle');
   const observedRoles = new Set(boundaries.map((receipt) => receipt.role));
   if (boundaries.length === 0 || boundaries.some((receipt) => receipt.checked !== true

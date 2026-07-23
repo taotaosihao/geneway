@@ -52,6 +52,13 @@ describe('Gate 0.2A Control Plane delivery and Evidence integration', () => {
     return workerCommandResponseSchema.parse(response.json());
   }
 
+  async function executionInput(taskId: string) {
+    const response = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${taskId}` });
+    expect(response.statusCode, response.body).toBe(200);
+    const approval = response.json<{ approval: { version: number; subjectDigest: string } }>().approval;
+    return { expectedApprovalVersion: approval.version, expectedApprovalSubjectDigest: approval.subjectDigest };
+  }
+
   async function createUploadedSnapshot(): Promise<Readonly<{ conversationId: string; snapshotId: string; sourceArtifactId: string }>> {
     const conversation = await controlPlane.app.inject({ method: 'POST', url: '/api/conversations', headers: headers('conversation-document-0001') });
     const conversationId = conversation.json<{ id: string }>().id;
@@ -94,7 +101,7 @@ describe('Gate 0.2A Control Plane delivery and Evidence integration', () => {
   }
 
   async function executeThroughWorker(taskId: string): Promise<WorkerDelivery> {
-    const execute = await controlPlane.app.inject({ method: 'POST', url: `/api/business-tasks/${taskId}/execute`, headers: headers('execute-document-00001') });
+    const execute = await controlPlane.app.inject({ method: 'POST', url: `/api/business-tasks/${taskId}/execute`, headers: headers('execute-document-00001'), payload: await executionInput(taskId) });
     expect(execute.statusCode, execute.body).toBe(200);
     expect(execute.json()).toEqual({ taskId, status: 'accepted' });
     const session = await sendWorker({

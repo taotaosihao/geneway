@@ -22,13 +22,14 @@ const receiptPath = `${receiptDirectory}/control-plane.json`;
 const supervisorLogPath = `${receiptDirectory}/control-plane-supervisor.jsonl`;
 
 type ProcessIdentity = Readonly<{ pid: number; procStartTicks: string; generation: number }>;
-type KillRequest = Readonly<{ pid?: number; procStartTicks?: string; generation?: number }>;
+type KillRequest = Readonly<{ pid?: number; procStartTicks?: string; generation?: number; restart?: boolean }>;
 
 let child: ChildProcessByStdio<null, Readable, Readable> | undefined;
 let identity: ProcessIdentity | undefined;
 let generation = 0;
 let ready = false;
 let restartRequested = false;
+let paused = false;
 let stopping = false;
 let unexpectedExit = false;
 
@@ -92,7 +93,7 @@ async function probeService(): Promise<boolean> {
 }
 
 function startControlPlane(): void {
-  if (stopping) return;
+  if (stopping || paused) return;
   generation += 1;
   ready = false;
   identity = undefined;
@@ -129,6 +130,10 @@ function startControlPlane(): void {
       restartRequested = false;
       void record({ event: 'control_plane.restart_requested_exit', pid: nextChild.pid ?? null, code, signal })
         .finally(() => setTimeout(startControlPlane, 25));
+      return;
+    }
+    if (paused) {
+      void record({ event: 'control_plane.paused_exit', pid: nextChild.pid ?? null, code, signal });
       return;
     }
     unexpectedExit = true;
@@ -175,15 +180,34 @@ async function handleKill(request: IncomingMessage, response: ServerResponse): P
     sendJson(response, 409, { error: 'E2E_CONTROL_PLANE_IDENTITY_STALE' });
     return;
   }
-  restartRequested = true;
+  const shouldRestart = payload.restart !== false;
+  restartRequested = shouldRestart;
+  paused = !shouldRestart;
   ready = false;
   if (!child.kill('SIGKILL')) {
     restartRequested = false;
+    paused = false;
     sendJson(response, 409, { error: 'E2E_CONTROL_PLANE_KILL_FAILED' });
     return;
   }
   await record({ event: 'control_plane.kill_requested', ...current, signal: 'SIGKILL' });
-  sendJson(response, 202, { killed: current, nextGeneration: current.generation + 1 });
+  sendJson(response, 202, { killed: current, restartScheduled: shouldRestart, nextGeneration: shouldRestart ? current.generation + 1 : null });
+}
+
+async function handleResume(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  const expectedToken = (await readFile(tokenFile, 'utf8')).trim();
+  if (request.headers.authorization !== `Bearer ${expectedToken}`) {
+    sendJson(response, 401, { error: 'E2E_SUPERVISOR_AUTH_REQUIRED' });
+    return;
+  }
+  if (!paused || ready || (child !== undefined && child.exitCode === null && child.signalCode === null)) {
+    sendJson(response, 409, { error: 'E2E_CONTROL_PLANE_NOT_PAUSED' });
+    return;
+  }
+  paused = false;
+  await record({ event: 'control_plane.resume_requested', nextGeneration: generation + 1 });
+  startControlPlane();
+  sendJson(response, 202, { restartScheduled: true, nextGeneration: generation });
 }
 
 const server = createServer((request, response) => {
@@ -198,6 +222,10 @@ const server = createServer((request, response) => {
   }
   if (request.method === 'POST' && request.url === '/test/kill-control-plane') {
     void handleKill(request, response).catch((error: unknown) => sendJson(response, 500, { error: String(error) }));
+    return;
+  }
+  if (request.method === 'POST' && request.url === '/test/resume-control-plane') {
+    void handleResume(request, response).catch((error: unknown) => sendJson(response, 500, { error: String(error) }));
     return;
   }
   response.writeHead(404).end();
@@ -218,6 +246,7 @@ function stop(signal: NodeJS.Signals): void {
   if (stopping) return;
   stopping = true;
   restartRequested = false;
+  paused = false;
   if (child?.exitCode === null && child.signalCode === null) child.kill(signal);
   void closeServer();
 }

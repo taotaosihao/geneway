@@ -13,6 +13,19 @@ export default defineConfig({
     host: webHost,
     port: webPort,
     strictPort: true,
-    proxy: { '/api': `http://127.0.0.1:${String(controlPlanePort)}`, '/health': `http://127.0.0.1:${String(controlPlanePort)}` },
+    proxy: {
+      '/api': {
+        target: `http://127.0.0.1:${String(controlPlanePort)}`,
+        configure(proxy) {
+          proxy.on('error', (_error, _request, response) => {
+            if ('writeHead' in response && !response.headersSent) {
+              response.writeHead(502, { 'content-type': 'application/json', 'x-geneway-upstream-status': 'offline' });
+              response.end(JSON.stringify({ error: { code: 'NETWORK_OFFLINE', message: 'Control Plane upstream is unavailable' } }));
+            }
+          });
+        },
+      },
+      '/health': `http://127.0.0.1:${String(controlPlanePort)}`,
+    },
   },
 });

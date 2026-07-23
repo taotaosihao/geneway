@@ -13,6 +13,7 @@ import {
   cancelChatRunProjectionSchema,
   documentSnapshotListSchema,
   evidenceProjectionSchema,
+  executeTaskInputSchema,
   taskEventProjectionSchema,
   taskListResponseSchema,
   taskSnapshotSchema,
@@ -34,6 +35,7 @@ import {
   type ExpertTarget,
   type TaskListQuery,
   type TaskListResponse,
+  type TaskEventProjection,
   type TaskSnapshot,
   type WorkflowDetailProjection,
   type WorkflowListQuery,
@@ -58,10 +60,62 @@ const key = (prefix: string): string => {
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
-  const payload = await response.json() as T & { error?: { code?: string; message?: string } };
-  if (!response.ok) throw new Error(`${payload.error?.code ?? 'REQUEST_FAILED'}: ${payload.error?.message ?? response.statusText}`);
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch (cause) {
+    throw new ApiError('NETWORK_OFFLINE', 'Control Plane 当前不可连接', 0, { cause });
+  }
+  const payload = await response.json().catch(() => ({})) as T & { error?: { code?: string; message?: string } };
+  if (!response.ok && response.headers.get('x-geneway-upstream-status') === 'offline') {
+    throw new ApiError('NETWORK_OFFLINE', 'Control Plane 当前不可连接', response.status);
+  }
+  if (!response.ok) throw new ApiError(
+    payload.error?.code ?? 'REQUEST_FAILED',
+    payload.error?.message ?? response.statusText,
+    response.status,
+  );
   return payload;
+}
+
+export class ApiError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly status: number,
+    options?: ErrorOptions,
+  ) {
+    super(`${code}: ${message}`, options);
+    this.name = 'ApiError';
+  }
+}
+
+export function apiErrorCode(cause: unknown): string {
+  return cause instanceof ApiError ? cause.code : 'REQUEST_FAILED';
+}
+
+export function apiErrorStatus(cause: unknown): number | undefined {
+  return cause instanceof ApiError ? cause.status : undefined;
+}
+
+export function mergeTaskEventBatch(
+  taskId: string,
+  afterCursor: number,
+  incoming: readonly TaskEventProjection[],
+): Readonly<{ events: readonly TaskEventProjection[]; cursor: number }> {
+  const byCursor = new Map<number, TaskEventProjection>();
+  const ids = new Set<string>();
+  for (const event of incoming) {
+    if (event.businessTaskId !== taskId) throw new Error('TASK_EVENT_TASK_MISMATCH');
+    if (event.cursor <= afterCursor) continue;
+    const existing = byCursor.get(event.cursor);
+    if (existing !== undefined && existing.id !== event.id) throw new Error('TASK_EVENT_CURSOR_COLLISION');
+    if (ids.has(event.id)) continue;
+    ids.add(event.id);
+    byCursor.set(event.cursor, event);
+  }
+  const events = [...byCursor.values()].sort((left, right) => left.cursor - right.cursor);
+  return { events, cursor: events.at(-1)?.cursor ?? afterCursor };
 }
 
 export const api = {
@@ -171,6 +225,7 @@ export const api = {
     workflowDetailProjectionSchema.parse(await request(`/api/workflow-versions/${id}`)),
   listWorkflows: async (query: Partial<WorkflowListQuery> = {}): Promise<WorkflowListResponse> => {
     const params = new URLSearchParams();
+    if (query.capabilityVersionId !== undefined) params.set('capabilityVersionId', query.capabilityVersionId);
     if (query.limit !== undefined) params.set('limit', String(query.limit));
     if (query.cursor !== undefined) params.set('cursor', query.cursor);
     const suffix = params.size === 0 ? '' : `?${params.toString()}`;
@@ -181,15 +236,27 @@ export const api = {
   approve: (id: string) => request<{ approvalId: string; status: string }>(`/api/approvals/${id}/decisions`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('approval') }, body: JSON.stringify({ decision: 'approved' }),
   }),
-  execute: (taskId: string) => request<{ taskId: string; status: string }>(`/api/business-tasks/${taskId}/execute`, {
-    method: 'POST', headers: { 'idempotency-key': key('execute') },
+  execute: (taskId: string, approval: Pick<ApprovalProjection, 'version' | 'subjectDigest'>) => request<{ taskId: string; status: string }>(`/api/business-tasks/${taskId}/execute`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('execute') },
+    body: JSON.stringify(executeTaskInputSchema.parse({
+      expectedApprovalVersion: approval.version,
+      expectedApprovalSubjectDigest: approval.subjectDigest,
+    })),
   }),
   cancelTask: (taskId: string) => request<{ taskId: string; status: 'canceled' }>(`/api/business-tasks/${taskId}/cancel`, {
     method: 'POST', headers: { 'idempotency-key': key('cancel') },
   }),
   events: async (taskId: string, afterCursor: number) => {
-    const response = await fetch(`/api/business-tasks/${taskId}/events?after=${String(afterCursor)}`, { headers: { accept: 'text/event-stream' } });
-    if (!response.ok) throw new Error(`EVENT_STREAM_FAILED: ${response.statusText}`);
+    let response: Response;
+    try {
+      response = await fetch(`/api/business-tasks/${taskId}/events?after=${String(afterCursor)}`, { headers: { accept: 'text/event-stream' } });
+    } catch (cause) {
+      throw new ApiError('NETWORK_OFFLINE', 'Task event stream 当前不可连接', 0, { cause });
+    }
+    if (!response.ok && response.headers.get('x-geneway-upstream-status') === 'offline') {
+      throw new ApiError('NETWORK_OFFLINE', 'Task event stream 当前不可连接', response.status);
+    }
+    if (!response.ok) throw new ApiError('EVENT_STREAM_FAILED', response.statusText, response.status);
     const text = await response.text();
     return [...text.matchAll(/^data: (.+)$/gm)].map((match) => taskEventProjectionSchema.parse(JSON.parse(match[1] ?? '{}')));
   },

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { Principal } from '@geneway/contracts';
 import { validateTextUpload } from '@geneway/ingestion';
-import { compileWorkflow, createSolutionAnalysisDraft } from '@geneway/workflow';
+import { compileWorkflow, createSolutionAnalysisDraft, hashCanonical } from '@geneway/workflow';
 import { createControlPlane, createWorkerCommandApp, type ControlPlane } from './index.js';
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -81,6 +81,13 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
       snapshotId: uploaded.documentSnapshot.id,
       ...taskResponse.json<{ taskId: string; approvalId: string; workflowVersionId: string }>(),
     };
+  }
+
+  async function executionInput(taskId: string) {
+    const response = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${taskId}` });
+    expect(response.statusCode, response.body).toBe(200);
+    const approval = response.json<{ approval: { version: number; subjectDigest: string } }>().approval;
+    return { expectedApprovalVersion: approval.version, expectedApprovalSubjectDigest: approval.subjectDigest };
   }
 
   it('derives identity server-side and rejects client-owned resolved snapshot fields', async () => {
@@ -271,6 +278,10 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
     expect(JSON.stringify(publicEventPayload)).not.toMatch(/workerInstanceId|attemptId|fencingToken|executionVersion/u);
 
     await controlPlane.repository.pool.query("DELETE FROM roles WHERE tenant_id='tenant_local' AND user_id='user_local' AND role='solution_reviewer'");
+    const revokedList = await controlPlane.app.inject({ method: 'GET', url: '/api/business-tasks?limit=1' });
+    expect(revokedList.statusCode).toBe(403);
+    expect(revokedList.json()).toEqual({ error: { code: 'TASK_LIST_FORBIDDEN', message: 'Task list permission is required', details: null } });
+    expect(revokedList.body).not.toMatch(/nextCursor|asOf|queryVersion|count/iu);
     const revokedCursor = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks?limit=1&cursor=${encodeURIComponent(cursor)}` });
     expect(revokedCursor.statusCode).toBe(409);
     expect(revokedCursor.json()).toMatchObject({ error: { code: 'CURSOR_INVALID' } });
@@ -310,7 +321,7 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
       const historicalRead = await controlPlane.app.inject({ method: 'GET', url });
       expect(historicalRead.statusCode, `${url}: ${historicalRead.body}`).toBe(200);
     }
-    const execute = await controlPlane.app.inject({ method: 'POST', url: `/api/business-tasks/${expired.taskId}/execute`, headers: baseHeaders('expiry-execute-0000001') });
+    const execute = await controlPlane.app.inject({ method: 'POST', url: `/api/business-tasks/${expired.taskId}/execute`, headers: baseHeaders('expiry-execute-0000001'), payload: await executionInput(expired.taskId) });
     expect(execute.statusCode).toBe(409);
     expect(execute.json()).toMatchObject({ error: { code: 'APPROVAL_EXPIRED' } });
     const outbox = await controlPlane.repository.pool.query("SELECT 1 FROM outbox_events WHERE business_task_id=$1 AND event_type='workflow.execute.requested'", [expired.taskId]);
@@ -405,6 +416,7 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
       method: 'POST',
       url: `/api/business-tasks/${replayed.taskId}/execute`,
       headers: baseHeaders(executeKey),
+      payload: await executionInput(replayed.taskId),
     })).statusCode).toBe(200);
     await controlPlane.repository.pool.query(`UPDATE delegated_capabilities
       SET expires_at=now()-interval '1 second'
@@ -419,6 +431,7 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
       method: 'POST',
       url: `/api/business-tasks/${replayed.taskId}/execute`,
       headers: baseHeaders(executeKey),
+      payload: await executionInput(replayed.taskId),
     });
     expect(approvalReplay.statusCode).toBe(409);
     expect(approvalReplay.json()).toMatchObject({ error: { code: 'DELEGATED_CAPABILITY_INVALID' } });
@@ -453,6 +466,57 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
     await workerApp.close();
   });
 
+  it('rejects execution when the UI approval version is older than the latest immutable ApprovalVersion', async () => {
+    const created = await createFixtureTask('approval-stale');
+    expect((await controlPlane.app.inject({
+      method: 'POST',
+      url: `/api/approvals/${created.approvalId}/decisions`,
+      headers: baseHeaders('approval-stale-decision-01'),
+      payload: { decision: 'approved' },
+    })).statusCode).toBe(200);
+    const stale = await executionInput(created.taskId);
+    const previous = await controlPlane.repository.pool.query<{ subject: Readonly<Record<string, unknown>>; subject_digest: string }>(
+      'SELECT subject,subject_digest FROM approval_versions WHERE tenant_id=$1 AND id=$2', ['tenant_local', created.approvalId],
+    );
+    const previousApproval = previous.rows[0];
+    if (previousApproval === undefined || typeof previousApproval.subject.budget !== 'object'
+      || previousApproval.subject.budget === null || Array.isArray(previousApproval.subject.budget)) {
+      throw new Error('Approval subject budget is missing');
+    }
+    const nextBudget = { ...previousApproval.subject.budget, maxRuntimeMs: 60_000 };
+    const nextSubject = { ...previousApproval.subject, budget: nextBudget };
+    const nextDigest = hashCanonical(nextSubject);
+    expect(nextDigest).not.toBe(previousApproval.subject_digest);
+    await controlPlane.repository.pool.query(`INSERT INTO approval_versions
+      (tenant_id,id,business_task_id,version,subject,subject_digest,status,requester_id,
+       approver_policy_version,expires_at,decision_by,decision_at)
+      SELECT tenant_id,'approval_stale_v2',business_task_id,2,$2,$3,'pending',requester_id,
+        approver_policy_version,now()+interval '15 minutes',null,null
+      FROM approval_versions WHERE tenant_id='tenant_local' AND id=$1`, [created.approvalId, nextSubject, nextDigest]);
+    await controlPlane.repository.pool.query("UPDATE business_tasks SET status='awaiting_approval',budget=$2 WHERE id=$1", [created.taskId, nextBudget]);
+    const response = await controlPlane.app.inject({
+      method: 'POST',
+      url: `/api/business-tasks/${created.taskId}/execute`,
+      headers: baseHeaders('approval-stale-execute-01'),
+      payload: stale,
+    });
+    expect(response.statusCode, response.body).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code: 'APPROVAL_SUBJECT_CHANGED' } });
+    const pending = await controlPlane.app.inject({
+      method: 'POST',
+      url: `/api/business-tasks/${created.taskId}/execute`,
+      headers: baseHeaders('approval-current-pending-01'),
+      payload: { expectedApprovalVersion: 2, expectedApprovalSubjectDigest: nextDigest },
+    });
+    expect(pending.statusCode, pending.body).toBe(409);
+    expect(pending.json()).toMatchObject({ error: { code: 'APPROVAL_REQUIRED' } });
+    const execution = await controlPlane.repository.pool.query(
+      "SELECT 1 FROM business_task_events WHERE business_task_id=$1 AND event_type='workflow.execute.requested'",
+      [created.taskId],
+    );
+    expect(execution.rowCount).toBe(0);
+  });
+
   it('revalidates exact approval and delegated capability before Worker claim', async () => {
     if (controlPlane.artifactService === null) throw new Error('Security test requires storage');
     const workerApp = createWorkerCommandApp({
@@ -471,6 +535,7 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
       method: 'POST',
       url: `/api/business-tasks/${created.taskId}/execute`,
       headers: baseHeaders('worker-authority-execute-01'),
+      payload: await executionInput(created.taskId),
     })).statusCode).toBe(200);
     await controlPlane.repository.pool.query("UPDATE business_tasks SET budget=jsonb_set(budget,'{maxRuntimeMs}','60000'::jsonb) WHERE tenant_id='tenant_local' AND id=$1", [created.taskId]);
     const claim = await workerApp.inject({
@@ -502,6 +567,7 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
       method: 'POST',
       url: `/api/business-tasks/${capabilityDrift.taskId}/execute`,
       headers: baseHeaders('worker-capability-execute-01'),
+      payload: await executionInput(capabilityDrift.taskId),
     })).statusCode).toBe(200);
     await controlPlane.repository.pool.query("UPDATE delegated_capabilities SET allowed_actions='[\"R0\"]'::jsonb WHERE tenant_id='tenant_local' AND business_task_id=$1", [capabilityDrift.taskId]);
     const capabilityClaim = await workerApp.inject({
@@ -540,6 +606,7 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
       method: 'POST',
       url: `/api/business-tasks/${created.taskId}/execute`,
       headers: baseHeaders('source-policy-execute-00001'),
+      payload: await executionInput(created.taskId),
     })).statusCode).toBe(200);
     const claim = await workerApp.inject({
       method: 'POST',

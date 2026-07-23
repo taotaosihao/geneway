@@ -693,6 +693,3233 @@
       ],
       "additionalProperties": false
     },
+    "ConversationProjection": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "latestTaskId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "author": {
+                "type": "string",
+                "enum": [
+                  "user",
+                  "xiaowei"
+                ]
+              },
+              "body": {
+                "type": "string"
+              },
+              "status": {
+                "default": "completed",
+                "type": "string",
+                "enum": [
+                  "completed",
+                  "streaming",
+                  "failed",
+                  "canceled"
+                ]
+              },
+              "contentVersion": {
+                "default": 0,
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              }
+            },
+            "required": [
+              "id",
+              "author",
+              "body",
+              "status",
+              "contentVersion",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "latestModelInvocation": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "assistantMessageId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "pending",
+                    "running",
+                    "completed",
+                    "cancel_requested",
+                    "canceled",
+                    "failed"
+                  ]
+                },
+                "errorClass": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "MODEL_ROUTE_UNAVAILABLE",
+                        "MODEL_AUTH_FAILED",
+                        "MODEL_QUOTA",
+                        "MODEL_TIMEOUT",
+                        "MODEL_STREAM_INTERRUPTED",
+                        "MODEL_PROTOCOL_VIOLATION",
+                        "CHAT_BUSY"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "lastEventCursor": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "createdAt": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                },
+                "terminalAt": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "assistantMessageId",
+                "status",
+                "errorClass",
+                "lastEventCursor",
+                "createdAt",
+                "terminalAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eventWatermark": {
+          "default": 0,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "id",
+        "createdAt",
+        "latestTaskId",
+        "messages",
+        "latestModelInvocation",
+        "eventWatermark"
+      ],
+      "additionalProperties": false
+    },
+    "TaskListQuery": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "awaiting_approval",
+            "approved",
+            "rejected",
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "canceled"
+          ]
+        },
+        "capabilityId": {
+          "type": "string",
+          "enum": [
+            "solution.analysis.v1",
+            "operations.exception-assist.v1"
+          ]
+        },
+        "sort": {
+          "default": "updatedAt",
+          "type": "string",
+          "enum": [
+            "createdAt",
+            "updatedAt"
+          ]
+        },
+        "direction": {
+          "default": "desc",
+          "type": "string",
+          "const": "desc"
+        },
+        "limit": {
+          "default": 25,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "sort",
+        "direction",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "TaskListResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "capabilityId": {
+                "type": "string",
+                "enum": [
+                  "solution.analysis.v1",
+                  "operations.exception-assist.v1"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "awaiting_approval",
+                  "approved",
+                  "rejected",
+                  "queued",
+                  "running",
+                  "completed",
+                  "failed",
+                  "canceled"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "enum": [
+                  "方案分析",
+                  "异常分析"
+                ]
+              },
+              "conversationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "workflowVersion": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "hash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "id",
+                  "hash"
+                ],
+                "additionalProperties": false
+              },
+              "approvalStatus": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "approved",
+                  "rejected"
+                ]
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              },
+              "updatedAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              },
+              "aggregateVersion": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "simulation": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "id",
+              "capabilityId",
+              "status",
+              "title",
+              "conversationId",
+              "workflowVersion",
+              "approvalStatus",
+              "createdAt",
+              "updatedAt",
+              "aggregateVersion",
+              "simulation"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 32,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "asOf": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "queryVersion": {
+          "type": "string",
+          "const": "business-tasks.list.v1"
+        }
+      },
+      "required": [
+        "tasks",
+        "nextCursor",
+        "asOf",
+        "queryVersion"
+      ],
+      "additionalProperties": false
+    },
+    "TaskSnapshot": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "capabilityId": {
+          "type": "string",
+          "enum": [
+            "solution.analysis.v1",
+            "operations.exception-assist.v1"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "enum": [
+            "方案分析",
+            "异常分析"
+          ]
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "awaiting_approval",
+            "approved",
+            "rejected",
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "canceled"
+          ]
+        },
+        "approvalStatus": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "inputRef": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "fixture"
+                },
+                "fixtureRef": {
+                  "type": "string",
+                  "const": "fixture:solution-analysis:v1"
+                },
+                "fixtureVersion": {
+                  "type": "number",
+                  "const": 1
+                }
+              },
+              "required": [
+                "kind",
+                "fixtureRef",
+                "fixtureVersion"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "document_snapshot"
+                },
+                "documentSnapshotId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "artifactId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "manifestId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "contentSha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "simulationProfile": {
+                  "type": "string",
+                  "const": "solution-analysis-demo/v2"
+                },
+                "profileRegistryVersion": {
+                  "type": "string",
+                  "const": "gate0.2a-profile-registry/1"
+                },
+                "resourceScope": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dataClass": {
+                  "type": "string",
+                  "const": "C1"
+                },
+                "audience": {
+                  "type": "string",
+                  "pattern": "^conversation:.*"
+                }
+              },
+              "required": [
+                "kind",
+                "documentSnapshotId",
+                "artifactId",
+                "manifestId",
+                "contentSha256",
+                "simulationProfile",
+                "profileRegistryVersion",
+                "resourceScope",
+                "dataClass",
+                "audience"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "const": "business_exception_snapshot"
+                },
+                "businessExceptionId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sourceVersionId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "sourceSha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "canonicalizationVersion": {
+                  "type": "string",
+                  "const": "rfc8785-jcs/1"
+                },
+                "fixtureVersion": {
+                  "type": "string",
+                  "enum": [
+                    "gate0.2b-capacity-lag/1",
+                    "gate0.2b-equipment-alarm/1"
+                  ]
+                },
+                "sourceSystem": {
+                  "type": "string",
+                  "const": "fixture-manufacturing"
+                },
+                "sourceObjectRef": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "detectionWindow": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "resourceScope": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "dataClass": {
+                  "type": "string",
+                  "const": "C1"
+                },
+                "sourceAudience": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "resource_exception"
+                    },
+                    "businessExceptionId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "resourceScope": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "dataClass": {
+                      "type": "string",
+                      "const": "C1"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "businessExceptionId",
+                    "resourceScope",
+                    "dataClass"
+                  ],
+                  "additionalProperties": false
+                },
+                "taskAudience": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "private_conversation"
+                    },
+                    "conversationId": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "conversationId"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "kind",
+                "businessExceptionId",
+                "sourceVersionId",
+                "sourceSha256",
+                "canonicalizationVersion",
+                "fixtureVersion",
+                "sourceSystem",
+                "sourceObjectRef",
+                "detectionWindow",
+                "resourceScope",
+                "dataClass",
+                "sourceAudience",
+                "taskAudience"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "workflowVersion": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "id",
+            "hash"
+          ],
+          "additionalProperties": false
+        },
+        "approval": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "approved",
+                "rejected"
+              ]
+            },
+            "subjectDigest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "id",
+            "version",
+            "status",
+            "subjectDigest"
+          ],
+          "additionalProperties": false
+        },
+        "expertTarget": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "auto"
+                }
+              },
+              "required": [
+                "mode"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "expert"
+                },
+                "expertId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "mode",
+                "expertId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "team"
+                },
+                "teamId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "mode",
+                "teamId"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "running",
+                  "completed",
+                  "failed",
+                  "canceled"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "published",
+                  "rejected"
+                ]
+              },
+              "evidenceRefId": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "rejectionCode": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "text",
+              "status",
+              "evidenceRefId",
+              "rejectionCode"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "legacy_fixture"
+                      },
+                      "fixtureRef": {
+                        "type": "string",
+                        "const": "fixture:solution-analysis:v1"
+                      },
+                      "fixtureVersion": {
+                        "type": "number",
+                        "const": 1
+                      },
+                      "sourceId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "excerptSha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "fixtureRef",
+                      "fixtureVersion",
+                      "sourceId",
+                      "excerptSha256"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "document_snapshot"
+                      },
+                      "documentSnapshotId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "artifactId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "startByte": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "endByteExclusive": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "snapshotSha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "excerptSha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "extractionVersion": {
+                        "type": "string",
+                        "const": "raw-utf8-byte-range/1"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "documentSnapshotId",
+                      "artifactId",
+                      "startByte",
+                      "endByteExclusive",
+                      "snapshotSha256",
+                      "excerptSha256",
+                      "extractionVersion"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "const": "business_exception_snapshot"
+                      },
+                      "businessExceptionId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "sourceVersionId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "sourceSha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "canonicalizationVersion": {
+                        "type": "string",
+                        "const": "rfc8785-jcs/1"
+                      },
+                      "jsonPointer": {
+                        "type": "string",
+                        "pattern": "^\\/.*"
+                      },
+                      "valueSha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "businessExceptionId",
+                      "sourceVersionId",
+                      "sourceSha256",
+                      "canonicalizationVersion",
+                      "jsonPointer",
+                      "valueSha256"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "excerpt": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "excerptSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "resourceScope": {
+                "type": "string",
+                "minLength": 1
+              },
+              "dataClass": {
+                "type": "string",
+                "const": "C1"
+              },
+              "audience": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "private_conversation"
+                  },
+                  "conversationId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "conversationId"
+                ],
+                "additionalProperties": false
+              },
+              "lineageRecordIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "required": [
+              "id",
+              "source",
+              "excerpt",
+              "excerptSha256",
+              "resourceScope",
+              "dataClass",
+              "audience",
+              "lineageRecordIds"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "manifestId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "source_document",
+                  "simulation_report"
+                ]
+              },
+              "displayName": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mediaType": {
+                "type": "string",
+                "enum": [
+                  "text/plain",
+                  "text/markdown"
+                ]
+              },
+              "sizeBytes": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 1048576
+              },
+              "contentSha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "downloadUrl": {
+                "type": "string",
+                "pattern": "^\\/api\\/artifacts\\/.*"
+              },
+              "lineageRecordIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "required": [
+              "id",
+              "manifestId",
+              "kind",
+              "displayName",
+              "mediaType",
+              "sizeBytes",
+              "contentSha256",
+              "downloadUrl",
+              "lineageRecordIds"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "lineage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "fromKind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "fromId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "toKind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "toId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "relation": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "id",
+              "fromKind",
+              "fromId",
+              "toKind",
+              "toId",
+              "relation"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "result": {
+          "anyOf": [
+            {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "completed"
+                    },
+                    "summary": {
+                      "type": "string"
+                    },
+                    "stepSummaries": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "simulation": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "runtimeMode": {
+                      "type": "string",
+                      "const": "fake"
+                    },
+                    "businessDecisionAllowed": {
+                      "type": "boolean",
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "summary",
+                    "stepSummaries",
+                    "simulation",
+                    "runtimeMode",
+                    "businessDecisionAllowed"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "failed"
+                    },
+                    "code": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "simulation": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "runtimeMode": {
+                      "type": "string",
+                      "const": "fake"
+                    },
+                    "businessDecisionAllowed": {
+                      "type": "boolean",
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "code",
+                    "message",
+                    "simulation",
+                    "runtimeMode",
+                    "businessDecisionAllowed"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "canceled"
+                    },
+                    "code": {
+                      "type": "string",
+                      "const": "USER_CANCELED"
+                    },
+                    "message": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "simulation": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "runtimeMode": {
+                      "type": "string",
+                      "const": "fake"
+                    },
+                    "businessDecisionAllowed": {
+                      "type": "boolean",
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "code",
+                    "message",
+                    "simulation",
+                    "runtimeMode",
+                    "businessDecisionAllowed"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "aggregateVersion": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "eventWatermark": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "simulation": {
+          "type": "boolean",
+          "const": true
+        },
+        "runtimeMode": {
+          "type": "string",
+          "const": "fake"
+        },
+        "businessDecisionAllowed": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "id",
+        "capabilityId",
+        "title",
+        "conversationId",
+        "status",
+        "approvalStatus",
+        "createdAt",
+        "updatedAt",
+        "inputRef",
+        "workflowVersion",
+        "approval",
+        "expertTarget",
+        "steps",
+        "claims",
+        "evidence",
+        "artifacts",
+        "lineage",
+        "result",
+        "aggregateVersion",
+        "eventWatermark",
+        "simulation",
+        "runtimeMode",
+        "businessDecisionAllowed"
+      ],
+      "additionalProperties": false
+    },
+    "TaskEventProjection": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "business_task.created"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "approvalId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "workflowVersionId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "workflowHash": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "approvalId",
+                "workflowVersionId",
+                "workflowHash"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "approval.decided"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "approvalId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "approved",
+                    "rejected"
+                  ]
+                }
+              },
+              "required": [
+                "approvalId",
+                "decision"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "workflow.execute.requested"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "workflowVersionId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "workflowHash": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                }
+              },
+              "required": [
+                "workflowVersionId",
+                "workflowHash"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "workflow.run_started"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "workflow.run_reclaimed"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "workflow.step_started"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "stepId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "stepId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "workflow.step_completed"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "stepId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "stepId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "business_task.completed"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "business_task.failed"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "code"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cursor": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "businessTaskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sequence": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "aggregateVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "occurredAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+            },
+            "simulation": {
+              "type": "boolean",
+              "const": true
+            },
+            "runtimeMode": {
+              "type": "string",
+              "const": "fake"
+            },
+            "businessDecisionAllowed": {
+              "type": "boolean",
+              "const": false
+            },
+            "eventType": {
+              "type": "string",
+              "const": "business_task.canceled"
+            },
+            "payload": {
+              "type": "object",
+              "properties": {
+                "reasonCode": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "reasonCode"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "cursor",
+            "id",
+            "businessTaskId",
+            "sequence",
+            "aggregateVersion",
+            "occurredAt",
+            "simulation",
+            "runtimeMode",
+            "businessDecisionAllowed",
+            "eventType",
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "TaskEventListResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "business_task.created"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "workflowVersionId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "workflowHash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "approvalId",
+                      "workflowVersionId",
+                      "workflowHash"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "approval.decided"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "decision": {
+                        "type": "string",
+                        "enum": [
+                          "approved",
+                          "rejected"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "approvalId",
+                      "decision"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "workflow.execute.requested"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {
+                      "workflowVersionId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "workflowHash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "workflowVersionId",
+                      "workflowHash"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "workflow.run_started"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "workflow.run_reclaimed"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "workflow.step_started"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {
+                      "stepId": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "stepId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "workflow.step_completed"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {
+                      "stepId": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "stepId"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "business_task.completed"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "business_task.failed"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {
+                      "code": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "code"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cursor": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "businessTaskId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sequence": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "occurredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "fake"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "eventType": {
+                    "type": "string",
+                    "const": "business_task.canceled"
+                  },
+                  "payload": {
+                    "type": "object",
+                    "properties": {
+                      "reasonCode": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "reasonCode"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "cursor",
+                  "id",
+                  "businessTaskId",
+                  "sequence",
+                  "aggregateVersion",
+                  "occurredAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "eventType",
+                  "payload"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        }
+      },
+      "required": [
+        "events"
+      ],
+      "additionalProperties": false
+    },
+    "ApprovalProjection": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "businessTaskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ]
+        },
+        "subjectDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "id",
+        "businessTaskId",
+        "version",
+        "status",
+        "subjectDigest"
+      ],
+      "additionalProperties": false
+    },
+    "ExecuteTaskInput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "expectedApprovalVersion": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expectedApprovalSubjectDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "expectedApprovalVersion",
+        "expectedApprovalSubjectDigest"
+      ],
+      "additionalProperties": false
+    },
+    "WorkflowListQuery": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "capabilityVersionId": {
+          "type": "string",
+          "enum": [
+            "cap_solution_analysis_v1_1",
+            "cap_operations_exception_assist_v1_shadow_1"
+          ]
+        },
+        "limit": {
+          "default": 25,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "WorkflowListResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "workflows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "hash": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "capabilityVersionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "harnessVersionId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+              },
+              "simulation": {
+                "type": "boolean",
+                "const": true
+              }
+            },
+            "required": [
+              "id",
+              "hash",
+              "capabilityVersionId",
+              "harnessVersionId",
+              "createdAt",
+              "simulation"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 32,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "asOf": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "queryVersion": {
+          "type": "string",
+          "const": "workflow-versions.list.v1"
+        }
+      },
+      "required": [
+        "workflows",
+        "nextCursor",
+        "asOf",
+        "queryVersion"
+      ],
+      "additionalProperties": false
+    },
+    "WorkflowDetailProjection": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "capabilityVersionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "harnessVersionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "simulation": {
+          "type": "boolean",
+          "const": true
+        },
+        "compilerVersion": {
+          "type": "string",
+          "const": "geneway-workflow-compiler/0.1.0"
+        },
+        "canonicalizationVersion": {
+          "type": "string",
+          "const": "RFC8785/JCS-1"
+        },
+        "featureSet": {
+          "type": "string",
+          "const": "fixed-v1"
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "deterministic"
+                  },
+                  "handlerVersion": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "inputRefs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "outputSchemaId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "handlerVersion",
+                  "inputRefs",
+                  "outputSchemaId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "capabilityVersionId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "harnessVersionId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "inputRefs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "outputSchemaId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "capabilityVersionId",
+                  "harnessVersionId",
+                  "inputRefs",
+                  "outputSchemaId"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "verification"
+                  },
+                  "policyVersion": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "inputRefs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "outputSchemaId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "policyVersion",
+                  "inputRefs",
+                  "outputSchemaId"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "minLength": 1
+              },
+              "to": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "permissionCeiling": {
+          "type": "object",
+          "properties": {
+            "actions": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "R0",
+                  "R1",
+                  "A1"
+                ]
+              }
+            },
+            "resourceScopes": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "dataClasses": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "C0",
+                  "C1",
+                  "C2"
+                ]
+              }
+            }
+          },
+          "required": [
+            "actions",
+            "resourceScopes",
+            "dataClasses"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "hash",
+        "capabilityVersionId",
+        "harnessVersionId",
+        "createdAt",
+        "simulation",
+        "compilerVersion",
+        "canonicalizationVersion",
+        "featureSet",
+        "nodes",
+        "edges",
+        "permissionCeiling"
+      ],
+      "additionalProperties": false
+    },
     "WorkerDelivery": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",

@@ -1,32 +1,52 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import {
-  businessExceptionListQuerySchema,
-  businessExceptionRefSchema,
-  businessExceptionSnapshotEvidenceSourceSchema,
-  exceptionAudienceSchema,
-  gate02bPublicWireJsonSchemas,
-  workerInputContentSchema,
-} from './index.js';
+import * as contracts from './index.js';
 
 type CorpusRow = Readonly<{
-  schema: 'businessExceptionRef' | 'exceptionAudience' | 'businessExceptionListQuery' | 'businessExceptionSnapshotEvidenceSource';
+  schema: keyof typeof contracts.gate02bPublicWireJsonSchemas;
   accepted: boolean;
   value: unknown;
 }>;
 
 const schemaByName = {
-  businessExceptionRef: businessExceptionRefSchema,
-  exceptionAudience: exceptionAudienceSchema,
-  businessExceptionListQuery: businessExceptionListQuerySchema,
-  businessExceptionSnapshotEvidenceSource: businessExceptionSnapshotEvidenceSourceSchema,
+  BusinessExceptionRef: contracts.businessExceptionRefSchema,
+  BusinessExceptionSourceSnapshot: contracts.businessExceptionSourceSnapshotSchema,
+  ExceptionAudience: contracts.exceptionAudienceSchema,
+  BusinessExceptionListQuery: contracts.businessExceptionListQuerySchema,
+  BusinessExceptionListResponse: contracts.businessExceptionListResponseSchema,
+  BusinessExceptionDetail: contracts.businessExceptionDetailSchema,
+  AcknowledgeBusinessExceptionInput: contracts.acknowledgeBusinessExceptionInputSchema,
+  CreateExceptionAnalysisTaskInput: contracts.createExceptionAnalysisTaskInputSchema,
+  CreateExceptionAnalysisTaskResponse: contracts.createExceptionAnalysisTaskResponseSchema,
+  ConversationProjection: contracts.conversationProjectionSchema,
+  TaskListQuery: contracts.taskListQuerySchema,
+  TaskListResponse: contracts.taskListResponseSchema,
+  TaskSnapshot: contracts.taskSnapshotSchema,
+  TaskEventProjection: contracts.taskEventProjectionSchema,
+  TaskEventListResponse: contracts.taskEventListResponseSchema,
+  ApprovalProjection: contracts.approvalProjectionSchema,
+  ExecuteTaskInput: contracts.executeTaskInputSchema,
+  WorkflowListQuery: contracts.workflowListQuerySchema,
+  WorkflowListResponse: contracts.workflowListResponseSchema,
+  WorkflowDetailProjection: contracts.workflowDetailProjectionSchema,
+  WorkerDelivery: contracts.workerDeliverySchema,
+  WorkerInputContent: contracts.workerInputContentSchema,
+  AttemptOutputCandidatePayload: contracts.attemptOutputCandidatePayloadSchema,
+  EvidenceLocatorCandidate: contracts.evidenceLocatorCandidateSchema,
+  EvidenceSource: contracts.evidenceSourceSchema,
 } as const;
 
 describe('Gate 0.2B public wire contracts', () => {
   it('keeps the frozen corpus aligned with Zod runtime acceptance', () => {
     const corpus = JSON.parse(readFileSync(new URL('./gate-0.2b.corpus.json', import.meta.url), 'utf8')) as CorpusRow[];
-    expect(corpus.length).toBeGreaterThanOrEqual(9);
+    const artifactNames = Object.keys(contracts.gate02bPublicWireJsonSchemas).sort();
+    expect([...new Set(corpus.map((row) => row.schema))].sort()).toEqual(artifactNames);
+    for (const schema of artifactNames as CorpusRow['schema'][]) {
+      const rows = corpus.filter((row) => row.schema === schema);
+      expect(rows.some((row) => row.accepted), `${schema} needs an accepted corpus case`).toBe(true);
+      expect(rows.some((row) => !row.accepted), `${schema} needs a rejected corpus case`).toBe(true);
+    }
     for (const row of corpus) {
       expect(schemaByName[row.schema].safeParse(row.value).success, row.schema).toBe(row.accepted);
     }
@@ -37,9 +57,9 @@ describe('Gate 0.2B public wire contracts', () => {
     const artifact = JSON.parse(artifactText) as unknown;
     expect(artifact).toEqual({
       schemaVersion: 'geneway-gate-0.2b-public-wire/1',
-      schemas: gate02bPublicWireJsonSchemas,
+      schemas: contracts.gate02bPublicWireJsonSchemas,
     });
-    expect(createHash('sha256').update(artifactText).digest('hex')).toBe('10edaef6b001b210df3d2aa3543ce19d7c8734c178e4cb12cb9fc713b3a7d6b2');
+    expect(createHash('sha256').update(artifactText).digest('hex')).toBe('261394c618342d95eedf9e7233973a5a9eb050bd4630770f99bc233e6b213a4c');
   });
 
   it('keeps exception Worker input source-bound and rejects unregistered source kinds', () => {
@@ -67,8 +87,8 @@ describe('Gate 0.2B public wire contracts', () => {
       },
       canonicalBytes: '{"fixed":true}',
     } as const;
-    expect(workerInputContentSchema.parse(input)).toEqual(input);
-    expect(workerInputContentSchema.safeParse({ ...input, kind: 'unregistered_source' }).success).toBe(false);
-    expect(workerInputContentSchema.safeParse({ ...input, rootArtifactId: 'artifact_not_allowed' }).success).toBe(false);
+    expect(contracts.workerInputContentSchema.parse(input)).toEqual(input);
+    expect(contracts.workerInputContentSchema.safeParse({ ...input, kind: 'unregistered_source' }).success).toBe(false);
+    expect(contracts.workerInputContentSchema.safeParse({ ...input, rootArtifactId: 'artifact_not_allowed' }).success).toBe(false);
   });
 });

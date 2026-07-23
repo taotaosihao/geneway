@@ -8,7 +8,7 @@ import {
 import { SimulationNotice } from '@geneway/ui';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from './api.js';
-import { ErrorState, Fact, LoadingState, ProductShell, type RouteState } from './product-routes.js';
+import { Fact, isFailClosedRouteState, LoadingState, ProductShell, RouteFailure, routeStateForError, type RouteState } from './product-routes.js';
 
 const EXCEPTION_TYPE_LABELS = {
   capacity_progress_lag: '产能进度落后',
@@ -99,14 +99,14 @@ export function ExceptionListPage() {
     void api.listBusinessExceptions(query).then((value) => {
       if (!active) return;
       setResult(value);
-      setState(value.exceptions.length === 0 ? 'empty' : 'ready');
+      setState(value.exceptions.length === 0 ? filtered ? 'filtered-empty' : 'empty' : 'ready');
     }).catch((cause: unknown) => {
       if (!active) return;
       setError(cause instanceof Error ? cause.message : String(cause));
-      setState('server-error');
+      setState(routeStateForError(cause));
     });
     return () => { active = false; };
-  }, [query]);
+  }, [filtered, query]);
 
   return <ProductShell active="exceptions" title="异常与待办" subtitle="由 Control Plane 授权返回的模拟制造现场异常" state={state} inspector={result === undefined ? undefined : <>
     <dl className="facts">
@@ -123,8 +123,8 @@ export function ExceptionListPage() {
     </section>
     <ExceptionFilters query={query} />
     {state === 'loading' && <LoadingState />}
-    {state === 'server-error' && <ErrorState message={error} />}
-    {state === 'empty' && <ExceptionListEmpty filtered={filtered} />}
+    <RouteFailure state={state} message={error} />
+    {(state === 'empty' || state === 'filtered-empty') && <ExceptionListEmpty filtered={state === 'filtered-empty'} />}
     {state === 'ready' && result !== undefined && <section className="table-card exception-table-card">
       <div className="section-heading"><div><span className="eyebrow">BusinessException projection</span><h2>当前页异常</h2></div><span>{result.exceptions.length} 条服务端记录</span></div>
       <div className="table-scroll"><table className="product-table exception-table" data-testid="exception-table"><thead><tr><th>异常</th><th>严重度</th><th>状态</th><th>资源范围</th><th>发现时间</th><th>边界</th></tr></thead><tbody>
@@ -195,7 +195,12 @@ export function ExceptionDetailPage({ exceptionId }: Readonly<{ exceptionId: str
     void api.getBusinessException(exceptionId).then((value) => {
       if (active) { setDetail(value); setState('ready'); }
     }).catch((cause: unknown) => {
-      if (active) { setError(cause instanceof Error ? cause.message : String(cause)); setState('server-error'); }
+      if (active) {
+        const nextState = routeStateForError(cause);
+        setError(cause instanceof Error ? cause.message : String(cause));
+        if (isFailClosedRouteState(nextState)) { setDetail(undefined); setBinding(undefined); }
+        setState(nextState);
+      }
     });
     return () => { active = false; };
   }, [exceptionId]);
@@ -208,7 +213,10 @@ export function ExceptionDetailPage({ exceptionId }: Readonly<{ exceptionId: str
       const value = await api.acknowledgeBusinessException(detail.id, detail.aggregateVersion);
       setDetail(value);
     } catch (cause) {
+      const nextState = routeStateForError(cause);
       setError(cause instanceof Error ? cause.message : String(cause));
+      if (isFailClosedRouteState(nextState)) { setDetail(undefined); setBinding(undefined); }
+      setState(nextState);
     } finally {
       setActing(null);
     }
@@ -223,7 +231,10 @@ export function ExceptionDetailPage({ exceptionId }: Readonly<{ exceptionId: str
       setBinding(value);
       await loadDetail();
     } catch (cause) {
+      const nextState = routeStateForError(cause);
       setError(cause instanceof Error ? cause.message : String(cause));
+      if (isFailClosedRouteState(nextState)) { setDetail(undefined); setBinding(undefined); }
+      setState(nextState);
     } finally {
       setActing(null);
     }
@@ -234,8 +245,8 @@ export function ExceptionDetailPage({ exceptionId }: Readonly<{ exceptionId: str
 
   return <ProductShell active="exceptions" title="异常详情" subtitle="版本固定的来源、Evidence、认领与小纬分析入口" state={state} inspector={detail === undefined ? undefined : <ExceptionInspector detail={detail} />}>
     {state === 'loading' && <LoadingState />}
-    {state === 'server-error' && <ErrorState message={error} />}
-    {detail !== undefined && <div className="detail-stack exception-detail" data-testid="exception-detail" data-exception-id={detail.id} data-aggregate-version={detail.aggregateVersion}>
+    <RouteFailure state={state} message={error} />
+    {detail !== undefined && !isFailClosedRouteState(state) && <div className="detail-stack exception-detail" data-testid="exception-detail" data-exception-id={detail.id} data-aggregate-version={detail.aggregateVersion}>
       <section className="detail-hero exception-hero">
         <div><span className="eyebrow">{EXCEPTION_TYPE_LABELS[detail.exceptionType]} · {detail.id}</span><h2>{detail.summary}</h2><p>{detail.resourceScope} · {detail.dataClass} · {formatDateTime(detail.detectedAt)}</p></div>
         <div className="exception-hero-status"><span className={`exception-severity severity-${detail.severity}`}>{SEVERITY_LABELS[detail.severity]}</span><span className={`status status-${detail.status}`}>{STATUS_LABELS[detail.status]}</span><span className="simulation-chip">固定模拟数据</span></div>

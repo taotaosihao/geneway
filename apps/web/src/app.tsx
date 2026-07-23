@@ -6,6 +6,7 @@ import type { DocumentSnapshotProjection, EvidenceProjection, ExpertTarget, Task
 import { SimulationNotice, TaskProgress } from '@geneway/ui';
 import { api, type Approval, type Conversation, type Workflow } from './api.js';
 import { FastChatExperience } from './chat-app.js';
+import { ErrorState, LoadingState, routeStateForError, type RouteState } from './product-routes.js';
 
 const STEP_NAMES: Readonly<Record<string, string>> = {
   document_ingest: '读取脱敏材料', requirement_extract: '提取需求', contradiction_check: '检查矛盾', solution_design: '生成方案',
@@ -69,6 +70,9 @@ export function ConversationExperience({ conversationId: explicitConversationId,
   if (selectedCapability === 'solution.analysis.v1' || forceOpen) {
     return <AnalysisConversationExperience {...(explicitConversationId === undefined ? {} : { conversationId: explicitConversationId })} />;
   }
+  if (selectedCapability !== null && selectedCapability !== 'xiaowei.chat.v1') {
+    return <main className="not-open" data-testid="not-open"><span>NOT_OPEN</span><h1>该能力尚未开放</h1><p>请返回与小纬开始普通对话，或选择已经开放的方案分析能力。</p></main>;
+  }
   if (explicitConversationId === undefined) return <FastChatExperience />;
   return <ExistingConversationExperience conversationId={explicitConversationId} />;
 }
@@ -76,19 +80,20 @@ export function ConversationExperience({ conversationId: explicitConversationId,
 function ExistingConversationExperience({ conversationId }: Readonly<{ conversationId: string }>) {
   const [hasBusinessTask, setHasBusinessTask] = useState<boolean>();
   const [error, setError] = useState<string>();
+  const [state, setState] = useState<RouteState>('loading');
 
   useEffect(() => {
     let active = true;
     void api.getConversation(conversationId).then((snapshot) => {
-      if (active) setHasBusinessTask(snapshot.latestTaskId !== null);
+      if (active) { setHasBusinessTask(snapshot.latestTaskId !== null); setState('ready'); }
     }).catch((cause: unknown) => {
-      if (active) setError(cause instanceof Error ? cause.message : String(cause));
+      if (active) { setError(cause instanceof Error ? cause.message : String(cause)); setState(routeStateForError(cause)); }
     });
     return () => { active = false; };
   }, [conversationId]);
 
-  if (error !== undefined) return <main className="not-open"><h1>会话加载失败</h1><p>{error}</p></main>;
-  if (hasBusinessTask === undefined) return <main className="not-open"><p>正在加载会话…</p></main>;
+  if (error !== undefined) return <main className="app-shell product-shell" data-testid="product-shell" data-state={state}><ErrorState message={error} state={state as Exclude<RouteState, 'loading' | 'ready' | 'empty' | 'filtered-empty' | 'canceled' | 'recovering'>} /></main>;
+  if (hasBusinessTask === undefined) return <main className="app-shell product-shell" data-testid="product-shell" data-state="loading"><LoadingState /></main>;
   return hasBusinessTask
     ? <AnalysisConversationExperience conversationId={conversationId} />
     : <FastChatExperience conversationId={conversationId} />;
@@ -234,7 +239,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
     try {
       if (approval.status === 'pending') await api.approve(approval.id);
       const approved = await recover(task.id, cursor);
-      await api.execute(task.id);
+      await api.execute(task.id, approved.snapshot.approval);
       let currentCursor = approved.cursor;
       for (let attempt = 0; attempt < 300; attempt += 1) {
         const current = await recover(task.id, currentCursor);

@@ -225,8 +225,15 @@ async function approve(request: APIRequestContext, caseId: RecoveryCaseId, appro
 }
 
 async function execute(request: APIRequestContext, caseId: RecoveryCaseId, taskId: string): Promise<void> {
+  const taskResponse = await request.get(`/api/business-tasks/${taskId}`);
+  expect(taskResponse.status(), await taskResponse.text()).toBe(200);
+  const task = await taskResponse.json() as { approval: { version: number; subjectDigest: string } };
   const response = await request.post(`/api/business-tasks/${taskId}/execute`, {
     headers: { origin, 'idempotency-key': key(caseId, 'execute') },
+    data: {
+      expectedApprovalVersion: task.approval.version,
+      expectedApprovalSubjectDigest: task.approval.subjectDigest,
+    },
   });
   expect(response.status(), await response.text()).toBe(200);
 }

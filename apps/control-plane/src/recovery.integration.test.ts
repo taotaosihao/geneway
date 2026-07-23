@@ -203,10 +203,14 @@ async function createApprovedTask(caseId: FaultCaseId) {
 }
 
 async function enqueue(taskId: string, caseId: FaultCaseId): Promise<void> {
+  const task = await controlPlane.app.inject({ method: 'GET', url: `/api/business-tasks/${taskId}` });
+  expect(task.statusCode, task.body).toBe(200);
+  const approval = task.json<{ approval: { version: number; subjectDigest: string } }>().approval;
   const response = await controlPlane.app.inject({
     method: 'POST',
     url: `/api/business-tasks/${taskId}/execute`,
     headers: requestHeaders(key(caseId, 'execute')),
+    payload: { expectedApprovalVersion: approval.version, expectedApprovalSubjectDigest: approval.subjectDigest },
   });
   expect(response.statusCode, response.body).toBe(200);
   expect(response.json()).toEqual({ taskId, status: 'accepted' });

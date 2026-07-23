@@ -16,6 +16,7 @@ import {
   workflowListItemSchema,
   workflowListResponseSchema,
   type CreateTaskInput,
+  type ExecuteTaskInput,
   type ApprovalProjection,
   type ConversationProjection,
   type Principal,
@@ -373,6 +374,16 @@ export class ControlPlaneRepository {
   async listTasks(principal: Principal, query: TaskListQuery): Promise<TaskListResponse> {
     return this.withTransaction(async (client) => {
       await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+      if (query.cursor === undefined) {
+        const listCapability = await client.query(`SELECT 1 FROM users principal_user
+          WHERE principal_user.tenant_id=$1 AND principal_user.id=$2
+            AND EXISTS (SELECT 1 FROM roles role_binding
+              WHERE role_binding.tenant_id=principal_user.tenant_id AND role_binding.user_id=principal_user.id
+                AND role_binding.role='solution_reviewer')`, [principal.tenantId, principal.userId]);
+        if (listCapability.rowCount !== 1) {
+          throw new GenewayError('TASK_LIST_FORBIDDEN', 'Task list permission is required', 403);
+        }
+      }
       const canonicalQuery = {
         status: query.status ?? null,
         capabilityId: query.capabilityId ?? null,
@@ -816,20 +827,20 @@ export class ControlPlaneRepository {
   async listWorkflows(principal: Principal, query: WorkflowListQuery): Promise<WorkflowListResponse> {
     return this.withTransaction(async (client) => {
       await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-      const canonicalQuery = { limit: query.limit };
+      const canonicalQuery = { capabilityVersionId: query.capabilityVersionId ?? null, limit: query.limit };
       const authorizationEpoch = await this.authorizationEpoch(client, principal);
       let snapshot: QuerySnapshotRow;
       let position = 0;
 
       if (query.cursor === undefined) {
         const candidates = await client.query<{ id: string; created_at: Date }>(`WITH readable_tasks AS (
-          SELECT t.workflow_version_id FROM business_tasks t
+          SELECT t.workflow_version_id,t.capability_version_id FROM business_tasks t
           WHERE t.tenant_id=$1 AND ${TASK_PROJECTION_AUTHORIZATION_SQL}
         )
           SELECT DISTINCT w.id,w.created_at FROM workflow_versions w JOIN readable_tasks task
             ON task.workflow_version_id=w.id
-          WHERE w.tenant_id=$1
-          ORDER BY w.created_at DESC,w.id ASC`, [principal.tenantId, principal.userId]);
+          WHERE w.tenant_id=$1 AND ($3::text IS NULL OR task.capability_version_id=$3)
+          ORDER BY w.created_at DESC,w.id ASC`, [principal.tenantId, principal.userId, query.capabilityVersionId ?? null]);
         const readable: { id: string; createdAt: Date }[] = [];
         for (const candidate of candidates.rows) {
           try {
@@ -883,11 +894,11 @@ export class ControlPlaneRepository {
     return this.withTransaction(async (client) => this.projectWorkflowDetail(await this.requireReadableWorkflow(client, principal, workflowId)));
   }
 
-  async enqueueExecution(principal: Principal, taskId: string, idempotencyKey: string): Promise<ExecutionResponse> {
-    return this.withTransaction((client) => this.idempotent(client, principal, 'business-task.execute', idempotencyKey, { taskId }, async () => {
+  async enqueueExecution(principal: Principal, taskId: string, input: ExecuteTaskInput, idempotencyKey: string): Promise<ExecutionResponse> {
+    return this.withTransaction((client) => this.idempotent(client, principal, 'business-task.execute', idempotencyKey, { taskId, ...input }, async () => {
       await this.assertPlatformOperational(client);
       const task = await this.requireTask(client, principal.tenantId, taskId, principal.userId);
-      await this.assertApprovedExecutionAuthority(client, task);
+      await this.assertApprovedExecutionAuthority(client, task, input);
       if (task.status === 'completed') return { taskId, status: 'completed' as const };
       if (task.status === 'queued' || task.status === 'running') return { taskId, status: 'accepted' as const };
       if (task.status !== 'approved') throw new GenewayError('TASK_EXECUTION_NOT_READY', `Task cannot be executed from state ${task.status}`, 409);
@@ -901,7 +912,7 @@ export class ControlPlaneRepository {
       return { taskId, status: 'accepted' as const };
     }, async (response) => {
       const task = await this.requireTask(client, principal.tenantId, response.taskId, principal.userId);
-      await this.assertApprovedExecutionAuthority(client, task);
+      await this.assertApprovedExecutionAuthority(client, task, input);
     }));
   }
 
@@ -1596,13 +1607,18 @@ export class ControlPlaneRepository {
     }
   }
 
-  private async assertApprovedExecutionAuthority(client: PoolClient, task: TaskRow): Promise<ApprovalRow> {
+  private async assertApprovedExecutionAuthority(client: PoolClient, task: TaskRow, expected: ExecuteTaskInput): Promise<ApprovalRow> {
     const result = await client.query<ApprovalRow>('SELECT * FROM approval_versions WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY version DESC LIMIT 1 FOR UPDATE', [
       task.tenant_id,
       task.id,
     ]);
     const approval = result.rows[0];
-    if (approval === undefined || approval.status !== 'approved') throw new GenewayError('APPROVAL_REQUIRED', 'Task requires an approved immutable subject', 409);
+    if (approval === undefined) throw new GenewayError('APPROVAL_REQUIRED', 'Task requires an approved immutable subject', 409);
+    if (approval.version !== expected.expectedApprovalVersion
+      || approval.subject_digest !== expected.expectedApprovalSubjectDigest) {
+      throw new GenewayError('APPROVAL_SUBJECT_CHANGED', 'Expected approval version or subject digest is stale', 409);
+    }
+    if (approval.status !== 'approved') throw new GenewayError('APPROVAL_REQUIRED', 'Task requires an approved immutable subject', 409);
     if (approval.expires_at.getTime() <= Date.now()) throw new GenewayError('APPROVAL_EXPIRED', 'Approved execution authority has expired', 409);
     await this.assertApprovalSubjectAuthority(client, approval, task);
     return approval;

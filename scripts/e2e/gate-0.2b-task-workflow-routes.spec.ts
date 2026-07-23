@@ -159,7 +159,18 @@ test('真实任务可从六条 served 路由恢复，并与 API、Postgres 和 W
   await openServedRoute(page, '/tasks', 'task-table');
   await expect(page.getByTestId('next-page')).toBeVisible();
   await page.getByTestId('next-page').click();
-  await expect(page).toHaveURL(/\/tasks\?cursor=/u);
+  await expect
+    .poll(() => {
+      const currentUrl = new URL(page.url());
+      return (
+        currentUrl.pathname === '/tasks' &&
+        Boolean(currentUrl.searchParams.get('cursor')) &&
+        currentUrl.searchParams.get('sort') === 'updatedAt' &&
+        currentUrl.searchParams.get('direction') === 'desc' &&
+        currentUrl.searchParams.get('limit') === '25'
+      );
+    })
+    .toBe(true);
   await expect(page.getByTestId('task-table')).toBeVisible();
   const taskRow = page.locator(`tr[data-task-id="${task.id}"]`);
   await expect(taskRow).toHaveAttribute('data-workflow-id', task.workflowVersion.id);

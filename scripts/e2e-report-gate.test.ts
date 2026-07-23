@@ -21,6 +21,10 @@ describe('E2E report gate', () => {
       ['--project=gate0.2a-recovery-multiprocess'],
     ).expectedCount).toBe(13);
     expect(validateE2eReport(reportFor('gate0.2b-success'), ['--project=gate0.2b-success']).expectedCount).toBe(2);
+    expect(validateE2eReport(reportFor('gate0.2b-negative'), ['--project=gate0.2b-negative']).expectedCount).toBe(5);
+    expect(validateE2eReport(reportFor('gate0.2b-recovery'), ['--project=gate0.2b-recovery']).expectedCount).toBe(3);
+    expect(validateE2eReport(reportFor('gate0.2b-visual-desktop'), ['--project=gate0.2b-visual-desktop']).expectedCount).toBe(1);
+    expect(validateE2eReport(reportFor('gate0.2b-visual-narrow'), ['--project=gate0.2b-visual-narrow']).expectedCount).toBe(1);
     expect(validateE2eReport(reportFor('gate-a0-live'), ['--project=gate-a0-live']).expectedCount).toBe(2);
     expect(validateE2eReport(reportFor('gate-a0-lan'), ['--project=gate-a0-lan']).expectedCount).toBe(1);
   });

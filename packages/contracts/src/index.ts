@@ -531,6 +531,13 @@ export const approvalProjectionSchema = z.object({
 
 export type ApprovalProjection = z.infer<typeof approvalProjectionSchema>;
 
+export const executeTaskInputSchema = z.object({
+  expectedApprovalVersion: z.number().int().positive(),
+  expectedApprovalSubjectDigest: sha256ValueSchema,
+}).strict();
+
+export type ExecuteTaskInput = z.infer<typeof executeTaskInputSchema>;
+
 export const conversationProjectionSchema = z.object({
   id: z.string().min(1),
   createdAt: z.string().datetime(),
@@ -727,6 +734,7 @@ export const workflowListResponseSchema = z.object({
 export type WorkflowListResponse = z.infer<typeof workflowListResponseSchema>;
 
 export const workflowListQuerySchema = z.object({
+  capabilityVersionId: z.enum(['cap_solution_analysis_v1_1', 'cap_operations_exception_assist_v1_shadow_1']).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   cursor: paginationCursorSchema.optional(),
 }).strict();
@@ -1085,6 +1093,7 @@ export const taskSnapshotJsonSchema = z.toJSONSchema(taskSnapshotSchema);
 export const taskEventProjectionJsonSchema = z.toJSONSchema(taskEventProjectionSchema);
 export const taskEventListResponseJsonSchema = z.toJSONSchema(taskEventListResponseSchema);
 export const approvalProjectionJsonSchema = z.toJSONSchema(approvalProjectionSchema);
+export const executeTaskInputJsonSchema = z.toJSONSchema(executeTaskInputSchema);
 export const workflowListQueryJsonSchema = z.toJSONSchema(workflowListQuerySchema);
 export const workflowListResponseJsonSchema = z.toJSONSchema(workflowListResponseSchema);
 export const workflowDetailProjectionJsonSchema = z.toJSONSchema(workflowDetailProjectionSchema);
@@ -1106,6 +1115,17 @@ export const gate02bPublicWireJsonSchemas = Object.freeze({
   AcknowledgeBusinessExceptionInput: acknowledgeBusinessExceptionInputJsonSchema,
   CreateExceptionAnalysisTaskInput: createExceptionAnalysisTaskInputJsonSchema,
   CreateExceptionAnalysisTaskResponse: createExceptionAnalysisTaskResponseJsonSchema,
+  ConversationProjection: conversationProjectionJsonSchema,
+  TaskListQuery: taskListQueryJsonSchema,
+  TaskListResponse: taskListResponseJsonSchema,
+  TaskSnapshot: taskSnapshotJsonSchema,
+  TaskEventProjection: taskEventProjectionJsonSchema,
+  TaskEventListResponse: taskEventListResponseJsonSchema,
+  ApprovalProjection: approvalProjectionJsonSchema,
+  ExecuteTaskInput: executeTaskInputJsonSchema,
+  WorkflowListQuery: workflowListQueryJsonSchema,
+  WorkflowListResponse: workflowListResponseJsonSchema,
+  WorkflowDetailProjection: workflowDetailProjectionJsonSchema,
   WorkerDelivery: workerDeliveryJsonSchema,
   WorkerInputContent: workerInputContentJsonSchema,
   AttemptOutputCandidatePayload: attemptOutputCandidatePayloadJsonSchema,

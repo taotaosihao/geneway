@@ -1,8 +1,8 @@
 import { Background, Controls, ReactFlow, type Edge, type Node } from '@xyflow/react';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { TaskSnapshot, WorkflowDetailProjection } from '@geneway/contracts';
+import { taskListQuerySchema, workflowListQuerySchema, type TaskListQuery, type TaskSnapshot, type WorkflowDetailProjection } from '@geneway/contracts';
 import { SimulationNotice } from '@geneway/ui';
-import { api } from './api.js';
+import { api, apiErrorCode, apiErrorStatus, mergeTaskEventBatch } from './api.js';
 
 const STEP_NAMES: Readonly<Record<string, string>> = {
   document_ingest: '读取材料',
@@ -20,7 +20,24 @@ const STEP_NAMES: Readonly<Record<string, string>> = {
   report_publish: '发布结果',
 };
 
-export type RouteState = 'loading' | 'ready' | 'empty' | 'server-error';
+export type RouteState = 'loading' | 'ready' | 'empty' | 'filtered-empty' | 'forbidden' | 'not-found'
+  | 'stale' | 'binding-conflict' | 'approval-stale' | 'offline' | 'server-error' | 'canceled' | 'recovering';
+
+export function routeStateForError(cause: unknown): RouteState {
+  const code = apiErrorCode(cause);
+  const status = apiErrorStatus(cause);
+  if (code === 'NETWORK_OFFLINE' || (typeof navigator !== 'undefined' && navigator.onLine === false)) return 'offline';
+  if (status === 403) return 'forbidden';
+  if (status === 404) return 'not-found';
+  if (code === 'BUSINESS_EXCEPTION_STALE' || code === 'TASK_CANCEL_CAS_CONFLICT') return 'stale';
+  if (code === 'ANALYSIS_BINDING_CONFLICT') return 'binding-conflict';
+  if (['APPROVAL_SUBJECT_CHANGED', 'APPROVAL_EXPIRED', 'APPROVAL_CAS_CONFLICT'].includes(code)) return 'approval-stale';
+  return 'server-error';
+}
+
+export function isFailClosedRouteState(state: RouteState): boolean {
+  return state === 'forbidden' || state === 'not-found';
+}
 
 function navigationClass(current: string, target: string): string | undefined {
   return current === target ? 'nav-active' : undefined;
@@ -41,13 +58,26 @@ export function ProductShell({
   children: ReactNode;
   inspector?: ReactNode;
 }>) {
-  return <main className="app-shell product-shell" data-state={state} data-testid="product-shell">
+  const [browserOffline, setBrowserOffline] = useState(() => typeof navigator !== 'undefined' && navigator.onLine === false);
+  useEffect(() => {
+    const markOffline = () => setBrowserOffline(true);
+    const markOnline = () => setBrowserOffline(false);
+    window.addEventListener('offline', markOffline);
+    window.addEventListener('online', markOnline);
+    return () => {
+      window.removeEventListener('offline', markOffline);
+      window.removeEventListener('online', markOnline);
+    };
+  }, []);
+  const visibleState = browserOffline ? 'offline' : state;
+  return <main className="app-shell product-shell" data-state={visibleState} data-testid="product-shell">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">纬</span><div><strong>geneway</strong><small>制造业数字员工</small></div></div>
-      <a className="new-task" href="/conversations/new?capability=solution.analysis.v1">＋ 新建会话</a>
+      <a className="new-task" href="/conversations/new">＋ 新建会话</a>
       <nav>
         <b>工作区</b>
-        <a href="/conversations/new?capability=solution.analysis.v1">小纬</a>
+        <a href="/conversations/new">小纬</a>
+        <a href="/conversations/new?capability=solution.analysis.v1">材料分析</a>
         <a className={navigationClass(active, 'exceptions')} href="/exceptions">异常与待办</a>
         <a className={navigationClass(active, 'tasks')} href="/tasks">我的任务</a>
         <a className={navigationClass(active, 'workflows')} href="/workflows">Workflow</a>
@@ -65,7 +95,7 @@ export function ProductShell({
     </section>
     <aside className="inspector product-inspector">
       <div className="inspector-head"><span>检查器</span></div>
-      {inspector ?? <div className="empty-inspector"><span>◇</span><p>选择任务或 Workflow 后，这里会显示权威版本与恢复信息。</p></div>}
+      {!isFailClosedRouteState(visibleState) && (inspector ?? <div className="empty-inspector"><span>◇</span><p>选择任务或 Workflow 后，这里会显示权威版本与恢复信息。</p></div>)}
     </aside>
   </main>;
 }
@@ -74,8 +104,28 @@ export function LoadingState() {
   return <section className="route-state route-loading" data-testid="route-loading"><span className="route-spinner" /><div><b>正在读取权威状态</b><p>数据来自 Control Plane，不使用浏览器夹具。</p></div></section>;
 }
 
-export function ErrorState({ message }: Readonly<{ message: string }>) {
-  return <section className="route-state route-error" role="alert" data-testid="route-error"><span>!</span><div><b>暂时无法读取</b><p>{message}</p><button type="button" className="secondary" onClick={() => location.reload()}>重新加载</button></div></section>;
+const ROUTE_FAILURE_COPY: Readonly<Record<Exclude<RouteState, 'loading' | 'ready' | 'empty' | 'filtered-empty' | 'canceled' | 'recovering'>, string>> = {
+  forbidden: '当前账号无权查看此内容',
+  'not-found': '对象不存在或当前账号无权查看',
+  stale: '页面版本已过期，请重新读取最新快照',
+  'binding-conflict': '此异常已绑定另一组不可变分析语义',
+  'approval-stale': '审批主题已变化，旧审批不能执行',
+  offline: 'Control Plane 当前离线',
+  'server-error': '服务暂时无法完成请求',
+};
+
+export function ErrorState({ message, state = 'server-error', onRetry }: Readonly<{
+  message: string;
+  state?: Exclude<RouteState, 'loading' | 'ready' | 'empty' | 'filtered-empty' | 'canceled' | 'recovering'>;
+  onRetry?: () => void;
+}>) {
+  const safeMessage = state === 'not-found' ? '请检查链接或返回列表重新选择。' : message;
+  return <section className="route-state route-error" role="alert" data-testid={`route-${state}`}><span>!</span><div><b>{ROUTE_FAILURE_COPY[state]}</b><p>{safeMessage}</p><button type="button" className="secondary" onClick={onRetry ?? (() => location.reload())}>重新加载</button></div></section>;
+}
+
+export function RouteFailure({ state, message }: Readonly<{ state: RouteState; message: string }>) {
+  if (['loading', 'ready', 'empty', 'filtered-empty', 'canceled', 'recovering'].includes(state)) return null;
+  return <ErrorState message={message} state={state as keyof typeof ROUTE_FAILURE_COPY} />;
 }
 
 function EmptyState({ kind }: Readonly<{ kind: 'task' | 'workflow' }>) {
@@ -96,10 +146,16 @@ function listLocation(): Readonly<{ cursor?: string; previous?: string }> {
   };
 }
 
-function pageHref(pathname: '/tasks' | '/workflows', cursor: string, previous?: string): string {
-  const query = new URLSearchParams({ cursor });
+function pageHref(pathname: '/tasks' | '/workflows', cursor: string, previous?: string, preserved?: Readonly<Record<string, string>>): string {
+  const query = new URLSearchParams(preserved);
+  query.set('cursor', cursor);
   if (previous !== undefined) query.set('previous', previous);
   return `${pathname}?${query.toString()}`;
+}
+
+function firstPageHref(pathname: '/tasks' | '/workflows', preserved?: Readonly<Record<string, string>>): string {
+  const query = new URLSearchParams(preserved);
+  return query.size === 0 ? pathname : `${pathname}?${query.toString()}`;
 }
 
 function PaginationControls({
@@ -107,19 +163,21 @@ function PaginationControls({
   currentCursor,
   previousCursor,
   nextCursor,
+  preserved,
 }: Readonly<{
   pathname: '/tasks' | '/workflows';
   currentCursor?: string;
   previousCursor?: string;
   nextCursor: string | null;
+  preserved?: Readonly<Record<string, string>>;
 }>) {
   return <nav className="pagination" aria-label="列表分页" data-testid="pagination-controls">
     {currentCursor === undefined
       ? <span className="pagination-disabled">上一页</span>
-      : <a className="secondary" href={previousCursor === undefined ? pathname : pageHref(pathname, previousCursor)}>上一页</a>}
+      : <a className="secondary" href={previousCursor === undefined ? firstPageHref(pathname, preserved) : pageHref(pathname, previousCursor, undefined, preserved)}>上一页</a>}
     {nextCursor === null
       ? <span className="pagination-disabled">下一页</span>
-      : <a className="secondary" data-testid="next-page" href={pageHref(pathname, nextCursor, currentCursor)}>下一页</a>}
+      : <a className="secondary" data-testid="next-page" href={pageHref(pathname, nextCursor, currentCursor, preserved)}>下一页</a>}
   </nav>;
 }
 
@@ -170,20 +228,30 @@ export function TaskListPage() {
   const [error, setError] = useState('');
   const [result, setResult] = useState<Awaited<ReturnType<typeof api.listTasks>>>();
   const location = listLocation();
+  const query = useMemo((): TaskListQuery => {
+    const params = new URLSearchParams(window.location.search);
+    const raw: Record<string, string> = {};
+    for (const name of ['status', 'capabilityId', 'sort', 'direction', 'limit', 'cursor']) {
+      const value = params.get(name);
+      if (value !== null && value.length > 0) raw[name] = value;
+    }
+    return taskListQuerySchema.parse(raw);
+  }, []);
+  const filtered = query.status !== undefined || query.capabilityId !== undefined;
 
   useEffect(() => {
     let active = true;
-    void api.listTasks(location.cursor === undefined ? {} : { cursor: location.cursor }).then((value) => {
+    void api.listTasks(query).then((value) => {
       if (!active) return;
       setResult(value);
-      setState(value.tasks.length === 0 ? 'empty' : 'ready');
+      setState(value.tasks.length === 0 ? filtered ? 'filtered-empty' : 'empty' : 'ready');
     }).catch((cause: unknown) => {
       if (!active) return;
       setError(cause instanceof Error ? cause.message : String(cause));
-      setState('server-error');
+      setState(routeStateForError(cause));
     });
     return () => { active = false; };
-  }, [location.cursor]);
+  }, [filtered, query]);
 
   return <ProductShell active="tasks" title="我的任务" subtitle="小纬发起的任务、专家路线、审批与交付状态" state={state} inspector={result !== undefined ? <dl className="facts">
     <Fact label="Query version" value={result.queryVersion} />
@@ -191,8 +259,14 @@ export function TaskListPage() {
     <Fact label="下一页" value={result.nextCursor === null ? '无' : '可继续'} />
   </dl> : undefined}>
     {state === 'loading' && <LoadingState />}
-    {state === 'server-error' && <ErrorState message={error} />}
+    <RouteFailure state={state} message={error} />
     {state === 'empty' && <EmptyState kind="task" />}
+    {state === 'filtered-empty' && <section className="route-state route-empty" data-testid="route-filtered-empty"><span>◇</span><div><b>当前筛选没有匹配任务</b><p>筛选由 Control Plane 执行，浏览器没有拼接其他页面。</p><a className="secondary route-action" href="/tasks">清除筛选</a></div></section>}
+    <form className="exception-filters" method="get" action="/tasks" aria-label="任务列表筛选">
+      <label>状态<select name="status" defaultValue={query.status ?? ''}><option value="">全部</option>{['awaiting_approval', 'approved', 'queued', 'running', 'completed', 'failed', 'canceled'].map((status) => <option value={status} key={status}>{status}</option>)}</select></label>
+      <label>Capability<select name="capabilityId" defaultValue={query.capabilityId ?? ''}><option value="">全部</option><option value="solution.analysis.v1">方案分析</option><option value="operations.exception-assist.v1">异常分析</option></select></label>
+      <button className="primary" type="submit">查询</button><a className="secondary" href="/tasks">重置</a>
+    </form>
     {state === 'ready' && result !== undefined && <section className="table-card">
       <div className="section-heading"><div><span className="eyebrow">Task authority</span><h2>任务列表</h2></div><span>{result.tasks.length} 条当前页记录</span></div>
       <div className="table-scroll"><table className="product-table" data-testid="task-table"><thead><tr><th>任务</th><th>状态</th><th>Workflow</th><th>审批</th><th>更新时间</th></tr></thead><tbody>
@@ -207,6 +281,11 @@ export function TaskListPage() {
       <PaginationControls
         pathname="/tasks"
         nextCursor={result.nextCursor}
+        preserved={{
+          ...(query.status === undefined ? {} : { status: query.status }),
+          ...(query.capabilityId === undefined ? {} : { capabilityId: query.capabilityId }),
+          sort: query.sort, direction: query.direction, limit: String(query.limit),
+        }}
         {...(location.cursor === undefined ? {} : { currentCursor: location.cursor })}
         {...(location.previous === undefined ? {} : { previousCursor: location.previous })}
       />
@@ -223,14 +302,53 @@ export function TaskDetailPage({ taskId }: Readonly<{ taskId: string }>) {
   const loadTask = useCallback(async () => {
     const value = await api.getTask(taskId);
     setTask(value);
-    setState('ready');
+    setState(value.status === 'canceled' ? 'canceled' : 'ready');
     return value;
   }, [taskId]);
 
   useEffect(() => {
+    if (task === undefined || !['queued', 'running'].includes(task.status)) return;
     let active = true;
-    void api.getTask(taskId).then((value) => { if (active) { setTask(value); setState('ready'); } }).catch((cause: unknown) => {
-      if (active) { setError(cause instanceof Error ? cause.message : String(cause)); setState('server-error'); }
+    let cursor = task.eventWatermark;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const batch = mergeTaskEventBatch(task.id, cursor, await api.events(task.id, cursor));
+        cursor = batch.cursor;
+        const reclaimed = batch.events.some((event) => event.eventType === 'workflow.run_reclaimed');
+        const terminal = batch.events.some((event) => ['business_task.completed', 'business_task.failed', 'business_task.canceled'].includes(event.eventType));
+        if (active && reclaimed) setState('recovering');
+        if (active && (batch.events.length > 0 || terminal)) {
+          const current = await api.getTask(task.id);
+          if (active) {
+            setTask(current);
+            setState(current.status === 'canceled' ? 'canceled' : reclaimed && current.status === 'running' ? 'recovering' : 'ready');
+          }
+        }
+      } catch (cause) {
+        if (active) {
+          const nextState = routeStateForError(cause);
+          setError(cause instanceof Error ? cause.message : String(cause));
+          if (isFailClosedRouteState(nextState)) setTask(undefined);
+          setState(nextState);
+        }
+      } finally {
+        if (active) timer = setTimeout(() => void poll(), 750);
+      }
+    };
+    timer = setTimeout(() => void poll(), 0);
+    return () => { active = false; if (timer !== undefined) clearTimeout(timer); };
+  }, [task?.id, task?.status]);
+
+  useEffect(() => {
+    let active = true;
+    void api.getTask(taskId).then((value) => { if (active) { setTask(value); setState(value.status === 'canceled' ? 'canceled' : 'ready'); } }).catch((cause: unknown) => {
+      if (active) {
+        const nextState = routeStateForError(cause);
+        setError(cause instanceof Error ? cause.message : String(cause));
+        if (isFailClosedRouteState(nextState)) setTask(undefined);
+        setState(nextState);
+      }
     });
     return () => { active = false; };
   }, [taskId]);
@@ -240,10 +358,13 @@ export function TaskDetailPage({ taskId }: Readonly<{ taskId: string }>) {
     setActing(true); setError('');
     try {
       if (task.status === 'awaiting_approval') await api.approve(task.approval.id);
-      await api.execute(task.id);
+      await api.execute(task.id, task.approval);
       await loadTask();
     } catch (cause) {
+      const nextState = routeStateForError(cause);
       setError(cause instanceof Error ? cause.message : String(cause));
+      if (isFailClosedRouteState(nextState)) setTask(undefined);
+      setState(nextState);
     } finally { setActing(false); }
   }, [loadTask, task]);
 
@@ -254,14 +375,18 @@ export function TaskDetailPage({ taskId }: Readonly<{ taskId: string }>) {
       await api.cancelTask(task.id);
       await loadTask();
     } catch (cause) {
+      const nextState = routeStateForError(cause);
       setError(cause instanceof Error ? cause.message : String(cause));
+      if (isFailClosedRouteState(nextState)) setTask(undefined);
+      setState(nextState);
     } finally { setActing(false); }
   }, [loadTask, task]);
 
   return <ProductShell active="tasks" title="任务详情" subtitle="同一个任务的步骤、审批、证据与交付物" state={state} inspector={task === undefined ? undefined : <TaskInspector task={task} />}>
     {state === 'loading' && <LoadingState />}
-    {state === 'server-error' && <ErrorState message={error} />}
-    {task !== undefined && <div className="detail-stack" data-testid="task-detail" data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}>
+    <RouteFailure state={state} message={error} />
+    {state === 'recovering' && <section className="route-state route-recovering" data-testid="route-recovering"><span className="route-spinner" /><div><b>Worker 正在恢复同一任务</b><p>从已持久化 checkpoint 与事件游标续传，不会创建第二份结果。</p></div></section>}
+    {task !== undefined && !isFailClosedRouteState(state) && <div className="detail-stack" data-testid="task-detail" data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}>
       <section className="detail-hero"><div><span className="eyebrow">{task.capabilityId}</span><h2>{task.title}</h2><p>用户只看到小纬；执行时可由小纬调用指定专家或专家团。</p></div><span className={`status status-${task.status}`}>{task.status}</span></section>
       <section className="task-action-bar" aria-label="任务操作">
         <div><b>任务操作</b><p>审批和执行仍写入同一个 Control Plane 权威状态。</p></div>
@@ -296,6 +421,7 @@ export function TaskWorkflowPage({ taskId }: Readonly<{ taskId: string }>) {
   const [error, setError] = useState('');
   const [task, setTask] = useState<TaskSnapshot>();
   const [workflow, setWorkflow] = useState<WorkflowDetailProjection>();
+  const [acting, setActing] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -306,19 +432,44 @@ export function TaskWorkflowPage({ taskId }: Readonly<{ taskId: string }>) {
       }
       if (active) { setTask(taskValue); setWorkflow(workflowValue); setState('ready'); }
     }).catch((cause: unknown) => {
-      if (active) { setError(cause instanceof Error ? cause.message : String(cause)); setState('server-error'); }
+      if (active) {
+        const nextState = routeStateForError(cause);
+        setError(cause instanceof Error ? cause.message : String(cause));
+        if (isFailClosedRouteState(nextState)) { setTask(undefined); setWorkflow(undefined); }
+        setState(nextState);
+      }
     });
     return () => { active = false; };
   }, [taskId]);
 
+  const execute = useCallback(async () => {
+    if (task === undefined) return;
+    setActing(true); setError('');
+    try {
+      await api.execute(task.id, task.approval);
+      const current = await api.getTask(task.id);
+      setTask(current);
+      setState('ready');
+    } catch (cause) {
+      const nextState = routeStateForError(cause);
+      setError(cause instanceof Error ? cause.message : String(cause));
+      if (isFailClosedRouteState(nextState)) { setTask(undefined); setWorkflow(undefined); }
+      setState(nextState);
+    } finally { setActing(false); }
+  }, [task]);
+
   return <ProductShell active="tasks" title="任务 Workflow" subtitle="不可变版本叠加当前任务步骤和审批摘要" state={state} inspector={task === undefined ? undefined : <>
     <TaskInspector task={task} />
-    <dl className="facts"><Fact label="ApprovalSubject digest" value={task.approval.subjectDigest} testId="workflow-approval-digest" /></dl>
+    <dl className="facts"><Fact label="ApprovalVersion" value={task.approval.version} testId="workflow-approval-version" /><Fact label="ApprovalSubject digest" value={task.approval.subjectDigest} testId="workflow-approval-digest" /></dl>
   </>}>
     {state === 'loading' && <LoadingState />}
-    {state === 'server-error' && <ErrorState message={error} />}
-    {task !== undefined && workflow !== undefined && <section className="workflow-page-card" data-testid="task-workflow" data-task-id={task.id}>
+    <RouteFailure state={state} message={error} />
+    {task !== undefined && workflow !== undefined && !isFailClosedRouteState(state) && <section className="workflow-page-card" data-testid="task-workflow" data-task-id={task.id}>
       <div className="section-heading"><div><span className="eyebrow">Task-scoped projection</span><h2>{workflow.id}</h2><code data-testid="workflow-hash">{workflow.hash}</code></div><a href={`/workflows/${encodeURIComponent(workflow.id)}`}>查看不可变版本</a></div>
+      {task.status === 'approved' && task.approval.status === 'approved' && <section className="task-action-bar" aria-label="Workflow 执行">
+        <div><b>执行已审批 Workflow</b><p>提交当前页面冻结的 ApprovalVersion 与 ApprovalSubject digest。</p></div>
+        <button className="primary" type="button" data-testid="task-workflow-execute" disabled={acting} onClick={() => void execute()}>{acting ? '正在提交…' : '执行模拟任务'}</button>
+      </section>}
       <WorkflowGraph workflow={workflow} task={task} />
     </section>}
   </ProductShell>;
@@ -329,26 +480,42 @@ export function WorkflowListPage() {
   const [error, setError] = useState('');
   const [result, setResult] = useState<Awaited<ReturnType<typeof api.listWorkflows>>>();
   const location = listLocation();
+  const query = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    const capabilityVersionId = params.get('capabilityVersionId');
+    return {
+      ...(capabilityVersionId === null || capabilityVersionId === '' ? {} : { capabilityVersionId }),
+      ...(location.cursor === undefined ? {} : { cursor: location.cursor }),
+    };
+  }, [location.cursor]);
+  const parsedQuery = useMemo(() => workflowListQuerySchema.parse(query), [query]);
+  const filtered = parsedQuery.capabilityVersionId !== undefined;
 
   useEffect(() => {
     let active = true;
-    void api.listWorkflows(location.cursor === undefined ? {} : { cursor: location.cursor }).then((value) => {
-      if (active) { setResult(value); setState(value.workflows.length === 0 ? 'empty' : 'ready'); }
+    void api.listWorkflows(parsedQuery).then((value) => {
+      if (active) { setResult(value); setState(value.workflows.length === 0 ? filtered ? 'filtered-empty' : 'empty' : 'ready'); }
     }).catch((cause: unknown) => {
-      if (active) { setError(cause instanceof Error ? cause.message : String(cause)); setState('server-error'); }
+      if (active) { setError(cause instanceof Error ? cause.message : String(cause)); setState(routeStateForError(cause)); }
     });
     return () => { active = false; };
-  }, [location.cursor]);
+  }, [filtered, parsedQuery]);
 
   return <ProductShell active="workflows" title="Workflow" subtitle="当前用户可见任务所引用的不可变流程版本" state={state} inspector={result !== undefined ? <dl className="facts"><Fact label="Query version" value={result.queryVersion} /><Fact label="Snapshot as of" value={result.asOf} /></dl> : undefined}>
     {state === 'loading' && <LoadingState />}
-    {state === 'server-error' && <ErrorState message={error} />}
+    <RouteFailure state={state} message={error} />
     {state === 'empty' && <EmptyState kind="workflow" />}
+    {state === 'filtered-empty' && <section className="route-state route-empty" data-testid="route-filtered-empty"><span>◇</span><div><b>当前筛选没有匹配 Workflow</b><p>筛选由 Control Plane 执行，浏览器没有拼接其他页面。</p><a className="secondary route-action" href="/workflows">清除筛选</a></div></section>}
+    <form className="exception-filters" method="get" action="/workflows" aria-label="Workflow 列表筛选">
+      <label>CapabilityVersion<select name="capabilityVersionId" defaultValue={parsedQuery.capabilityVersionId ?? ''}><option value="">全部</option><option value="cap_solution_analysis_v1_1">方案分析</option><option value="cap_operations_exception_assist_v1_shadow_1">异常分析</option></select></label>
+      <button className="primary" type="submit">查询</button><a className="secondary" href="/workflows">重置</a>
+    </form>
     {state === 'ready' && result !== undefined && <section className="table-card"><div className="section-heading"><div><span className="eyebrow">Immutable registry</span><h2>流程版本</h2></div><span>{result.workflows.length} 个版本</span></div><div className="table-scroll"><table className="product-table" data-testid="workflow-table"><thead><tr><th>WorkflowVersion</th><th>Capability</th><th>Harness</th><th>创建时间</th></tr></thead><tbody>
       {result.workflows.map((workflow) => <tr key={workflow.id} data-workflow-id={workflow.id} data-workflow-hash={workflow.hash}><td><a href={`/workflows/${encodeURIComponent(workflow.id)}`}><b>{workflow.id}</b><small>{workflow.hash}</small></a></td><td>{workflow.capabilityVersionId}</td><td>{workflow.harnessVersionId}</td><td>{new Date(workflow.createdAt).toLocaleString('zh-CN')}</td></tr>)}
     </tbody></table></div><PaginationControls
       pathname="/workflows"
       nextCursor={result.nextCursor}
+      preserved={{ ...(parsedQuery.capabilityVersionId === undefined ? {} : { capabilityVersionId: parsedQuery.capabilityVersionId }) }}
       {...(location.cursor === undefined ? {} : { currentCursor: location.cursor })}
       {...(location.previous === undefined ? {} : { previousCursor: location.previous })}
     /></section>}
@@ -363,7 +530,12 @@ export function WorkflowDetailPage({ workflowId }: Readonly<{ workflowId: string
   useEffect(() => {
     let active = true;
     void api.getWorkflow(workflowId).then((value) => { if (active) { setWorkflow(value); setState('ready'); } }).catch((cause: unknown) => {
-      if (active) { setError(cause instanceof Error ? cause.message : String(cause)); setState('server-error'); }
+      if (active) {
+        const nextState = routeStateForError(cause);
+        setError(cause instanceof Error ? cause.message : String(cause));
+        if (isFailClosedRouteState(nextState)) setWorkflow(undefined);
+        setState(nextState);
+      }
     });
     return () => { active = false; };
   }, [workflowId]);
@@ -376,8 +548,8 @@ export function WorkflowDetailPage({ workflowId }: Readonly<{ workflowId: string
     <Fact label="Feature set" value={workflow.featureSet} />
   </dl>}>
     {state === 'loading' && <LoadingState />}
-    {state === 'server-error' && <ErrorState message={error} />}
-    {workflow !== undefined && <section className="workflow-page-card" data-testid="workflow-detail" data-workflow-id={workflow.id} data-workflow-hash={workflow.hash}>
+    <RouteFailure state={state} message={error} />
+    {workflow !== undefined && !isFailClosedRouteState(state) && <section className="workflow-page-card" data-testid="workflow-detail" data-workflow-id={workflow.id} data-workflow-hash={workflow.hash}>
       <div className="section-heading"><div><span className="eyebrow">Immutable WorkflowVersion</span><h2>{workflow.id}</h2><code>{workflow.hash}</code></div><span>{workflow.nodes.length} 个节点</span></div>
       <WorkflowGraph workflow={workflow} />
       <div className="permission-strip"><span>动作上限 {workflow.permissionCeiling.actions.join(' / ')}</span><span>数据等级 {workflow.permissionCeiling.dataClasses.join(' / ')}</span><span>{workflow.permissionCeiling.resourceScopes.join(' / ')}</span></div>

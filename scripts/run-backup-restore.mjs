@@ -700,8 +700,13 @@ function expectedResponse(response, expected) {
 }
 
 async function executeTask(stack, taskId, key, expected = 200) {
+  const snapshot = await taskSnapshot(stack, taskId);
   return await api(stack, 'POST', `/api/business-tasks/${taskId}/execute`, {
     headers: { 'idempotency-key': key },
+    json: {
+      expectedApprovalVersion: snapshot.approval.version,
+      expectedApprovalSubjectDigest: snapshot.approval.subjectDigest,
+    },
   }).then((response) => expectedResponse(response, expected));
 }
 
@@ -1310,11 +1315,12 @@ async function runOnlineRole(action, stack, data) {
     const approved = await createTask(stack, state.conversationId, state.uploaded.documentSnapshot.id,
       `backup-approved-probe-${randomUUID()}`);
     await approveTask(stack, approved.approvalId, `backup-approved-probe-approval-${randomUUID()}`);
+    const approvedSnapshot = await taskSnapshot(stack, approved.taskId);
     const queued = await createTask(stack, state.conversationId, state.uploaded.documentSnapshot.id,
       `backup-queued-probe-${randomUUID()}`);
     await approveTask(stack, queued.approvalId, `backup-queued-probe-approval-${randomUUID()}`);
     await executeTask(stack, queued.taskId, `backup-queued-probe-execute-${randomUUID()}`);
-    return { pending, approved, queued };
+    return { pending, approved: { ...approved, executionAuthority: approvedSnapshot.approval }, queued };
   }
   if (action === 'target-gate') {
     const download = await api(stack, 'GET', data.state.sourceArtifact.downloadUrl);
@@ -1325,6 +1331,10 @@ async function runOnlineRole(action, stack, data) {
     expectResponse(approval, 503, 'RESTORE_PLATFORM_GATE_ACTIVE');
     const execute = await api(stack, 'POST', `/api/business-tasks/${data.probes.approved.taskId}/execute`, {
       headers: { 'idempotency-key': `${data.restoreState}-execute-${randomUUID()}` },
+      json: {
+        expectedApprovalVersion: data.probes.approved.executionAuthority.version,
+        expectedApprovalSubjectDigest: data.probes.approved.executionAuthority.subjectDigest,
+      },
     });
     expectResponse(execute, 503, 'RESTORE_PLATFORM_GATE_ACTIVE');
     return { download: { status: download.status, code: download.payload.error.code },

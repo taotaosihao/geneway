@@ -221,7 +221,7 @@ test('真实 Worker 完成上传、Workflow、Claim–Evidence–Lineage 与报�
       workflowVersion: { id: string; hash: string };
       approval: { id: string; status: string };
       claims: readonly { id: string; text: string; status: string; evidenceRefId: string | null }[];
-      evidence: readonly { id: string; source: { kind: string; documentSnapshotId: string; artifactId: string; startByte: number; endByteExclusive: number; snapshotSha256: string; excerptSha256: string; extractionVersion: string }; excerptSha256: string; resourceScope: string; dataClass: string; audience: string; lineageRecordIds: readonly string[] }[];
+      evidence: readonly { id: string; source: { kind: string; documentSnapshotId: string; artifactId: string; startByte: number; endByteExclusive: number; snapshotSha256: string; excerptSha256: string; extractionVersion: string }; excerptSha256: string; resourceScope: string; dataClass: string; audience: { kind: string; conversationId: string }; lineageRecordIds: readonly string[] }[];
       artifacts: readonly { id: string; manifestId: string; kind: string; contentSha256: string; downloadUrl: string }[];
       lineage: readonly { id: string; fromKind: string; fromId: string; toKind: string; toId: string; relation: string }[];
       simulation: boolean;
@@ -257,7 +257,7 @@ test('真实 Worker 完成上传、Workflow、Claim–Evidence–Lineage 与报�
       excerptSha256,
       resourceScope: `artifact:${sourceIds.artifactId ?? ''}`,
       dataClass: 'C1',
-      audience: `conversation:${snapshot.conversationId}`,
+      audience: { kind: 'private_conversation', conversationId: snapshot.conversationId },
     }));
     expect(reportArtifact).toBeDefined();
 
@@ -273,7 +273,7 @@ test('真实 Worker 完成上传、Workflow、Claim–Evidence–Lineage 与报�
     await expect(evidenceDrawer).toContainText(sourceIds.artifactId ?? 'missing-artifact');
     await expect(evidenceDrawer).toContainText(excerptSha256);
     await expect(evidenceDrawer).toContainText('C1');
-    await expect(evidenceDrawer).toContainText(`conversation:${snapshot.conversationId}`);
+    await expect(evidenceDrawer).toContainText(`private_conversation:${snapshot.conversationId}`);
     // This projection returns only lineage records directly connected to the
     // selected Evidence. The complete task lineage is asserted in Postgres below.
     for (const relation of ['verified_as', 'supports']) await expect(evidenceDrawer).toContainText(relation);

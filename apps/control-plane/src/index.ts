@@ -10,6 +10,7 @@ import {
   businessExceptionListQuerySchema,
   createExceptionAnalysisTaskInputSchema,
   eventCursorSchema,
+  executeTaskInputSchema,
   evidenceProjectionSchema,
   GenewayError,
   isGenewayError,
@@ -430,7 +431,8 @@ export async function createControlPlane(options: Readonly<{
 
   app.post('/api/business-tasks/:id/execute', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
-    return repository.enqueueExecution(request.principal, params.id, idempotencyKey(request));
+    const input = executeTaskInputSchema.parse(request.body);
+    return repository.enqueueExecution(request.principal, params.id, input, idempotencyKey(request));
   });
 
   app.post('/api/business-tasks/:id/cancel', async (request) => {

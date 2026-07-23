@@ -253,6 +253,16 @@ export class BusinessExceptionRepository {
   async list(principal: Principal, query: BusinessExceptionListQuery): Promise<BusinessExceptionListResponse> {
     return this.withTransaction(async (client) => {
       await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+      if (query.cursor === undefined) {
+        const listCapability = await client.query(`SELECT 1 FROM users principal_user
+          WHERE principal_user.tenant_id=$1 AND principal_user.id=$2
+            AND EXISTS (SELECT 1 FROM roles role_binding
+              WHERE role_binding.tenant_id=principal_user.tenant_id AND role_binding.user_id=principal_user.id
+                AND role_binding.role='solution_reviewer')`, [principal.tenantId, principal.userId]);
+        if (listCapability.rowCount !== 1) {
+          throw new GenewayError('BUSINESS_EXCEPTION_LIST_FORBIDDEN', 'Business exception list permission is required', 403);
+        }
+      }
       const canonicalQuery = {
         status: query.status ?? null,
         severity: query.severity ?? null,

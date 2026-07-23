@@ -159,6 +159,14 @@ describe('Gate 0.2B.2 BusinessException authorization boundaries', () => {
     expect(cursor).not.toBeNull();
     await controlPlane.repository.pool.query(`DELETE FROM roles
       WHERE tenant_id='tenant_local' AND user_id='user_peer' AND role='solution_reviewer'`);
+    const revokedList = await controlPlane.app.inject({
+      method: 'GET', url: '/api/business-exceptions?limit=1', headers: principalHeaders('user_peer'),
+    });
+    expect(revokedList.statusCode).toBe(403);
+    expect(revokedList.json()).toEqual({ error: {
+      code: 'BUSINESS_EXCEPTION_LIST_FORBIDDEN', message: 'Business exception list permission is required', details: null,
+    } });
+    expect(revokedList.body).not.toMatch(/nextCursor|asOf|queryVersion|count/iu);
     const staleCursor = await controlPlane.app.inject({
       method: 'GET', url: `/api/business-exceptions?limit=1&cursor=${encodeURIComponent(String(cursor))}`,
       headers: principalHeaders('user_peer'),

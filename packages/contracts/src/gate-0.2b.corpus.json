@@ -1,6 +1,6 @@
 [
   {
-    "schema": "businessExceptionRef",
+    "schema": "BusinessExceptionRef",
     "accepted": true,
     "value": {
       "exceptionId": "exception_capacity",
@@ -17,7 +17,7 @@
     }
   },
   {
-    "schema": "businessExceptionRef",
+    "schema": "BusinessExceptionRef",
     "accepted": false,
     "value": {
       "exceptionId": "exception_capacity",
@@ -35,7 +35,7 @@
     }
   },
   {
-    "schema": "exceptionAudience",
+    "schema": "ExceptionAudience",
     "accepted": true,
     "value": {
       "kind": "resource_exception",
@@ -45,7 +45,7 @@
     }
   },
   {
-    "schema": "exceptionAudience",
+    "schema": "ExceptionAudience",
     "accepted": true,
     "value": {
       "kind": "private_conversation",
@@ -53,12 +53,12 @@
     }
   },
   {
-    "schema": "exceptionAudience",
+    "schema": "ExceptionAudience",
     "accepted": false,
     "value": "conversation:conversation_capacity"
   },
   {
-    "schema": "businessExceptionListQuery",
+    "schema": "BusinessExceptionListQuery",
     "accepted": true,
     "value": {
       "status": "open",
@@ -69,14 +69,14 @@
     }
   },
   {
-    "schema": "businessExceptionListQuery",
+    "schema": "BusinessExceptionListQuery",
     "accepted": false,
     "value": {
       "sort": "sourceObjectRef"
     }
   },
   {
-    "schema": "businessExceptionSnapshotEvidenceSource",
+    "schema": "EvidenceSource",
     "accepted": true,
     "value": {
       "kind": "business_exception_snapshot",
@@ -89,7 +89,7 @@
     }
   },
   {
-    "schema": "businessExceptionSnapshotEvidenceSource",
+    "schema": "EvidenceSource",
     "accepted": false,
     "value": {
       "kind": "unregistered_source",
@@ -100,5 +100,153 @@
       "jsonPointer": "/values/progressPct",
       "valueSha256": "98010bd9270f9b100b6214a21754fd33bdc8d41b2bc9f9dd16ff54d3c34ffd71"
     }
-  }
+  },
+  {
+    "schema": "TaskEventProjection",
+    "accepted": true,
+    "value": {
+      "cursor": 8,
+      "id": "event_reclaimed_8",
+      "businessTaskId": "task_exception",
+      "sequence": 8,
+      "aggregateVersion": 4,
+      "occurredAt": "2026-07-23T08:00:00.000Z",
+      "simulation": true,
+      "runtimeMode": "fake",
+      "businessDecisionAllowed": false,
+      "eventType": "workflow.run_reclaimed",
+      "payload": {}
+    }
+  },
+  {
+    "schema": "TaskEventProjection",
+    "accepted": false,
+    "value": {
+      "cursor": "pagination-cursor-must-not-be-used-here",
+      "id": "event_bad_cursor",
+      "businessTaskId": "task_exception",
+      "sequence": 8,
+      "aggregateVersion": 4,
+      "occurredAt": "2026-07-23T08:00:00.000Z",
+      "simulation": true,
+      "runtimeMode": "fake",
+      "businessDecisionAllowed": false,
+      "eventType": "workflow.run_reclaimed",
+      "payload": {},
+      "ownerPrincipalId": "forbidden"
+    }
+  },
+  {
+    "schema": "ExecuteTaskInput",
+    "accepted": true,
+    "value": {
+      "expectedApprovalVersion": 2,
+      "expectedApprovalSubjectDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "schema": "ExecuteTaskInput",
+    "accepted": false,
+    "value": {
+      "expectedApprovalVersion": 0,
+      "expectedApprovalSubjectDigest": "not-a-sha256",
+      "approvalId": "forbidden-parallel-authority"
+    }
+  },
+  {
+    "schema": "WorkflowListQuery",
+    "accepted": true,
+    "value": {
+      "capabilityVersionId": "cap_operations_exception_assist_v1_shadow_1",
+      "limit": "25"
+    }
+  },
+  {
+    "schema": "WorkflowListQuery",
+    "accepted": false,
+    "value": {
+      "capabilityVersionId": "capability_not_registered",
+      "ownerPrincipalId": "forbidden"
+    }
+  },
+  {
+    "schema": "BusinessExceptionSourceSnapshot",
+    "accepted": true,
+    "value": { "businessExceptionId": "exception_1", "sourceVersionId": "source_1", "canonicalBytes": "{}", "canonicalSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "canonicalizationVersion": "rfc8785-jcs/1", "fixtureVersion": "gate0.2b-capacity-lag/1", "sourceSystem": "fixture-manufacturing", "sourceObjectRef": "work-order:1", "detectionWindow": "window", "resourceScope": "factory-01", "dataClass": "C1", "audience": { "kind": "resource_exception", "businessExceptionId": "exception_1", "resourceScope": "factory-01", "dataClass": "C1" } }
+  },
+  {
+    "schema": "BusinessExceptionSourceSnapshot",
+    "accepted": false,
+    "value": { "businessExceptionId": "exception_1", "sourceVersionId": "source_1", "canonicalBytes": "{}", "canonicalSha256": "bad", "canonicalizationVersion": "rfc8785-jcs/1", "fixtureVersion": "gate0.2b-capacity-lag/1", "sourceSystem": "fixture-manufacturing", "sourceObjectRef": "work-order:1", "detectionWindow": "window", "resourceScope": "factory-01", "dataClass": "C1", "audience": { "kind": "resource_exception", "businessExceptionId": "exception_1", "resourceScope": "factory-01", "dataClass": "C1" } }
+  },
+  {
+    "schema": "BusinessExceptionListResponse", "accepted": true,
+    "value": { "exceptions": [], "nextCursor": null, "asOf": "2026-07-23T08:00:00.000Z", "queryVersion": "business-exceptions.list.v1" }
+  },
+  {
+    "schema": "BusinessExceptionListResponse", "accepted": false,
+    "value": { "exceptions": [], "nextCursor": null, "asOf": "not-a-date", "queryVersion": "business-exceptions.list.v1" }
+  },
+  {
+    "schema": "BusinessExceptionDetail", "accepted": true,
+    "value": { "id": "exception_1", "exceptionType": "equipment_alarm", "summary": "报警", "severity": "medium", "status": "open", "resourceScope": "factory-01", "dataClass": "C1", "detectedAt": "2026-07-23T08:00:00.000Z", "aggregateVersion": 1, "simulation": true, "sourceObjectRef": "equipment:1", "detectionWindow": "window", "acknowledgedAt": null, "ownerDisplayState": "unassigned", "analysisDisplayState": "not_requested", "evidence": [] }
+  },
+  {
+    "schema": "BusinessExceptionDetail", "accepted": false,
+    "value": { "id": "exception_1", "exceptionType": "equipment_alarm", "summary": "报警", "severity": "urgent", "status": "open", "resourceScope": "factory-01", "dataClass": "C1", "detectedAt": "2026-07-23T08:00:00.000Z", "aggregateVersion": 1, "simulation": true, "sourceObjectRef": "equipment:1", "detectionWindow": "window", "acknowledgedAt": null, "ownerDisplayState": "unassigned", "analysisDisplayState": "not_requested", "evidence": [] }
+  },
+  { "schema": "AcknowledgeBusinessExceptionInput", "accepted": true, "value": { "aggregateVersion": 1 } },
+  { "schema": "AcknowledgeBusinessExceptionInput", "accepted": false, "value": { "aggregateVersion": 0 } },
+  { "schema": "CreateExceptionAnalysisTaskInput", "accepted": true, "value": { "aggregateVersion": 1, "requestedExpertTarget": { "mode": "auto" }, "idempotencyKey": "key-0001" } },
+  { "schema": "CreateExceptionAnalysisTaskInput", "accepted": false, "value": { "aggregateVersion": 1, "requestedExpertTarget": { "mode": "root" }, "idempotencyKey": "short" } },
+  { "schema": "CreateExceptionAnalysisTaskResponse", "accepted": true, "value": { "taskId": "task_1", "conversationId": "conversation_1", "workflowVersion": { "id": "workflow_1", "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "approvalSubjectDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "simulation": true } },
+  { "schema": "CreateExceptionAnalysisTaskResponse", "accepted": false, "value": { "taskId": "task_1", "conversationId": "conversation_1", "workflowVersion": { "id": "workflow_1", "hash": "bad" }, "approvalSubjectDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "simulation": true } },
+  { "schema": "ConversationProjection", "accepted": true, "value": { "id": "conversation_1", "createdAt": "2026-07-23T08:00:00.000Z", "latestTaskId": null, "messages": [], "latestModelInvocation": null, "eventWatermark": 0 } },
+  { "schema": "ConversationProjection", "accepted": false, "value": { "id": "conversation_1", "createdAt": "bad", "latestTaskId": null, "messages": [], "latestModelInvocation": null, "eventWatermark": -1 } },
+  { "schema": "TaskListQuery", "accepted": true, "value": { "status": "running", "capabilityId": "solution.analysis.v1", "limit": "25" } },
+  { "schema": "TaskListQuery", "accepted": false, "value": { "status": "unknown", "limit": 0 } },
+  { "schema": "TaskListResponse", "accepted": true, "value": { "tasks": [], "nextCursor": null, "asOf": "2026-07-23T08:00:00.000Z", "queryVersion": "business-tasks.list.v1" } },
+  { "schema": "TaskListResponse", "accepted": false, "value": { "tasks": [], "nextCursor": "short", "asOf": "2026-07-23T08:00:00.000Z", "queryVersion": "business-tasks.list.v1" } },
+  {
+    "schema": "TaskSnapshot", "accepted": true,
+    "value": { "id": "task_1", "capabilityId": "solution.analysis.v1", "title": "方案分析", "conversationId": "conversation_1", "status": "awaiting_approval", "approvalStatus": "pending", "createdAt": "2026-07-23T08:00:00.000Z", "updatedAt": "2026-07-23T08:00:00.000Z", "inputRef": { "kind": "fixture", "fixtureRef": "fixture:solution-analysis:v1", "fixtureVersion": 1 }, "workflowVersion": { "id": "workflow_1", "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "approval": { "id": "approval_1", "version": 1, "status": "pending", "subjectDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }, "expertTarget": { "mode": "auto" }, "steps": [], "claims": [], "evidence": [], "artifacts": [], "lineage": [], "result": null, "aggregateVersion": 1, "eventWatermark": 0, "simulation": true, "runtimeMode": "fake", "businessDecisionAllowed": false }
+  },
+  {
+    "schema": "TaskSnapshot", "accepted": false,
+    "value": { "id": "task_1", "capabilityId": "solution.analysis.v1", "title": "方案分析", "conversationId": "conversation_1", "status": "awaiting_approval", "approvalStatus": "pending", "createdAt": "2026-07-23T08:00:00.000Z", "updatedAt": "2026-07-23T08:00:00.000Z", "inputRef": { "kind": "fixture", "fixtureRef": "fixture:solution-analysis:v1", "fixtureVersion": 1 }, "workflowVersion": { "id": "workflow_1", "hash": "bad" }, "approval": { "id": "approval_1", "version": 0, "status": "pending", "subjectDigest": "bad" }, "expertTarget": { "mode": "auto" }, "steps": [], "claims": [], "evidence": [], "artifacts": [], "lineage": [], "result": null, "aggregateVersion": 0, "eventWatermark": -1, "simulation": true, "runtimeMode": "fake", "businessDecisionAllowed": false }
+  },
+  { "schema": "TaskEventListResponse", "accepted": true, "value": { "events": [] } },
+  { "schema": "TaskEventListResponse", "accepted": false, "value": { "events": "not-an-array" } },
+  { "schema": "ApprovalProjection", "accepted": true, "value": { "id": "approval_1", "businessTaskId": "task_1", "version": 1, "status": "pending", "subjectDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" } },
+  { "schema": "ApprovalProjection", "accepted": false, "value": { "id": "approval_1", "businessTaskId": "task_1", "version": 0, "status": "expired", "subjectDigest": "bad" } },
+  { "schema": "WorkflowListResponse", "accepted": true, "value": { "workflows": [], "nextCursor": null, "asOf": "2026-07-23T08:00:00.000Z", "queryVersion": "workflow-versions.list.v1" } },
+  { "schema": "WorkflowListResponse", "accepted": false, "value": { "workflows": [], "nextCursor": null, "asOf": "bad", "queryVersion": "workflow-versions.list.v2" } },
+  {
+    "schema": "WorkflowDetailProjection", "accepted": true,
+    "value": { "id": "workflow_1", "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "capabilityVersionId": "cap_solution_analysis_v1_1", "harnessVersionId": "harness_1", "createdAt": "2026-07-23T08:00:00.000Z", "simulation": true, "compilerVersion": "geneway-workflow-compiler/0.1.0", "canonicalizationVersion": "RFC8785/JCS-1", "featureSet": "fixed-v1", "nodes": [], "edges": [], "permissionCeiling": { "actions": ["R0"], "resourceScopes": ["fixture:solution-analysis:v1"], "dataClasses": ["C1"] } }
+  },
+  {
+    "schema": "WorkflowDetailProjection", "accepted": false,
+    "value": { "id": "workflow_1", "hash": "bad", "capabilityVersionId": "cap_solution_analysis_v1_1", "harnessVersionId": "harness_1", "createdAt": "2026-07-23T08:00:00.000Z", "simulation": true, "compilerVersion": "unknown", "canonicalizationVersion": "RFC8785/JCS-1", "featureSet": "fixed-v1", "nodes": [], "edges": [], "permissionCeiling": { "actions": [], "resourceScopes": [], "dataClasses": [] } }
+  },
+  {
+    "schema": "WorkerDelivery", "accepted": true,
+    "value": { "tenantId": "tenant_local", "taskId": "task_1", "consumer": "gate0.2a-worker", "deploymentId": "gate0.2a-local", "workerInstanceId": "worker_1", "lease": { "eventId": "event_1", "deliveryId": "delivery_1", "attemptId": "attempt_1", "fencingToken": 1 }, "inputRef": { "kind": "fixture", "fixtureRef": "fixture:solution-analysis:v1", "fixtureVersion": 1 }, "workflow": { "id": "workflow_1", "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "canonicalizationVersion": "RFC8785/JCS-1", "canonicalPayload": {} } }
+  },
+  {
+    "schema": "WorkerDelivery", "accepted": false,
+    "value": { "tenantId": "tenant_local", "taskId": "task_1", "consumer": "live-worker", "deploymentId": "gate0.2a-local", "workerInstanceId": "worker_1", "lease": { "eventId": "event_1", "deliveryId": "delivery_1", "attemptId": "attempt_1", "fencingToken": 0 }, "inputRef": { "kind": "fixture", "fixtureRef": "fixture:solution-analysis:v1", "fixtureVersion": 1 }, "workflow": { "id": "workflow_1", "hash": "bad", "canonicalizationVersion": "RFC8785/JCS-1", "canonicalPayload": {} } }
+  },
+  { "schema": "WorkerInputContent", "accepted": true, "value": { "kind": "fixture", "inputRef": { "kind": "fixture", "fixtureRef": "fixture:solution-analysis:v1", "fixtureVersion": 1 } } },
+  { "schema": "WorkerInputContent", "accepted": false, "value": { "kind": "fixture", "inputRef": { "kind": "fixture", "fixtureRef": "fixture:solution-analysis:v1", "fixtureVersion": 2 } } },
+  {
+    "schema": "AttemptOutputCandidatePayload", "accepted": true,
+    "value": { "evidence": [], "claims": [{ "candidateKey": "claim_1", "text": "结论", "evidenceCandidateKey": null }], "result": { "kind": "completed", "summary": "完成", "stepSummaries": [], "simulation": true, "runtimeMode": "fake", "businessDecisionAllowed": false } }
+  },
+  {
+    "schema": "AttemptOutputCandidatePayload", "accepted": false,
+    "value": { "evidence": [], "claims": [], "result": { "kind": "completed", "summary": "完成", "stepSummaries": [], "simulation": false, "runtimeMode": "live", "businessDecisionAllowed": true } }
+  },
+  { "schema": "EvidenceLocatorCandidate", "accepted": true, "value": { "kind": "legacy_fixture", "candidateKey": "evidence_1", "fixtureRef": "fixture:solution-analysis:v1", "fixtureVersion": 1, "sourceId": "source_1" } },
+  { "schema": "EvidenceLocatorCandidate", "accepted": false, "value": { "kind": "legacy_fixture", "candidateKey": "", "fixtureRef": "fixture:solution-analysis:v2", "fixtureVersion": 2, "sourceId": "" } }
 ]

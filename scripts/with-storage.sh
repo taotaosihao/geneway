@@ -93,7 +93,7 @@ start_proxy() {
   ( set -o noclobber; umask 077; : >"$log" )
   mkfifo -m 0600 "$control_fifo"
   env -i PATH="$PATH" HOME="$HOME" LANG="${LANG:-C.UTF-8}" \
-    node scripts/gate02b-loopback-proxy.mjs --control "$proxy_root" "$name" "$COMPOSE_PROJECT_NAME" \
+    setsid node scripts/gate02b-loopback-proxy.mjs --control "$proxy_root" "$name" "$COMPOSE_PROJECT_NAME" \
       "$service" "${COMPOSE_PROJECT_NAME}_${network}" "$listen_port" "$target_port" \
       "$GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY" <"$control_fifo" >"$log" 2>&1 &
   local pid=$!
@@ -114,11 +114,11 @@ start_proxy() {
       pgid="${stat_fields[2]:-}"
       sid="${stat_fields[3]:-}"
       start_ticks="${stat_fields[19]:-}"
-      [[ "$state" != Z* && "$start_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ppid" == "$$" ]] && break
+      [[ "$state" != Z* && "$start_ticks" =~ ^[0-9]+$ && "$pgid" == "$pid" && "$sid" == "$pid" && "$ppid" == "$$" ]] && break
     fi
     sleep 0.01
   done
-  [[ "$state" != Z* && "$start_ticks" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ && "$sid" =~ ^[0-9]+$ && "$ppid" == "$$" ]] || {
+  [[ "$state" != Z* && "$start_ticks" =~ ^[0-9]+$ && "$pgid" == "$pid" && "$sid" == "$pid" && "$ppid" == "$$" ]] || {
     echo "loopback proxy did not inherit the private control pipe as a direct child: $name" >&2
     proxy_pids+=("$pid")
     proxy_start_ticks+=("${start_ticks:-unknown}")

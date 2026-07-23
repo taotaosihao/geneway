@@ -97,6 +97,7 @@ export default defineConfig({
       command: `cd .. && exec env GENEWAY_STORAGE_TARGET_ROLE=control-plane GENEWAY_START_STORAGE_RECONCILER=1 PORT=${String(controlPlanePort)} GENEWAY_WEB_PORT=${String(webPort)} bash scripts/with-storage.sh env GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT=${String(controlPlaneSupervisorPort)} GENEWAY_WORKER_SOCKET_PATH=${workerSocketPath} GENEWAY_WORKER_TOKEN_FILE=${workerTokenFile} GENEWAY_WORKER_LEASE_MS=1000 GENEWAY_E2E_HOOK_URL=http://127.0.0.1:${String(workerHealthPort)} GENEWAY_E2E_HOOK_TOKEN_FILE=${workerTokenFile}${controlPlaneGatewayEnvironment} ./node_modules/.bin/tsx scripts/e2e/start-e2e-control-plane.ts`,
       url: `http://127.0.0.1:${String(controlPlaneSupervisorPort)}/health`,
       timeout: 60_000,
+      gracefulShutdown: { signal: 'SIGTERM', timeout: 30_000 },
       reuseExistingServer: false,
       stdout: 'pipe',
       stderr: 'pipe',

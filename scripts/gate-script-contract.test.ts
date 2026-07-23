@@ -344,6 +344,7 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     const backupCompose = await readFile(new URL('./backup-restore/docker-compose.yml', import.meta.url), 'utf8');
     const backupRunner = await readFile(new URL('./run-backup-restore.mjs', import.meta.url), 'utf8');
     const storageRunner = await readFile(new URL('./with-storage.sh', import.meta.url), 'utf8');
+    const playwrightConfig = await readFile(new URL('./playwright.config.ts', import.meta.url), 'utf8');
     const proxyRunner = await readFile(new URL('./gate02b-loopback-proxy.mjs', import.meta.url), 'utf8');
     const e2eRunner = await readFile(new URL('./run-e2e.mjs', import.meta.url), 'utf8');
     const guard = await readFile(new URL('./backup-restore/gate02b-egress-guard.c', import.meta.url), 'utf8');
@@ -361,6 +362,9 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     expect(backupRunner).toContain('abandonUnresponsiveControlPipeChild(child)');
     expect(backupRunner).toContain('control-pipe-process-remains');
     expect(storageRunner).toContain('if [[ "${GENEWAY_GATE02B_EGRESS_GUARD:-}" == "required" ]]');
+    expect(storageRunner).toContain('setsid node scripts/gate02b-loopback-proxy.mjs --control');
+    expect(storageRunner.match(/"\$pgid" == "\$pid" && "\$sid" == "\$pid" && "\$ppid" == "\$\$"/gu)).toHaveLength(2);
+    expect(playwrightConfig.match(/gracefulShutdown: \{ signal: 'SIGTERM', timeout: 30_000 \}/gu)).toHaveLength(1);
     expect(storageRunner.match(/"\$\{pull_policy\[@\]\}"/gu)).toHaveLength(3);
     expect(storageRunner).toContain("schemaVersion: 'geneway-gate02b-storage-invocation/1'");
     expect(storageRunner).toContain("writeFileSync(env.GENEWAY_INVOCATION_PATH");

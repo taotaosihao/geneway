@@ -32,15 +32,23 @@ interface Gate02bModule {
   };
   parseSocketLine: (line: string, kind: 'listener' | 'egress') => { local: string; peer: string; pids: number[] };
   parseProcNetSockets: (text: string, protocol: string) => Array<{ protocol: string; remoteAddress: string; remotePort: number; state: string }>;
-  procNetReadErrorIsExitRace: (errorCode: string, expectedStartTicks: string,
-    identity: { status: string; state?: string; startTicks?: string }) => boolean;
   parseBackupRawReceipt: (raw: string, containerId: string, role: string, action: string, allowedPorts: readonly string[],
     allowedUnix?: readonly string[]) => {
     passed: boolean; reloadCount: number; unknownLines: string[]; unexpected: string[];
   };
   proxyTargetBindingMatches: (policy: unknown, container: unknown, network: unknown) => boolean;
+  publishedPortsAfterInspect: (previous: unknown[], container: unknown) => unknown[];
   proxyPolicyPathFromCommandLine: (commandLine: string) => string | null;
   networkAttachmentsAfterInspect: (previous: unknown[], container: unknown) => unknown[];
+  observedDockerContainer: (containers: ReadonlyMap<string, { id: string; name: string }>, observedId: string,
+    name?: string) => { id: string; name: string } | undefined;
+  readProcNetSnapshot: (path: string, pid: number, expectedStartTicks: string, dependencies: {
+    read: (path: string) => string; observeIdentity: (pid: number) => { status: string; state?: string; startTicks?: string };
+    wait: () => void;
+  }) => { text: string | null; failure: unknown; exited: boolean; attempts: number };
+  unresolvedUnsafeListeners: (observations: Array<{ sample: number; unsafe: string[]; validated: string[] }>) => string[];
+  storeObservedDockerContainer: (state: { containers: Map<string, { id: string; name: string }> },
+    container: { id: string; name: string }) => void;
   validateProxyPolicy: (policy: unknown, expectedRoot: string) => unknown;
   validateProxyInventory: (inventory: string[]) => string[];
   validateProxyIdentityChain: (policy: unknown, ready: unknown, summary: unknown) => boolean;
@@ -63,7 +71,9 @@ const {
   findForbiddenEnvironmentNames, gate02bAggregatePassed, gate02bDockerIsolationEnvironment, gateAuthorityRootNames,
   internalDockerListenerBinding, isForbiddenRuntimeCommandLine, isGateAuthorityPath, isInternalDockerAdapterListener,
   isRepositoryDockerScope, parseBackupRawReceipt, parseProcNetSockets, parseSocketLine, proxyPolicyPathFromCommandLine,
-  networkAttachmentsAfterInspect, procNetReadErrorIsExitRace, proxyTargetBindingMatches, requiredGate02bSteps,
+  networkAttachmentsAfterInspect, observedDockerContainer, proxyTargetBindingMatches, publishedPortsAfterInspect,
+  readProcNetSnapshot, requiredGate02bSteps, unresolvedUnsafeListeners,
+  storeObservedDockerContainer,
   sourceBindingsMatch, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
   validateDockerIsolationCommandSafety, validateDockerStructuralIsolationReceipt, validateGate02bStepPlan,
   validateGate02bInvocationTopology, validateProcessLifecycleReceipt, validateProxyIdentityChain, validateProxyInventory, validateProxyPolicy,
@@ -786,14 +796,59 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     ]);
   });
 
-  it('ignores a proc-net ENOENT only after the original process identity is proven gone', () => {
-    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'missing' })).toBe(true);
-    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'present', state: 'Z', startTicks: '42' })).toBe(true);
-    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'present', state: 'S', startTicks: '43' })).toBe(true);
-    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'present', state: 'S', startTicks: '42' })).toBe(false);
-    expect(procNetReadErrorIsExitRace('ENOENT', '42', { status: 'error' })).toBe(false);
-    expect(procNetReadErrorIsExitRace('EACCES', '42', { status: 'missing' })).toBe(false);
-    expect(procNetReadErrorIsExitRace('ENOENT', '', { status: 'missing' })).toBe(false);
+  it('retries a live-identity proc-net ENOENT but still fails closed after the bounded attempts', () => {
+    const enoent = Object.assign(new Error('missing'), { code: 'ENOENT' });
+    let reads = 0;
+    let waits = 0;
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => { reads += 1; if (reads < 3) throw enoent; return 'snapshot'; },
+      observeIdentity: () => ({ status: 'present', state: 'S', startTicks: '42' }),
+      wait: () => { waits += 1; },
+    })).toEqual({ text: 'snapshot', failure: null, exited: false, attempts: 3 });
+    expect(waits).toBe(2);
+    reads = 0;
+    waits = 0;
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => { reads += 1; throw enoent; },
+      observeIdentity: () => ({ status: 'present', state: 'S', startTicks: '42' }),
+      wait: () => { waits += 1; },
+    })).toMatchObject({ text: null, failure: enoent, exited: false, attempts: 3 });
+    expect(reads).toBe(3);
+    expect(waits).toBe(2);
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => { throw new Error('must not read'); }, observeIdentity: () => ({ status: 'missing' }),
+      wait: () => { throw new Error('no wait'); },
+    })).toEqual({ text: null, failure: null, exited: true, attempts: 1 });
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => { throw new Error('must not read'); },
+      observeIdentity: () => ({ status: 'present', state: 'Z', startTicks: '42' }), wait: () => {},
+    })).toEqual({ text: null, failure: null, exited: true, attempts: 1 });
+    const identities = [
+      { status: 'present', state: 'S', startTicks: '42' },
+      { status: 'present', state: 'S', startTicks: '42' },
+      { status: 'present', state: 'S', startTicks: '42' },
+      { status: 'present', state: 'S', startTicks: '43' },
+    ];
+    let reuseReads = 0;
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => { reuseReads += 1; if (reuseReads === 1) throw enoent; return 'wrong-process-snapshot'; },
+      observeIdentity: () => identities.shift() ?? { status: 'error' }, wait: () => {},
+    })).toEqual({ text: null, failure: null, exited: true, attempts: 2 });
+    const unreliable = readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => 'snapshot', observeIdentity: () => ({ status: 'error' }), wait: () => {},
+    });
+    expect(unreliable).toMatchObject({ text: null, exited: false, attempts: 1 });
+    expect(unreliable.failure).toBeInstanceOf(Error);
+    const eacces = Object.assign(new Error('denied'), { code: 'EACCES' });
+    let eaccesIdentityChecks = 0;
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => { throw eacces; }, observeIdentity: () => {
+        eaccesIdentityChecks += 1;
+        return eaccesIdentityChecks === 1 ? { status: 'present', state: 'S', startTicks: '42' } : { status: 'missing' };
+      },
+      wait: () => { throw new Error('no retry'); },
+    })).toMatchObject({ text: null, failure: eacces, exited: false, attempts: 1 });
+    expect(eaccesIdentityChecks).toBe(1);
   });
 
   it('retains the last inspected network attachments when a later inspect disappears', () => {
@@ -804,6 +859,65 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
       { name: 'geneway-storage-test_storage', id: 'network-id', ip: '192.168.96.4' },
     ]);
     expect(networkAttachmentsAfterInspect(attachments, undefined)).toBe(attachments);
+    expect(networkAttachmentsAfterInspect(attachments, { NetworkSettings: { Networks: {
+      'geneway-storage-test_storage': { NetworkID: '', IPAddress: '' },
+    } } })).toEqual(attachments);
+    expect(networkAttachmentsAfterInspect(attachments, { NetworkSettings: { Networks: {} } })).toBe(attachments);
+    expect(networkAttachmentsAfterInspect([
+      ...attachments, { name: 'geneway-storage-test_default', id: 'default-id', ip: '192.168.64.4' },
+    ], { NetworkSettings: { Networks: {
+      'geneway-storage-test_storage': { NetworkID: 'network-id-2', IPAddress: '192.168.96.5' },
+    } } })).toEqual([
+      { name: 'geneway-storage-test_storage', id: 'network-id-2', ip: '192.168.96.5' },
+      { name: 'geneway-storage-test_default', id: 'default-id', ip: '192.168.64.4' },
+    ]);
+  });
+
+  it('never erases an observed published port when a later inspect is empty or disappears', () => {
+    const observed = publishedPortsAfterInspect([], { NetworkSettings: { Ports: {
+      '7400/tcp': [{ HostIp: '0.0.0.0', HostPort: '17400' }],
+    } } });
+    expect(observed).toEqual([{ hostIp: '0.0.0.0', hostPort: '17400' }]);
+    expect(publishedPortsAfterInspect(observed, undefined)).toBe(observed);
+    expect(publishedPortsAfterInspect(observed, { NetworkSettings: { Ports: {} } })).toEqual(observed);
+  });
+
+  it('correlates short Docker CLI IDs with their full event and inspect identity', () => {
+    const full = { id: 'a'.repeat(64), name: 'geneway-storage-test-postgres-1' };
+    const containers = new Map([[full.id, full]]);
+    expect(observedDockerContainer(containers, 'a'.repeat(12), full.name)).toBe(full);
+    expect(observedDockerContainer(containers, full.id, 'geneway-storage-test-other-1')).toBeUndefined();
+    expect(observedDockerContainer(containers, full.id)).toBe(full);
+    expect(observedDockerContainer(containers, 'a'.repeat(12))).toBeUndefined();
+    expect(observedDockerContainer(containers, 'a'.repeat(11), full.name)).toBeUndefined();
+    expect(observedDockerContainer(new Map([['a'.repeat(12), { ...full, id: 'a'.repeat(12) }]]), full.id, full.name))
+      .toMatchObject({ id: 'a'.repeat(12), name: full.name });
+    expect(observedDockerContainer(containers, 'b'.repeat(12), full.name)).toBeUndefined();
+    expect(observedDockerContainer(containers, 'b'.repeat(12), 'geneway-storage-test-other-1')).toBeUndefined();
+    const short = { ...full, id: 'a'.repeat(12) };
+    const state = { containers: new Map([[short.id, short]]) };
+    short.id = full.id;
+    storeObservedDockerContainer(state, short);
+    expect([...state.containers.entries()]).toEqual([[full.id, short]]);
+    short.id = 'a'.repeat(12);
+    storeObservedDockerContainer(state, short);
+    expect(short.id).toBe(full.id);
+    expect([...state.containers.entries()]).toEqual([[full.id, short]]);
+    expect(() => storeObservedDockerContainer(state, { id: full.id, name: 'conflict' })).toThrow('key conflict');
+    const conflictingObject = { id: 'b'.repeat(64), name: short.name };
+    const conflictingState = { containers: new Map([[full.id, conflictingObject]]) };
+    expect(() => storeObservedDockerContainer(conflictingState, conflictingObject)).toThrow('correlation conflict');
+  });
+
+  it('resolves an unsafe rygel endpoint only when exact adapter evidence is at least as recent', () => {
+    expect(unresolvedUnsafeListeners([
+      { sample: 1, unsafe: ['lan', 'adapter'], validated: [] },
+      { sample: 2, unsafe: [], validated: ['adapter'] },
+    ])).toEqual(['lan']);
+    expect(unresolvedUnsafeListeners([
+      { sample: 1, unsafe: [], validated: ['adapter'] },
+      { sample: 2, unsafe: ['adapter'], validated: [] },
+    ])).toEqual(['adapter']);
   });
 
   it('exempts only exact rygel listeners on interfaces proven to belong to current internal Docker networks', () => {

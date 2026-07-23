@@ -93,6 +93,7 @@ const gate02bComposeServiceAllowlist = new Set([
   'postgres', 'versitygw', 'storage-adapter', 'storage-reconciliation-adapter', 'storage-reconciler',
   'storage-oracle', 'storage-provisioner',
 ]);
+const procNetRetrySignal = new Int32Array(new SharedArrayBuffer(4));
 
 function safeEnvironment() {
   const environment = {};
@@ -565,6 +566,17 @@ export function isInternalDockerAdapterListener(line, context, commandLines) {
   return scopedIpv6 !== null && context.interfaceNames.includes(scopedIpv6[2]);
 }
 
+export function unresolvedUnsafeListeners(observations) {
+  const latestUnsafe = new Map();
+  const latestValidated = new Map();
+  for (const observation of observations) {
+    for (const line of observation.unsafe) latestUnsafe.set(line, observation.sample);
+    for (const line of observation.validated) latestValidated.set(line, observation.sample);
+  }
+  return [...latestUnsafe].filter(([line, sample]) => (latestValidated.get(line) ?? -1) < sample)
+    .map(([line]) => line).sort();
+}
+
 function dockerJson(command) {
   const result = capture(command);
   if (result.status !== 0 || typeof result.stdout !== 'string') return null;
@@ -599,6 +611,33 @@ function repositoryDockerBoundaryResources() {
 function createDockerObservation() {
   return { containers: new Map(), networks: new Map(), eventCount: 0, eventParseErrors: [], monitorErrors: [],
     monitorStarted: false, eventBoundaryMs: Date.now() };
+}
+
+export function observedDockerContainer(containers, observedId, name) {
+  const validId = (value) => typeof value === 'string' && /^(?:[a-f0-9]{12}|[a-f0-9]{64})$/u.test(value);
+  if (!validId(observedId)) return undefined;
+  const exact = containers.get(observedId);
+  if (exact !== undefined && (typeof name !== 'string' || exact.name === name)) return exact;
+  if (typeof name !== 'string') return undefined;
+  return [...containers.values()].find((container) =>
+    (validId(container.id) && container.id.length !== observedId.length
+      && (container.id.startsWith(observedId) || observedId.startsWith(container.id)))
+    && container.name === name);
+}
+
+export function storeObservedDockerContainer(state, container) {
+  const occupied = state.containers.get(container.id);
+  if (occupied !== undefined && occupied !== container) throw new Error('Docker container identity key conflict');
+  const identityKeys = [...state.containers].filter(([, value]) => value === container).map(([key]) => key);
+  const candidates = [...new Set([...identityKeys, container.id])];
+  const fullIds = candidates.filter((value) => /^[a-f0-9]{64}$/u.test(value));
+  if (fullIds.length > 1 || (fullIds.length === 1 && candidates.some((value) =>
+    /^[a-f0-9]{12}$/u.test(value) && !fullIds[0].startsWith(value)))) {
+    throw new Error('Docker container identity correlation conflict');
+  }
+  if (fullIds.length === 1) container.id = fullIds[0];
+  for (const key of identityKeys) if (key !== container.id) state.containers.delete(key);
+  state.containers.set(container.id, container);
 }
 
 function scopedDockerName(name) {
@@ -648,18 +687,58 @@ function processIdentityObservation(pid) {
   }
 }
 
-export function procNetReadErrorIsExitRace(errorCode, expectedStartTicks, identityObservation) {
-  if (errorCode !== 'ENOENT' || !/^[1-9][0-9]*$/u.test(expectedStartTicks ?? '')) return false;
-  return identityObservation?.status === 'missing'
-    || (identityObservation?.status === 'present'
-      && (identityObservation.state?.startsWith('Z') || identityObservation.startTicks !== expectedStartTicks));
+export function readProcNetSnapshot(path, pid, expectedStartTicks, dependencies = {}) {
+  const read = dependencies.read ?? ((candidate) => readFileSync(candidate, 'utf8'));
+  const observeIdentity = dependencies.observeIdentity ?? processIdentityObservation;
+  const wait = dependencies.wait ?? (() => Atomics.wait(procNetRetrySignal, 0, 0, 1));
+  const identityDisposition = (identity) => {
+    if (!/^[1-9][0-9]*$/u.test(expectedStartTicks ?? '') || identity?.status === 'error') return 'error';
+    if (identity?.status === 'missing' || (identity?.status === 'present'
+      && (identity.state?.startsWith('Z') || identity.startTicks !== expectedStartTicks))) return 'exited';
+    return identity?.status === 'present' ? 'bound' : 'error';
+  };
+  const identityFailure = () => new Error('proc-net process identity could not be bound');
+  let failure;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const before = identityDisposition(observeIdentity(pid));
+    if (before === 'exited') return { text: null, failure: null, exited: true, attempts: attempt };
+    if (before !== 'bound') return { text: null, failure: identityFailure(), exited: false, attempts: attempt };
+    try {
+      const text = read(path);
+      const after = identityDisposition(observeIdentity(pid));
+      if (after === 'exited') return { text: null, failure: null, exited: true, attempts: attempt };
+      if (after !== 'bound') return { text: null, failure: identityFailure(), exited: false, attempts: attempt };
+      return { text, failure: null, exited: false, attempts: attempt };
+    } catch (cause) {
+      failure = cause;
+      if (cause?.code !== 'ENOENT') return { text: null, failure, exited: false, attempts: attempt };
+      const after = identityDisposition(observeIdentity(pid));
+      if (after === 'exited') return { text: null, failure, exited: true, attempts: attempt };
+      if (after !== 'bound') return { text: null, failure: identityFailure(), exited: false, attempts: attempt };
+      if (attempt === 3) return { text: null, failure, exited: false, attempts: attempt };
+      wait();
+    }
+  }
+  return { text: null, failure, exited: false, attempts: 3 };
 }
 
 export function networkAttachmentsAfterInspect(previous, container) {
   if (container === undefined) return previous;
-  return Object.entries(container.NetworkSettings?.Networks ?? {}).map(([name, attachment]) => ({
-    name, id: attachment?.NetworkID ?? null, ip: attachment?.IPAddress ?? null,
-  }));
+  const entries = Object.entries(container.NetworkSettings?.Networks ?? {});
+  if (entries.length === 0) return previous;
+  const merged = new Map(previous.map((attachment) => [attachment.name, attachment]));
+  for (const [name, attachment] of entries) {
+    const prior = merged.get(name);
+    merged.set(name, { name, id: attachment?.NetworkID || prior?.id || null, ip: attachment?.IPAddress || prior?.ip || null });
+  }
+  return [...merged.values()];
+}
+
+export function publishedPortsAfterInspect(previous, container) {
+  if (container === undefined) return previous;
+  const observed = Object.values(container.NetworkSettings?.Ports ?? {}).flatMap((bindings) => Array.isArray(bindings)
+    ? bindings.map((binding) => ({ hostIp: binding.HostIp, hostPort: binding.HostPort })) : []);
+  return [...new Map([...previous, ...observed].map((binding) => [JSON.stringify(binding), binding])).values()];
 }
 
 function observeDockerContainer(state, identity, fallbackName) {
@@ -667,7 +746,10 @@ function observeDockerContainer(state, identity, fallbackName) {
   const container = Array.isArray(inspected) ? inspected[0] : undefined;
   const name = typeof container?.Name === 'string' ? container.Name.replace(/^\//u, '') : fallbackName;
   if (!isRepositoryDockerScope(name, container?.Config?.Labels ?? {})) return;
-  const existing = state.containers.get(container?.Id ?? identity) ?? { id: container?.Id ?? identity, name, networkIds: new Set(), networkNames: new Set(), inspectObserved: false };
+  const observedId = container?.Id ?? identity;
+  const existing = observedDockerContainer(state.containers, observedId, name)
+    ?? { id: observedId, name, networkIds: new Set(), networkNames: new Set(), inspectObserved: false };
+  if (container?.Id !== undefined) existing.id = container.Id;
   existing.repositoryScoped = true;
   existing.inspectObserved ||= container !== undefined;
   existing.service = container?.Config?.Labels?.['com.docker.compose.service'] ?? existing.service ?? null;
@@ -685,8 +767,7 @@ function observeDockerContainer(state, identity, fallbackName) {
     const processIdentity = processIdentityObservation(container.State.Pid);
     existing.pidStartTicks = processIdentity.status === 'present' ? processIdentity.startTicks : null;
   }
-  existing.publishedPorts = Object.values(container?.NetworkSettings?.Ports ?? {}).flatMap((bindings) => Array.isArray(bindings)
-    ? bindings.map((binding) => ({ hostIp: binding.HostIp, hostPort: binding.HostPort })) : []);
+  existing.publishedPorts = publishedPortsAfterInspect(existing.publishedPorts ?? [], container);
   if (container !== undefined) {
     existing.networkAttachments = networkAttachmentsAfterInspect(existing.networkAttachments ?? [], container);
     for (const attachment of existing.networkAttachments) {
@@ -700,17 +781,18 @@ function observeDockerContainer(state, identity, fallbackName) {
     existing.netnsSockets ??= [];
     existing.netnsErrors ??= [];
     for (const [protocol, file] of [['tcp', 'tcp'], ['tcp6', 'tcp6'], ['udp', 'udp'], ['udp6', 'udp6']]) {
-      try {
-        const text = readFileSync(`/proc/${String(container.State.Pid)}/net/${file}`, 'utf8');
-        existing.netnsSockets.push(...parseProcNetSockets(text, protocol));
-      } catch (cause) {
-        const exitRace = procNetReadErrorIsExitRace(cause?.code, existing.pidStartTicks,
-          processIdentityObservation(container.State.Pid));
-        if (!exitRace) existing.netnsErrors.push(`${protocol}:${cause instanceof Error ? cause.message : String(cause)}`);
+      const path = `/proc/${String(container.State.Pid)}/net/${file}`;
+      const snapshot = readProcNetSnapshot(path, container.State.Pid, existing.pidStartTicks);
+      if (snapshot.text !== null) {
+        try { existing.netnsSockets.push(...parseProcNetSockets(snapshot.text, protocol)); } catch (cause) {
+          existing.netnsErrors.push(`${protocol}:${cause instanceof Error ? cause.message : String(cause)}`);
+        }
+      } else if (!snapshot.exited) {
+        existing.netnsErrors.push(`${protocol}:${snapshot.failure instanceof Error ? snapshot.failure.message : String(snapshot.failure)}`);
       }
     }
   }
-  state.containers.set(existing.id, existing);
+  storeObservedDockerContainer(state, existing);
 }
 
 function observeDockerResources(state) {
@@ -738,7 +820,9 @@ function recordDockerEvent(state, event) {
   const identity = actor.ID ?? actor.id;
   const name = attributes.name;
   if (type === 'container' && isRepositoryDockerScope(name, attributes)) {
-    const existing = state.containers.get(identity) ?? { id: identity, name, networkIds: new Set(), networkNames: new Set(), inspectObserved: false };
+    const existing = observedDockerContainer(state.containers, identity, name)
+      ?? { id: identity, name, networkIds: new Set(), networkNames: new Set(), inspectObserved: false };
+    existing.id = identity;
     existing.repositoryScoped = true;
     existing.eventObserved = true;
     existing.service = attributes['com.docker.compose.service'] ?? existing.service ?? null;
@@ -748,17 +832,22 @@ function recordDockerEvent(state, event) {
     existing.backupAction = attributes['geneway.backup.action'] ?? existing.backupAction ?? null;
     existing.egressReceiptPath = attributes['geneway.gate02b.egress_receipt'] ?? existing.egressReceiptPath ?? null;
     if (action === 'die') existing.exitCode = attributes.exitCode ?? null;
-    state.containers.set(identity, existing);
+    storeObservedDockerContainer(state, existing);
     if (action !== 'destroy') observeDockerContainer(state, identity, name);
   }
   if (type === 'network' && isRepositoryDockerScope(name, attributes)) {
     if (action !== 'destroy') observeDockerNetwork(state, identity || name);
     const containerId = attributes.container;
     if (action === 'connect' && typeof containerId === 'string') {
-      const container = state.containers.get(containerId) ?? { id: containerId, name: attributes.container_name ?? 'unknown', networkIds: new Set(), networkNames: new Set(), inspectObserved: false };
+      const observedName = attributes.container_name;
+      const existing = observedDockerContainer(state.containers, containerId, observedName);
+      if (existing === undefined && observedName === undefined) return;
+      const container = existing
+        ?? { id: containerId, name: observedName, networkIds: new Set(), networkNames: new Set(), inspectObserved: false };
+      container.id = containerId;
       container.networkIds.add(identity);
       container.networkNames.add(name);
-      state.containers.set(containerId, container);
+      storeObservedDockerContainer(state, container);
     }
   }
 }
@@ -1562,7 +1651,8 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
   const stepGlobalListenerBaseline = globalListenerLines();
   const observedIdentities = new Map();
   const runtimeReceipt = { checked: true, sampleCount: 0, maxDescendantCount: 0, unsafeListeners: [],
-    internalDockerAdapterListeners: [], nonLoopbackEgress: [], forbiddenProcesses: [], proxyPolicyPaths: [], sampleErrors: [] };
+    internalDockerAdapterListeners: [], listenerObservations: [], nonLoopbackEgress: [], forbiddenProcesses: [],
+    proxyPolicyPaths: [], sampleErrors: [] };
   const dockerObservation = createDockerObservation();
   const dockerEventMonitor = startDockerEventMonitor(dockerObservation);
   let result;
@@ -1588,6 +1678,8 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
           runtimeReceipt.addedGlobalListeners.push(...observed.addedGlobalListeners);
           runtimeReceipt.internalDockerAdapterListeners.push(...observed.internalDockerAdapterListeners);
           runtimeReceipt.unsafeListeners.push(...observed.unsafeListeners);
+          runtimeReceipt.listenerObservations.push({ sample: runtimeReceipt.sampleCount,
+            unsafe: observed.unsafeListeners, validated: observed.internalDockerAdapterListeners });
           runtimeReceipt.nonLoopbackEgress.push(...observed.nonLoopbackEgress);
           runtimeReceipt.forbiddenProcesses.push(...observed.forbiddenProcesses);
           runtimeReceipt.proxyPolicyPaths.push(...observed.proxyPolicyPaths);
@@ -1622,9 +1714,9 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
       }
     }
   }
-  runtimeReceipt.unsafeListeners = [...new Set(runtimeReceipt.unsafeListeners)].sort();
   runtimeReceipt.addedGlobalListeners = [...new Set(runtimeReceipt.addedGlobalListeners ?? [])].sort();
   runtimeReceipt.internalDockerAdapterListeners = [...new Set(runtimeReceipt.internalDockerAdapterListeners)].sort();
+  runtimeReceipt.unsafeListeners = unresolvedUnsafeListeners(runtimeReceipt.listenerObservations);
   runtimeReceipt.nonLoopbackEgress = [...new Set(runtimeReceipt.nonLoopbackEgress)].sort();
   runtimeReceipt.forbiddenProcesses = [...new Map(runtimeReceipt.forbiddenProcesses.map((item) => [`${String(item.pid)}:${item.identity}`, item])).values()];
   const backupRunsRequired = ['gate0.2b.3', 'gate0.2a-baseline'].includes(step.name);

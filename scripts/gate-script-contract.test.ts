@@ -13,6 +13,7 @@ interface Gate02bModule {
   findForbiddenEnvironmentNames: (names: readonly string[]) => string[];
   gate02bDockerIsolationEnvironment: Readonly<Record<string, string>>;
   gate02bAggregatePassed: (input: Readonly<Record<string, unknown>>) => boolean;
+  gateAuthorityRootNames: (entries: readonly string[]) => string[];
   isGateAuthorityPath: (path: string) => boolean;
   isRepositoryDockerScope: (name: string, labels?: Readonly<Record<string, string>>) => boolean;
   dockerStructuralIsolationReceipt: (state: unknown) => { passed: boolean; violations: string[] };
@@ -33,7 +34,8 @@ interface Gate02bModule {
 const {
   backupArtifactRoots, childEnvironment, collectReachableCommandStrings, dockerStructuralIsolationReceipt, extractNestedVerifierCommands,
   extractStructuredBackupRunIds,
-  findForbiddenEnvironmentNames, gate02bAggregatePassed, gate02bDockerIsolationEnvironment, isGateAuthorityPath,
+  findForbiddenEnvironmentNames, gate02bAggregatePassed, gate02bDockerIsolationEnvironment, gateAuthorityRootNames,
+  isGateAuthorityPath,
   isRepositoryDockerScope, parseBackupRawReceipt, parseSocketLine, requiredGate02bSteps,
   sourceBindingsMatch, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
   validateDockerIsolationCommandSafety, validateDockerStructuralIsolationReceipt, validateGate02bStepPlan,
@@ -322,6 +324,9 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     expect(isGateAuthorityPath('/tmp/gw-uds-X/token')).toBe(true);
     expect(isGateAuthorityPath('/tmp/gw-mgw-X')).toBe(true);
     expect(isGateAuthorityPath('/tmp/sharp-cell-X/token')).toBe(false);
+    expect(gateAuthorityRootNames([
+      'fuse', 'sharp-cell-X', 'gw-uds-Z', 'gw-mgw-A', 'gw-uds-', 'gw-uds-X/child',
+    ])).toEqual(['gw-mgw-A', 'gw-uds-Z']);
     expect(isRepositoryDockerScope('scripts-postgres-1', {
       'com.docker.compose.project.config_files': '/home/gewu/work/geneway/scripts/docker-compose.yml',
       'com.docker.compose.project.working_dir': '/home/gewu/work/geneway/scripts',

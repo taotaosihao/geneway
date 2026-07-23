@@ -386,12 +386,30 @@ export function isGateAuthorityPath(path) {
   return /^\/tmp\/gw-(?:uds|mgw)-[^/]+(?:\/[^/]+)?$/u.test(path);
 }
 
+export function gateAuthorityRootNames(entries) {
+  return entries.filter((name) => /^gw-(?:uds|mgw)-[^/]+$/u.test(name)).sort();
+}
+
 function gateAuthorityPaths() {
-  const roots = successfulLines(['find', '/tmp', '-maxdepth', '1', '-type', 'd',
-    '(', '-name', 'gw-uds-*', '-o', '-name', 'gw-mgw-*', ')', '-printf', '%p\n'], 'worker authority root')
-    .filter(isGateAuthorityPath);
-  return roots.flatMap((root) => successfulLines(['find', root, '-maxdepth', '1', '-printf', '%p\n'], 'worker authority path'))
-    .filter(isGateAuthorityPath).sort();
+  const roots = gateAuthorityRootNames(readdirSync('/tmp')).map((name) => resolve('/tmp', name));
+  const paths = [];
+  for (const root of roots) {
+    const rootStat = lstatSync(root);
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+      throw new Error(`Gate 0.2B worker authority root is unsafe: ${root}`);
+    }
+    paths.push(root);
+    for (const name of readdirSync(root)) {
+      const child = resolve(root, name);
+      if (dirname(child) !== root || !isGateAuthorityPath(child)) {
+        throw new Error(`Gate 0.2B worker authority child escaped its root: ${child}`);
+      }
+      const childStat = lstatSync(child);
+      if (childStat.isSymbolicLink()) throw new Error(`Gate 0.2B worker authority child is a symlink: ${child}`);
+      paths.push(child);
+    }
+  }
+  return paths.sort();
 }
 
 function repositoryProcesses() {

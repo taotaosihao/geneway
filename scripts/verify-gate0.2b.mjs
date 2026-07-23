@@ -552,6 +552,30 @@ function processCommandLine(pid) {
   }
 }
 
+export function stableProcessCommandLine(pid, dependencies = {}) {
+  const observeIdentity = dependencies.observeIdentity ?? processIdentityObservation;
+  const readCommandLine = dependencies.readCommandLine ?? processCommandLine;
+  const readExecutable = dependencies.readExecutable ?? ((candidate) => readlinkSync(`/proc/${String(candidate)}/exe`));
+  const before = observeIdentity(pid);
+  if (before?.status !== 'present' || before.state?.startsWith('Z')) return null;
+  try {
+    const commandLine = readCommandLine(pid);
+    const executable = readExecutable(pid);
+    const after = observeIdentity(pid);
+    if (after?.status !== 'present' || after.state?.startsWith('Z') || after.startTicks !== before.startTicks
+      || executable !== '/usr/bin/rygel' || commandLine !== '/usr/bin/rygel') return null;
+    return { commandLine, startTicks: before.startTicks };
+  } catch {
+    return null;
+  }
+}
+
+export function processIdentityMatchesProof(proof, observation) {
+  return proof?.commandLine === '/usr/bin/rygel' && /^[1-9][0-9]*$/u.test(proof.startTicks ?? '')
+    && observation?.status === 'present' && !observation.state?.startsWith('Z')
+    && observation.startTicks === proof.startTicks;
+}
+
 export function isInternalDockerAdapterListener(line, context, commandLines) {
   const match = line.match(/^(\S+) pids=([1-9][0-9]*)$/u);
   if (match === null) return false;
@@ -567,14 +591,7 @@ export function isInternalDockerAdapterListener(line, context, commandLines) {
 }
 
 export function unresolvedUnsafeListeners(observations) {
-  const latestUnsafe = new Map();
-  const latestValidated = new Map();
-  for (const observation of observations) {
-    for (const line of observation.unsafe) latestUnsafe.set(line, observation.sample);
-    for (const line of observation.validated) latestValidated.set(line, observation.sample);
-  }
-  return [...latestUnsafe].filter(([line, sample]) => (latestValidated.get(line) ?? -1) < sample)
-    .map(([line]) => line).sort();
+  return [...new Set(observations.flatMap((observation) => observation.unsafe))].sort();
 }
 
 function dockerJson(command) {
@@ -669,9 +686,54 @@ function observeDockerNetwork(state, identity) {
   const network = Array.isArray(inspected) ? inspected[0] : undefined;
   const name = network?.Name;
   if (network === undefined || (!isRepositoryDockerScope(name, network.Labels ?? {}) && !scopedDockerName(identity))) return;
-  state.networks.set(network.Id ?? identity, { id: network.Id ?? identity, name: name ?? identity, internal: network.Internal === true,
-    inspectObserved: true, project: network.Labels?.['com.docker.compose.project'] ?? null,
-    subnets: (network.IPAM?.Config ?? []).flatMap((config) => typeof config.Subnet === 'string' ? [config.Subnet] : []) });
+  const id = network.Id ?? identity;
+  const existing = state.networks.get(id)
+    ?? { id, gatewayAddresses: new Set(), interfaceNames: new Set(), memberIdentities: new Map() };
+  existing.name = name ?? identity;
+  existing.internal = network.Internal === true;
+  existing.driver = network.Driver ?? null;
+  existing.inspectObserved = true;
+  existing.project = network.Labels?.['com.docker.compose.project'] ?? null;
+  existing.subnets = (network.IPAM?.Config ?? []).flatMap((config) => typeof config.Subnet === 'string' ? [config.Subnet] : []);
+  for (const config of network.IPAM?.Config ?? []) {
+    if (typeof config.Gateway === 'string') existing.gatewayAddresses.add(config.Gateway);
+  }
+  if (existing.internal && existing.driver === 'bridge') {
+    const configuredBridge = network.Options?.['com.docker.network.bridge.name'];
+    const bridgeName = typeof configuredBridge === 'string' && configuredBridge.length > 0
+      ? configuredBridge : `br-${id.slice(0, 12)}`;
+    existing.bridgeName = bridgeName;
+    for (const [index, command] of [['ip', '-j', 'link', 'show', 'dev', bridgeName],
+      ['ip', '-j', 'link', 'show', 'master', bridgeName]].entries()) {
+      const result = capture(command);
+      if (result.status !== 0 || typeof result.stdout !== 'string') continue;
+      try {
+        for (const link of JSON.parse(result.stdout)) {
+          if (typeof link.ifname !== 'string' || !Number.isInteger(link.ifindex) || typeof link.address !== 'string') continue;
+          const linkIdentity = { ifindex: link.ifindex, address: link.address };
+          if (index === 0 && link.ifname === bridgeName) {
+            if (existing.bridgeIdentity !== undefined
+              && JSON.stringify(existing.bridgeIdentity) !== JSON.stringify(linkIdentity)) {
+              existing.identityConflict = true;
+              continue;
+            }
+            existing.bridgeIdentity = linkIdentity;
+          } else if (index === 1) {
+            const prior = existing.memberIdentities.get(link.ifname);
+            if (prior !== undefined && JSON.stringify(prior) !== JSON.stringify(linkIdentity)) {
+              existing.identityConflict = true;
+              continue;
+            }
+            existing.memberIdentities.set(link.ifname, linkIdentity);
+          }
+          existing.interfaceNames.add(link.ifname);
+        }
+      } catch {
+        // A partial link snapshot cannot add trusted interface evidence.
+      }
+    }
+  }
+  state.networks.set(id, existing);
 }
 
 function processIdentityObservation(pid) {
@@ -1149,13 +1211,22 @@ export function dockerStructuralIsolationReceipt(state, expectedBackupRunIds = [
     networkIds: [...container.networkIds].sort(), networkNames: [...container.networkNames].sort(),
     networkAttachments: container.networkAttachments ?? [],
   })).sort((left, right) => left.name.localeCompare(right.name));
-  const networks = [...state.networks.values()].sort((left, right) => left.name.localeCompare(right.name));
+  const networks = [...state.networks.values()].map((network) => ({
+    id: network.id, name: network.name, internal: network.internal, driver: network.driver,
+    inspectObserved: network.inspectObserved, project: network.project, subnets: network.subnets,
+    bridgeName: network.bridgeName ?? null, gatewayAddresses: [...(network.gatewayAddresses ?? [])].sort(),
+    interfaceNames: [...(network.interfaceNames ?? [])].sort(),
+    bridgeIdentity: network.bridgeIdentity ?? null, identityConflict: network.identityConflict === true,
+    memberIdentities: [...(network.memberIdentities ?? [])].map(([name, identity]) => ({ name, ...identity }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+  })).sort((left, right) => left.name.localeCompare(right.name));
   const internalIdentities = new Set(networks.filter((network) => network.internal).flatMap((network) => [network.id, network.name]));
   const internalSubnets = networks.filter((network) => network.internal).flatMap((network) => network.subnets);
   const violations = [];
   for (const network of networks) {
     if (!network.internal) violations.push(`non-internal-network:${network.name}:${network.id}`);
     if (!network.inspectObserved) violations.push(`network-inspect-missing:${network.name}:${network.id}`);
+    if (network.identityConflict) violations.push(`network-link-identity-conflict:${network.name}:${network.id}`);
     if (typeof network.project !== 'string' || !/^geneway-(?:storage|e2e|br)-[A-Za-z0-9._-]+$/u.test(network.project)) {
       violations.push(`network-project-forbidden:${network.name}:${String(network.project)}`);
     }
@@ -1504,9 +1575,38 @@ export function proxyEgressMatchesPolicy(processItem, line) {
   return proxyTargetBindingMatches(policy, inspected, inspectedNetwork);
 }
 
-function internalDockerListenerContext(processes, knownPolicyPaths = []) {
+function internalDockerListenerContext(processes, knownPolicyPaths = [], dockerObservation) {
   const gatewayAddresses = new Set();
   const interfaceNames = new Set();
+  for (const network of dockerObservation?.networks?.values() ?? []) {
+    if (!network.inspectObserved || !network.internal || network.driver !== 'bridge'
+      || typeof network.bridgeName !== 'string' || network.identityConflict) continue;
+    const addressResult = capture(['ip', '-j', 'address', 'show', 'dev', network.bridgeName]);
+    const memberResult = capture(['ip', '-j', 'link', 'show', 'master', network.bridgeName]);
+    if (addressResult.status !== 0 || typeof addressResult.stdout !== 'string'
+      || memberResult.status !== 0 || typeof memberResult.stdout !== 'string') continue;
+    try {
+      const addresses = JSON.parse(addressResult.stdout);
+      const members = JSON.parse(memberResult.stdout);
+      const bridge = addresses.find((link) => link.ifname === network.bridgeName);
+      if (bridge === undefined || !Number.isInteger(bridge.ifindex) || typeof bridge.address !== 'string'
+        || JSON.stringify({ ifindex: bridge.ifindex, address: bridge.address }) !== JSON.stringify(network.bridgeIdentity)) continue;
+      const liveAddresses = new Set(addresses.flatMap((link) => (link.addr_info ?? [])
+        .flatMap((address) => typeof address.local === 'string' ? [address.local] : [])));
+      const matchingGateways = [...(network.gatewayAddresses ?? [])].filter((gateway) => liveAddresses.has(gateway));
+      if (matchingGateways.length === 0) continue;
+      for (const gateway of matchingGateways) gatewayAddresses.add(gateway);
+      interfaceNames.add(network.bridgeName);
+      for (const link of members) {
+        const cached = network.memberIdentities?.get(link.ifname);
+        if (cached !== undefined && JSON.stringify(cached) === JSON.stringify({ ifindex: link.ifindex, address: link.address })) {
+          interfaceNames.add(link.ifname);
+        }
+      }
+    } catch {
+      // Unparseable live link evidence cannot earn an adapter-listener exemption.
+    }
+  }
   const policyPaths = [...new Set([
     ...knownPolicyPaths,
     ...processes.map((item) => proxyPolicyPathFromCommandLine(item.commandLine)).filter(Boolean),
@@ -1556,16 +1656,24 @@ export function isForbiddenRuntimeCommandLine(commandLine) {
   return /services\/model-gateway/iu.test(commandLine) && !isModelGatewayTypeScriptProjectBuild(commandLine);
 }
 
-function runtimeBoundarySample(rootPid, initialGlobalListeners, knownProxyPolicyPaths = []) {
+function runtimeBoundarySample(rootPid, initialGlobalListeners, knownProxyPolicyPaths = [], dockerObservation) {
   const descendants = descendantProcesses(rootPid);
   const listeners = socketLinesForProcesses(['ss', '-H', '-ltnp'], descendants, 'listener');
   const egress = socketLinesForProcesses(['ss', '-H', '-tnp', 'state', 'established'], descendants, 'egress');
-  const addedGlobalListeners = additions(initialGlobalListeners, globalListenerLines());
-  const internalDockerContext = internalDockerListenerContext(descendants, knownProxyPolicyPaths);
-  const listenerProcessIds = [...new Set(addedGlobalListeners.flatMap((line) =>
+  const firstGlobalListeners = globalListenerLines();
+  const firstAddedGlobalListeners = additions(initialGlobalListeners, firstGlobalListeners);
+  observeDockerResources(dockerObservation);
+  const internalDockerContext = internalDockerListenerContext(descendants, knownProxyPolicyPaths, dockerObservation);
+  const listenerProcessIds = [...new Set(firstAddedGlobalListeners.flatMap((line) =>
     [...line.matchAll(/pids=([1-9][0-9]*)/gu)].map((match) => Number(match[1]))))];
-  const listenerCommandLines = new Map(listenerProcessIds.map((pid) => [pid, processCommandLine(pid)]));
-  const internalDockerAdapterListeners = addedGlobalListeners.filter((line) =>
+  const listenerProcessProofs = new Map(listenerProcessIds.map((pid) => [pid, stableProcessCommandLine(pid)]));
+  const secondGlobalListeners = globalListenerLines();
+  const listenerCommandLines = new Map([...listenerProcessProofs].map(([pid, proof]) =>
+    [pid, processIdentityMatchesProof(proof, processIdentityObservation(pid)) ? proof.commandLine : null]));
+  const secondGlobalSet = new Set(secondGlobalListeners);
+  const addedGlobalListeners = firstAddedGlobalListeners.filter((line) => secondGlobalSet.has(line));
+  const unstableGlobalListeners = firstAddedGlobalListeners.filter((line) => !secondGlobalSet.has(line));
+  const internalDockerAdapterListeners = firstAddedGlobalListeners.filter((line) =>
     isInternalDockerAdapterListener(line, internalDockerContext, listenerCommandLines));
   const forbiddenProcesses = descendants.filter((item) => isForbiddenRuntimeCommandLine(item.commandLine))
     .map((item) => ({ pid: item.pid, command: item.command, identity: item.commandLine.split(/\s+/u).slice(0, 4).join(' ') }));
@@ -1576,6 +1684,7 @@ function runtimeBoundarySample(rootPid, initialGlobalListeners, knownProxyPolicy
   };
   const internalDockerAdapterSet = new Set(internalDockerAdapterListeners);
   const unsafeListeners = [...listeners.filter(listenerIsUnsafe),
+    ...unstableGlobalListeners.filter((line) => listenerIsUnsafe(line) && !internalDockerAdapterSet.has(line)),
     ...addedGlobalListeners.filter((line) => listenerIsUnsafe(line) && !internalDockerAdapterSet.has(line))];
   const nonLoopbackEgress = egress.filter((line) => {
     const connection = line.split(/\s+/u)[0] ?? '';
@@ -1671,7 +1780,9 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
       };
       const sample = () => {
         try {
-          const observed = runtimeBoundarySample(child.pid ?? -1, stepGlobalListenerBaseline, runtimeReceipt.proxyPolicyPaths);
+          observeDockerResources(dockerObservation);
+          const observed = runtimeBoundarySample(child.pid ?? -1, stepGlobalListenerBaseline,
+            runtimeReceipt.proxyPolicyPaths, dockerObservation);
           runtimeReceipt.sampleCount += 1;
           runtimeReceipt.maxDescendantCount = Math.max(runtimeReceipt.maxDescendantCount, observed.descendantCount);
           runtimeReceipt.addedGlobalListeners ??= [];
@@ -1684,7 +1795,6 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
           runtimeReceipt.forbiddenProcesses.push(...observed.forbiddenProcesses);
           runtimeReceipt.proxyPolicyPaths.push(...observed.proxyPolicyPaths);
           for (const identity of observed.identities) observedIdentities.set(`${String(identity.pid)}:${identity.startTicks}`, identity);
-          observeDockerResources(dockerObservation);
         } catch (cause) {
           runtimeReceipt.sampleErrors.push(cause instanceof Error ? cause.message : String(cause));
           stopAfterSamplingFailure();

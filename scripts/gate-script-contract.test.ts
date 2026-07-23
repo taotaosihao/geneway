@@ -47,6 +47,12 @@ interface Gate02bModule {
     wait: () => void;
   }) => { text: string | null; failure: unknown; exited: boolean; attempts: number };
   unresolvedUnsafeListeners: (observations: Array<{ sample: number; unsafe: string[]; validated: string[] }>) => string[];
+  stableProcessCommandLine: (pid: number, dependencies: {
+    observeIdentity: (pid: number) => { status: string; state?: string; startTicks?: string };
+    readCommandLine: (pid: number) => string | null; readExecutable: (pid: number) => string;
+  }) => { commandLine: string; startTicks: string } | null;
+  processIdentityMatchesProof: (proof: { commandLine: string; startTicks: string } | null,
+    observation: { status: string; state?: string; startTicks?: string }) => boolean;
   storeObservedDockerContainer: (state: { containers: Map<string, { id: string; name: string }> },
     container: { id: string; name: string }) => void;
   validateProxyPolicy: (policy: unknown, expectedRoot: string) => unknown;
@@ -71,9 +77,9 @@ const {
   findForbiddenEnvironmentNames, gate02bAggregatePassed, gate02bDockerIsolationEnvironment, gateAuthorityRootNames,
   internalDockerListenerBinding, isForbiddenRuntimeCommandLine, isGateAuthorityPath, isInternalDockerAdapterListener,
   isRepositoryDockerScope, parseBackupRawReceipt, parseProcNetSockets, parseSocketLine, proxyPolicyPathFromCommandLine,
-  networkAttachmentsAfterInspect, observedDockerContainer, proxyTargetBindingMatches, publishedPortsAfterInspect,
+  networkAttachmentsAfterInspect, observedDockerContainer, processIdentityMatchesProof, proxyTargetBindingMatches, publishedPortsAfterInspect,
   readProcNetSnapshot, requiredGate02bSteps, unresolvedUnsafeListeners,
-  storeObservedDockerContainer,
+  stableProcessCommandLine, storeObservedDockerContainer,
   sourceBindingsMatch, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
   validateDockerIsolationCommandSafety, validateDockerStructuralIsolationReceipt, validateGate02bStepPlan,
   validateGate02bInvocationTopology, validateProcessLifecycleReceipt, validateProxyIdentityChain, validateProxyInventory, validateProxyPolicy,
@@ -374,6 +380,13 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     expect(backupRunner).toContain("gate02bGuardRequired && role === 'provision-docker'");
     expect(backupRunner).toContain('rawReceiptSha256: sha256(rawBytes)');
     expect(verifier).toMatch(/finally \{\s+try \{ await stopDockerEventMonitor\(dockerEventMonitor, dockerObservation\);/u);
+    const runtimeSampler = verifier.slice(verifier.indexOf('function runtimeBoundarySample'), verifier.indexOf('\nfunction additions'));
+    const firstListenerSnapshot = runtimeSampler.indexOf('const firstGlobalListeners = globalListenerLines()');
+    const postListenerDockerRefresh = runtimeSampler.indexOf('observeDockerResources(dockerObservation)', firstListenerSnapshot);
+    const internalContext = runtimeSampler.indexOf('const internalDockerContext = internalDockerListenerContext');
+    expect(firstListenerSnapshot).toBeGreaterThan(0);
+    expect(postListenerDockerRefresh).toBeGreaterThan(firstListenerSnapshot);
+    expect(internalContext).toBeGreaterThan(postListenerDockerRefresh);
     expect(gate02bDockerIsolationEnvironment).toEqual({
       GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL: 'true',
       GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL: 'true',
@@ -909,15 +922,32 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     expect(() => storeObservedDockerContainer(conflictingState, conflictingObject)).toThrow('correlation conflict');
   });
 
-  it('resolves an unsafe rygel endpoint only when exact adapter evidence is at least as recent', () => {
+  it('never lets a later adapter proof erase an earlier unsafe listener observation', () => {
     expect(unresolvedUnsafeListeners([
       { sample: 1, unsafe: ['lan', 'adapter'], validated: [] },
       { sample: 2, unsafe: [], validated: ['adapter'] },
-    ])).toEqual(['lan']);
-    expect(unresolvedUnsafeListeners([
-      { sample: 1, unsafe: [], validated: ['adapter'] },
-      { sample: 2, unsafe: ['adapter'], validated: [] },
-    ])).toEqual(['adapter']);
+    ])).toEqual(['adapter', 'lan']);
+    expect(unresolvedUnsafeListeners([{ sample: 1, unsafe: ['descendant-only'], validated: [] }]))
+      .toEqual(['descendant-only']);
+  });
+
+  it('accepts rygel only while one process start identity remains bound around command and executable reads', () => {
+    const stable = () => ({ status: 'present', state: 'S', startTicks: '42' });
+    expect(stableProcessCommandLine(7, {
+      observeIdentity: stable, readCommandLine: () => '/usr/bin/rygel', readExecutable: () => '/usr/bin/rygel',
+    })).toEqual({ commandLine: '/usr/bin/rygel', startTicks: '42' });
+    const reused = [stable(), { status: 'present', state: 'S', startTicks: '43' }];
+    expect(stableProcessCommandLine(7, {
+      observeIdentity: () => reused.shift() ?? { status: 'error' },
+      readCommandLine: () => '/usr/bin/rygel', readExecutable: () => '/usr/bin/rygel',
+    })).toBeNull();
+    expect(stableProcessCommandLine(7, {
+      observeIdentity: stable, readCommandLine: () => '/usr/bin/rygel', readExecutable: () => '/tmp/rygel',
+    })).toBeNull();
+    const proof = { commandLine: '/usr/bin/rygel', startTicks: '42' };
+    expect(processIdentityMatchesProof(proof, stable())).toBe(true);
+    expect(processIdentityMatchesProof(proof, { status: 'present', state: 'S', startTicks: '43' })).toBe(false);
+    expect(processIdentityMatchesProof(proof, { status: 'missing' })).toBe(false);
   });
 
   it('exempts only exact rygel listeners on interfaces proven to belong to current internal Docker networks', () => {

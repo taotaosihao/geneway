@@ -2,9 +2,11 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, open, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertSecureRunDirectories, e2eRunIdentity, gate02bEnvironmentNames } from './e2e-run-identity.mjs';
 
 const requiredCaseIds = [
   'after_intent_commit_before_s3_put',
@@ -37,12 +39,12 @@ const workerRestartCases = new Set([
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDirectory, '..');
-const runId = process.env.GENEWAY_RUN_ID ?? `gate0.2a-recovery-${Date.now()}-${randomUUID().slice(0, 8)}`;
-if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId)) throw new Error('GENEWAY_RUN_ID must be a safe path segment');
-
-const outputRoot = join('/tmp/geneway-runs', runId, 'recovery');
-const casesRoot = join(outputRoot, 'cases');
+const requestedRunId = process.env.GENEWAY_RUN_ID ?? `gate0.2a-recovery-${Date.now()}-${randomUUID().slice(0, 8)}`;
+if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(requestedRunId)) throw new Error('GENEWAY_RUN_ID must be a safe path segment');
+const e2eArguments = ['--project=gate0.2a-recovery-multiprocess'];
+const outputRoot = join('/tmp/geneway-runs', requestedRunId, 'recovery');
 const summaryPath = join(outputRoot, 'recovery-summary.json');
+const invocationResultPath = join(outputRoot, 'e2e-invocation-result.json');
 
 async function run(command, args, environment = {}) {
   await new Promise((resolveRun, reject) => {
@@ -60,7 +62,15 @@ async function run(command, args, environment = {}) {
 }
 
 async function readJson(path) {
-  return JSON.parse(await readFile(path, 'utf8'));
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    assert(stat.isFile() && (stat.mode & 0o777) === 0o600 && stat.uid === process.getuid(),
+      `Evidence JSON is not a regular owned 0600 file: ${path}`);
+    return JSON.parse(await handle.readFile('utf8'));
+  } finally {
+    await handle.close();
+  }
 }
 
 function assert(condition, message) {
@@ -76,8 +86,8 @@ function processIdentity(receipt, role) {
   return `${String(receipt.pid)}:${receipt.procStartTicks}`;
 }
 
-function validateCase(item, caseId) {
-  assert(item?.schemaVersion === 'geneway-multiprocess-recovery-case/1' && item?.runId === runId,
+function validateCase(item, caseId, servedRunId) {
+  assert(item?.schemaVersion === 'geneway-multiprocess-recovery-case/1' && item?.runId === servedRunId,
     `${caseId} has invalid multiprocess evidence metadata`);
   assert(item.caseId === caseId && item.faultTriggered === true && item.fault_triggered === true,
     `${caseId} did not trigger its real fault`);
@@ -103,20 +113,52 @@ function validateCase(item, caseId) {
 
 let stage = 'multiprocess-recovery';
 try {
-  await mkdir(outputRoot, { recursive: true });
+  await mkdir(outputRoot, { recursive: true, mode: 0o700 });
+  assertSecureRunDirectories([
+    '/tmp/geneway-runs',
+    join('/tmp/geneway-runs', requestedRunId),
+    outputRoot,
+  ]);
   await run('node', ['scripts/check-e2e-authenticity.mjs']);
-  await run('node', ['scripts/run-e2e.mjs', '--project=gate0.2a-recovery-multiprocess'], { GENEWAY_RUN_ID: runId });
+  await run('node', ['scripts/run-e2e.mjs', ...e2eArguments], {
+    GENEWAY_RUN_ID: requestedRunId,
+    GENEWAY_E2E_INVOCATION_RESULT_PATH: invocationResultPath,
+  });
 
   stage = 'evidence-validation';
+  const invocation = await readJson(invocationResultPath);
+  assert(invocation?.schemaVersion === 'geneway-e2e-invocation-result/1'
+    && invocation.parentRunId === requestedRunId
+    && typeof invocation.runId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(invocation.runId)
+    && invocation.artifactRoot === `/tmp/geneway-runs/${invocation.runId}`
+    && JSON.stringify(invocation.forwarded) === JSON.stringify(e2eArguments)
+    && JSON.stringify(invocation.selectedProjects) === JSON.stringify(['gate0.2a-recovery-multiprocess'])
+    && invocation.status === 0 && invocation.signal === null && invocation.cleanupPassed === true
+    && invocation.reportGatePassed === true && invocation.passed === true,
+  'E2E invocation result does not bind a passing recovery served run');
+  const servedRunId = invocation.runId;
+  const servedArtifactRoot = invocation.artifactRoot;
+  const gate02bGuarded = gate02bEnvironmentNames.every((name) => process.env[name] !== undefined);
+  assert(e2eRunIdentity(requestedRunId, e2eArguments, gate02bGuarded).runId === servedRunId,
+    'E2E invocation result does not match the canonical served run identity');
+  assertSecureRunDirectories([servedArtifactRoot]);
+  const sourceBinding = await readJson(join(servedArtifactRoot, 'source-binding.json'));
+  assert(sourceBinding?.runId === servedRunId && sourceBinding.parentRunId === requestedRunId
+    && JSON.stringify(sourceBinding.forwarded) === JSON.stringify(e2eArguments)
+    && JSON.stringify(sourceBinding.selectedProjects) === JSON.stringify(['gate0.2a-recovery-multiprocess']),
+  'E2E source binding does not match the invocation result');
+  const casesRoot = join(servedArtifactRoot, 'recovery', 'cases');
   const caseFileNames = (await readdir(casesRoot)).filter((name) => name.endsWith('.json')).sort();
   const expectedFileNames = requiredCaseIds.map((caseId) => `${caseId}.json`).sort();
   assert(JSON.stringify(caseFileNames) === JSON.stringify(expectedFileNames),
     `Recovery case files drifted; expected ${expectedFileNames.join(', ')}, observed ${caseFileNames.join(', ')}`);
   const cases = [];
-  for (const caseId of requiredCaseIds) cases.push(validateCase(await readJson(join(casesRoot, `${caseId}.json`)), caseId));
+  for (const caseId of requiredCaseIds) {
+    cases.push(validateCase(await readJson(join(casesRoot, `${caseId}.json`)), caseId, servedRunId));
+  }
 
-  const cleanupPath = join('/tmp/geneway-runs', runId, 'worker-authority-cleanup.json');
-  const hooksPath = join('/tmp/geneway-runs', runId, 'process-boundaries', 'e2e-hooks.json');
+  const cleanupPath = join(servedArtifactRoot, 'worker-authority-cleanup.json');
+  const hooksPath = join(servedArtifactRoot, 'process-boundaries', 'e2e-hooks.json');
   const cleanup = await readJson(cleanupPath);
   const hooks = await readJson(hooksPath);
   assert(cleanup.workerReceiptFound === true && cleanup.workerGenerationCount >= 6 && cleanup.workerGenerationsExited === true,
@@ -125,7 +167,7 @@ try {
     && cleanup.controlPlaneGenerationsExited === true, 'Control Plane generation lifecycle evidence is incomplete');
   assert(cleanup.authorityCleaned === true && cleanup.tokenRemoved === true && cleanup.socketRemoved === true,
     'Worker authority was not fully removed');
-  assert(hooks.schemaVersion === 'geneway-e2e-hooks/1' && hooks.runId === runId && Array.isArray(hooks.hooks),
+  assert(hooks.schemaVersion === 'geneway-e2e-hooks/1' && hooks.runId === servedRunId && Array.isArray(hooks.hooks),
     'Hook supervisor evidence is invalid');
 
   const observed = cases.map((item) => item.caseId);
@@ -136,7 +178,10 @@ try {
     .map((item) => item.caseId);
   const summary = {
     schemaVersion: 'geneway-gate0.2a-multiprocess-recovery/1',
-    runId,
+    runId: requestedRunId,
+    servedRunId,
+    servedArtifactRoot,
+    invocationResultPath,
     generatedAt: new Date().toISOString(),
     requiredCaseIds,
     cases: cases.map((item) => ({ ...item, fault_triggered: true })),
@@ -158,7 +203,7 @@ try {
 } catch (error) {
   const failure = {
     schemaVersion: 'geneway-gate0.2a-multiprocess-recovery/1',
-    runId,
+    runId: requestedRunId,
     generatedAt: new Date().toISOString(),
     passed: false,
     failedStage: stage,

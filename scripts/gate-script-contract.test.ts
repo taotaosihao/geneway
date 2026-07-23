@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -69,6 +69,10 @@ interface Gate02bModule {
     nestedSources?: Readonly<Record<string, string>>) => readonly unknown[];
   requiredGate02bSteps: readonly GateStep[];
   sourceBindingsMatch: (initial: Readonly<Record<string, unknown>>, final: Readonly<Record<string, unknown>>) => boolean;
+  storageInvocationManifests: (runRoot: string, expectation?: {
+    expectedWithStorageInvocations?: number; expectedStorageInvocations?: number;
+    expectedE2eInvocations?: number; enforceExpectedCardinality?: boolean;
+  }) => unknown[];
   validateArtifactRoots: (roots: unknown) => string[];
   validateCleanupReceipt: (receipt: unknown) => boolean;
   validateGate02bCommandSafety: (steps: readonly { command: readonly string[] }[]) => boolean;
@@ -86,7 +90,7 @@ const {
   networkAttachmentsAfterInspect, observedDockerContainer, processIdentityMatchesProof, proxyTargetBindingMatches, publishedPortsAfterInspect,
   readProcNetSnapshot, requiredGate02bSteps, unresolvedUnsafeListeners,
   stableProcessCommandLine, storeObservedDockerContainer, unreachableCachedDockerNetworkContext,
-  sourceBindingsMatch, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
+  sourceBindingsMatch, storageInvocationManifests, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
   validateDockerIsolationCommandSafety, validateDockerStructuralIsolationReceipt, validateGate02bStepPlan,
   validateGate02bInvocationTopology, validateProcessLifecycleReceipt, validateProxyIdentityChain, validateProxyInventory, validateProxyPolicy,
   validateProxyRawReceipt,
@@ -98,8 +102,40 @@ const { controlledDockerInvocation } = await import('./gate02b-loopback-proxy.mj
     command: string; args: string[]; options: { timeout: number; killSignal: string; env: Record<string, string | undefined> };
   };
 };
+// @ts-expect-error The executable helper is native ESM; this test consumes its pure identity function.
+const { assertSecureRunDirectories, e2eRunIdentity } = await import('./e2e-run-identity.mjs') as unknown as {
+  assertSecureRunDirectories: (paths: string[]) => void;
+  e2eRunIdentity: (parentRunId: string, forwarded: string[], guarded: boolean) => { runId: string; selectedProjects: string[] };
+};
 
 describe('Gate 0.2A executable script contract', () => {
+  it('shares the guarded served-run identity with parent evidence validators', () => {
+    const parentRunId = 'gate0.2a-recovery-example';
+    const forwarded = ['--project=gate0.2a-recovery-multiprocess'];
+    const identityHash = createHash('sha256').update(JSON.stringify({
+      parentRunId, forwarded, selectedProjects: ['gate0.2a-recovery-multiprocess'],
+    })).digest('hex').slice(0, 16);
+    expect(e2eRunIdentity(parentRunId, forwarded, true)).toEqual({
+      runId: `${parentRunId}-gate0-2a-recovery-multiprocess-${identityHash}`,
+      selectedProjects: ['gate0.2a-recovery-multiprocess'],
+    });
+    expect(e2eRunIdentity(parentRunId, forwarded, false).runId).toBe(parentRunId);
+  });
+
+  it('rejects a symlink anywhere a recovery evidence directory is required', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'geneway-recovery-directory-'));
+    try {
+      const real = join(root, 'real');
+      const linked = join(root, 'linked');
+      await mkdir(real, { mode: 0o700 });
+      await symlink(real, linked);
+      expect(() => assertSecureRunDirectories([root, real])).not.toThrow();
+      expect(() => assertSecureRunDirectories([root, linked])).toThrow('Run evidence directory is unsafe');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('accepts a browser projection ahead of a persisted streaming checkpoint', () => {
     expect(isVisiblePersistedStreamingCheckpoint({
       invocationStatus: 'running', persistedStatus: 'streaming', persistedBody: '你好，我', browserText: '你好，我是小纬',
@@ -138,12 +174,19 @@ describe('Gate 0.2A executable script contract', () => {
 
   it('makes the served E2E runner fail when report membership or no-skip validation fails', async () => {
     const runner = await readFile(new URL('./run-e2e.mjs', import.meta.url), 'utf8');
+    const identityHelper = await readFile(new URL('./e2e-run-identity.mjs', import.meta.url), 'utf8');
+    const recoveryRunner = await readFile(new URL('./test-recovery.mjs', import.meta.url), 'utf8');
     expect(runner).toContain('scripts/e2e-report-gate.ts');
     expect(runner).toContain('cleanupFailed || reportGateFailed');
     for (const name of ['GENEWAY_GATE02B_EGRESS_GUARD', 'GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY',
       'GENEWAY_GATE02B_PROXY_RUN_ROOT', 'GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL',
-      'GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL']) expect(runner).toContain(name);
+      'GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL']) expect(`${runner}\n${identityHelper}`).toContain(name);
     expect(runner).toContain('Gate 0.2B E2E environment tuple is incomplete');
+    expect(runner).toContain("schemaVersion: 'geneway-e2e-invocation-result/1'");
+    expect(runner).toContain("{ flag: 'wx', mode: 0o600 }");
+    expect(recoveryRunner).toContain('constants.O_RDONLY | constants.O_NOFOLLOW');
+    expect(recoveryRunner).toContain('assertSecureRunDirectories([');
+    expect(recoveryRunner).toContain("sourceBinding.parentRunId === requestedRunId");
     const partial = spawnSync(process.execPath, ['scripts/run-e2e.mjs'], {
       cwd: new URL('..', import.meta.url), encoding: 'utf8',
       env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C.UTF-8', GENEWAY_GATE02B_EGRESS_GUARD: 'required' },
@@ -347,8 +390,10 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     const playwrightConfig = await readFile(new URL('./playwright.config.ts', import.meta.url), 'utf8');
     const proxyRunner = await readFile(new URL('./gate02b-loopback-proxy.mjs', import.meta.url), 'utf8');
     const e2eRunner = await readFile(new URL('./run-e2e.mjs', import.meta.url), 'utf8');
+    const e2eIdentity = await readFile(new URL('./e2e-run-identity.mjs', import.meta.url), 'utf8');
     const guard = await readFile(new URL('./backup-restore/gate02b-egress-guard.c', import.meta.url), 'utf8');
     const verifier = await readFile(new URL('./verify-gate0.2b.mjs', import.meta.url), 'utf8');
+    expect(verifier).toContain('const backupRunsRequired = result.status === 0 && result.signal === null');
     expect(compose).toContain('internal: ${GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL:-false}');
     expect(compose).toContain('internal: ${GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL:-true}');
     expect(backupCompose).toContain('internal: ${GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL:-false}');
@@ -373,8 +418,8 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     expect(proxyRunner).toContain("timeout: 2_000");
     expect(proxyRunner).toContain("DOCKER_CONFIG: configPath");
     expect(proxyRunner).not.toContain('DOCKER_CONTEXT:');
-    expect(e2eRunner).toContain("JSON.stringify({ parentRunId, forwarded, selectedProjects })");
-    expect(e2eRunner).toContain('const runId = gate02bGuarded');
+    expect(e2eIdentity).toContain("JSON.stringify({ parentRunId, forwarded, selectedProjects })");
+    expect(e2eRunner).toContain('e2eRunIdentity(parentRunId, forwarded, gate02bGuarded)');
     expect(e2eRunner).toContain('parentRunId,\n    forwarded,\n    selectedProjects,');
     expect(verifier).toContain("['cc', '-std=gnu17', '-shared', '-fPIC'");
     for (const call of ['connect(', 'sendto(', 'sendmsg(', 'sendmmsg(']) expect(guard).toContain(call);
@@ -702,6 +747,26 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     }).passed).toBe(false);
     expect(dockerStructuralIsolationReceipt({ ...cleanState, monitorExit: { status: 0, signal: null } }, [], [],
       { expectedWithStorageInvocations: 1 }).passed).toBe(false);
+    expect(dockerStructuralIsolationReceipt({ ...cleanState, monitorExit: { status: 0, signal: null } }, [], [], {
+      expectedWithStorageInvocations: 1,
+      expectedStorageInvocations: 1,
+      enforceExpectedCardinality: false,
+    }).passed).toBe(true);
+  });
+
+  it('preserves partial storage invocation evidence for a failed child without relaxing successful-child cardinality', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'geneway-partial-invocations-'));
+    try {
+      const expectation = {
+        expectedWithStorageInvocations: 1,
+        expectedStorageInvocations: 1,
+        expectedE2eInvocations: 0,
+      };
+      expect(storageInvocationManifests(root, { ...expectation, enforceExpectedCardinality: false })).toEqual([]);
+      expect(() => storageInvocationManifests(root, expectation)).toThrow('storage invocation manifests are missing');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('requires exact structured backup child run membership', () => {

@@ -1148,8 +1148,9 @@ export function expectedBackupProxyProjects(results) {
 export function storageInvocationManifests(runRoot, expectation = {}) {
   const directory = resolve(runRoot, 'invocations');
   const expectedTotal = expectation.expectedWithStorageInvocations ?? 0;
+  const enforceExpectedCardinality = expectation.enforceExpectedCardinality !== false;
   if (!existsSync(directory)) {
-    if (expectedTotal !== 0) throw new Error('Gate 0.2B storage invocation manifests are missing');
+    if (enforceExpectedCardinality && expectedTotal !== 0) throw new Error('Gate 0.2B storage invocation manifests are missing');
     return [];
   }
   const directoryStat = lstatSync(directory);
@@ -1202,8 +1203,8 @@ export function storageInvocationManifests(runRoot, expectation = {}) {
   });
   const storageCount = manifests.filter((manifest) => manifest.kind === 'storage').length;
   const e2eCount = manifests.filter((manifest) => manifest.kind === 'e2e').length;
-  if (manifests.length !== expectedTotal || storageCount !== (expectation.expectedStorageInvocations ?? 0)
-    || e2eCount !== (expectation.expectedE2eInvocations ?? 0)) {
+  if (enforceExpectedCardinality && (manifests.length !== expectedTotal || storageCount !== (expectation.expectedStorageInvocations ?? 0)
+    || e2eCount !== (expectation.expectedE2eInvocations ?? 0))) {
     throw new Error('Gate 0.2B storage invocation manifest membership does not match the step plan');
   }
   return manifests;
@@ -1216,6 +1217,7 @@ export function backupArtifactRoots(results) {
 }
 
 export function dockerStructuralIsolationReceipt(state, expectedBackupRunIds = [], proxyRunRoot = null, proxyExpectation = {}) {
+  const enforceExpectedCardinality = proxyExpectation.enforceExpectedCardinality !== false;
   const containers = [...state.containers.values()].filter((container) => container.repositoryScoped === true).map((container) => ({
     id: container.id, name: container.name, project: container.project ?? null, service: container.service ?? null,
     backupRun: container.backupRun ?? null, backupRole: container.backupRole ?? null, backupAction: container.backupAction ?? null,
@@ -1303,7 +1305,8 @@ export function dockerStructuralIsolationReceipt(state, expectedBackupRunIds = [
     }
   }
   const backupRunIds = [...new Set(containers.flatMap((container) => typeof container.backupRun === 'string' ? [container.backupRun] : []))].sort();
-  if (JSON.stringify(backupRunIds) !== JSON.stringify(expectedBackupRunIds)) violations.push('backup-run-membership-mismatch');
+  if (enforceExpectedCardinality
+    && JSON.stringify(backupRunIds) !== JSON.stringify(expectedBackupRunIds)) violations.push('backup-run-membership-mismatch');
   const proxyRoots = proxyRunRoot === null ? [] : [...new Set(Array.isArray(proxyRunRoot) ? proxyRunRoot : [proxyRunRoot])];
   const invocationManifests = proxyRoots.length === 0 ? [] : storageInvocationManifests(proxyRoots[0], proxyExpectation);
   const proxyReceipts = proxyRoots.map((root) => loopbackProxyArtifactReceipt(root, state));
@@ -1317,8 +1320,9 @@ export function dockerStructuralIsolationReceipt(state, expectedBackupRunIds = [
   const actualProxyNames = loopbackProxies.proxies.map((proxy) => proxy.name).sort();
   loopbackProxies.expectedNames = expectedProxyNames;
   loopbackProxies.passed &&= JSON.stringify(actualProxyNames) === JSON.stringify(expectedProxyNames);
-  const expectedProxyCount = (proxyExpectation.expectedWithStorageInvocations ?? 0) * 4
-    + (proxyExpectation.expectedBackupCases ?? 0) * 4;
+  const expectedProxyCount = enforceExpectedCardinality
+    ? (proxyExpectation.expectedWithStorageInvocations ?? 0) * 4 + (proxyExpectation.expectedBackupCases ?? 0) * 4
+    : expectedProxyNames.length;
   loopbackProxies.expectedCount = expectedProxyCount;
   loopbackProxies.passed &&= loopbackProxies.count === expectedProxyCount;
   if (!loopbackProxies.passed) violations.push('loopback-proxy-boundary-failed');
@@ -1856,7 +1860,8 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
   runtimeReceipt.unsafeListeners = unresolvedUnsafeListeners(runtimeReceipt.listenerObservations);
   runtimeReceipt.nonLoopbackEgress = [...new Set(runtimeReceipt.nonLoopbackEgress)].sort();
   runtimeReceipt.forbiddenProcesses = [...new Map(runtimeReceipt.forbiddenProcesses.map((item) => [`${String(item.pid)}:${item.identity}`, item])).values()];
-  const backupRunsRequired = ['gate0.2b.3', 'gate0.2a-baseline'].includes(step.name);
+  const backupRunsRequired = result.status === 0 && result.signal === null
+    && ['gate0.2b.3', 'gate0.2a-baseline'].includes(step.name);
   const backupLog = readFileSync(logPath, 'utf8');
   const expectedBackupRuns = extractStructuredBackupRuns(backupLog, backupRunsRequired);
   const expectedBackupRunIds = expectedBackupRuns.map((result) => result.runId);
@@ -1864,8 +1869,19 @@ async function runStep(step, runId, outputRoot, aggregateBinding, guardLibraryPa
     environment.GENEWAY_GATE02B_PROXY_RUN_ROOT,
     ...expectedBackupRunIds.map((runId) => `/tmp/geneway-runs/${runId}-proxies`),
   ])];
-  runtimeReceipt.structuralIsolation = dockerStructuralIsolationReceipt(dockerObservation, expectedBackupRunIds, proxyRoots,
-    { ...step, expectedBackupProjects: expectedBackupProxyProjects(expectedBackupRuns) });
+  const enforceExpectedCardinality = result.status === 0 && result.signal === null;
+  try {
+    runtimeReceipt.structuralIsolation = dockerStructuralIsolationReceipt(dockerObservation, expectedBackupRunIds, proxyRoots,
+      { ...step, expectedBackupProjects: expectedBackupProxyProjects(expectedBackupRuns), enforceExpectedCardinality });
+  } catch (cause) {
+    if (enforceExpectedCardinality) throw cause;
+    runtimeReceipt.structuralIsolation = {
+      checked: true,
+      passed: false,
+      partialFailureEvidence: true,
+      error: cause instanceof Error ? cause.message : String(cause),
+    };
+  }
   const afterGlobalListeners = globalListenerLines();
   const identities = [...observedIdentities.values()].sort((left, right) => left.pid - right.pid);
   const survivors = identities.filter(processIdentityStillAlive);

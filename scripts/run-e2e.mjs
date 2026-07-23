@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { resolve } from 'node:path';
+import { assertSecureRunDirectories, e2eRunIdentity, gate02bEnvironmentNames } from './e2e-run-identity.mjs';
 
 async function findAvailablePort(excludedPorts = new Set()) {
   while (true) {
@@ -20,33 +21,26 @@ async function findAvailablePort(excludedPorts = new Set()) {
 }
 
 const forwarded = process.argv.slice(2).filter((argument, index) => !(argument === '--' && index === 0));
-const selectedProjects = forwarded.flatMap((argument, index) => {
-  if (argument.startsWith('--project=')) return [argument.slice('--project='.length)];
-  if (argument === '--project') return [forwarded[index + 1]];
-  return [];
-}).filter((value) => typeof value === 'string');
-const gateA0Live = selectedProjects.includes('gate-a0-live');
-const gate02bEnvironmentNames = [
-  'GENEWAY_GATE02B_EGRESS_GUARD', 'GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY', 'GENEWAY_GATE02B_PROXY_RUN_ROOT',
-  'GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL', 'GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL',
-];
 const gate02bEnvironment = Object.fromEntries(gate02bEnvironmentNames.flatMap((name) =>
   process.env[name] === undefined ? [] : [[name, process.env[name]]]));
 if (![0, gate02bEnvironmentNames.length].includes(Object.keys(gate02bEnvironment).length)) {
   throw new Error('Gate 0.2B E2E environment tuple is incomplete');
 }
 const gate02bGuarded = Object.keys(gate02bEnvironment).length === gate02bEnvironmentNames.length;
+const parentRunId = process.env.GENEWAY_RUN_ID ?? `gate-0.1-${Date.now()}-${process.pid}`;
+if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(parentRunId)) throw new Error('GENEWAY_RUN_ID must be a safe path segment');
+const { runId, selectedProjects } = e2eRunIdentity(parentRunId, forwarded, gate02bGuarded);
+const invocationResultPath = process.env.GENEWAY_E2E_INVOCATION_RESULT_PATH;
+const expectedInvocationResultPath = `/tmp/geneway-runs/${parentRunId}/recovery/e2e-invocation-result.json`;
+if (invocationResultPath !== undefined && invocationResultPath !== expectedInvocationResultPath) {
+  throw new Error('GENEWAY_E2E_INVOCATION_RESULT_PATH is outside the bounded parent recovery root');
+}
+const gateA0Live = selectedProjects.includes('gate-a0-live');
 const liveAuthFile = process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE;
 const liveConformanceFile = process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE;
 if (gateA0Live && (liveAuthFile === undefined || liveConformanceFile === undefined)) {
   throw new Error('gate-a0-live requires GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE and GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE');
 }
-const parentRunId = process.env.GENEWAY_RUN_ID ?? `gate-0.1-${Date.now()}-${process.pid}`;
-const identityHash = createHash('sha256').update(JSON.stringify({ parentRunId, forwarded, selectedProjects })).digest('hex').slice(0, 16);
-const identityLabel = (selectedProjects[0] ?? 'default').toLowerCase().replace(/[^a-z0-9_-]/gu, '-').slice(0, 32);
-const runId = gate02bGuarded
-  ? `${parentRunId.replace(/[^A-Za-z0-9._-]/gu, '-').slice(0, 56)}-${identityLabel}-${identityHash}`
-  : parentRunId;
 const allocatedPorts = new Set();
 const allocatePort = async () => {
   const port = String(await findAvailablePort(allocatedPorts));
@@ -355,5 +349,26 @@ try {
   })}\n`, { mode: 0o600 });
   if (!authorityCleaned || !modelGatewayAuthorityCleaned) cleanupFailed = true;
 }
+const exitCode = cleanupFailed || reportGateFailed ? 1 : (result?.status ?? 1);
+if (invocationResultPath !== undefined) {
+  assertSecureRunDirectories([
+    '/tmp/geneway-runs',
+    `/tmp/geneway-runs/${parentRunId}`,
+    `/tmp/geneway-runs/${parentRunId}/recovery`,
+  ]);
+  writeFileSync(invocationResultPath, `${JSON.stringify({
+    schemaVersion: 'geneway-e2e-invocation-result/1',
+    parentRunId,
+    runId,
+    artifactRoot: `/tmp/geneway-runs/${runId}`,
+    forwarded,
+    selectedProjects,
+    status: result?.status ?? null,
+    signal: result?.signal ?? null,
+    cleanupPassed: !cleanupFailed,
+    reportGatePassed: !reportGateFailed,
+    passed: exitCode === 0,
+  })}\n`, { flag: 'wx', mode: 0o600 });
+}
 console.log(`geneway served-test artifacts: /tmp/geneway-runs/${runId}/`);
-process.exit(cleanupFailed || reportGateFailed ? 1 : (result?.status ?? 1));
+process.exit(exitCode);

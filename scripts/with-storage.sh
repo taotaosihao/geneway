@@ -1,8 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pick_port() {
-  node --input-type=module -e "import net from 'node:net'; const server=net.createServer(); server.listen(0,'127.0.0.1',()=>{ const address=server.address(); if(typeof address==='string'||address===null) process.exit(1); console.log(address.port); server.close(); });"
+pick_ports() {
+  node --input-type=module <<'NODE'
+import net from 'node:net';
+const servers = Array.from({ length: 4 }, () => net.createServer());
+await Promise.all(servers.map((server) => new Promise((resolve, reject) => {
+  server.once('error', reject);
+  server.listen(0, '127.0.0.1', resolve);
+})));
+const ports = servers.map((server) => server.address()).map((address) => {
+  if (typeof address === 'string' || address === null) throw new Error('unable to reserve loopback port');
+  return address.port;
+});
+if (new Set(ports).size !== servers.length) throw new Error('loopback port reservation collision');
+await Promise.all(servers.map((server) => new Promise((resolve, reject) =>
+  server.close((error) => error === undefined ? resolve() : reject(error)))));
+console.log(ports.join(' '));
+NODE
 }
 
 random_secret() {
@@ -21,10 +36,25 @@ if [[ "${GENEWAY_MANAGED_TEST_INFRA:-0}" == '1' ]]; then
   [[ "$GENEWAY_S3_ENDPOINT" == "http://127.0.0.1:${GENEWAY_S3_PORT}" ]] || { echo 'managed S3 endpoint is not loopback' >&2; exit 1; }
   [[ "$COMPOSE_PROJECT_NAME" == geneway-e2e-* ]] || { echo 'managed compose project is not an E2E project' >&2; exit 1; }
 else
-  export GENEWAY_POSTGRES_PORT="$(pick_port)"
-  export GENEWAY_S3_PORT="$(pick_port)"
-  export GENEWAY_STORAGE_ADAPTER_PORT="$(pick_port)"
-  export GENEWAY_RECONCILIATION_ADAPTER_PORT="$(pick_port)"
+  GENEWAY_POSTGRES_PORT=''
+  GENEWAY_S3_PORT=''
+  GENEWAY_STORAGE_ADAPTER_PORT=''
+  GENEWAY_RECONCILIATION_ADAPTER_PORT=''
+  if ! read -r GENEWAY_POSTGRES_PORT GENEWAY_S3_PORT GENEWAY_STORAGE_ADAPTER_PORT \
+    GENEWAY_RECONCILIATION_ADAPTER_PORT < <(pick_ports); then
+    echo 'unable to reserve four distinct loopback ports' >&2
+    exit 1
+  fi
+  [[ "$GENEWAY_POSTGRES_PORT" =~ ^[1-9][0-9]*$ && "$GENEWAY_S3_PORT" =~ ^[1-9][0-9]*$ \
+    && "$GENEWAY_STORAGE_ADAPTER_PORT" =~ ^[1-9][0-9]*$ && "$GENEWAY_RECONCILIATION_ADAPTER_PORT" =~ ^[1-9][0-9]*$ \
+    && "$GENEWAY_POSTGRES_PORT" != "$GENEWAY_S3_PORT" && "$GENEWAY_POSTGRES_PORT" != "$GENEWAY_STORAGE_ADAPTER_PORT" \
+    && "$GENEWAY_POSTGRES_PORT" != "$GENEWAY_RECONCILIATION_ADAPTER_PORT" && "$GENEWAY_S3_PORT" != "$GENEWAY_STORAGE_ADAPTER_PORT" \
+    && "$GENEWAY_S3_PORT" != "$GENEWAY_RECONCILIATION_ADAPTER_PORT" \
+    && "$GENEWAY_STORAGE_ADAPTER_PORT" != "$GENEWAY_RECONCILIATION_ADAPTER_PORT" ]] || {
+    echo 'loopback port reservation did not return four distinct ports' >&2
+    exit 1
+  }
+  export GENEWAY_POSTGRES_PORT GENEWAY_S3_PORT GENEWAY_STORAGE_ADAPTER_PORT GENEWAY_RECONCILIATION_ADAPTER_PORT
   export DATABASE_URL="postgres://geneway:geneway@127.0.0.1:${GENEWAY_POSTGRES_PORT}/geneway_test"
   export GENEWAY_S3_ENDPOINT="http://127.0.0.1:${GENEWAY_S3_PORT}"
   export COMPOSE_PROJECT_NAME="geneway-storage-$$-$(date +%s)"
@@ -170,8 +200,8 @@ if [[ "${GENEWAY_GATE02B_EGRESS_GUARD:-}" == "required" ]]; then
   : "${GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY:?Gate 0.2B proxy requires guard library}"
   proxy_root="$GENEWAY_GATE02B_PROXY_RUN_ROOT"
   compose=(env \
-    GENEWAY_POSTGRES_PORT="$(pick_port)" GENEWAY_S3_PORT="$(pick_port)" \
-    GENEWAY_STORAGE_ADAPTER_PORT="$(pick_port)" GENEWAY_RECONCILIATION_ADAPTER_PORT="$(pick_port)" \
+    GENEWAY_POSTGRES_PORT="$GENEWAY_POSTGRES_PORT" GENEWAY_S3_PORT="$GENEWAY_S3_PORT" \
+    GENEWAY_STORAGE_ADAPTER_PORT="$GENEWAY_STORAGE_ADAPTER_PORT" GENEWAY_RECONCILIATION_ADAPTER_PORT="$GENEWAY_RECONCILIATION_ADAPTER_PORT" \
     docker --host unix:///var/run/docker.sock compose -f scripts/docker-compose.yml)
 fi
 if [[ "${GENEWAY_STORAGE_TARGET_ROLE:-test}" != 'control-plane' ]]; then

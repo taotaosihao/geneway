@@ -449,6 +449,38 @@ set -e
     }
   });
 
+  it('reserves all four storage proxy ports concurrently so one invocation cannot self-collide', async () => {
+    const storageRunner = await readFile(new URL('./with-storage.sh', import.meta.url), 'utf8');
+    const functionStart = storageRunner.indexOf('pick_ports() {');
+    const functionEnd = storageRunner.indexOf('\n\nrandom_secret() {', functionStart);
+    expect(functionStart).toBeGreaterThanOrEqual(0);
+    expect(functionEnd).toBeGreaterThan(functionStart);
+    const probe = spawnSync('bash', ['-c', `
+set -euo pipefail
+${storageRunner.slice(functionStart, functionEnd)}
+for _ in $(seq 1 20); do
+  read -r first second third fourth < <(pick_ports)
+  [[ "$first" =~ ^[1-9][0-9]*$ && "$second" =~ ^[1-9][0-9]*$ \
+    && "$third" =~ ^[1-9][0-9]*$ && "$fourth" =~ ^[1-9][0-9]*$ ]]
+  [[ "$(printf '%s\n' "$first" "$second" "$third" "$fourth" | sort -u | wc -l)" -eq 4 ]]
+  node --input-type=module - "$first" "$second" "$third" "$fourth" <<'NODE'
+import net from 'node:net';
+const ports = process.argv.slice(2).map(Number);
+const servers = ports.map(() => net.createServer());
+await Promise.all(servers.map((server, index) => new Promise((resolve, reject) => {
+  server.once('error', reject);
+  server.listen(ports[index], '127.0.0.1', resolve);
+})));
+await Promise.all(servers.map((server) => new Promise((resolve, reject) =>
+  server.close((error) => error === undefined ? resolve() : reject(error)))));
+NODE
+done
+`], { encoding: 'utf8', timeout: 15_000 });
+    expect(probe.status, `${probe.stdout}\n${probe.stderr}\n${String(probe.error)} signal=${String(probe.signal)}`).toBe(0);
+    expect(storageRunner).not.toContain('pick_port() {');
+    expect(storageRunner).not.toContain('$(pick_port)');
+  });
+
   it('abandons an unresponsive backup proxy without a numeric signal fallback', async () => {
     const backupRunner = await readFile(new URL('./run-backup-restore.mjs', import.meta.url), 'utf8');
     const functionStart = backupRunner.indexOf('function abandonUnresponsiveControlPipeChild(child) {');

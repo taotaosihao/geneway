@@ -945,13 +945,27 @@ function boundarySnapshot() {
     containers: dockerResources, workerSockets };
 }
 
+function isModelGatewayTypeScriptProjectBuild(commandLine) {
+  if (typeof commandLine !== 'string'
+    || !/(?:^|\s)services\/model-gateway\/tsconfig\.json(?:\s|$)/u.test(commandLine)
+    || /(?:[&|;`\r\n]|\$\()/u.test(commandLine)) return false;
+  const command = commandLine.trim().replace(/^(?:\S*\/)?sh\s+-c\s+/u, '');
+  return /^(?:(?:\S*\/)?tsc|(?:\S*\/)?pnpm(?:\.cjs)?\s+(?:exec\s+)?(?:\S*\/)?tsc|(?:\S*\/)?node\s+(?:(?:\S*\/)?pnpm(?:\.cjs)?\s+(?:exec\s+)?(?:\S*\/)?tsc|\S*typescript\/bin\/tsc))\s+-b(?:\s|$)/u.test(command);
+}
+
+export function isForbiddenRuntimeCommandLine(commandLine) {
+  if (typeof commandLine !== 'string') return false;
+  const forbiddenRuntimePattern = /(?:start-e2e-model-gateway|start-gate-a0-release|run-gate-a0-lan|gate-a0-live|GENEWAY_LAN_|GENEWAY_MODEL_GATEWAY_|(?:^|\s)provider(?:\s|$))/iu;
+  if (forbiddenRuntimePattern.test(commandLine)) return true;
+  return /services\/model-gateway/iu.test(commandLine) && !isModelGatewayTypeScriptProjectBuild(commandLine);
+}
+
 function runtimeBoundarySample(rootPid, initialGlobalListeners) {
   const descendants = descendantProcesses(rootPid);
   const listeners = socketLinesForProcesses(['ss', '-H', '-ltnp'], descendants, 'listener');
   const egress = socketLinesForProcesses(['ss', '-H', '-tnp', 'state', 'established'], descendants, 'egress');
   const addedGlobalListeners = additions(initialGlobalListeners, globalListenerLines());
-  const forbiddenRuntimePattern = /(?:start-e2e-model-gateway|start-gate-a0-release|run-gate-a0-lan|services\/model-gateway|gate-a0-live|GENEWAY_LAN_|GENEWAY_MODEL_GATEWAY_|(?:^|\s)provider(?:\s|$))/iu;
-  const forbiddenProcesses = descendants.filter((item) => forbiddenRuntimePattern.test(item.commandLine))
+  const forbiddenProcesses = descendants.filter((item) => isForbiddenRuntimeCommandLine(item.commandLine))
     .map((item) => ({ pid: item.pid, command: item.command, identity: item.commandLine.split(/\s+/u).slice(0, 4).join(' ') }));
   const unsafeListeners = [...listeners, ...addedGlobalListeners].filter((line) => {
     const local = line.split(/\s+/u)[0] ?? '';

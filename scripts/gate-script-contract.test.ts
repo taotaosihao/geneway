@@ -14,6 +14,7 @@ interface Gate02bModule {
   gate02bDockerIsolationEnvironment: Readonly<Record<string, string>>;
   gate02bAggregatePassed: (input: Readonly<Record<string, unknown>>) => boolean;
   gateAuthorityRootNames: (entries: readonly string[]) => string[];
+  isForbiddenRuntimeCommandLine: (commandLine: string) => boolean;
   isGateAuthorityPath: (path: string) => boolean;
   isRepositoryDockerScope: (name: string, labels?: Readonly<Record<string, string>>) => boolean;
   dockerStructuralIsolationReceipt: (state: unknown) => { passed: boolean; violations: string[] };
@@ -35,7 +36,7 @@ const {
   backupArtifactRoots, childEnvironment, collectReachableCommandStrings, dockerStructuralIsolationReceipt, extractNestedVerifierCommands,
   extractStructuredBackupRunIds,
   findForbiddenEnvironmentNames, gate02bAggregatePassed, gate02bDockerIsolationEnvironment, gateAuthorityRootNames,
-  isGateAuthorityPath,
+  isForbiddenRuntimeCommandLine, isGateAuthorityPath,
   isRepositoryDockerScope, parseBackupRawReceipt, parseSocketLine, requiredGate02bSteps,
   sourceBindingsMatch, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
   validateDockerIsolationCommandSafety, validateDockerStructuralIsolationReceipt, validateGate02bStepPlan,
@@ -212,6 +213,30 @@ describe('Gate 0.2B joint aggregate script contract', () => {
       'forbidden live/auth command',
     );
     expect(extractNestedVerifierCommands("const steps = [\n  ['lint', ['pnpm', 'lint']],\n];")).toEqual(['pnpm lint']);
+  });
+
+  it('allows only static TypeScript project builds to reference the Model Gateway tsconfig at runtime', () => {
+    const projects = 'packages/contracts/tsconfig.json services/model-gateway/tsconfig.json apps/worker/tsconfig.json';
+    for (const commandLine of [
+      `sh -c pnpm exec tsc -b ${projects} --force --pretty false`,
+      `node /home/gewu/.nvm/versions/node/v24.15.0/bin/pnpm exec tsc -b ${projects} --force --pretty false`,
+      `node ./node_modules/.bin/../typescript/bin/tsc -b ${projects} --force --pretty false`,
+    ]) expect(isForbiddenRuntimeCommandLine(commandLine), commandLine).toBe(false);
+    for (const commandLine of [
+      'node services/model-gateway/dist/index.js',
+      'tsx services/model-gateway/src/index.ts',
+      'vitest run services/model-gateway/src',
+      'node scripts/not-tsc.mjs -b services/model-gateway/tsconfig.json',
+      `pnpm exec tsc -b ${projects} & node services/model-gateway/dist/index.js`,
+      `pnpm exec tsc -b ${projects} | node services/model-gateway/dist/index.js`,
+      `pnpm exec tsc -b ${projects}\nnode services/model-gateway/dist/index.js`,
+      `pnpm exec tsc -b ${projects}\rnode services/model-gateway/dist/index.js`,
+      'node scripts/e2e/start-e2e-model-gateway.ts',
+      'node scripts/start-gate-a0-release.mjs',
+      'node scripts/run-gate-a0-lan.mjs',
+      'env GENEWAY_MODEL_GATEWAY_URL=http://127.0.0.1:3150 node scripts/safe.mjs',
+      'provider invoke live',
+    ]) expect(isForbiddenRuntimeCommandLine(commandLine), commandLine).toBe(true);
   });
 
   it('accepts the actual mandatory static typecheck and build targets after recursive expansion', async () => {

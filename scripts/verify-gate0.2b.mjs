@@ -770,6 +770,11 @@ function processIdentityObservation(pid) {
 export function readProcNetSnapshot(path, pid, expectedStartTicks, dependencies = {}) {
   const read = dependencies.read ?? ((candidate) => readFileSync(candidate, 'utf8'));
   const observeIdentity = dependencies.observeIdentity ?? processIdentityObservation;
+  const observeNetworkNamespace = dependencies.observeNetworkNamespace ?? ((candidate) => {
+    try { return { status: 'present', identity: readlinkSync(`/proc/${String(candidate)}/ns/net`) }; } catch (cause) {
+      return cause?.code === 'ENOENT' ? { status: 'released' } : { status: 'error', failure: cause };
+    }
+  });
   const wait = dependencies.wait ?? (() => Atomics.wait(procNetRetrySignal, 0, 0, 1));
   const identityDisposition = (identity) => {
     if (identity?.status === 'missing' || (identity?.status === 'present' && identity.state?.startsWith('Z'))) return 'exited';
@@ -795,7 +800,20 @@ export function readProcNetSnapshot(path, pid, expectedStartTicks, dependencies 
       const after = identityDisposition(observeIdentity(pid));
       if (after === 'exited') return { text: null, failure, exited: true, attempts: attempt };
       if (after !== 'bound') return { text: null, failure: identityFailure(), exited: false, attempts: attempt };
-      if (attempt === 3) return { text: null, failure, exited: false, attempts: attempt };
+      if (attempt === 3) {
+        const namespace = observeNetworkNamespace(pid);
+        const finalIdentity = identityDisposition(observeIdentity(pid));
+        if (finalIdentity === 'exited') return { text: null, failure: null, exited: true, attempts: attempt };
+        if (finalIdentity !== 'bound') return { text: null, failure: identityFailure(), exited: false, attempts: attempt };
+        if (namespace?.status === 'released') {
+          return { text: null, failure: null, exited: false, released: true, attempts: attempt };
+        }
+        if (namespace?.status === 'error') {
+          return { text: null, failure: namespace.failure ?? new Error('proc-net namespace identity could not be read'),
+            exited: false, attempts: attempt };
+        }
+        return { text: null, failure, exited: false, attempts: attempt };
+      }
       wait();
     }
   }
@@ -860,6 +878,7 @@ function observeDockerContainer(state, identity, fallbackName) {
     existing.netnsAttempted = true;
     existing.netnsSockets ??= [];
     existing.netnsErrors ??= [];
+    existing.netnsReleaseTransitions ??= [];
     for (const [protocol, file] of [['tcp', 'tcp'], ['tcp6', 'tcp6'], ['udp', 'udp'], ['udp6', 'udp6']]) {
       const path = `/proc/${String(container.State.Pid)}/net/${file}`;
       const snapshot = readProcNetSnapshot(path, container.State.Pid, existing.pidStartTicks);
@@ -867,6 +886,8 @@ function observeDockerContainer(state, identity, fallbackName) {
         try { existing.netnsSockets.push(...parseProcNetSockets(snapshot.text, protocol)); } catch (cause) {
           existing.netnsErrors.push(`${protocol}:${cause instanceof Error ? cause.message : String(cause)}`);
         }
+      } else if (snapshot.released) {
+        existing.netnsReleaseTransitions.push({ protocol, pid: container.State.Pid, pidStartTicks: existing.pidStartTicks });
       } else if (!snapshot.exited) {
         existing.netnsErrors.push(`${protocol}:${snapshot.failure instanceof Error ? snapshot.failure.message : String(snapshot.failure)}`);
       }
@@ -1227,6 +1248,8 @@ export function dockerStructuralIsolationReceipt(state, expectedBackupRunIds = [
     inspectObserved: container.inspectObserved === true, eventObserved: container.eventObserved === true,
     extraHosts: container.extraHosts ?? [], publishedPorts: container.publishedPorts ?? [], netnsAttempted: container.netnsAttempted === true,
     netnsErrors: [...new Set(container.netnsErrors ?? [])],
+    netnsReleaseTransitions: [...new Map((container.netnsReleaseTransitions ?? [])
+      .map((transition) => [JSON.stringify(transition), transition])).values()],
     netnsSockets: [...new Map((container.netnsSockets ?? []).map((socket) => [JSON.stringify(socket), socket])).values()],
     networkIds: [...container.networkIds].sort(), networkNames: [...container.networkNames].sort(),
     networkAttachments: container.networkAttachments ?? [],

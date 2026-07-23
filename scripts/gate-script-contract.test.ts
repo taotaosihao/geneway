@@ -28,7 +28,7 @@ interface Gate02bModule {
   isGateAuthorityPath: (path: string) => boolean;
   isRepositoryDockerScope: (name: string, labels?: Readonly<Record<string, string>>) => boolean;
   dockerStructuralIsolationReceipt: (state: unknown, backupRunIds?: string[], proxyRoots?: string[], expectation?: unknown) => {
-    passed: boolean; violations: string[];
+    passed: boolean; violations: string[]; observedContainers: Array<Record<string, unknown>>;
   };
   parseSocketLine: (line: string, kind: 'listener' | 'egress') => { local: string; peer: string; pids: number[] };
   parseProcNetSockets: (text: string, protocol: string) => Array<{ protocol: string; remoteAddress: string; remotePort: number; state: string }>;
@@ -44,8 +44,8 @@ interface Gate02bModule {
     name?: string) => { id: string; name: string } | undefined;
   readProcNetSnapshot: (path: string, pid: number, expectedStartTicks: string, dependencies: {
     read: (path: string) => string; observeIdentity: (pid: number) => { status: string; state?: string; startTicks?: string };
-    wait: () => void;
-  }) => { text: string | null; failure: unknown; exited: boolean; attempts: number };
+    observeNetworkNamespace?: (pid: number) => { status: string; identity?: string; failure?: unknown }; wait: () => void;
+  }) => { text: string | null; failure: unknown; exited: boolean; released?: boolean; attempts: number };
   unresolvedUnsafeListeners: (observations: Array<{ sample: number; unsafe: string[]; validated: string[] }>) => string[];
   unreachableCachedDockerNetworkContext: (network: {
     bridgeName: string; bridgeIdentity: { ifindex: number; address: string }; gatewayAddresses: Set<string>;
@@ -731,6 +731,38 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     })).toBe(true);
   });
 
+  it('records identity-bound namespace release separately while hard proc-net errors still fail closed', () => {
+    const project = 'geneway-storage-exit-race';
+    const networkId = 'network-id';
+    const baseContainer = {
+      id: 'container-id', name: `${project}-postgres-1`, project, service: 'postgres', repositoryScoped: true,
+      networkMode: `${project}_default`, inspectObserved: true, eventObserved: true,
+      networkIds: new Set([networkId]), networkNames: new Set([`${project}_default`]),
+      publishedPorts: [], extraHosts: [], netnsAttempted: true, netnsSockets: [], netnsErrors: [],
+      netnsReleaseTransitions: [{ protocol: 'udp', pid: 71, pidStartTicks: '42' }],
+    };
+    const baseState = {
+      containers: new Map([['container-id', baseContainer]]),
+      networks: new Map([[networkId, {
+        id: networkId, name: `${project}_default`, project, internal: true, driver: 'bridge', inspectObserved: true,
+        subnets: ['192.168.96.0/20'], networkIds: new Set(), networkNames: new Set(), memberIdentities: new Map(),
+      }]]),
+      monitorStarted: true, eventCount: 2, eventParseErrors: [], monitorErrors: [], monitorExit: { status: 143, signal: null },
+      monitorStop: { requested: true, signal: 'SIGTERM', requestSucceeded: true, exit: { status: 143, signal: null } },
+    };
+    const released = dockerStructuralIsolationReceipt(baseState);
+    expect(released.passed).toBe(true);
+    expect(released.observedContainers[0]).toMatchObject({
+      netnsErrors: [], netnsReleaseTransitions: [{ protocol: 'udp', pid: 71, pidStartTicks: '42' }],
+    });
+    const hardFailure = dockerStructuralIsolationReceipt({
+      ...baseState,
+      containers: new Map([['container-id', { ...baseContainer, netnsErrors: ['udp:EACCES'] }]]),
+    });
+    expect(hardFailure.passed).toBe(false);
+    expect(hardFailure.violations).toContain(`container-netns-read-failed:${project}-postgres-1`);
+  });
+
   it('accepts status 143 only after a successful verifier-requested SIGTERM monitor stop', () => {
     const cleanState = {
       containers: new Map(), networks: new Map(), monitorStarted: true, eventCount: 36,
@@ -987,6 +1019,7 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
 
   it('retries a live-identity proc-net ENOENT but still fails closed after the bounded attempts', () => {
     const enoent = Object.assign(new Error('missing'), { code: 'ENOENT' });
+    const liveNamespace = () => ({ status: 'present', identity: 'net:[42]' });
     let reads = 0;
     let waits = 0;
     expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
@@ -1000,6 +1033,7 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
       read: () => { reads += 1; throw enoent; },
       observeIdentity: () => ({ status: 'present', state: 'S', startTicks: '42' }),
+      observeNetworkNamespace: liveNamespace,
       wait: () => { waits += 1; },
     })).toMatchObject({ text: null, failure: enoent, exited: false, attempts: 3 });
     expect(reads).toBe(3);
@@ -1060,6 +1094,31 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
       wait: () => { throw new Error('no retry'); },
     })).toMatchObject({ text: null, failure: eacces, exited: false, attempts: 1 });
     expect(eaccesIdentityChecks).toBe(1);
+  });
+
+  it('accepts final proc-net ENOENT only when the same process has released its network namespace', () => {
+    const enoent = Object.assign(new Error('missing'), { code: 'ENOENT' });
+    const boundIdentity = () => ({ status: 'present', state: 'S', startTicks: '42' });
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => { throw enoent; }, observeIdentity: boundIdentity,
+      observeNetworkNamespace: () => ({ status: 'released' }), wait: () => {},
+    })).toEqual({ text: null, failure: null, exited: false, released: true, attempts: 3 });
+
+    const namespaceDenied = Object.assign(new Error('denied'), { code: 'EACCES' });
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => { throw enoent; }, observeIdentity: boundIdentity,
+      observeNetworkNamespace: () => ({ status: 'error', failure: namespaceDenied }), wait: () => {},
+    })).toEqual({ text: null, failure: namespaceDenied, exited: false, attempts: 3 });
+
+    let identityChecks = 0;
+    expect(readProcNetSnapshot('/proc/7/net/udp', 7, '42', {
+      read: () => { throw enoent; },
+      observeIdentity: () => {
+        identityChecks += 1;
+        return identityChecks < 7 ? boundIdentity() : { status: 'present', state: 'S', startTicks: '43' };
+      },
+      observeNetworkNamespace: () => ({ status: 'released' }), wait: () => {},
+    })).toEqual({ text: null, failure: null, exited: true, attempts: 3 });
   });
 
   it('retains the last inspected network attachments when a later inspect disappears', () => {

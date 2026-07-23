@@ -350,6 +350,14 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     expect(isRepositoryDockerScope('unrelated-postgres-1', {
       'com.docker.compose.project.working_dir': '/tmp/unrelated',
     })).toBe(false);
+    expect(isRepositoryDockerScope('gearjob-postgres-1', {
+      'com.docker.compose.project.config_files': '/home/gewu/work/gearjob/deploy/docker-compose.yml,-',
+      'com.docker.compose.project.working_dir': '/home/gewu/work/gearjob/deploy',
+    })).toBe(false);
+    expect(isRepositoryDockerScope('relative-postgres-1', {
+      'com.docker.compose.project.config_files': 'scripts/docker-compose.yml, -, ',
+      'com.docker.compose.project.working_dir': 'scripts',
+    })).toBe(false);
   });
 
   it('independently parses raw backup guard identities, reloads, attempts, and violations', () => {

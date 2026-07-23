@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -535,6 +535,7 @@ export function isRepositoryDockerScope(name, labels = {}) {
   const knownDefaultProjects = ['scripts', 'backup-restore'];
   const normalizedRepositoryRoot = resolve(repositoryRoot);
   const withinRepository = (path) => {
+    if (!isAbsolute(path)) return false;
     const normalized = resolve(path);
     return normalized === normalizedRepositoryRoot || normalized.startsWith(`${normalizedRepositoryRoot}/`);
   };

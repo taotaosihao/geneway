@@ -81,6 +81,15 @@ const idempotencyKey = (request: FastifyRequest): string => {
   return typeof value === 'string' ? value : '';
 };
 
+const liveDocumentTaskCandidateSchema = z.object({
+  conversationId: z.string().min(1),
+  capabilityId: z.literal('solution.analysis.v1'),
+  inputRef: z.object({
+    kind: z.literal('document_snapshot'),
+    documentSnapshotId: z.string().min(1),
+  }).strict(),
+}).passthrough();
+
 const bearerMatches = (header: string | undefined, expected: string): boolean => {
   if (header === undefined || !header.startsWith('Bearer ')) return false;
   const supplied = Buffer.from(header.slice('Bearer '.length), 'utf8');
@@ -472,33 +481,35 @@ export async function createControlPlane(options: Readonly<{
   });
 
   app.post('/api/business-tasks', async (request, reply) => {
-    const liveInput = gateALiveTaskCreateInputSchema.safeParse(request.body);
-    if (liveInput.success && gateALiveRepository !== null) {
-      const modelRouteAvailable = options.chatRouteAvailable === undefined
-        ? false
-        : await options.chatRouteAvailable();
-      const capabilityRoute = gateACapabilityRouteProjectionSchema.parse(await gateALiveRepository.getCapabilityRoute(
-        request.principal,
-        modelRouteAvailable,
-        options.artifactServiceHooks?.parserSandbox !== undefined,
-      ));
-      if (capabilityRoute.status !== 'internal') {
-        return reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'Capability is not open' } });
-      }
+    const liveCandidate = liveDocumentTaskCandidateSchema.safeParse(request.body);
+    if (liveCandidate.success && gateALiveRepository !== null) {
       const source = await repository.pool.query<{ simulation_profile: string | null }>(`SELECT snapshot.simulation_profile
         FROM document_snapshots snapshot
         JOIN conversations conversation ON conversation.tenant_id=snapshot.tenant_id
           AND conversation.id=snapshot.conversation_id
         WHERE snapshot.tenant_id=$1 AND snapshot.id=$2 AND conversation.user_id=$3`, [
-        request.principal.tenantId, liveInput.data.inputRef.documentSnapshotId, request.principal.userId,
+        request.principal.tenantId, liveCandidate.data.inputRef.documentSnapshotId, request.principal.userId,
       ]);
       if (source.rows[0]?.simulation_profile === null || source.rowCount === 0) {
-      const result = await gateALiveRepository.createLiveTaskProjection(request.principal, {
-        conversationId: liveInput.data.conversationId,
-        documentSnapshotId: liveInput.data.inputRef.documentSnapshotId,
-        idempotencyKey: idempotencyKey(request),
-      });
-      return reply.status(201).send(result);
+        const liveInput = gateALiveTaskCreateInputSchema.parse(request.body);
+        const modelRouteAvailable = options.chatRouteAvailable === undefined
+          ? false
+          : await options.chatRouteAvailable();
+        const capabilityRoute = gateACapabilityRouteProjectionSchema.parse(await gateALiveRepository.getCapabilityRoute(
+          request.principal,
+          modelRouteAvailable,
+          options.artifactServiceHooks?.parserSandbox !== undefined,
+        ));
+        if (capabilityRoute.status !== 'internal') {
+          return reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'Capability is not open' } });
+        }
+        const result = await gateALiveRepository.createLiveTaskProjection(request.principal, {
+          conversationId: liveInput.conversationId,
+          documentSnapshotId: liveInput.inputRef.documentSnapshotId,
+          idempotencyKey: idempotencyKey(request),
+          expertTarget: liveInput.expertTarget,
+        });
+        return reply.status(201).send(result);
       }
     }
     const input = createTaskInputSchema.parse(request.body);

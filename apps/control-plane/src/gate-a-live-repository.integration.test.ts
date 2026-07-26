@@ -8,7 +8,9 @@ import {
   gateAParserManifestSchema,
   gateAParserStartupApprovalSchema,
   gateAProviderReadinessEvidenceSchema,
+  gateA2LiveValidationCandidateEvidenceSchema,
   gateALiveValidationCandidateEvidenceSchema,
+  gateAAnalysisGatewayReceiptSchema,
   gateAAnalysisWorkerClaimSchema,
   liveResolvedTaskInputRefSchema,
   type GateAAnalysisWorkerClaim,
@@ -17,7 +19,7 @@ import {
   StorageObjectAlreadyExistsError,
   type ObjectStorage,
 } from '@geneway/storage';
-import { SOLUTION_LIVE_TEMPLATE, compileTemplateWorkflow } from '@geneway/workflow';
+import { SOLUTION_LIVE_TEMPLATE, SOLUTION_LIVE_V2_TEMPLATE, compileTemplateWorkflow } from '@geneway/workflow';
 import { createControlPlane } from './index.js';
 import { ControlPlaneRepository } from './repository.js';
 import { GateALiveRepository } from './gate-a-live-repository.js';
@@ -152,6 +154,7 @@ const receiptIdentityFromClaim = (claim: GateAAnalysisWorkerClaim) => ({
   outputSchemaVersion: claim.outputSchemaVersion,
   maxOutputTokens: claim.maxOutputTokens,
   deadline: claim.deadline,
+  ...(claim.schemaVersion === 'analysis-worker-claim/2' ? { agentVersionId: claim.agentVersionId } : {}),
 });
 
 const approveAndClaim = async (idempotencyKey: string): Promise<GateAAnalysisWorkerClaim> => {
@@ -193,7 +196,9 @@ const completedTerminalFor = (claim: GateAAnalysisWorkerClaim) => {
     { id: 'unknown_1', kind: 'unknown' as const, text: 'The rollout date is not provided.', evidenceCandidateKeys: [], confidence: 1 }],
   };
   const payload = {
-    schemaVersion: 'gate-a-analysis-gateway-receipt/1' as const,
+    schemaVersion: claim.schemaVersion === 'analysis-worker-claim/2'
+      ? 'gate-a-analysis-gateway-receipt/2' as const
+      : 'gate-a-analysis-gateway-receipt/1' as const,
     issuer: 'geneway-model-gateway' as const,
     audience: 'geneway-control-plane' as const,
     receiptJti: randomUUID(),
@@ -205,8 +210,10 @@ const completedTerminalFor = (claim: GateAAnalysisWorkerClaim) => {
     outputPayloadDigest: hash(canonicalizeGateAProjection(output)),
     usage: { inputTokens: 24, outputTokens: 18, totalTokens: 42 },
   };
-  return { status: 'completed' as const, output, receipt: { payload, signature: createHmac('sha256', secret)
-    .update(canonicalizeGateAProjection(payload), 'utf8').digest('base64url') } };
+  return { status: 'completed' as const, output, receipt: gateAAnalysisGatewayReceiptSchema.parse({
+    payload, signature: createHmac('sha256', secret)
+      .update(canonicalizeGateAProjection(payload), 'utf8').digest('base64url'),
+  }) };
 };
 
 const capabilitySpec = {
@@ -225,7 +232,7 @@ const promptPolicy = {
   outputSchemaVersion: 'analysis-result/1', toolChoice: 'none',
 };
 
-async function seedRelease(): Promise<void> {
+async function seedRelease(a2CandidateSchema: 'v1' | 'v2' = 'v2'): Promise<void> {
   const immutableAuthority = await control.pool.query<{
     capability_spec: unknown; prompt_policy: unknown;
   }>(`SELECT capability.spec capability_spec,prompt.policy prompt_policy
@@ -322,9 +329,75 @@ async function seedRelease(): Promise<void> {
     SET release_id='release_solution_live_internal',pointer_version=pointer_version+1
     WHERE tenant_id='tenant_local' AND capability_id='solution.analysis.v1'
       AND release_id='release_solution_live_shadow'`);
+
+  const workflowV2 = compileTemplateWorkflow({
+    schemaVersion: 'workflow-draft.template-v1',
+    templateId: SOLUTION_LIVE_V2_TEMPLATE.templateId,
+    registryDigest: SOLUTION_LIVE_V2_TEMPLATE.registryDigest,
+  });
+  const candidateV2 = gateA2LiveValidationCandidateEvidenceSchema.parse({
+    ...candidate,
+    schemaVersion: 'gate-a-live-validation-candidate/2',
+    capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+    harnessVersionId: 'harness_solution_analysis_v1_live_2',
+    promptPolicyVersionId: 'xiaowei.solution-analysis.system/2',
+    workflow: {
+      templateId: SOLUTION_LIVE_V2_TEMPLATE.templateId,
+      registryDigest: SOLUTION_LIVE_V2_TEMPLATE.registryDigest,
+      workflowVersionId: workflowV2.id,
+      workflowHash: workflowV2.hash,
+    },
+    expertCatalogVersionId: 'expert_catalog_solution_live_2',
+    expertCatalogVersion: 3,
+    expertCatalogDigest: '121420aa044cfe05999b63027e4c83dcd5623b463655521042c62993c26f1237',
+    availableExpertModes: ['auto', 'expert', 'team'],
+    equalPermissionCeilingDigest: 'ed68706e8a9af0b5ca760a3c0f15afa395a86b6fc6c1f6ced52aa7ec8390c2e1',
+    purpose: 'temporarily open only the disposable Gate A.2 three-ExpertTarget internal validation route',
+  });
+  const a2Candidate = a2CandidateSchema === 'v2' ? candidateV2 : candidate;
+  await control.pool.query(`INSERT INTO capability_release_records
+    (tenant_id,id,capability_version_id,prompt_policy_version_id,state,sequence,previous_release_id,
+     actor,gate_evidence,gate_evidence_digest)
+    VALUES ('tenant_local','release_solution_live_2_shadow','cap_solution_analysis_v1_live_2',
+     'xiaowei.solution-analysis.system/2','shadow',2,'release_solution_analysis_v1_live_2_draft','test',$1,$2),
+    ('tenant_local','release_solution_live_2_internal','cap_solution_analysis_v1_live_2',
+     'xiaowei.solution-analysis.system/2','internal',3,'release_solution_live_2_shadow','test',$3,$4)`, [
+    shadow, shadowDigest, a2Candidate, digest(a2Candidate),
+  ]);
+  const activationEvidence = {
+    kind: 'gate-a2-independent-activation',
+    previousActiveReleaseId: 'release_solution_live_internal',
+    targetInternalReleaseId: 'release_solution_live_2_internal',
+    candidateDigest: digest(a2Candidate),
+  };
+  const activationClient = await control.pool.connect();
+  try {
+    await activationClient.query('BEGIN');
+    await activationClient.query(`INSERT INTO capability_release_activation_records
+      (tenant_id,id,schema_version,capability_id,previous_active_release_id,previous_pointer_version,
+       target_internal_release_id,target_pointer_version,actor,gate_evidence,gate_evidence_digest)
+      VALUES ('tenant_local','activation_solution_live_2','capability-release-activation/1',
+       'solution.analysis.v1','release_solution_live_internal',3,'release_solution_live_2_internal',4,
+       'test',$1,$2)`, [activationEvidence, digest(activationEvidence)]);
+    const activated = await activationClient.query(`UPDATE capability_active_releases
+      SET release_id='release_solution_live_2_internal',pointer_version=4,
+        activation_record_id='activation_solution_live_2'
+      WHERE tenant_id='tenant_local' AND capability_id='solution.analysis.v1'
+        AND release_id='release_solution_live_internal' AND pointer_version=3`);
+    if (activated.rowCount !== 1) throw new Error('failed to activate the test Gate A.2 release');
+    await activationClient.query('COMMIT');
+  } catch (error) {
+    await activationClient.query('ROLLBACK');
+    throw error;
+  } finally {
+    activationClient.release();
+  }
 }
 
-async function seedDocument(bytes = Buffer.from('需求：内部测试材料必须保持可追溯，并只允许生成只读建议。', 'utf8')): Promise<void> {
+async function seedDocument(
+  bytes = Buffer.from('需求：内部测试材料必须保持可追溯，并只允许生成只读建议。', 'utf8'),
+  simulationProfile: 'solution-analysis-demo/v2' | null = null,
+): Promise<void> {
   const contentHash = hash(bytes);
   const canonicalPageIndex = {
     schemaVersion: 'canonical-page-index/1', format: 'txt', mediaType: 'text/plain',
@@ -387,8 +460,8 @@ async function seedDocument(bytes = Buffer.from('需求：内部测试材料必�
     (tenant_id,id,conversation_id,artifact_id,manifest_id,display_name,media_type,size_bytes,content_sha256,
      data_class,audience,resource_scope,trust,simulation_profile,profile_registry_version,created_by)
     VALUES ('tenant_local','snapshot_live','conversation_live','artifact_live','manifest_live','live.txt','text/plain',
-     $1,$2,'C1',$3,'artifact:artifact_live','untrusted_text',NULL,'gate0.2a-profile-registry/1','user_local')`,
-  [bytes.byteLength, contentHash, audience]);
+     $1,$2,'C1',$3,'artifact:artifact_live','untrusted_text',$4,'gate0.2a-profile-registry/1','user_local')`,
+  [bytes.byteLength, contentHash, audience, simulationProfile]);
   await control.pool.query(`INSERT INTO parser_manifests
     (tenant_id,id,schema_version,media_type,parser_name,parser_version,executable_digest,package_digest,
      manifest_digest,registry_source,upstream_source,lock_resolution,lock_integrity,license,dependencies,
@@ -435,6 +508,339 @@ describe('Gate A live task create authority', () => {
     expect(authority.rows[0]).toEqual({ tasks: 1, steps: 7, approvals: 1, events: 1, outbox: 1 });
   });
 
+  it('keeps invalid live ExpertTarget input on the strict live route with zero legacy fallback', async () => {
+    const controlPlane = await createControlPlane({
+      databaseUrl: requiredDatabaseUrl,
+      cursorHmacSecret: 'gate-a-invalid-expert-cursor-secret-at-least-32-bytes',
+      objectStorage: memoryStorage,
+      gateALiveValidationRunId: runId,
+      modelGatewayAuthority: { serviceToken: modelGatewayToken, invocationTokenSecret: secret },
+      chatRouteAvailable: () => Promise.resolve(true),
+      artifactServiceHooks: { parserSandbox: { parse: () => Promise.reject(new Error('not called')) } },
+    });
+    try {
+      const response = await controlPlane.app.inject({
+        method: 'POST',
+        url: '/api/business-tasks',
+        headers: { 'idempotency-key': 'gate-a2-invalid-expert-route-0001' },
+        payload: {
+          conversationId: 'conversation_live', capabilityId: 'solution.analysis.v1',
+          inputRef: { kind: 'document_snapshot', documentSnapshotId: 'snapshot_live' },
+          expertTarget: { mode: 'expert', expertId: 'expert.solution.unknown' },
+        },
+      });
+      expect(response.statusCode, response.body).toBe(400);
+      expect(response.json()).toMatchObject({ error: { code: 'INVALID_INPUT' } });
+      expect(response.body).not.toContain('NOT_OPEN_FOR_SIMULATION_PROFILE');
+      const counts = await control.pool.query<{ tasks: number; outbox: number }>(`SELECT
+        (SELECT count(*)::int FROM business_tasks) tasks,
+        (SELECT count(*)::int FROM outbox_events) outbox`);
+      expect(counts.rows).toEqual([{ tasks: 0, outbox: 0 }]);
+    } finally {
+      await controlPlane.app.close();
+    }
+  });
+
+  it('classifies a simulation snapshot before live readiness and preserves the legacy route', async () => {
+    await control.resetForTest();
+    await repository.ensureLiveAuthority();
+    await seedDocument(undefined, 'solution-analysis-demo/v2');
+    await seedRelease();
+    const controlPlane = await createControlPlane({
+      databaseUrl: requiredDatabaseUrl,
+      cursorHmacSecret: 'gate-a-legacy-routing-cursor-secret-at-least-32-bytes',
+      objectStorage: memoryStorage,
+      gateALiveValidationRunId: runId,
+      modelGatewayAuthority: { serviceToken: modelGatewayToken, invocationTokenSecret: secret },
+      chatRouteAvailable: () => Promise.resolve(false),
+    });
+    try {
+      const response = await controlPlane.app.inject({
+        method: 'POST',
+        url: '/api/business-tasks',
+        headers: { 'idempotency-key': 'gate-a2-legacy-route-0001' },
+        payload: {
+          conversationId: 'conversation_live', capabilityId: 'solution.analysis.v1',
+          inputRef: { kind: 'document_snapshot', documentSnapshotId: 'snapshot_live' },
+          expertTarget: { mode: 'expert', expertId: 'expert.solution.architect' },
+        },
+      });
+      expect(response.statusCode, response.body).toBe(201);
+      const taskId = response.json<{ taskId: string }>().taskId;
+      const authority = await control.pool.query<{
+        simulation: boolean; runtime_mode: string; record_variant: string | null;
+      }>(`SELECT simulation,runtime_mode,record_variant FROM business_tasks
+        WHERE tenant_id='tenant_local' AND id=$1`, [taskId]);
+      expect(authority.rows).toEqual([{
+        simulation: true, runtime_mode: 'fake', record_variant: null,
+      }]);
+    } finally {
+      await controlPlane.app.close();
+    }
+  });
+
+  it('freezes auto, expert, and team as distinct targets with one permission ceiling and exact AgentVersion claims', async () => {
+    const routes = [
+      { requested: { mode: 'auto' as const }, resolution: 'automatic', identityKey: 'expertVersionId',
+        identityValue: 'expert.solution.architect.live/2' },
+      { requested: { mode: 'expert' as const, expertId: 'expert.solution.architect' as const },
+        resolution: 'explicit', identityKey: 'agentVersionId', identityValue: 'agent.solution.architect/live-2' },
+      { requested: { mode: 'team' as const, teamId: 'team.solution.core' as const },
+        resolution: 'explicit', identityKey: 'teamVersionId', identityValue: 'team.solution.core.live/2' },
+    ] as const;
+    const authorityDigests = new Set<string>();
+    const semanticFingerprints = new Set<string>();
+    for (const [index, route] of routes.entries()) {
+      const created = await repository.createLiveTask(livePrincipal, {
+        conversationId: 'conversation_live', documentSnapshotId: 'snapshot_live',
+        idempotencyKey: `gate-a2-three-route-${index}`, expertTarget: route.requested,
+      });
+      const snapshot = await repository.getLiveTask(livePrincipal, created.taskId);
+      expect(snapshot).toMatchObject({
+        capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+        customerFacingAuthor: '小纬',
+        workflowVersion: { templateId: 'workflow-template.solution-live/2' },
+        expertTarget: {
+          requested: route.requested,
+          resolved: {
+            mode: route.requested.mode,
+            resolution: route.resolution,
+            [route.identityKey]: route.identityValue,
+            promptPolicyVersionId: 'xiaowei.solution-analysis.system/2',
+            stepBindings: [
+              { stepId: 'requirement_extract', agentRegistryReference: 'agent.solution.requirement/live-1',
+                agentVersionId: 'agent.solution.requirement/live-2' },
+              { stepId: 'contradiction_check', agentRegistryReference: 'agent.solution.contradiction/live-1',
+                agentVersionId: 'agent.solution.contradiction/live-2' },
+              { stepId: 'solution_design', agentRegistryReference: 'agent.solution.architect/live-1',
+                agentVersionId: 'agent.solution.architect/live-2' },
+            ],
+          },
+        },
+      });
+      const frozen = await control.pool.query<{
+        permission_scope: unknown; audience_scope: unknown; budget: unknown; semantic_fingerprint: string;
+        approval_subject: unknown; expert_target: unknown; reason_codes: unknown; audit_details: unknown;
+      }>(`SELECT task.permission_scope,task.audience_scope,task.budget,task.semantic_fingerprint,
+          approval.subject approval_subject,task.expert_target,
+          (SELECT decision.reason_codes FROM policy_decisions decision
+            WHERE decision.tenant_id=task.tenant_id AND decision.business_task_id=task.id) reason_codes,
+          (SELECT audit.details FROM audit_events audit
+            WHERE audit.tenant_id=task.tenant_id AND audit.resource_type='business_task'
+              AND audit.resource_id=task.id AND audit.event_type='business-task.live.create') audit_details
+        FROM business_tasks task
+        JOIN approval_versions approval ON approval.tenant_id=task.tenant_id AND approval.business_task_id=task.id
+        WHERE task.tenant_id='tenant_local' AND task.id=$1`, [created.taskId]);
+      const frozenRow = frozen.rows[0];
+      if (frozenRow === undefined) throw new Error('missing frozen Gate A.2 route authority');
+      authorityDigests.add(digest({ permissionScope: frozenRow.permission_scope,
+        audienceScope: frozenRow.audience_scope, budget: frozenRow.budget }));
+      semanticFingerprints.add(frozenRow.semantic_fingerprint);
+      expect(frozenRow.approval_subject).toMatchObject({ resolvedExpertTarget: frozenRow.expert_target });
+      expect(frozenRow.reason_codes).toContain(route.requested.mode === 'auto' ? 'AUTO_EXPERT_TARGET'
+        : route.requested.mode === 'expert' ? 'EXPLICIT_EXPERT_TARGET' : 'EXPLICIT_TEAM_TARGET');
+      expect(frozenRow.audit_details).toMatchObject({
+        expertCatalogVersionId: 'expert_catalog_solution_live_2',
+        requestedExpertTarget: route.requested,
+        resolvedExpertTarget: frozenRow.expert_target,
+        expertTargetDigest: digest(frozenRow.expert_target),
+      });
+
+      await control.pool.query(`UPDATE approval_versions SET status='approved',decision_by='user_local',decision_at=now()
+        WHERE tenant_id='tenant_local' AND id=$1`, [created.approvalId]);
+      await control.pool.query(`UPDATE business_tasks SET status='running',updated_at=now()
+        WHERE tenant_id='tenant_local' AND id=$1`, [created.taskId]);
+      const claim = await repository.claimAnalysis(`worker-route-${index}`, 60_000);
+      expect(claim).toMatchObject({
+        schemaVersion: 'analysis-worker-claim/2', taskId: created.taskId,
+        stepId: 'requirement_extract', agentVersionId: 'agent.solution.requirement/live-2',
+      });
+      if (claim === null) throw new Error('expected a Gate A.2 route claim');
+      await repository.markAnalysisStarted(mutationFromClaim(claim));
+      await repository.settleAnalysis(mutationFromClaim(claim), {
+        status: 'failed', errorClass: 'MODEL_TIMEOUT',
+      });
+    }
+    expect(authorityDigests.size).toBe(1);
+    expect(semanticFingerprints.size).toBe(3);
+
+    const auto = await repository.createLiveTask(livePrincipal, {
+      conversationId: 'conversation_live', documentSnapshotId: 'snapshot_live',
+      idempotencyKey: 'gate-a2-target-conflict', expertTarget: { mode: 'auto' },
+    });
+    expect(auto.taskId).toBeTruthy();
+    await expect(repository.createLiveTask(livePrincipal, {
+      conversationId: 'conversation_live', documentSnapshotId: 'snapshot_live',
+      idempotencyKey: 'gate-a2-target-conflict',
+      expertTarget: { mode: 'expert', expertId: 'expert.solution.architect' },
+    })).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+
+  it.each([
+    { consumedBeforeCrash: false, suffix: 'unconsumed' },
+    { consumedBeforeCrash: true, suffix: 'consumed' },
+  ])('reclaims an expired $suffix claim with new fences and publishes only one terminal result and Artifact',
+  async ({ consumedBeforeCrash, suffix }) => {
+    const created = await repository.createLiveTask(livePrincipal, {
+      conversationId: 'conversation_live', documentSnapshotId: 'snapshot_live',
+      idempotencyKey: `gate-a2-worker-reclaim-${suffix}`,
+      expertTarget: { mode: 'team', teamId: 'team.solution.core' },
+    });
+    await control.pool.query(`UPDATE approval_versions SET status='approved',decision_by='user_local',decision_at=now()
+      WHERE tenant_id='tenant_local' AND id=$1`, [created.approvalId]);
+    await control.pool.query(`UPDATE business_tasks SET status='running',updated_at=now()
+      WHERE tenant_id='tenant_local' AND id=$1`, [created.taskId]);
+    const expired = await repository.claimAnalysis('worker-before-crash', 60_000);
+    if (expired === null) throw new Error('expected an initial Gate A.2 claim');
+    if (expired.schemaVersion !== 'analysis-worker-claim/2') throw new Error('expected an A.2 worker claim');
+    if (consumedBeforeCrash) {
+      await repository.markAnalysisStarted(mutationFromClaim(expired));
+      expect(await repository.consumeAnalysisInvocationToken(expired.invocationToken)).toBe(true);
+    }
+    await control.pool.query(`UPDATE business_task_steps SET lease_until=now()-interval '1 second'
+      WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3`, [
+      expired.tenantId, expired.taskId, expired.stepId,
+    ]);
+    const competing = await repository.createLiveTask(livePrincipal, {
+      conversationId: 'conversation_live', documentSnapshotId: 'snapshot_live',
+      idempotencyKey: `gate-a2-worker-reclaim-competitor-${suffix}`, expertTarget: { mode: 'auto' },
+    });
+    await control.pool.query(`UPDATE approval_versions SET status='approved',decision_by='user_local',decision_at=now()
+      WHERE tenant_id='tenant_local' AND id=$1`, [competing.approvalId]);
+    await control.pool.query(`UPDATE business_tasks
+      SET status='running',created_at=now()-interval '1 day',updated_at=now()
+      WHERE tenant_id='tenant_local' AND id=$1`, [competing.taskId]);
+
+    const reclaimed = await repository.claimAnalysis('worker-after-crash', 60_000);
+    expect(reclaimed).toMatchObject({
+      schemaVersion: 'analysis-worker-claim/2', taskId: expired.taskId, stepId: expired.stepId,
+      agentVersionId: expired.agentVersionId,
+      taskFence: expired.taskFence + 1, stepFence: expired.stepFence + 1,
+    });
+    if (reclaimed === null) throw new Error('expected a reclaimed Gate A.2 claim');
+    expect(reclaimed.taskId).toBe(expired.taskId);
+    expect(reclaimed.executionAttemptId).not.toBe(expired.executionAttemptId);
+    expect(reclaimed.stepAttemptId).not.toBe(expired.stepAttemptId);
+    expect(reclaimed.modelInvocationId).not.toBe(expired.modelInvocationId);
+    expect(await repository.consumeAnalysisInvocationToken(expired.invocationToken)).toBe(false);
+    await expect(repository.markAnalysisStarted(mutationFromClaim(expired))).rejects.toMatchObject({
+      code: 'STALE_ATTEMPT',
+    });
+    await expect(repository.settleAnalysis(
+      mutationFromClaim(expired),
+      consumedBeforeCrash ? completedTerminalFor(expired) : { status: 'failed', errorClass: 'MODEL_TIMEOUT' },
+    )).rejects.toMatchObject({ code: 'STALE_ATTEMPT' });
+    await expect(repository.cancelLiveTask(
+      livePrincipal, competing.taskId, `gate-a2-reclaim-competitor-cancel-${suffix}`,
+    )).resolves.toMatchObject({ status: 'canceled' });
+
+    await repository.markAnalysisStarted(mutationFromClaim(reclaimed));
+    expect(await repository.consumeAnalysisInvocationToken(reclaimed.invocationToken)).toBe(true);
+    await repository.settleAnalysis(mutationFromClaim(reclaimed), completedTerminalFor(reclaimed));
+    for (const expectedStep of ['contradiction_check', 'solution_design'] as const) {
+      const claim = await repository.claimAnalysis(`worker-after-crash-${expectedStep}`, 60_000);
+      if (claim === null || claim.stepId !== expectedStep) throw new Error(`expected ${expectedStep} after reclaim`);
+      await repository.markAnalysisStarted(mutationFromClaim(claim));
+      expect(await repository.consumeAnalysisInvocationToken(claim.invocationToken)).toBe(true);
+      if (expectedStep === 'solution_design') {
+        const app = createWorkerCommandApp({ repository: control, storage: memoryStorage, token: workerToken,
+          gateALiveRepository: repository, leaseDurationMs: 60_000 });
+        try {
+          const terminal = await app.inject({ method: 'POST', url: analysisCommandPath,
+            headers: { authorization: `Bearer ${workerToken}` },
+            payload: { command: 'gate_a_analysis_terminal', ...mutationFromClaim(claim),
+              terminal: completedTerminalFor(claim) } });
+          expect(terminal.statusCode, terminal.body).toBe(200);
+        } finally {
+          await app.close();
+        }
+      } else {
+        await repository.settleAnalysis(mutationFromClaim(claim), completedTerminalFor(claim));
+      }
+    }
+    const authority = await control.pool.query<{
+      task_status: string; old_invocation_status: string; old_execution_status: string;
+      invocation_count: number; completed_invocation_count: number; result_count: number;
+      report_count: number; artifact_count: number;
+    }>(`SELECT
+      (SELECT status FROM business_tasks WHERE tenant_id=$1 AND id=$2) task_status,
+      (SELECT status FROM gate_a_model_invocations WHERE tenant_id=$1 AND id=$3) old_invocation_status,
+      (SELECT status FROM execution_attempts WHERE tenant_id=$1 AND id=$4) old_execution_status,
+      (SELECT count(*)::int FROM gate_a_model_invocations WHERE tenant_id=$1 AND business_task_id=$2) invocation_count,
+      (SELECT count(*)::int FROM gate_a_model_invocations
+        WHERE tenant_id=$1 AND business_task_id=$2 AND status='completed') completed_invocation_count,
+      (SELECT count(*)::int FROM gate_a_live_results WHERE tenant_id=$1 AND business_task_id=$2) result_count,
+      (SELECT count(*)::int FROM gate_a_live_reports WHERE tenant_id=$1 AND business_task_id=$2) report_count,
+      (SELECT count(*)::int FROM artifacts WHERE tenant_id=$1 AND business_task_id=$2) artifact_count`, [
+      expired.tenantId, expired.taskId, expired.modelInvocationId, expired.executionAttemptId,
+    ]);
+    expect(authority.rows[0]).toEqual({
+      task_status: 'completed', old_invocation_status: 'failed', old_execution_status: 'superseded',
+      invocation_count: 4, completed_invocation_count: 3, result_count: 1, report_count: 1, artifact_count: 1,
+    });
+    await expectLiveEventReadable(expired.taskId, 'workflow.run_reclaimed', {
+      executionAttemptId: reclaimed.executionAttemptId,
+      previousExecutionAttemptId: expired.executionAttemptId,
+      stepId: expired.stepId,
+      taskFence: expired.taskFence + 1,
+      stepFence: expired.stepFence + 1,
+    });
+  });
+
+  it('keeps two concurrent expired reclaims bound to each task previous execution attempt', async () => {
+    const created = await Promise.all(['first', 'second'].map(async (suffix) => {
+      const task = await repository.createLiveTask(livePrincipal, {
+        conversationId: 'conversation_live', documentSnapshotId: 'snapshot_live',
+        idempotencyKey: `gate-a2-two-expired-${suffix}`, expertTarget: { mode: 'auto' },
+      });
+      await control.pool.query(`UPDATE approval_versions
+        SET status='approved',decision_by='user_local',decision_at=now()
+        WHERE tenant_id='tenant_local' AND id=$1`, [task.approvalId]);
+      await control.pool.query(`UPDATE business_tasks SET status='running',updated_at=now()
+        WHERE tenant_id='tenant_local' AND id=$1`, [task.taskId]);
+      return task;
+    }));
+    const originals = [
+      await repository.claimAnalysis('worker-expired-first', 60_000),
+      await repository.claimAnalysis('worker-expired-second', 60_000),
+    ];
+    if (originals.some((claim) => claim === null)) throw new Error('expected two original claims');
+    for (const [index, claim] of originals.entries()) {
+      if (claim === null) throw new Error('expected an original claim');
+      await control.pool.query(`UPDATE business_task_steps
+        SET lease_until=now()-($4::text || ' seconds')::interval
+        WHERE tenant_id=$1 AND business_task_id=$2 AND step_id=$3`, [
+        claim.tenantId, claim.taskId, claim.stepId, String(2 - index),
+      ]);
+    }
+    const reclaims = [
+      await repository.claimAnalysis('worker-reclaim-first', 60_000),
+      await repository.claimAnalysis('worker-reclaim-second', 60_000),
+    ];
+    if (reclaims.some((claim) => claim === null)) throw new Error('expected two reclaimed claims');
+    const originalByTask = new Map(originals.flatMap((claim) => claim === null ? [] : [
+      [claim.taskId, claim.executionAttemptId] as const,
+    ]));
+    expect(new Set(reclaims.flatMap((claim) => claim === null ? [] : [claim.taskId])))
+      .toEqual(new Set(created.map((task) => task.taskId)));
+    for (const claim of reclaims) {
+      if (claim === null) throw new Error('expected a reclaimed claim');
+      const events = await repository.getLiveEvents(livePrincipal, claim.taskId, 0) as Readonly<{
+        events: readonly Readonly<{ eventType: string; payload: unknown }>[];
+      }>;
+      const reclaimedEvent = events.events.find((event) => event.eventType === 'workflow.run_reclaimed');
+      expect(reclaimedEvent).toBeDefined();
+      expect(reclaimedEvent?.payload).toMatchObject({
+        executionAttemptId: claim.executionAttemptId,
+        previousExecutionAttemptId: originalByTask.get(claim.taskId),
+      });
+      await repository.markAnalysisStarted(mutationFromClaim(claim));
+      await repository.settleAnalysis(mutationFromClaim(claim), {
+        status: 'failed', errorClass: 'MODEL_TIMEOUT',
+      });
+    }
+  });
+
   it('returns stable public NOT_OPEN without exposing release or model-route details', async () => {
     const controlPlane = await createControlPlane({
       databaseUrl: requiredDatabaseUrl,
@@ -467,6 +873,29 @@ describe('Gate A live task create authority', () => {
     }
   });
 
+  it('keeps A.2 NOT_OPEN when its release embeds a valid but stale A.1 candidate', async () => {
+    await control.resetForTest();
+    await repository.ensureLiveAuthority();
+    await seedDocument();
+    await seedRelease('v1');
+
+    await expect(repository.getCapabilityRoute(livePrincipal, true, true)).resolves.toMatchObject({
+      capabilityId: 'solution.analysis.v1',
+      status: 'NOT_OPEN',
+      executionRoute: 'not_open',
+      availableExpertModes: [],
+      reason: 'LIVE_RELEASE_NOT_OPEN',
+    });
+    await expect(repository.createLiveTask(livePrincipal, {
+      conversationId: 'conversation_live',
+      documentSnapshotId: 'snapshot_live',
+      idempotencyKey: 'gate-a2-stale-a1-candidate-0001',
+      expertTarget: { mode: 'auto' },
+    })).rejects.toMatchObject({ code: 'MODEL_ROUTE_UNAVAILABLE', statusCode: 503 });
+    expect((await control.pool.query<{ count: number }>(`SELECT count(*)::int count FROM business_tasks
+      WHERE record_variant='business-task.live/1'`)).rows[0]?.count).toBe(0);
+  });
+
   it('claims an approved task with one fenced ModelInvocation and same projection identities', async () => {
     const created = await repository.createLiveTask(
       { tenantId: 'tenant_local', userId: 'user_local', trust: 'trusted-local' },
@@ -480,13 +909,15 @@ describe('Gate A live task create authority', () => {
       WHERE tenant_id='tenant_local' AND id=$1`, [created.taskId]);
     const claim = await repository.claimAnalysis('worker-live-1', 60_000);
     expect(claim).toMatchObject({
+      schemaVersion: 'analysis-worker-claim/2',
       taskId: created.taskId, workflowVersionId: created.workflowVersionId,
       workflowHash: created.workflowHash, approvalSubjectDigest: created.approvalSubjectDigest,
-      capabilityVersionId: 'cap_solution_analysis_v1_live_1',
-      promptPolicyVersionId: 'xiaowei.solution-analysis.system/1',
+      capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+      promptPolicyVersionId: 'xiaowei.solution-analysis.system/2',
       logicalModelPolicy: 'business.solution.analysis.standard', routeProfile: 'codex_subscription_dev',
       dataClass: 'C1', toolChoice: 'none', stepId: 'requirement_extract',
       agentRegistryReference: 'agent.solution.requirement/live-1',
+      agentVersionId: 'agent.solution.requirement/live-2',
       outputSchemaVersion: 'analysis.requirement-candidates/1',
     });
     expect(claim?.invocationToken.split('.')).toHaveLength(2);
@@ -839,6 +1270,29 @@ describe('Gate A live task create authority', () => {
     expect(await repository.claimPendingLiveReportMutation('worker-report-recovery', 60_000)).toEqual(mutation);
   });
 
+  it('publishes within the frozen workflow deadline after the short execution lease expires', async () => {
+    const claim = await approveAndClaim('gate-a-live-report-after-lease-0001');
+    await control.pool.query(`UPDATE execution_attempts SET lease_until=now()-interval '1 second'
+      WHERE tenant_id=$1 AND id=$2 AND business_task_id=$3`, [
+      claim.tenantId, claim.executionAttemptId, claim.taskId,
+    ]);
+    const app = createWorkerCommandApp({ repository: control, storage: memoryStorage, token: workerToken,
+      gateALiveRepository: repository, leaseDurationMs: 60_000 });
+    try {
+      const completed = await app.inject({ method: 'POST', url: analysisCommandPath,
+        headers: { authorization: `Bearer ${workerToken}` },
+        payload: { command: 'gate_a_analysis_terminal', ...mutationFromClaim(claim),
+          terminal: completedTerminalFor(claim) } });
+      expect(completed.statusCode, completed.body).toBe(200);
+    } finally {
+      await app.close();
+    }
+    expect((await control.pool.query<{ status: string; error_class: string | null }>(`SELECT status,
+      terminal_error_class error_class FROM business_tasks WHERE tenant_id=$1 AND id=$2`, [
+      claim.tenantId, claim.taskId,
+    ])).rows[0]).toEqual({ status: 'completed', error_class: null });
+  });
+
   it('keeps a terminal report readable after execution authority expiry and redacts ordinary Evidence after source revocation', async () => {
     const claim = await approveAndClaim('gate-a-live-terminal-read-authority-0001');
     const app = createWorkerCommandApp({ repository: control, storage: memoryStorage, token: workerToken,
@@ -1142,7 +1596,7 @@ describe('Gate A live task create authority', () => {
     };
     const resultDigest = hash(canonicalizeGateAProjection(output));
     const payload = {
-      schemaVersion: 'gate-a-analysis-gateway-receipt/1' as const,
+      schemaVersion: 'gate-a-analysis-gateway-receipt/2' as const,
       issuer: 'geneway-model-gateway' as const,
       audience: 'geneway-control-plane' as const,
       receiptJti: randomUUID(),

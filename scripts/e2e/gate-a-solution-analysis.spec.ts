@@ -17,7 +17,7 @@
  */
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext, type Download, type Locator, type Page } from '@playwright/test';
 import {
   gateACapabilityRouteProjectionSchema,
@@ -591,15 +591,18 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       agent_registry_reference: string;
       output_schema_version: string;
       prior_step_outputs_digest: string;
+      receipt_attested: boolean;
       gateway_receipt_jti: string;
       gateway_receipt_digest: string;
+      tool_choice: string;
       deadline: string;
       task_deadline_ms: number;
       max_output_tokens: number;
     }>(`SELECT invocation.id,invocation.step_id,invocation.status,invocation.step_attempt_id,
       invocation.task_fence::text,invocation.step_fence::text,
       invocation.agent_registry_reference,invocation.output_schema_version,invocation.prior_step_outputs_digest,
-      invocation.gateway_receipt_jti::text,invocation.gateway_receipt_digest,
+      invocation.receipt_attested,invocation.gateway_receipt_jti::text,invocation.gateway_receipt_digest,
+      invocation.tool_choice,
       invocation.deadline::text,
       round(extract(epoch FROM (invocation.deadline-attempt.started_at))*1000)::int task_deadline_ms,
       invocation.max_output_tokens
@@ -617,6 +620,8 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       status: invocation.status,
       agent_registry_reference: invocation.agent_registry_reference,
       output_schema_version: invocation.output_schema_version,
+      receipt_attested: invocation.receipt_attested,
+      tool_choice: invocation.tool_choice,
       task_deadline_ms: invocation.task_deadline_ms,
       max_output_tokens: invocation.max_output_tokens,
     }))).toEqual([
@@ -624,18 +629,21 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
         step_id: 'requirement_extract', status: 'completed',
         agent_registry_reference: 'agent.solution.requirement/live-1',
         output_schema_version: 'analysis.requirement-candidates/1',
+        receipt_attested: true, tool_choice: 'none',
         task_deadline_ms: 300_000, max_output_tokens: 1_024,
       },
       {
         step_id: 'contradiction_check', status: 'completed',
         agent_registry_reference: 'agent.solution.contradiction/live-1',
         output_schema_version: 'analysis.contradiction/1',
+        receipt_attested: true, tool_choice: 'none',
         task_deadline_ms: 300_000, max_output_tokens: 1_024,
       },
       {
         step_id: 'solution_design', status: 'completed',
         agent_registry_reference: 'agent.solution.architect/live-1',
         output_schema_version: 'analysis.result-candidate/1',
+        receipt_attested: true, tool_choice: 'none',
         task_deadline_ms: 300_000, max_output_tokens: 2_048,
       },
     ]);
@@ -650,6 +658,77 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       expect(invocation.gateway_receipt_jti).toMatch(/^[0-9a-f-]{36}$/u);
       expect(invocation.gateway_receipt_digest).toMatch(/^[a-f0-9]{64}$/u);
     }
+
+    const artifactRoot = `/tmp/geneway-runs/${runId}`;
+    const boundaryEntries = await Promise.all(['browser', 'control-plane', 'worker', 'model-gateway'].map(async (role) => {
+      const parsed = JSON.parse(await readFile(`${artifactRoot}/process-boundaries/${role}.json`, 'utf8')) as Readonly<{
+        role?: unknown; checked?: unknown; ready?: unknown; forbiddenNamesPresent?: unknown;
+      }>;
+      expect(parsed.role).toBe(role);
+      expect(parsed.checked).toBe(true);
+      if (role !== 'browser') expect(parsed.ready).toBe(true);
+      expect(parsed.forbiddenNamesPresent).toEqual([]);
+      return { role, checked: true, ready: role === 'browser' ? null : true, forbiddenNamesPresent: [] } as const;
+    }));
+    const releaseEvidence = JSON.parse(await readFile(`${artifactRoot}/gate-a/release-promotion.json`, 'utf8')) as Readonly<{
+      providerReadiness?: Readonly<{
+        providerManifestDigest?: unknown; conformanceDigest?: unknown; routeProfile?: unknown;
+        logicalModelPolicy?: unknown; providerModel?: unknown;
+      }>;
+    }>;
+    expect(releaseEvidence.providerReadiness).toMatchObject({
+      providerManifestDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      conformanceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      routeProfile: 'codex_subscription_dev',
+      logicalModelPolicy: 'business.solution.analysis.standard',
+      providerModel: 'gpt-5.4-mini',
+    });
+    const correlationSummary = {
+      schemaVersion: 'geneway-gate-a1-served-correlation-summary/1',
+      runId,
+      task: { id: task.id, status: task.status, conversationId: task.conversationId },
+      workflowVersion: task.workflowVersion,
+      approval: { id: task.approval.id, version: task.approval.version,
+        subjectDigest: task.approval.subjectDigest },
+      source: { documentSnapshotId: started.material.snapshotId, artifactId: started.material.artifactId,
+        artifactSha256: started.material.contentSha256,
+        canonicalTextSha256: task.inputRef.canonicalTextSha256,
+        canonicalSelectionProjectionDigest: task.inputRef.canonicalSelectionProjectionDigest },
+      modelInvocations: agentInvocations.rows.map((invocation) => ({
+        id: invocation.id, stepId: invocation.step_id, stepAttemptId: invocation.step_attempt_id,
+        agentRegistryReference: invocation.agent_registry_reference,
+        outputSchemaVersion: invocation.output_schema_version,
+        gatewayReceiptJti: invocation.gateway_receipt_jti,
+        gatewayReceiptDigest: invocation.gateway_receipt_digest,
+      })),
+      result: { id: task.result?.id, outputPayloadDigest: task.result?.outputPayloadDigest,
+        publishedFactCount: publishedFacts.length },
+      evidence: task.evidence.map((item) => ({ id: item.id, statementId: item.statementId,
+        excerptSha256: item.source.excerptSha256 })),
+      report: { artifactId: report.id, manifestId: report.manifestId,
+        contentSha256: report.contentSha256, sizeBytes: report.sizeBytes },
+      serverCorrelation: { publishedFactCount: correlated.rows[0]?.published_facts,
+        supportingLinkCount: correlated.rows[0]?.supporting_links,
+        evidenceCount: correlated.rows[0]?.evidence_count },
+    } as const;
+    const egressOracle = {
+      schemaVersion: 'geneway-gate-a1-provider-egress-oracle/1',
+      runId,
+      route: 'model_gateway',
+      providerReadiness: releaseEvidence.providerReadiness,
+      receiver: { kind: 'signed-model-gateway-receipt', invocationCount: agentInvocations.rowCount,
+        receiptAttestedCount: agentInvocations.rows.filter((item) => item.receipt_attested).length,
+        uniqueReceiptJtiCount: new Set(agentInvocations.rows.map((item) => item.gateway_receipt_jti)).size },
+      toolChoiceNoneCount: agentInvocations.rows.filter((item) => item.tool_choice === 'none').length,
+      processBoundaries: boundaryEntries,
+      providerCredentialOutsideBrowserControlPlaneWorker: true,
+    } as const;
+    await Promise.all([
+      writeFile(`${artifactRoot}/gate-a/served-correlation-summary.json`, `${JSON.stringify(correlationSummary, null, 2)}\n`,
+        { flag: 'wx', mode: 0o600 }),
+      writeFile(`${artifactRoot}/gate-a/provider-egress-oracle.json`, `${JSON.stringify(egressOracle, null, 2)}\n`,
+        { flag: 'wx', mode: 0o600 }),
+    ]);
 
     await page.reload();
     await expect(page.getByTestId('task-card')).toHaveAttribute('data-task-id', task.id);

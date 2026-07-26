@@ -17,7 +17,7 @@
  */
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext, type Download, type Locator, type Page } from '@playwright/test';
 import {
   gateACapabilityRouteProjectionSchema,
@@ -253,15 +253,56 @@ async function waitForTask(
   taskId: string,
   expected: 'completed' | 'failed' | 'canceled',
 ): Promise<GateALiveTaskSnapshot> {
-  let latest: GateALiveTaskSnapshot | undefined;
-  await expect.poll(async () => {
+  const deadline = Date.now() + 180_000;
+  const intervals = [100, 200, 500] as const;
+  let attempt = 0;
+  while (Date.now() < deadline) {
     const response = await request.get(`/api/business-tasks/${taskId}`);
     expect(response.ok()).toBe(true);
-    latest = gateALiveTaskSnapshotSchema.parse(await response.json());
-    return latest.status;
-  }, { timeout: 180_000, intervals: [100, 200, 500] }).toBe(expected);
-  if (latest === undefined) throw new Error('Gate A TaskSnapshot did not materialize');
-  return latest;
+    const latest = gateALiveTaskSnapshotSchema.parse(await response.json());
+    if (latest.status === expected) return latest;
+    if (['completed', 'failed', 'canceled'].includes(latest.status)) {
+      const invocations = await pool.query<{
+        id: string;
+        step_id: string;
+        status: string;
+        error_class: string | null;
+        receipt_attested: boolean;
+        gateway_receipt_jti: string | null;
+        gateway_receipt_digest: string | null;
+        provider_revision: string | null;
+        model_revision: string | null;
+        terminal_at: string | null;
+      }>(`SELECT id,step_id,status,error_class,receipt_attested,gateway_receipt_jti::text,
+        gateway_receipt_digest,provider_revision,model_revision,terminal_at::text
+        FROM gate_a_model_invocations
+        WHERE tenant_id='tenant_local' AND business_task_id=$1
+        ORDER BY created_at`, [taskId]);
+      const artifactDirectory = `/tmp/geneway-runs/${runId}/gate-a`;
+      const diagnosticPath = `${artifactDirectory}/unexpected-terminal-diagnostic.json`;
+      await mkdir(artifactDirectory, { recursive: true, mode: 0o700 });
+      await writeFile(diagnosticPath, `${JSON.stringify({
+        schemaVersion: 'geneway-gate-a1-unexpected-terminal-diagnostic/1',
+        runId,
+        task: { id: latest.id, expectedStatus: expected, actualStatus: latest.status,
+          errorClass: latest.errorClass, aggregateVersion: latest.aggregateVersion,
+          eventWatermark: latest.eventWatermark },
+        invocations: invocations.rows.map((invocation) => ({
+          id: invocation.id, stepId: invocation.step_id, status: invocation.status,
+          errorClass: invocation.error_class, receiptAttested: invocation.receipt_attested,
+          gatewayReceiptJti: invocation.gateway_receipt_jti,
+          gatewayReceiptDigest: invocation.gateway_receipt_digest,
+          providerRevision: invocation.provider_revision, modelRevision: invocation.model_revision,
+          terminalAt: invocation.terminal_at,
+        })),
+      }, null, 2)}\n`, { mode: 0o600 });
+      throw new Error(`Gate A task reached unexpected terminal ${latest.status}; diagnostic: ${diagnosticPath}`);
+    }
+    const interval = intervals[Math.min(attempt, intervals.length - 1)] ?? 500;
+    attempt += 1;
+    await new Promise((resolve) => setTimeout(resolve, interval));
+  }
+  throw new Error(`Gate A task did not reach ${expected} before the served-test deadline`);
 }
 
 async function createAndStartLiveTask(

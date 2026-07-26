@@ -1,0 +1,22 @@
+geneway Gate 0.2B.2–0.2B.3 联合恢复关闭记录
+
+Authority brief:
+/home/gewu/.codex/workflow/artifacts/20260723-022-geneway-gate-a-gate-0-2b-2-0-2b-3/team/sdd/slices/gate-0-2b-2-3-restoration/brief.md
+
+Final contract:
+/home/gewu/work/geneway/doc/plans/atlas-workflow/20260723-022-geneway-gate-a-gate-0-2b-2-0-2b-3/implementation-contract.final.md
+
+Closing aggregate:
+/tmp/geneway-runs/gate0.2b-1785038729533-2773014/gate-0.2b/gate0.2b-aggregate.json
+aggregate sha256: cdb774d91f143e2043a48bcbe605c9470f2e9f790e3b3847237e684ba0e28a23
+runId: gate0.2b-1785038729533-2773014
+source HEAD at execution: f4839eadfa006da54be4d20126603741962aca40
+workspaceSha256: 023f43a6a212a7a8202b1edb7445fa09e095678b480f26470ca0f9ac6bc839de
+fileCount: 247
+implementation commit: 13f0e16 fix(verification): harden Gate 0.2B runtime evidence
+
+Controller outcome: CLOSED
+Review outcome: PASS
+Verifier outcome: PASS
+
+边界：fixture/shadow-only；未启用真实 Model Gateway/provider；未读取 auth.json 或客户生产凭据；未访问或修改 GearJob；未 push、PR、部署或发布；未修改现有文件权限。

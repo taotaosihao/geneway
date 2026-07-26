@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   gateACapabilityRouteProjectionSchema,
+  gateA2ResolvedExpertTargetSchema,
   gateADocumentExecutionEligibilitySchema,
   gateALivePublicWireJsonSchemas,
   gateALivePublishedStatementSchema,
@@ -11,7 +12,40 @@ import {
 const digest = (character: string): string => character.repeat(64);
 
 describe('Gate A live public wire contracts', () => {
-  it('accepts only the client-owned auto material task fields', () => {
+  const stepBindings = [
+    { stepId: 'requirement_extract', agentRegistryReference: 'agent.solution.requirement/live-1',
+      agentVersionId: 'agent.solution.requirement/live-2' },
+    { stepId: 'contradiction_check', agentRegistryReference: 'agent.solution.contradiction/live-1',
+      agentVersionId: 'agent.solution.contradiction/live-2' },
+    { stepId: 'solution_design', agentRegistryReference: 'agent.solution.architect/live-1',
+      agentVersionId: 'agent.solution.architect/live-2' },
+  ] as const;
+
+  it('projects immutable A.2 expert and ordered team provenance without changing the author', () => {
+    const expert = gateA2ResolvedExpertTargetSchema.parse({
+      mode: 'expert', resolution: 'explicit', expertId: 'expert.solution.architect',
+      expertVersionId: 'expert.solution.architect.live/2',
+      agentVersionId: 'agent.solution.architect/live-2',
+      promptPolicyVersionId: 'xiaowei.solution-analysis.system/2', stepBindings,
+    });
+    if (expert.mode !== 'expert') throw new Error('expected expert projection');
+    expect(expert.expertVersionId).toBe('expert.solution.architect.live/2');
+    const team = gateA2ResolvedExpertTargetSchema.parse({
+      mode: 'team', resolution: 'explicit', teamId: 'team.solution.core',
+      teamVersionId: 'team.solution.core.live/2',
+      members: [
+        { order: 1, role: 'Requirement Analyst', expertVersionId: 'expert.solution.requirement.live/2', agentVersionId: 'agent.solution.requirement/live-2' },
+        { order: 2, role: 'Contradiction Analyst', expertVersionId: 'expert.solution.contradiction.live/2', agentVersionId: 'agent.solution.contradiction/live-2' },
+        { order: 3, role: 'Solution Architect', expertVersionId: 'expert.solution.architect.live/2', agentVersionId: 'agent.solution.architect/live-2' },
+      ],
+      promptPolicyVersionId: 'xiaowei.solution-analysis.system/2', stepBindings,
+    });
+    if (team.mode !== 'team') throw new Error('expected team projection');
+    expect(team.members.map((member: { role: string }) => member.role))
+      .toEqual(['Requirement Analyst', 'Contradiction Analyst', 'Solution Architect']);
+    expect(gateA2ResolvedExpertTargetSchema.safeParse({ ...expert, author: '方案架构师' }).success).toBe(false);
+  });
+  it('accepts only the three stable client-owned ExpertTarget selectors', () => {
     const input = {
       conversationId: 'conversation-1',
       capabilityId: 'solution.analysis.v1',
@@ -23,10 +57,19 @@ describe('Gate A live public wire contracts', () => {
       ...input,
       provider: 'browser-selected',
     }).success).toBe(false);
-    expect(gateALiveTaskCreateInputSchema.safeParse({
-      ...input,
-      expertTarget: { mode: 'expert', expertId: 'expert.solution.architect.live/1' },
-    }).success).toBe(false);
+    expect(gateALiveTaskCreateInputSchema.parse({
+      ...input, expertTarget: { mode: 'expert', expertId: 'expert.solution.architect' },
+    }).expertTarget.mode).toBe('expert');
+    expect(gateALiveTaskCreateInputSchema.parse({
+      ...input, expertTarget: { mode: 'team', teamId: 'team.solution.core' },
+    }).expertTarget.mode).toBe('team');
+    for (const expertTarget of [
+      { mode: 'expert', expertId: 'expert.solution.architect.live/2' },
+      { mode: 'team', teamId: 'team.solution.core', members: [] },
+      { mode: 'auto', promptPolicyVersionId: 'browser-owned' },
+      { mode: 'auto', provider: 'browser-owned' },
+      { mode: 'auto', maxOutputTokens: 1 },
+    ]) expect(gateALiveTaskCreateInputSchema.safeParse({ ...input, expertTarget }).success).toBe(false);
     expect(gateALiveTaskCreateInputSchema.safeParse({
       ...input,
       inputRef: { ...input.inputRef, resourceScope: 'browser-owned' },
@@ -114,7 +157,7 @@ describe('Gate A live public wire contracts', () => {
     }).eligible).toBe(false);
   });
 
-  it('opens only the auto ExpertTarget and keeps public JSON schemas secret-free', () => {
+  it('reads A.1 auto and opens the additive A.2 three-mode tuple without public authority controls', () => {
     expect(gateACapabilityRouteProjectionSchema.parse({
       capabilityId: 'solution.analysis.v1',
       status: 'internal',
@@ -126,6 +169,11 @@ describe('Gate A live public wire contracts', () => {
       businessDecisionAllowed: false,
       internalAcceptance: true,
     }).availableExpertModes).toEqual(['auto']);
+    expect(gateACapabilityRouteProjectionSchema.parse({
+      capabilityId: 'solution.analysis.v1', status: 'internal', executionRoute: 'live',
+      capabilityVersionId: 'cap_solution_analysis_v1_live_2', availableExpertModes: ['auto', 'expert', 'team'],
+      simulation: false, runtimeMode: 'model_gateway', businessDecisionAllowed: false, internalAcceptance: true,
+    }).availableExpertModes).toEqual(['auto', 'expert', 'team']);
     const wire = JSON.stringify(gateALivePublicWireJsonSchemas);
     expect(wire).not.toContain('authFile');
     expect(wire).not.toContain('serviceToken');

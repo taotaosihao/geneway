@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   gateALiveAuthorityJsonSchemas,
   gateALiveValidationCandidateEvidenceSchema,
+  gateA2LiveValidationCandidateEvidenceSchema,
   gateAParserStartupApprovalSchema,
   gateAProviderReadinessEvidenceSchema,
 } from './gate-a-release.js';
@@ -137,6 +138,35 @@ describe('Gate A live authority contracts', () => {
     expect(gateALiveValidationCandidateEvidenceSchema.safeParse({
       ...candidate,
       modelRoute: { ...candidate.modelRoute, toolChoice: 'auto' },
+    }).success).toBe(false);
+  });
+
+  it('adds an A.2-only candidate bound to the exact registry, workflow and equal ceilings', () => {
+    const a2 = gateA2LiveValidationCandidateEvidenceSchema.parse({
+      ...candidate,
+      schemaVersion: 'gate-a-live-validation-candidate/2',
+      capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+      harnessVersionId: 'harness_solution_analysis_v1_live_2',
+      promptPolicyVersionId: 'xiaowei.solution-analysis.system/2',
+      workflow: {
+        templateId: 'workflow-template.solution-live/2',
+        registryDigest: '8bd18c5c953f696a590cfdccf16fc42abe5c98394f1ef40dc5023a5071aad1b6',
+        workflowVersionId: 'workflow_a0c85227b3aa484622384b5a',
+        workflowHash: 'a0c85227b3aa484622384b5a1e550a1b027b29df9543af1820b735e58e7d68e5',
+      },
+      expertCatalogVersionId: 'expert_catalog_solution_live_2',
+      expertCatalogVersion: 3,
+      expertCatalogDigest: '121420aa044cfe05999b63027e4c83dcd5623b463655521042c62993c26f1237',
+      availableExpertModes: ['auto', 'expert', 'team'],
+      equalPermissionCeilingDigest: 'ed68706e8a9af0b5ca760a3c0f15afa395a86b6fc6c1f6ced52aa7ec8390c2e1',
+      purpose: 'temporarily open only the disposable Gate A.2 three-ExpertTarget internal validation route',
+    });
+    expect(a2.availableExpertModes).toEqual(['auto', 'expert', 'team']);
+    expect(gateA2LiveValidationCandidateEvidenceSchema.safeParse({
+      ...a2, availableExpertModes: ['auto', 'team', 'expert'],
+    }).success).toBe(false);
+    expect(gateA2LiveValidationCandidateEvidenceSchema.safeParse({
+      ...a2, purpose: candidate.purpose,
     }).success).toBe(false);
   });
 

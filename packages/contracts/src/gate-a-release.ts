@@ -60,7 +60,7 @@ export const gateAProviderReadinessEvidenceSchema = z.object({
   }
 });
 
-export const gateALiveValidationCandidateEvidenceSchema = z.object({
+const gateALiveValidationCandidateEvidenceBaseSchema = z.object({
   schemaVersion: z.literal('gate-a-live-validation-candidate/1'),
   kind: z.literal('gate-a-live-validation-candidate'),
   runId: runIdSchema,
@@ -130,7 +130,11 @@ export const gateALiveValidationCandidateEvidenceSchema = z.object({
   purpose: z.literal('temporarily open only the disposable Gate A.1 real-material validation route'),
   issuedAt: z.string().datetime(),
   expiresAt: z.string().datetime(),
-}).strict().superRefine((evidence, context) => {
+}).strict();
+function refineCandidateExpiry(
+  evidence: Readonly<{ issuedAt: string; expiresAt: string; parsers: Readonly<Record<string, { expiresAt: string }>> }>,
+  context: z.RefinementCtx,
+): void {
   const issuedAt = Date.parse(evidence.issuedAt);
   const expiresAt = Date.parse(evidence.expiresAt);
   const parserExpiresAt = Math.min(...Object.values(evidence.parsers).map((parser) => Date.parse(parser.expiresAt)));
@@ -141,14 +145,37 @@ export const gateALiveValidationCandidateEvidenceSchema = z.object({
       message: 'Gate A live candidate is expired or outlives its parser authority',
     });
   }
-});
+}
+export const gateALiveValidationCandidateEvidenceSchema = gateALiveValidationCandidateEvidenceBaseSchema
+  .superRefine(refineCandidateExpiry);
+
+export const gateA2LiveValidationCandidateEvidenceSchema = gateALiveValidationCandidateEvidenceBaseSchema.extend({
+  schemaVersion: z.literal('gate-a-live-validation-candidate/2'),
+  capabilityVersionId: z.literal('cap_solution_analysis_v1_live_2'),
+  harnessVersionId: z.literal('harness_solution_analysis_v1_live_2'),
+  promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+  workflow: z.object({
+    templateId: z.literal('workflow-template.solution-live/2'),
+    registryDigest: z.literal('8bd18c5c953f696a590cfdccf16fc42abe5c98394f1ef40dc5023a5071aad1b6'),
+    workflowVersionId: z.literal('workflow_a0c85227b3aa484622384b5a'),
+    workflowHash: z.literal('a0c85227b3aa484622384b5a1e550a1b027b29df9543af1820b735e58e7d68e5'),
+  }).strict(),
+  expertCatalogVersionId: z.literal('expert_catalog_solution_live_2'),
+  expertCatalogVersion: z.literal(3),
+  expertCatalogDigest: z.literal('121420aa044cfe05999b63027e4c83dcd5623b463655521042c62993c26f1237'),
+  availableExpertModes: z.tuple([z.literal('auto'), z.literal('expert'), z.literal('team')]),
+  equalPermissionCeilingDigest: z.literal('ed68706e8a9af0b5ca760a3c0f15afa395a86b6fc6c1f6ced52aa7ec8390c2e1'),
+  purpose: z.literal('temporarily open only the disposable Gate A.2 three-ExpertTarget internal validation route'),
+}).superRefine(refineCandidateExpiry);
 
 export type GateAParserStartupApproval = z.infer<typeof gateAParserStartupApprovalSchema>;
 export type GateAProviderReadinessEvidence = z.infer<typeof gateAProviderReadinessEvidenceSchema>;
 export type GateALiveValidationCandidateEvidence = z.infer<typeof gateALiveValidationCandidateEvidenceSchema>;
+export type GateA2LiveValidationCandidateEvidence = z.infer<typeof gateA2LiveValidationCandidateEvidenceSchema>;
 
 export const gateALiveAuthorityJsonSchemas = Object.freeze({
   ParserStartupApproval: z.toJSONSchema(gateAParserStartupApprovalSchema),
   ProviderReadinessEvidence: z.toJSONSchema(gateAProviderReadinessEvidenceSchema),
   LiveValidationCandidateEvidence: z.toJSONSchema(gateALiveValidationCandidateEvidenceSchema),
+  A2LiveValidationCandidateEvidence: z.toJSONSchema(gateA2LiveValidationCandidateEvidenceSchema),
 });

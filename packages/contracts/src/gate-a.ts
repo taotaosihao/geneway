@@ -154,6 +154,129 @@ function refineGateAAgentAuthority(value: Readonly<{
   }
 }
 
+const gateA2PermissionCeilingSchema = z.object({
+  actions: z.tuple([z.literal('R0'), z.literal('R1'), z.literal('A1')]),
+  resourceScopes: z.tuple([z.literal('document-snapshot:approval-subject-bound')]),
+  dataClasses: z.tuple([z.literal('C0'), z.literal('C1')]),
+  connectors: z.tuple([]),
+  modelTools: z.tuple([]),
+}).strict();
+
+const gateA2AgentVersionIdSchema = z.enum([
+  'agent.solution.requirement/live-2',
+  'agent.solution.contradiction/live-2',
+  'agent.solution.architect/live-2',
+]);
+const gateA2StepBindingSchema = z.object({
+  stepId: gateAAgentStepIdSchema,
+  agentRegistryReference: gateAAgentRegistryReferenceSchema,
+  agentVersionId: gateA2AgentVersionIdSchema,
+  outputSchemaVersion: gateAAgentOutputSchemaIdSchema,
+}).strict();
+
+const gateA2OrderedStepBindingsSchema = z.tuple([
+  gateA2StepBindingSchema.extend({
+    stepId: z.literal('requirement_extract'),
+    agentRegistryReference: z.literal('agent.solution.requirement/live-1'),
+    agentVersionId: z.literal('agent.solution.requirement/live-2'),
+    outputSchemaVersion: z.literal('analysis.requirement-candidates/1'),
+  }),
+  gateA2StepBindingSchema.extend({
+    stepId: z.literal('contradiction_check'),
+    agentRegistryReference: z.literal('agent.solution.contradiction/live-1'),
+    agentVersionId: z.literal('agent.solution.contradiction/live-2'),
+    outputSchemaVersion: z.literal('analysis.contradiction/1'),
+  }),
+  gateA2StepBindingSchema.extend({
+    stepId: z.literal('solution_design'),
+    agentRegistryReference: z.literal('agent.solution.architect/live-1'),
+    agentVersionId: z.literal('agent.solution.architect/live-2'),
+    outputSchemaVersion: z.literal('analysis.result-candidate/1'),
+  }),
+]);
+
+export const gateA2ExpertRegistrySchema = z.object({
+  schemaVersion: z.literal('expert-registry.solution-live/2'),
+  registryId: z.literal('expert_catalog_solution_live_2'),
+  version: z.literal(3),
+  capabilityId: z.literal('solution.analysis.v1'),
+  capabilityVersionId: z.literal('cap_solution_analysis_v1_live_2'),
+  harnessVersionId: z.literal('harness_solution_analysis_v1_live_2'),
+  promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+  enabled: z.literal(true),
+  permissionCeiling: gateA2PermissionCeilingSchema,
+  agents: z.tuple([
+    z.object({ agentVersionId: z.literal('agent.solution.requirement/live-2'), version: z.literal(2),
+      role: z.literal('requirement_analyst'), enabled: z.literal(true),
+      logicalModelPolicy: z.literal('business.solution.analysis.standard'),
+      maxInputBytes: z.literal(262_144), maxOutputTokens: z.literal(4_096),
+      permissionCeiling: gateA2PermissionCeilingSchema }).strict(),
+    z.object({ agentVersionId: z.literal('agent.solution.contradiction/live-2'), version: z.literal(2),
+      role: z.literal('contradiction_analyst'), enabled: z.literal(true),
+      logicalModelPolicy: z.literal('business.solution.analysis.standard'),
+      maxInputBytes: z.literal(262_144), maxOutputTokens: z.literal(4_096),
+      permissionCeiling: gateA2PermissionCeilingSchema }).strict(),
+    z.object({ agentVersionId: z.literal('agent.solution.architect/live-2'), version: z.literal(2),
+      role: z.literal('solution_architect'), enabled: z.literal(true),
+      logicalModelPolicy: z.literal('business.solution.analysis.standard'),
+      maxInputBytes: z.literal(262_144), maxOutputTokens: z.literal(4_096),
+      permissionCeiling: gateA2PermissionCeilingSchema }).strict(),
+  ]),
+  experts: z.tuple([
+    z.object({ expertId: z.literal('expert.solution.requirement'),
+      expertVersionId: z.literal('expert.solution.requirement.live/2'), version: z.literal(2),
+      agentVersionId: z.literal('agent.solution.requirement/live-2'), enabled: z.literal(true),
+      capability: z.literal('solution.analysis.v1'), permissionCeiling: gateA2PermissionCeilingSchema }).strict(),
+    z.object({ expertId: z.literal('expert.solution.contradiction'),
+      expertVersionId: z.literal('expert.solution.contradiction.live/2'), version: z.literal(2),
+      agentVersionId: z.literal('agent.solution.contradiction/live-2'), enabled: z.literal(true),
+      capability: z.literal('solution.analysis.v1'), permissionCeiling: gateA2PermissionCeilingSchema }).strict(),
+    z.object({ expertId: z.literal('expert.solution.architect'),
+      expertVersionId: z.literal('expert.solution.architect.live/2'), version: z.literal(2),
+      agentVersionId: z.literal('agent.solution.architect/live-2'), enabled: z.literal(true),
+      capability: z.literal('solution.analysis.v1'), permissionCeiling: gateA2PermissionCeilingSchema }).strict(),
+  ]),
+  team: z.object({
+    teamId: z.literal('team.solution.core'),
+    teamVersionId: z.literal('team.solution.core.live/2'),
+    version: z.literal(2),
+    enabled: z.literal(true),
+    members: z.tuple([
+      z.object({ order: z.literal(1), role: z.literal('Requirement Analyst'),
+        expertVersionId: z.literal('expert.solution.requirement.live/2'),
+        agentVersionId: z.literal('agent.solution.requirement/live-2') }).strict(),
+      z.object({ order: z.literal(2), role: z.literal('Contradiction Analyst'),
+        expertVersionId: z.literal('expert.solution.contradiction.live/2'),
+        agentVersionId: z.literal('agent.solution.contradiction/live-2') }).strict(),
+      z.object({ order: z.literal(3), role: z.literal('Solution Architect'),
+        expertVersionId: z.literal('expert.solution.architect.live/2'),
+        agentVersionId: z.literal('agent.solution.architect/live-2') }).strict(),
+    ]),
+    permissionCeiling: gateA2PermissionCeilingSchema,
+  }).strict(),
+  modeBindings: z.tuple([
+    z.object({ mode: z.literal('auto'), resolvedExpertVersionId: z.literal('expert.solution.architect.live/2'),
+      promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+      logicalModelPolicy: z.literal('business.solution.analysis.standard'),
+      maxInputBytes: z.literal(262_144), maxOutputTokens: z.literal(4_096),
+      stepBindings: gateA2OrderedStepBindingsSchema, permissionCeiling: gateA2PermissionCeilingSchema }).strict(),
+    z.object({ mode: z.literal('expert'), expertId: z.literal('expert.solution.architect'),
+      expertVersionId: z.literal('expert.solution.architect.live/2'),
+      promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+      logicalModelPolicy: z.literal('business.solution.analysis.standard'),
+      maxInputBytes: z.literal(262_144), maxOutputTokens: z.literal(4_096),
+      stepBindings: gateA2OrderedStepBindingsSchema, permissionCeiling: gateA2PermissionCeilingSchema }).strict(),
+    z.object({ mode: z.literal('team'), teamId: z.literal('team.solution.core'),
+      teamVersionId: z.literal('team.solution.core.live/2'),
+      promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+      logicalModelPolicy: z.literal('business.solution.analysis.standard'),
+      maxInputBytes: z.literal(262_144), maxOutputTokens: z.literal(4_096),
+      stepBindings: gateA2OrderedStepBindingsSchema, permissionCeiling: gateA2PermissionCeilingSchema }).strict(),
+  ]),
+}).strict();
+
+export type GateA2ExpertRegistry = z.infer<typeof gateA2ExpertRegistrySchema>;
+
 const locatorCommonShape = {
   schemaVersion: z.literal('evidence-locator.live/1'),
   sourceArtifactId: idSchema,
@@ -218,7 +341,7 @@ const gateAProviderProjectionIdentityShape = {
 } as const;
 
 
-export const gateAAnalysisInvocationTokenClaimsSchema = z.object({
+const gateAAnalysisInvocationTokenClaimsBaseSchema = z.object({
   schemaVersion: z.literal('gate-a-analysis-invocation-token/1'),
   iss: z.literal('geneway-control-plane'),
   aud: z.literal('local-model-gateway-analysis'),
@@ -251,8 +374,36 @@ export const gateAAnalysisInvocationTokenClaimsSchema = z.object({
   jti: z.string().uuid(),
   iat: z.number().int().positive(),
   exp: z.number().int().positive(),
-}).strict().superRefine((claims, context) => {
+}).strict();
+export const gateAAnalysisInvocationTokenClaimsSchema = gateAAnalysisInvocationTokenClaimsBaseSchema.superRefine((claims, context) => {
   refineGateAAgentAuthority(claims, context);
+  if (claims.exp < claims.iat || claims.exp - claims.iat > 60) {
+    context.addIssue({ code: 'custom', path: ['exp'], message: 'analysis invocation token TTL must not exceed 60 seconds' });
+  }
+});
+
+function refineGateA2AgentVersionBinding(value: Readonly<{
+  stepId: z.infer<typeof gateAAgentStepIdSchema>;
+  agentVersionId: z.infer<typeof gateA2AgentVersionIdSchema>;
+}>, context: z.RefinementCtx): void {
+  const expected = {
+    requirement_extract: 'agent.solution.requirement/live-2',
+    contradiction_check: 'agent.solution.contradiction/live-2',
+    solution_design: 'agent.solution.architect/live-2',
+  } as const;
+  if (value.agentVersionId !== expected[value.stepId]) {
+    context.addIssue({ code: 'custom', path: ['agentVersionId'], message: 'A.2 step and AgentVersion must match' });
+  }
+}
+
+export const gateA2AnalysisInvocationTokenClaimsSchema = gateAAnalysisInvocationTokenClaimsBaseSchema.extend({
+  schemaVersion: z.literal('gate-a-analysis-invocation-token/2'),
+  capabilityVersionId: z.literal('cap_solution_analysis_v1_live_2'),
+  promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+  agentVersionId: gateA2AgentVersionIdSchema,
+}).superRefine((claims, context) => {
+  refineGateAAgentAuthority(claims, context);
+  refineGateA2AgentVersionBinding(claims, context);
   if (claims.exp < claims.iat || claims.exp - claims.iat > 60) {
     context.addIssue({ code: 'custom', path: ['exp'], message: 'analysis invocation token TTL must not exceed 60 seconds' });
   }
@@ -327,6 +478,46 @@ export const gateAAnalysisGatewayReceiptPayloadSchema = z.discriminatedUnion('ou
     retryNotBefore: dateTimeSchema.optional(),
   }).strict(),
 ]).superRefine(refineGateAAgentAuthority);
+
+const receiptV2CommonShape = {
+  ...receiptCommonShape,
+  schemaVersion: z.literal('gate-a-analysis-gateway-receipt/2'),
+  capabilityVersionId: z.literal('cap_solution_analysis_v1_live_2'),
+  promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+  agentVersionId: gateA2AgentVersionIdSchema,
+} as const;
+export const gateA2AnalysisGatewayReceiptPayloadSchema = z.discriminatedUnion('outcome', [
+  z.object({
+    ...receiptV2CommonShape,
+    outcome: z.literal('completed'),
+    providerRevision: z.string().min(1).max(200),
+    modelRevision: z.string().min(1).max(200),
+    outputPayloadDigest: sha256Schema,
+    usage: z.object({ inputTokens: z.number().int().nonnegative(), outputTokens: z.number().int().nonnegative(),
+      totalTokens: z.number().int().nonnegative() }).strict().superRefine((usage, context) => {
+      if (usage.inputTokens + usage.outputTokens !== usage.totalTokens) {
+        context.addIssue({ code: 'custom', path: ['totalTokens'], message: 'total tokens must equal input plus output tokens' });
+      }
+    }),
+  }).strict(),
+  z.object({
+    ...receiptV2CommonShape,
+    outcome: gateAAnalysisErrorClassSchema,
+    providerRevision: z.string().min(1).max(200).nullable(),
+    modelRevision: z.string().min(1).max(200).nullable(),
+    outputPayloadDigest: z.null(),
+    usage: z.null(),
+    retryNotBefore: dateTimeSchema.optional(),
+  }).strict(),
+]).superRefine((value, context) => {
+  refineGateAAgentAuthority(value, context);
+  refineGateA2AgentVersionBinding(value, context);
+});
+
+export const gateA2AnalysisGatewayReceiptSchema = z.object({
+  payload: gateA2AnalysisGatewayReceiptPayloadSchema,
+  signature: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
+}).strict();
 
 export const gateAAnalysisGatewayReceiptSchema = z.object({
   payload: gateAAnalysisGatewayReceiptPayloadSchema,
@@ -892,6 +1083,9 @@ export const gateAParserManifestJsonSchema = z.toJSONSchema(gateAParserManifestS
 export const deidentificationReclassificationRecordJsonSchema = z.toJSONSchema(deidentificationReclassificationRecordSchema);
 export const gateAAnalysisInvocationTokenClaimsJsonSchema = z.toJSONSchema(gateAAnalysisInvocationTokenClaimsSchema);
 export const gateAAnalysisGatewayReceiptJsonSchema = z.toJSONSchema(gateAAnalysisGatewayReceiptSchema);
+export const gateA2ExpertRegistryJsonSchema = z.toJSONSchema(gateA2ExpertRegistrySchema);
+export const gateA2AnalysisInvocationTokenClaimsJsonSchema = z.toJSONSchema(gateA2AnalysisInvocationTokenClaimsSchema);
+export const gateA2AnalysisGatewayReceiptJsonSchema = z.toJSONSchema(gateA2AnalysisGatewayReceiptSchema);
 export const gateAAnalysisWorkerClaimJsonSchema = z.toJSONSchema(gateAAnalysisWorkerClaimSchema);
 
 export const gateAPublicWireJsonSchemas = Object.freeze({
@@ -904,5 +1098,8 @@ export const gateAPublicWireJsonSchemas = Object.freeze({
   DeidentificationReclassificationRecord: deidentificationReclassificationRecordJsonSchema,
   AnalysisInvocationTokenClaims: gateAAnalysisInvocationTokenClaimsJsonSchema,
   AnalysisGatewayReceipt: gateAAnalysisGatewayReceiptJsonSchema,
+  A2ExpertRegistry: gateA2ExpertRegistryJsonSchema,
+  A2AnalysisInvocationTokenClaims: gateA2AnalysisInvocationTokenClaimsJsonSchema,
+  A2AnalysisGatewayReceipt: gateA2AnalysisGatewayReceiptJsonSchema,
   AnalysisWorkerClaim: gateAAnalysisWorkerClaimJsonSchema,
 });

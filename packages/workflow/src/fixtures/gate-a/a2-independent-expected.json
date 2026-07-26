@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "gate-a2-workflow-independent-expected/1",
+  "a1Regression": {
+    "templateId": "workflow-template.solution-live/1",
+    "registryDigest": "4d7f7edebc5d24b3d19048bb0e4e7a4012bbb4626f5fa95345be55852b83b5f6",
+    "workflowId": "workflow_4663f2a5e6c1cad3440457e1",
+    "workflowHash": "4663f2a5e6c1cad3440457e16478636572f202f6211db25fd564150731fb2ae9"
+  },
+  "a2": {
+    "templateId": "workflow-template.solution-live/2",
+    "registryDigest": "8bd18c5c953f696a590cfdccf16fc42abe5c98394f1ef40dc5023a5071aad1b6",
+    "workflowId": "workflow_a0c85227b3aa484622384b5a",
+    "workflowHash": "a0c85227b3aa484622384b5a1e550a1b027b29df9543af1820b735e58e7d68e5",
+    "expertCatalogVersionId": "expert_catalog_solution_live_2",
+    "expertCatalogVersion": 3,
+    "expertCatalogDigest": "121420aa044cfe05999b63027e4c83dcd5623b463655521042c62993c26f1237",
+    "equalPermissionCeilingDigest": "ed68706e8a9af0b5ca760a3c0f15afa395a86b6fc6c1f6ced52aa7ec8390c2e1"
+  }
+}

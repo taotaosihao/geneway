@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "gate-a2-workflow-canonical-fixture/1",
+  "template": {
+    "schemaVersion": "workflow-template-version/1",
+    "templateId": "workflow-template.solution-live/2",
+    "capabilityVersionId": "cap_solution_analysis_v1_live_2",
+    "harnessVersionId": "harness_solution_analysis_v1_live_2",
+    "workflowDraftSchemaVersion": "workflow-draft.template-v1",
+    "workflowPayloadSchemaVersion": "workflow-version.template-v1",
+    "compilerVersion": "geneway-workflow-compiler/0.2.0",
+    "canonicalizationVersion": "RFC8785/JCS-1",
+    "nodes": [
+      { "id": "document_ingest", "kind": "deterministic", "registryReference": "document-snapshot-reader/live-1", "inputRefs": ["workflow.input.documentSnapshotId"], "outputSchemaId": "document.snapshot.live/1" },
+      { "id": "requirement_extract", "kind": "agent", "registryReference": "agent.solution.requirement/live-1", "inputRefs": ["step.document_ingest.output"], "outputSchemaId": "analysis.requirement-candidates/1" },
+      { "id": "contradiction_check", "kind": "agent", "registryReference": "agent.solution.contradiction/live-1", "inputRefs": ["step.requirement_extract.output"], "outputSchemaId": "analysis.contradiction/1" },
+      { "id": "solution_design", "kind": "agent", "registryReference": "agent.solution.architect/live-1", "inputRefs": ["step.requirement_extract.output", "step.contradiction_check.output"], "outputSchemaId": "analysis.result-candidate/1" },
+      { "id": "evidence_verify", "kind": "verification", "registryReference": "claim-evidence-live/1", "inputRefs": ["step.solution_design.output"], "outputSchemaId": "evidence.verdict/1" },
+      { "id": "result_quality_check", "kind": "verification", "registryReference": "analysis-quality-live/1", "inputRefs": ["step.evidence_verify.output"], "outputSchemaId": "analysis.quality-verdict/1" },
+      { "id": "report_publish", "kind": "deterministic", "registryReference": "analysis-report-publisher/live-1", "inputRefs": ["step.result_quality_check.output"], "outputSchemaId": "artifact.analysis-report/1" }
+    ],
+    "edges": [
+      { "from": "document_ingest", "to": "requirement_extract" },
+      { "from": "requirement_extract", "to": "contradiction_check" },
+      { "from": "contradiction_check", "to": "solution_design" },
+      { "from": "solution_design", "to": "evidence_verify" },
+      { "from": "evidence_verify", "to": "result_quality_check" },
+      { "from": "result_quality_check", "to": "report_publish" }
+    ],
+    "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] },
+    "registryDigest": "8bd18c5c953f696a590cfdccf16fc42abe5c98394f1ef40dc5023a5071aad1b6"
+  },
+  "compiled": {
+    "id": "workflow_a0c85227b3aa484622384b5a",
+    "hash": "a0c85227b3aa484622384b5a1e550a1b027b29df9543af1820b735e58e7d68e5",
+    "canonicalJson": "{\"canonicalizationVersion\":\"RFC8785/JCS-1\",\"capabilityVersionId\":\"cap_solution_analysis_v1_live_2\",\"compilerVersion\":\"geneway-workflow-compiler/0.2.0\",\"edges\":[{\"from\":\"document_ingest\",\"to\":\"requirement_extract\"},{\"from\":\"requirement_extract\",\"to\":\"contradiction_check\"},{\"from\":\"contradiction_check\",\"to\":\"solution_design\"},{\"from\":\"solution_design\",\"to\":\"evidence_verify\"},{\"from\":\"evidence_verify\",\"to\":\"result_quality_check\"},{\"from\":\"result_quality_check\",\"to\":\"report_publish\"}],\"featureSet\":\"fixed-template-v1\",\"harnessVersionId\":\"harness_solution_analysis_v1_live_2\",\"nodes\":[{\"id\":\"document_ingest\",\"inputRefs\":[\"workflow.input.documentSnapshotId\"],\"kind\":\"deterministic\",\"outputSchemaId\":\"document.snapshot.live/1\",\"registryReference\":\"document-snapshot-reader/live-1\"},{\"id\":\"requirement_extract\",\"inputRefs\":[\"step.document_ingest.output\"],\"kind\":\"agent\",\"outputSchemaId\":\"analysis.requirement-candidates/1\",\"registryReference\":\"agent.solution.requirement/live-1\"},{\"id\":\"contradiction_check\",\"inputRefs\":[\"step.requirement_extract.output\"],\"kind\":\"agent\",\"outputSchemaId\":\"analysis.contradiction/1\",\"registryReference\":\"agent.solution.contradiction/live-1\"},{\"id\":\"solution_design\",\"inputRefs\":[\"step.requirement_extract.output\",\"step.contradiction_check.output\"],\"kind\":\"agent\",\"outputSchemaId\":\"analysis.result-candidate/1\",\"registryReference\":\"agent.solution.architect/live-1\"},{\"id\":\"evidence_verify\",\"inputRefs\":[\"step.solution_design.output\"],\"kind\":\"verification\",\"outputSchemaId\":\"evidence.verdict/1\",\"registryReference\":\"claim-evidence-live/1\"},{\"id\":\"result_quality_check\",\"inputRefs\":[\"step.evidence_verify.output\"],\"kind\":\"verification\",\"outputSchemaId\":\"analysis.quality-verdict/1\",\"registryReference\":\"analysis-quality-live/1\"},{\"id\":\"report_publish\",\"inputRefs\":[\"step.result_quality_check.output\"],\"kind\":\"deterministic\",\"outputSchemaId\":\"artifact.analysis-report/1\",\"registryReference\":\"analysis-report-publisher/live-1\"}],\"permissionCeiling\":{\"actions\":[\"R0\",\"R1\",\"A1\"],\"connectors\":[],\"dataClasses\":[\"C0\",\"C1\"],\"modelTools\":[],\"resourceScopes\":[\"document-snapshot:approval-subject-bound\"]},\"registryDigest\":\"8bd18c5c953f696a590cfdccf16fc42abe5c98394f1ef40dc5023a5071aad1b6\",\"schemaVersion\":\"workflow-version.template-v1\",\"templateId\":\"workflow-template.solution-live/2\",\"templateSchemaVersion\":\"workflow-template-version/1\"}"
+  }
+}

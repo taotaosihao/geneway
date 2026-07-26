@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import canonicalFixture from './fixtures/gate-a/canonical-fixture.json' with { type: 'json' };
 import independentExpected from './fixtures/gate-a/independent-expected.json' with { type: 'json' };
+import a2CanonicalFixture from './fixtures/gate-a/a2-canonical-fixture.json' with { type: 'json' };
+import a2IndependentExpected from './fixtures/gate-a/a2-independent-expected.json' with { type: 'json' };
 import {
   compileTemplateWorkflow,
   GATE_A_WORKFLOW_TEMPLATE_REGISTRY,
   readStoredTemplateWorkflowVersion,
   SOLUTION_FIXTURE_TEMPLATE,
   SOLUTION_LIVE_TEMPLATE,
+  SOLUTION_LIVE_V2_TEMPLATE,
   WORK_ORDER_STATUS_TEMPLATE,
   workflowTemplateSelectionSchema,
   workflowTemplateVersionSchema,
@@ -14,6 +17,32 @@ import {
 import { compileWorkflow, createSolutionAnalysisDraft } from './index.js';
 
 describe('Gate A immutable workflow template authority', () => {
+  it('adds the independent A.2 template while preserving the A.1 tuple and hash', () => {
+    expect({
+      templateId: SOLUTION_LIVE_TEMPLATE.templateId,
+      registryDigest: SOLUTION_LIVE_TEMPLATE.registryDigest,
+    }).toEqual({
+      templateId: a2IndependentExpected.a1Regression.templateId,
+      registryDigest: a2IndependentExpected.a1Regression.registryDigest,
+    });
+    const a1 = compileTemplateWorkflow({ schemaVersion: 'workflow-draft.template-v1',
+      templateId: SOLUTION_LIVE_TEMPLATE.templateId, registryDigest: SOLUTION_LIVE_TEMPLATE.registryDigest });
+    expect({ id: a1.id, hash: a1.hash }).toEqual({
+      id: a2IndependentExpected.a1Regression.workflowId,
+      hash: a2IndependentExpected.a1Regression.workflowHash,
+    });
+    expect(SOLUTION_LIVE_V2_TEMPLATE).toEqual(a2CanonicalFixture.template);
+    const a2 = compileTemplateWorkflow({ schemaVersion: 'workflow-draft.template-v1',
+      templateId: SOLUTION_LIVE_V2_TEMPLATE.templateId, registryDigest: SOLUTION_LIVE_V2_TEMPLATE.registryDigest });
+    expect({ id: a2.id, hash: a2.hash, canonicalJson: a2.canonicalJson }).toEqual({
+      id: a2IndependentExpected.a2.workflowId,
+      hash: a2IndependentExpected.a2.workflowHash,
+      canonicalJson: a2CanonicalFixture.compiled.canonicalJson,
+    });
+    expect(a2.payload.nodes).toEqual(a1.payload.nodes);
+    expect(a2.payload.edges).toEqual(a1.payload.edges);
+    expect(a2.payload.permissionCeiling).toEqual(a1.payload.permissionCeiling);
+  });
   it('matches checked-in independent registry digests and both live workflow hashes', () => {
     expect(SOLUTION_FIXTURE_TEMPLATE.registryDigest).toBe(independentExpected.legacy.registryDigest);
     expect(SOLUTION_LIVE_TEMPLATE.registryDigest).toBe(independentExpected.solutionLive.registryDigest);
@@ -39,7 +68,9 @@ describe('Gate A immutable workflow template authority', () => {
       hash: independentExpected.workOrderStatus.workflowHash,
       canonicalJson: canonicalFixture.compiled.workOrderStatus.canonicalJson,
     });
-    expect(Object.values(GATE_A_WORKFLOW_TEMPLATE_REGISTRY)).toEqual(canonicalFixture.registry);
+    expect(Object.values(GATE_A_WORKFLOW_TEMPLATE_REGISTRY)
+      .filter((entry) => entry.templateId !== 'workflow-template.solution-live/2'))
+      .toEqual(canonicalFixture.registry);
   });
 
     expect(Object.isFrozen(SOLUTION_LIVE_TEMPLATE)).toBe(true);

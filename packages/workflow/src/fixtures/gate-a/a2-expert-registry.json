@@ -1,0 +1,47 @@
+{
+  "schemaVersion": "expert-registry.solution-live/2",
+  "registryId": "expert_catalog_solution_live_2",
+  "version": 3,
+  "capabilityId": "solution.analysis.v1",
+  "capabilityVersionId": "cap_solution_analysis_v1_live_2",
+  "harnessVersionId": "harness_solution_analysis_v1_live_2",
+  "promptPolicyVersionId": "xiaowei.solution-analysis.system/2",
+  "enabled": true,
+  "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] },
+  "agents": [
+    { "agentVersionId": "agent.solution.requirement/live-2", "version": 2, "role": "requirement_analyst", "enabled": true, "logicalModelPolicy": "business.solution.analysis.standard", "maxInputBytes": 262144, "maxOutputTokens": 4096, "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] } },
+    { "agentVersionId": "agent.solution.contradiction/live-2", "version": 2, "role": "contradiction_analyst", "enabled": true, "logicalModelPolicy": "business.solution.analysis.standard", "maxInputBytes": 262144, "maxOutputTokens": 4096, "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] } },
+    { "agentVersionId": "agent.solution.architect/live-2", "version": 2, "role": "solution_architect", "enabled": true, "logicalModelPolicy": "business.solution.analysis.standard", "maxInputBytes": 262144, "maxOutputTokens": 4096, "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] } }
+  ],
+  "experts": [
+    { "expertId": "expert.solution.requirement", "expertVersionId": "expert.solution.requirement.live/2", "version": 2, "agentVersionId": "agent.solution.requirement/live-2", "enabled": true, "capability": "solution.analysis.v1", "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] } },
+    { "expertId": "expert.solution.contradiction", "expertVersionId": "expert.solution.contradiction.live/2", "version": 2, "agentVersionId": "agent.solution.contradiction/live-2", "enabled": true, "capability": "solution.analysis.v1", "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] } },
+    { "expertId": "expert.solution.architect", "expertVersionId": "expert.solution.architect.live/2", "version": 2, "agentVersionId": "agent.solution.architect/live-2", "enabled": true, "capability": "solution.analysis.v1", "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] } }
+  ],
+  "team": {
+    "teamId": "team.solution.core", "teamVersionId": "team.solution.core.live/2", "version": 2, "enabled": true,
+    "members": [
+      { "order": 1, "role": "Requirement Analyst", "expertVersionId": "expert.solution.requirement.live/2", "agentVersionId": "agent.solution.requirement/live-2" },
+      { "order": 2, "role": "Contradiction Analyst", "expertVersionId": "expert.solution.contradiction.live/2", "agentVersionId": "agent.solution.contradiction/live-2" },
+      { "order": 3, "role": "Solution Architect", "expertVersionId": "expert.solution.architect.live/2", "agentVersionId": "agent.solution.architect/live-2" }
+    ],
+    "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] }
+  },
+  "modeBindings": [
+    { "mode": "auto", "resolvedExpertVersionId": "expert.solution.architect.live/2", "promptPolicyVersionId": "xiaowei.solution-analysis.system/2", "logicalModelPolicy": "business.solution.analysis.standard", "maxInputBytes": 262144, "maxOutputTokens": 4096, "stepBindings": [
+      { "stepId": "requirement_extract", "agentRegistryReference": "agent.solution.requirement/live-1", "agentVersionId": "agent.solution.requirement/live-2", "outputSchemaVersion": "analysis.requirement-candidates/1" },
+      { "stepId": "contradiction_check", "agentRegistryReference": "agent.solution.contradiction/live-1", "agentVersionId": "agent.solution.contradiction/live-2", "outputSchemaVersion": "analysis.contradiction/1" },
+      { "stepId": "solution_design", "agentRegistryReference": "agent.solution.architect/live-1", "agentVersionId": "agent.solution.architect/live-2", "outputSchemaVersion": "analysis.result-candidate/1" }
+    ], "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] } },
+    { "mode": "expert", "expertId": "expert.solution.architect", "expertVersionId": "expert.solution.architect.live/2", "promptPolicyVersionId": "xiaowei.solution-analysis.system/2", "logicalModelPolicy": "business.solution.analysis.standard", "maxInputBytes": 262144, "maxOutputTokens": 4096, "stepBindings": [
+      { "stepId": "requirement_extract", "agentRegistryReference": "agent.solution.requirement/live-1", "agentVersionId": "agent.solution.requirement/live-2", "outputSchemaVersion": "analysis.requirement-candidates/1" },
+      { "stepId": "contradiction_check", "agentRegistryReference": "agent.solution.contradiction/live-1", "agentVersionId": "agent.solution.contradiction/live-2", "outputSchemaVersion": "analysis.contradiction/1" },
+      { "stepId": "solution_design", "agentRegistryReference": "agent.solution.architect/live-1", "agentVersionId": "agent.solution.architect/live-2", "outputSchemaVersion": "analysis.result-candidate/1" }
+    ], "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] } },
+    { "mode": "team", "teamId": "team.solution.core", "teamVersionId": "team.solution.core.live/2", "promptPolicyVersionId": "xiaowei.solution-analysis.system/2", "logicalModelPolicy": "business.solution.analysis.standard", "maxInputBytes": 262144, "maxOutputTokens": 4096, "stepBindings": [
+      { "stepId": "requirement_extract", "agentRegistryReference": "agent.solution.requirement/live-1", "agentVersionId": "agent.solution.requirement/live-2", "outputSchemaVersion": "analysis.requirement-candidates/1" },
+      { "stepId": "contradiction_check", "agentRegistryReference": "agent.solution.contradiction/live-1", "agentVersionId": "agent.solution.contradiction/live-2", "outputSchemaVersion": "analysis.contradiction/1" },
+      { "stepId": "solution_design", "agentRegistryReference": "agent.solution.architect/live-1", "agentVersionId": "agent.solution.architect/live-2", "outputSchemaVersion": "analysis.result-candidate/1" }
+    ], "permissionCeiling": { "actions": ["R0", "R1", "A1"], "resourceScopes": ["document-snapshot:approval-subject-bound"], "dataClasses": ["C0", "C1"], "connectors": [], "modelTools": [] } }
+  ]
+}

@@ -3779,64 +3779,128 @@
                 "additionalProperties": false
               },
               {
-                "type": "object",
-                "properties": {
-                  "recordVariant": {
-                    "type": "string",
-                    "const": "workflow-read-model.live/1"
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "recordVariant": {
+                        "type": "string",
+                        "const": "workflow-read-model.live/1"
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "hash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "capabilityVersionId": {
+                        "type": "string",
+                        "const": "cap_solution_analysis_v1_live_1"
+                      },
+                      "harnessVersionId": {
+                        "type": "string",
+                        "const": "harness_solution_analysis_v1_live_1"
+                      },
+                      "createdAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                      },
+                      "simulation": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "runtimeMode": {
+                        "type": "string",
+                        "const": "model_gateway"
+                      },
+                      "businessDecisionAllowed": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "internalAcceptance": {
+                        "type": "boolean",
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "recordVariant",
+                      "id",
+                      "hash",
+                      "capabilityVersionId",
+                      "harnessVersionId",
+                      "createdAt",
+                      "simulation",
+                      "runtimeMode",
+                      "businessDecisionAllowed",
+                      "internalAcceptance"
+                    ],
+                    "additionalProperties": false
                   },
-                  "id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 500
-                  },
-                  "hash": {
-                    "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
-                  },
-                  "capabilityVersionId": {
-                    "type": "string",
-                    "const": "cap_solution_analysis_v1_live_1"
-                  },
-                  "harnessVersionId": {
-                    "type": "string",
-                    "const": "harness_solution_analysis_v1_live_1"
-                  },
-                  "createdAt": {
-                    "type": "string",
-                    "format": "date-time",
-                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
-                  },
-                  "simulation": {
-                    "type": "boolean",
-                    "const": false
-                  },
-                  "runtimeMode": {
-                    "type": "string",
-                    "const": "model_gateway"
-                  },
-                  "businessDecisionAllowed": {
-                    "type": "boolean",
-                    "const": false
-                  },
-                  "internalAcceptance": {
-                    "type": "boolean",
-                    "const": true
+                  {
+                    "type": "object",
+                    "properties": {
+                      "recordVariant": {
+                        "type": "string",
+                        "const": "workflow-read-model.live/1"
+                      },
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "hash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "capabilityVersionId": {
+                        "type": "string",
+                        "const": "cap_solution_analysis_v1_live_2"
+                      },
+                      "harnessVersionId": {
+                        "type": "string",
+                        "const": "harness_solution_analysis_v1_live_2"
+                      },
+                      "createdAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                      },
+                      "simulation": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "runtimeMode": {
+                        "type": "string",
+                        "const": "model_gateway"
+                      },
+                      "businessDecisionAllowed": {
+                        "type": "boolean",
+                        "const": false
+                      },
+                      "internalAcceptance": {
+                        "type": "boolean",
+                        "const": true
+                      }
+                    },
+                    "required": [
+                      "recordVariant",
+                      "id",
+                      "hash",
+                      "capabilityVersionId",
+                      "harnessVersionId",
+                      "createdAt",
+                      "simulation",
+                      "runtimeMode",
+                      "businessDecisionAllowed",
+                      "internalAcceptance"
+                    ],
+                    "additionalProperties": false
                   }
-                },
-                "required": [
-                  "recordVariant",
-                  "id",
-                  "hash",
-                  "capabilityVersionId",
-                  "harnessVersionId",
-                  "createdAt",
-                  "simulation",
-                  "runtimeMode",
-                  "businessDecisionAllowed",
-                  "internalAcceptance"
-                ],
-                "additionalProperties": false
+                ]
               }
             ]
           }

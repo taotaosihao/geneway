@@ -22,6 +22,12 @@ const gateALiveTerminalErrorClassSchema = z.union([gateAAnalysisErrorClassSchema
   'REPORT_AUTHORITY_INVALID', 'REPORT_PUBLICATION_FAILED', 'STORAGE_OPERATION_FAILED',
 ])]);
 
+export const gateAExpertTargetSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('auto') }).strict(),
+  z.object({ mode: z.literal('expert'), expertId: z.literal('expert.solution.architect') }).strict(),
+  z.object({ mode: z.literal('team'), teamId: z.literal('team.solution.core') }).strict(),
+]);
+
 export const gateALiveTaskCreateInputSchema = z.object({
   conversationId: idSchema,
   capabilityId: z.literal('solution.analysis.v1'),
@@ -29,7 +35,7 @@ export const gateALiveTaskCreateInputSchema = z.object({
     kind: z.literal('document_snapshot'),
     documentSnapshotId: idSchema,
   }).strict(),
-  expertTarget: z.object({ mode: z.literal('auto') }).strict(),
+  expertTarget: gateAExpertTargetSchema,
 }).strict();
 
 export const gateADocumentExecutionEligibilitySchema = z.discriminatedUnion('route', [
@@ -64,13 +70,21 @@ export const gateADocumentExecutionEligibilitySchema = z.discriminatedUnion('rou
   }).strict(),
 ]);
 
-export const gateACapabilityRouteProjectionSchema = z.discriminatedUnion('status', [
+export const gateACapabilityRouteProjectionSchema = z.union([
   z.object({
     capabilityId: z.literal('solution.analysis.v1'),
     status: z.literal('internal'),
     executionRoute: z.literal('live'),
     capabilityVersionId: z.literal('cap_solution_analysis_v1_live_1'),
     availableExpertModes: z.tuple([z.literal('auto')]),
+    ...internalAcceptanceShape,
+  }).strict(),
+  z.object({
+    capabilityId: z.literal('solution.analysis.v1'),
+    status: z.literal('internal'),
+    executionRoute: z.literal('live'),
+    capabilityVersionId: z.literal('cap_solution_analysis_v1_live_2'),
+    availableExpertModes: z.tuple([z.literal('auto'), z.literal('expert'), z.literal('team')]),
     ...internalAcceptanceShape,
   }).strict(),
   z.object({
@@ -87,7 +101,7 @@ export const gateACapabilityRouteProjectionSchema = z.discriminatedUnion('status
   }).strict(),
 ]);
 
-export const gateALiveTaskCreateResponseSchema = z.object({
+const gateA1LiveTaskCreateResponseSchema = z.object({
   recordVariant: z.literal('business-task.live/1'),
   executionRoute: z.literal('live'),
   taskId: idSchema,
@@ -101,6 +115,19 @@ export const gateALiveTaskCreateResponseSchema = z.object({
   }).strict(),
   ...internalAcceptanceShape,
 }).strict();
+
+const gateA2LiveTaskCreateResponseSchema = gateA1LiveTaskCreateResponseSchema.extend({
+  workflowVersion: z.object({
+    id: idSchema,
+    hash: sha256Schema,
+    templateId: z.literal('workflow-template.solution-live/2'),
+    registryDigest: sha256Schema,
+  }).strict(),
+});
+export const gateALiveTaskCreateResponseSchema = z.union([
+  gateA1LiveTaskCreateResponseSchema,
+  gateA2LiveTaskCreateResponseSchema,
+]);
 
 export const gateALivePublishedStatementSchema = z.object({
   id: idSchema,
@@ -169,7 +196,7 @@ const workflowNodeSchema = z.object({
 }).strict();
 const workflowEdgeSchema = z.object({ from: idSchema, to: idSchema }).strict();
 
-export const gateALiveWorkflowDetailProjectionSchema = z.object({
+const gateA1LiveWorkflowDetailProjectionSchema = z.object({
   recordVariant: z.literal('workflow-read-model.live/1'),
   id: idSchema,
   hash: sha256Schema,
@@ -195,11 +222,25 @@ export const gateALiveWorkflowDetailProjectionSchema = z.object({
   ...internalAcceptanceShape,
 }).strict();
 
-export const gateALiveWorkflowListItemSchema = gateALiveWorkflowDetailProjectionSchema.pick({
+const gateA2LiveWorkflowDetailProjectionSchema = gateA1LiveWorkflowDetailProjectionSchema.extend({
+  templateId: z.literal('workflow-template.solution-live/2'),
+  capabilityVersionId: z.literal('cap_solution_analysis_v1_live_2'),
+  harnessVersionId: z.literal('harness_solution_analysis_v1_live_2'),
+});
+export const gateALiveWorkflowDetailProjectionSchema = z.union([
+  gateA1LiveWorkflowDetailProjectionSchema,
+  gateA2LiveWorkflowDetailProjectionSchema,
+]);
+
+const workflowListPick = {
   recordVariant: true, id: true, hash: true, capabilityVersionId: true, harnessVersionId: true,
   createdAt: true, simulation: true, runtimeMode: true, businessDecisionAllowed: true,
   internalAcceptance: true,
-});
+} as const;
+export const gateALiveWorkflowListItemSchema = z.union([
+  gateA1LiveWorkflowDetailProjectionSchema.pick(workflowListPick),
+  gateA2LiveWorkflowDetailProjectionSchema.pick(workflowListPick),
+]);
 
 const liveStepIdSchema = z.enum([
   'document_ingest',
@@ -222,7 +263,7 @@ const liveTaskStatusSchema = z.enum([
   'canceled',
 ]);
 
-export const gateALiveTaskSnapshotSchema = z.object({
+const gateA1LiveTaskSnapshotSchema = z.object({
   recordVariant: z.literal('business-task.live/1'),
   id: idSchema,
   capabilityId: z.literal('solution.analysis.v1'),
@@ -282,6 +323,60 @@ export const gateALiveTaskSnapshotSchema = z.object({
   eventWatermark: z.number().int().nonnegative(),
   ...internalAcceptanceShape,
 }).strict();
+
+const gateA2ResolvedStepBindingsSchema = z.tuple([
+  z.object({ stepId: z.literal('requirement_extract'),
+    agentRegistryReference: z.literal('agent.solution.requirement/live-1'),
+    agentVersionId: z.literal('agent.solution.requirement/live-2') }).strict(),
+  z.object({ stepId: z.literal('contradiction_check'),
+    agentRegistryReference: z.literal('agent.solution.contradiction/live-1'),
+    agentVersionId: z.literal('agent.solution.contradiction/live-2') }).strict(),
+  z.object({ stepId: z.literal('solution_design'),
+    agentRegistryReference: z.literal('agent.solution.architect/live-1'),
+    agentVersionId: z.literal('agent.solution.architect/live-2') }).strict(),
+]);
+export const gateA2ResolvedExpertTargetSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('auto'), resolution: z.literal('automatic'),
+    expertVersionId: z.literal('expert.solution.architect.live/2'),
+    promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+    stepBindings: gateA2ResolvedStepBindingsSchema }).strict(),
+  z.object({ mode: z.literal('expert'), resolution: z.literal('explicit'),
+    expertId: z.literal('expert.solution.architect'),
+    expertVersionId: z.literal('expert.solution.architect.live/2'),
+    agentVersionId: z.literal('agent.solution.architect/live-2'),
+    promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+    stepBindings: gateA2ResolvedStepBindingsSchema }).strict(),
+  z.object({ mode: z.literal('team'), resolution: z.literal('explicit'),
+    teamId: z.literal('team.solution.core'),
+    teamVersionId: z.literal('team.solution.core.live/2'),
+    members: z.tuple([
+      z.object({ order: z.literal(1), role: z.literal('Requirement Analyst'),
+        expertVersionId: z.literal('expert.solution.requirement.live/2'),
+        agentVersionId: z.literal('agent.solution.requirement/live-2') }).strict(),
+      z.object({ order: z.literal(2), role: z.literal('Contradiction Analyst'),
+        expertVersionId: z.literal('expert.solution.contradiction.live/2'),
+        agentVersionId: z.literal('agent.solution.contradiction/live-2') }).strict(),
+      z.object({ order: z.literal(3), role: z.literal('Solution Architect'),
+        expertVersionId: z.literal('expert.solution.architect.live/2'),
+        agentVersionId: z.literal('agent.solution.architect/live-2') }).strict(),
+    ]),
+    promptPolicyVersionId: z.literal('xiaowei.solution-analysis.system/2'),
+    stepBindings: gateA2ResolvedStepBindingsSchema }).strict(),
+]);
+const gateA2LiveTaskSnapshotSchema = gateA1LiveTaskSnapshotSchema.extend({
+  capabilityVersionId: z.literal('cap_solution_analysis_v1_live_2'),
+  customerFacingAuthor: z.literal('小纬'),
+  workflowVersion: z.object({ id: idSchema, hash: sha256Schema,
+    templateId: z.literal('workflow-template.solution-live/2'), registryDigest: sha256Schema }).strict(),
+  expertTarget: z.object({
+    requested: gateAExpertTargetSchema,
+    resolved: gateA2ResolvedExpertTargetSchema,
+  }).strict(),
+});
+export const gateALiveTaskSnapshotSchema = z.union([
+  gateA1LiveTaskSnapshotSchema,
+  gateA2LiveTaskSnapshotSchema,
+]);
 
 const gateALiveEventCommonShape = {
   recordVariant: z.literal('business-task-event.live/1'),
@@ -425,4 +520,5 @@ export const gateALivePublicWireJsonSchemas = Object.freeze({
   WorkflowDetailProjection: z.toJSONSchema(gateALiveWorkflowDetailProjectionSchema),
   EvidenceProjection: z.toJSONSchema(gateALiveEvidenceProjectionSchema),
   ArtifactProjection: z.toJSONSchema(gateALiveArtifactProjectionSchema),
+  A2ResolvedExpertTarget: z.toJSONSchema(gateA2ResolvedExpertTargetSchema),
 });

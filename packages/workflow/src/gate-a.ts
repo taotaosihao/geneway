@@ -24,16 +24,19 @@ export const workflowTemplatePermissionCeilingSchema = z.object({
 const templateIds = [
   'workflow-template.solution-fixture/1',
   'workflow-template.solution-live/1',
+  'workflow-template.solution-live/2',
   'workflow-template.work-order-status/1',
 ] as const;
 const capabilityIds = [
   'cap_solution_analysis_v1_1',
   'cap_solution_analysis_v1_live_1',
+  'cap_solution_analysis_v1_live_2',
   'cap_production_work_order_status_v1_1',
 ] as const;
 const harnessIds = [
   'harness_solution_analysis_v1_1',
   'harness_solution_analysis_v1_live_1',
+  'harness_solution_analysis_v1_live_2',
   'harness_production_work_order_status_v1_1',
 ] as const;
 const unsignedShape = {
@@ -55,7 +58,7 @@ export type WorkflowTemplateVersion = z.infer<typeof workflowTemplateVersionSche
 
 export const workflowTemplateSelectionSchema = z.object({
   schemaVersion: z.literal('workflow-draft.template-v1'),
-  templateId: z.enum(['workflow-template.solution-live/1', 'workflow-template.work-order-status/1']),
+  templateId: z.enum(['workflow-template.solution-live/1', 'workflow-template.solution-live/2', 'workflow-template.work-order-status/1']),
   registryDigest: sha256Schema,
 }).strict();
 export const templateWorkflowVersionPayloadSchema = z.object({
@@ -64,10 +67,10 @@ export const templateWorkflowVersionPayloadSchema = z.object({
   compilerVersion: z.literal('geneway-workflow-compiler/0.2.0'),
   canonicalizationVersion: z.literal('RFC8785/JCS-1'),
   featureSet: z.literal('fixed-template-v1'),
-  templateId: z.enum(['workflow-template.solution-live/1', 'workflow-template.work-order-status/1']),
+  templateId: z.enum(['workflow-template.solution-live/1', 'workflow-template.solution-live/2', 'workflow-template.work-order-status/1']),
   registryDigest: sha256Schema,
-  capabilityVersionId: z.enum(['cap_solution_analysis_v1_live_1', 'cap_production_work_order_status_v1_1']),
-  harnessVersionId: z.enum(['harness_solution_analysis_v1_live_1', 'harness_production_work_order_status_v1_1']),
+  capabilityVersionId: z.enum(['cap_solution_analysis_v1_live_1', 'cap_solution_analysis_v1_live_2', 'cap_production_work_order_status_v1_1']),
+  harnessVersionId: z.enum(['harness_solution_analysis_v1_live_1', 'harness_solution_analysis_v1_live_2', 'harness_production_work_order_status_v1_1']),
   nodes: z.array(workflowTemplateNodeSchema).min(1),
   edges: z.array(workflowTemplateEdgeSchema),
   permissionCeiling: workflowTemplatePermissionCeilingSchema,
@@ -150,6 +153,15 @@ export const SOLUTION_LIVE_TEMPLATE = entry({
   permissionCeiling: { actions: ['R0', 'R1', 'A1'], resourceScopes: ['document-snapshot:approval-subject-bound'],
     dataClasses: ['C0', 'C1'], connectors: [], modelTools: [] },
 });
+export const SOLUTION_LIVE_V2_TEMPLATE = entry({
+  schemaVersion: 'workflow-template-version/1', templateId: 'workflow-template.solution-live/2',
+  capabilityVersionId: 'cap_solution_analysis_v1_live_2', harnessVersionId: 'harness_solution_analysis_v1_live_2',
+  workflowDraftSchemaVersion: 'workflow-draft.template-v1', workflowPayloadSchemaVersion: 'workflow-version.template-v1',
+  compilerVersion: 'geneway-workflow-compiler/0.2.0', canonicalizationVersion: 'RFC8785/JCS-1',
+  nodes: liveNodes, edges: edges(liveNodes),
+  permissionCeiling: { actions: ['R0', 'R1', 'A1'], resourceScopes: ['document-snapshot:approval-subject-bound'],
+    dataClasses: ['C0', 'C1'], connectors: [], modelTools: [] },
+});
 export const WORK_ORDER_STATUS_TEMPLATE = entry({
   schemaVersion: 'workflow-template-version/1', templateId: 'workflow-template.work-order-status/1',
   capabilityVersionId: 'cap_production_work_order_status_v1_1',
@@ -163,6 +175,7 @@ export const WORK_ORDER_STATUS_TEMPLATE = entry({
 export const GATE_A_WORKFLOW_TEMPLATE_REGISTRY = Object.freeze({
   [SOLUTION_FIXTURE_TEMPLATE.templateId]: SOLUTION_FIXTURE_TEMPLATE,
   [SOLUTION_LIVE_TEMPLATE.templateId]: SOLUTION_LIVE_TEMPLATE,
+  [SOLUTION_LIVE_V2_TEMPLATE.templateId]: SOLUTION_LIVE_V2_TEMPLATE,
   [WORK_ORDER_STATUS_TEMPLATE.templateId]: WORK_ORDER_STATUS_TEMPLATE,
 });
 function assertDigest(value: WorkflowTemplateVersion): void {

@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import a2ExpertRegistry from '../../workflow/src/fixtures/gate-a/a2-expert-registry.json' with { type: 'json' };
+import a2Expected from '../../workflow/src/fixtures/gate-a/a2-independent-expected.json' with { type: 'json' };
 import {
   analysisStatementSchema,
   buildGateAMaterialProjection,
@@ -12,8 +15,12 @@ import {
   deidentificationReclassificationRecordSchema,
   gateAAnalysisGatewayReceiptPayloadSchema,
   gateAAnalysisInvocationTokenClaimsSchema,
+  gateA2AnalysisGatewayReceiptPayloadSchema,
+  gateA2AnalysisInvocationTokenClaimsSchema,
+  gateA2ExpertRegistrySchema,
   gateAAnalysisResultSchema,
   gateACanonicalSelectionProjectionSchema,
+  canonicalizeGateAProjection,
   gateAParserManifestSchema,
   verifyGateAParserManifestDigest,
   verifyLiveResolvedTaskInputRefCanonicalSelection,
@@ -95,6 +102,17 @@ const fullCanonicalSelectionProjection = {
 
 
 describe('Gate A live contracts', () => {
+  it('freezes the A.2 Agent/Expert/Team registry and equal three-mode ceilings', () => {
+    const registry = gateA2ExpertRegistrySchema.parse(a2ExpertRegistry);
+    const registryDigest = createHash('sha256').update(canonicalizeGateAProjection(registry)).digest('hex');
+    expect(registryDigest).toBe(a2Expected.a2.expertCatalogDigest);
+    expect(registry.modeBindings.map((binding) => binding.mode)).toEqual(['auto', 'expert', 'team']);
+    expect(registry.modeBindings.map((binding) => binding.permissionCeiling))
+      .toEqual([registry.permissionCeiling, registry.permissionCeiling, registry.permissionCeiling]);
+    expect(registry.team.members.map((member) => member.role))
+      .toEqual(['Requirement Analyst', 'Contradiction Analyst', 'Solution Architect']);
+    expect(gateA2ExpertRegistrySchema.safeParse({ ...registry, provider: 'client-owned' }).success).toBe(false);
+  });
   it('requires fact Evidence and keeps statement kinds exclusive', () => {
     expect(analysisStatementSchema.safeParse({
       id: 's1', kind: 'fact', text: 'fact', evidenceCandidateKeys: ['e1', 'e1'], confidence: 0.9,
@@ -326,6 +344,38 @@ describe('Gate A live contracts', () => {
       outputPayloadDigest: null,
       usage: null,
     }).outcome).toBe('MODEL_BUSY');
+  });
+
+  it('binds A.2 token and receipt to the exact immutable AgentVersion', () => {
+    const token = gateA2AnalysisInvocationTokenClaimsSchema.parse({
+      schemaVersion: 'gate-a-analysis-invocation-token/2', iss: 'geneway-control-plane',
+      aud: 'local-model-gateway-analysis', ...authority,
+      capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+      promptPolicyVersionId: 'xiaowei.solution-analysis.system/2',
+      agentVersionId: 'agent.solution.architect/live-2', ...projectionIdentity,
+      logicalModelPolicy: 'business.solution.analysis.standard', routeProfile: 'codex_subscription_dev',
+      dataClass: 'C1', toolChoice: 'none', outputSchemaVersion: 'analysis.result-candidate/1',
+      maxInputBytes: 1024, maxOutputTokens: 512, deadline: new Date(Date.now() + 30_000).toISOString(),
+      jti: '77777777-7777-4777-8777-777777777777', iat: now, exp: now + 60,
+    });
+    expect(gateA2AnalysisInvocationTokenClaimsSchema.safeParse({
+      ...token, agentVersionId: 'agent.solution.requirement/live-2',
+    }).success).toBe(false);
+    const receipt = gateA2AnalysisGatewayReceiptPayloadSchema.parse({
+      schemaVersion: 'gate-a-analysis-gateway-receipt/2', issuer: 'geneway-model-gateway',
+      audience: 'geneway-control-plane', receiptJti: '88888888-8888-4888-8888-888888888888',
+      ...authority, capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+      promptPolicyVersionId: 'xiaowei.solution-analysis.system/2',
+      agentVersionId: 'agent.solution.architect/live-2', ...projectionIdentity,
+      logicalModelPolicy: 'business.solution.analysis.standard', routeProfile: 'codex_subscription_dev',
+      toolChoice: 'none', maxInputBytes: 1024, dataClass: 'C1',
+      outputSchemaVersion: 'analysis.result-candidate/1', maxOutputTokens: 512,
+      deadline: token.deadline, issuedAt: new Date().toISOString(), outcome: 'MODEL_BUSY',
+      providerRevision: null, modelRevision: null, outputPayloadDigest: null, usage: null,
+    });
+    expect(gateA2AnalysisGatewayReceiptPayloadSchema.safeParse({
+      ...receipt, agentVersionId: 'agent.solution.requirement/live-2',
+    }).success).toBe(false);
   });
 
   it('derives material, prompt-policy and provider-input digests from exact versioned projections', async () => {

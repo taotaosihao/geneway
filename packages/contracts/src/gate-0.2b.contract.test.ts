@@ -59,7 +59,7 @@ describe('Gate 0.2B public wire contracts', () => {
       schemaVersion: 'geneway-gate-0.2b-public-wire/1',
       schemas: contracts.gate02bPublicWireJsonSchemas,
     });
-    expect(createHash('sha256').update(artifactText).digest('hex')).toBe('00ef79d42297f56ae58a98e1811e8f002efc7959ffb5e979de96cb4285d741f5');
+    expect(createHash('sha256').update(artifactText).digest('hex')).toBe('1ba573fd2b71689555c60070a0f4478c4c83046d42da15841bb6d949b035a718');
   });
 
   it('keeps exception Worker input source-bound and rejects unregistered source kinds', () => {

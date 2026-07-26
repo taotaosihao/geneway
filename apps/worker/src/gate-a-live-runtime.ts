@@ -71,13 +71,19 @@ async function readBoundedJson(response: Response): Promise<unknown> {
 
 function receiptMatchesClaim(receipt: GateAAnalysisGatewayReceipt, claim: GateAAnalysisWorkerClaim): boolean {
   const payload = receipt.payload;
-  return payload.tenantId === claim.tenantId
+  const versionMatches = claim.schemaVersion === 'analysis-worker-claim/1'
+    ? payload.schemaVersion === 'gate-a-analysis-gateway-receipt/1'
+    : payload.schemaVersion === 'gate-a-analysis-gateway-receipt/2'
+      && payload.agentVersionId === claim.agentVersionId;
+  return versionMatches
+    && payload.tenantId === claim.tenantId
     && payload.principalId === claim.principalId
     && payload.conversationId === claim.conversationId
     && payload.taskId === claim.taskId
     && payload.workflowVersionId === claim.workflowVersionId
     && payload.workflowHash === claim.workflowHash
     && payload.stepId === claim.stepId
+    && payload.agentRegistryReference === claim.agentRegistryReference
     && payload.executionAttemptId === claim.executionAttemptId
     && payload.stepAttemptId === claim.stepAttemptId
     && payload.taskFence === claim.taskFence
@@ -101,6 +107,7 @@ function receiptMatchesClaim(receipt: GateAAnalysisGatewayReceipt, claim: GateAA
     && payload.materialProjectionDigest === claim.materialProjectionDigest
     && payload.promptPolicyResolvedBytesSha256 === claim.promptPolicyResolvedBytesSha256
     && payload.providerInputProjectionDigest === claim.providerInputProjectionDigest
+    && payload.priorStepOutputsDigest === claim.priorStepOutputsDigest
     && payload.logicalModelPolicy === claim.logicalModelPolicy
     && payload.dataClass === claim.dataClass
     && payload.routeProfile === claim.routeProfile

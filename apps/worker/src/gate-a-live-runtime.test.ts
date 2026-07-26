@@ -20,7 +20,7 @@ import { runWorkerLoop } from './worker-loop.js';
 const digest = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex');
 const serviceToken = 'gate-a-worker-model-gateway-token-0000000000000001';
 
-function claim(): GateAAnalysisWorkerClaim {
+function claim(version: 1 | 2 = 1): GateAAnalysisWorkerClaim {
   const materialText = '计划数量为 100。';
   const canonicalTextSha256 = digest(materialText);
   const canonicalTextByteLength = Buffer.byteLength(materialText, 'utf8');
@@ -46,7 +46,7 @@ function claim(): GateAAnalysisWorkerClaim {
   const canonicalSelectionProjectionDigest = digest(JSON.stringify(canonicalSelectionProjection));
   const documentSnapshotId = 'snapshot-1';
   return gateAAnalysisWorkerClaimSchema.parse({
-    schemaVersion: 'analysis-worker-claim/1',
+    schemaVersion: version === 2 ? 'analysis-worker-claim/2' : 'analysis-worker-claim/1',
     tenantId: 'tenant_local',
     principalId: 'user_local',
     conversationId: 'conversation-1',
@@ -61,8 +61,9 @@ function claim(): GateAAnalysisWorkerClaim {
     stepFence: 3,
     modelInvocationId: 'model-invocation-1',
     approvalSubjectDigest: digest('approval'),
-    capabilityVersionId: 'cap_solution_analysis_v1_live_1',
-    promptPolicyVersionId: 'xiaowei.solution-analysis.system/1',
+    capabilityVersionId: version === 2 ? 'cap_solution_analysis_v1_live_2' : 'cap_solution_analysis_v1_live_1',
+    promptPolicyVersionId: version === 2 ? 'xiaowei.solution-analysis.system/2' : 'xiaowei.solution-analysis.system/1',
+    ...(version === 2 ? { agentVersionId: 'agent.solution.architect/live-2' } : {}),
     expertTargetDigest: digest('expert'),
     documentSnapshotId,
     artifactId: 'artifact-1',
@@ -133,7 +134,9 @@ const output = Object.freeze({
 
 function receipt(value: GateAAnalysisWorkerClaim, outcome: 'completed' | 'MODEL_TIMEOUT' = 'completed'): GateAAnalysisGatewayReceipt {
   const common = {
-    schemaVersion: 'gate-a-analysis-gateway-receipt/1',
+    schemaVersion: value.schemaVersion === 'analysis-worker-claim/2'
+      ? 'gate-a-analysis-gateway-receipt/2' as const
+      : 'gate-a-analysis-gateway-receipt/1' as const,
     issuer: 'geneway-model-gateway',
     audience: 'geneway-control-plane',
     receiptJti: '11111111-1111-4111-8111-111111111111',
@@ -178,6 +181,7 @@ function receipt(value: GateAAnalysisWorkerClaim, outcome: 'completed' | 'MODEL_
     maxOutputTokens: value.maxOutputTokens,
     deadline: value.deadline,
     issuedAt: new Date().toISOString(),
+    ...(value.schemaVersion === 'analysis-worker-claim/2' ? { agentVersionId: value.agentVersionId } : {}),
   } as const;
   return gateAAnalysisGatewayReceiptSchema.parse({
     payload: outcome === 'completed'
@@ -229,6 +233,40 @@ describe('Gate A live Worker runtime', () => {
     const runtime = new GateAAnalysisRuntimeAdapter('http://127.0.0.1:3150', serviceToken);
     await expect(runtime.execute(value)).resolves.toEqual(expected);
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('accepts a v2 receipt only when it carries the exact claim AgentVersion', async () => {
+    const value = claim(2);
+    const expected = result(value);
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify(expected), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })));
+    const runtime = new GateAAnalysisRuntimeAdapter('http://127.0.0.1:3150', serviceToken);
+    await expect(runtime.execute(value)).resolves.toEqual(expected);
+    expect(expected.receipt.payload).toMatchObject({
+      schemaVersion: 'gate-a-analysis-gateway-receipt/2',
+      agentVersionId: 'agent.solution.architect/live-2',
+    });
+  });
+
+  it('rejects a v2 receipt rebound to another step and AgentVersion', async () => {
+    const value = claim(2);
+    const valid = receipt(value);
+    const tampered = gateAAnalysisGatewayReceiptSchema.parse({
+      ...valid,
+      payload: {
+        ...valid.payload,
+        stepId: 'requirement_extract',
+        agentRegistryReference: 'agent.solution.requirement/live-1',
+        agentVersionId: 'agent.solution.requirement/live-2',
+        outputSchemaVersion: 'analysis.requirement-candidates/1',
+      },
+    });
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ output, receipt: tampered }), {
+      status: 200, headers: { 'content-type': 'application/json' },
+    })));
+    const runtime = new GateAAnalysisRuntimeAdapter('http://127.0.0.1:3150', serviceToken);
+    await expect(runtime.execute(value)).rejects.toMatchObject({ errorClass: 'MODEL_PROTOCOL_VIOLATION' });
   });
 
   it('rejects a receipt whose material or provider projection identity differs from the claim', async () => {

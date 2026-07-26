@@ -29,6 +29,7 @@ import {
   liveEvidenceLocatorSchema,
   liveResolvedTaskInputRefSchema,
 } from './gate-a.js';
+import { gateALiveTaskEventProjectionSchema } from './gate-a-public.js';
 
 const hash = (value: string) => value.repeat(64);
 const now = Math.floor(Date.now() / 1_000);
@@ -102,6 +103,22 @@ const fullCanonicalSelectionProjection = {
 
 
 describe('Gate A live contracts', () => {
+  it('reads both historical and A.2 reclaimed event payloads without reinterpreting the event version', () => {
+    const event = {
+      recordVariant: 'business-task-event.live/1', schemaVersion: 2, cursor: 1,
+      id: 'event-reclaimed', businessTaskId: 'task-reclaimed', sequence: 1, aggregateVersion: 1,
+      occurredAt: '2026-07-26T00:00:00.000Z', eventType: 'workflow.run_reclaimed',
+      simulation: false, runtimeMode: 'model_gateway', businessDecisionAllowed: false, internalAcceptance: true,
+    } as const;
+    expect(gateALiveTaskEventProjectionSchema.parse({
+      ...event, payload: { executionAttemptId: 'execution-current' },
+    }).payload).toEqual({ executionAttemptId: 'execution-current' });
+    expect(gateALiveTaskEventProjectionSchema.parse({
+      ...event,
+      payload: { executionAttemptId: 'execution-current', previousExecutionAttemptId: 'execution-old',
+        stepId: 'requirement_extract', taskFence: 2, stepFence: 2 },
+    }).payload).toMatchObject({ previousExecutionAttemptId: 'execution-old', taskFence: 2, stepFence: 2 });
+  });
   it('freezes the A.2 Agent/Expert/Team registry and equal three-mode ceilings', () => {
     const registry = gateA2ExpertRegistrySchema.parse(a2ExpertRegistry);
     const registryDigest = createHash('sha256').update(canonicalizeGateAProjection(registry)).digest('hex');
@@ -442,6 +459,8 @@ describe('Gate A live contracts', () => {
     expect(provider.providerUserPrompt).toBe(buildGateAProviderUserPrompt([
       { candidateKey: 'candidate-1', excerpt: untrustedText.text },
     ]));
+    expect(provider.providerUserPrompt).toContain('"allowedEvidenceCandidateKeys":["candidate-1"]');
+    expect(provider.providerUserPrompt).toContain('禁止生成、改写 candidateKey');
   });
 
 

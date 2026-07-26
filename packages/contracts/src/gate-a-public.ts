@@ -42,7 +42,7 @@ export const gateADocumentExecutionEligibilitySchema = z.discriminatedUnion('rou
   z.object({
     route: z.literal('live'),
     eligible: z.literal(true),
-    capabilityVersionId: z.literal('cap_solution_analysis_v1_live_1'),
+    capabilityVersionId: z.enum(['cap_solution_analysis_v1_live_1', 'cap_solution_analysis_v1_live_2']),
     parserManifestId: idSchema,
     parserDigest: sha256Schema,
     extractionVersion: gateADocumentExtractionVersionSchema,
@@ -423,8 +423,22 @@ export const gateALiveTaskEventProjectionSchema = z.discriminatedUnion('eventTyp
   }).strict(),
   z.object({
     ...gateALiveEventCommonShape,
-    eventType: z.enum(['workflow.run_started', 'workflow.run_reclaimed']),
+    eventType: z.literal('workflow.run_started'),
     payload: z.object({ executionAttemptId: idSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...gateALiveEventCommonShape,
+    eventType: z.literal('workflow.run_reclaimed'),
+    payload: z.union([
+      z.object({ executionAttemptId: idSchema }).strict(),
+      z.object({
+        executionAttemptId: idSchema,
+        previousExecutionAttemptId: idSchema,
+        stepId: z.enum(['requirement_extract', 'contradiction_check', 'solution_design']),
+        taskFence: z.number().int().positive(),
+        stepFence: z.number().int().positive(),
+      }).strict(),
+    ]),
   }).strict(),
   z.object({
     ...gateALiveEventCommonShape,

@@ -2,7 +2,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import type { FastifyInstance } from 'fastify';
 import { createOpenAIOAuth } from '@openai-oauth/ai-sdk';
 import { openaiCredentials } from '@openai-oauth/local';
-import { generateText, Output } from 'ai';
+import { generateText, jsonSchema, Output } from 'ai';
 import { z } from 'zod';
 import {
   buildGateAMaterialProjection,
@@ -16,6 +16,7 @@ import {
   gateAAnalysisGatewayReceiptPayloadSchema,
   gateAAnalysisGatewayReceiptSchema,
   gateAAnalysisInvocationTokenClaimsSchema,
+  gateA2AnalysisGatewayReceiptPayloadSchema,
   gateAAnalysisResultSchema,
   gateAAgentOutputSchema,
   gateARequirementCandidatesSchema,
@@ -69,6 +70,17 @@ const authorityClaimKeys = [
   'providerInputProjectionDigest', 'dataClass', 'toolChoice',
   'agentRegistryReference', 'priorStepOutputsDigest', 'outputSchemaVersion', 'maxInputBytes', 'maxOutputTokens', 'deadline',
 ] as const;
+
+function claimVersionsMatch(
+  claims: GateAAnalysisInvocationTokenClaims,
+  claim: GateAAnalysisWorkerClaim,
+): boolean {
+  if (claims.schemaVersion === 'gate-a-analysis-invocation-token/1') {
+    return claim.schemaVersion === 'analysis-worker-claim/1';
+  }
+  return claim.schemaVersion === 'analysis-worker-claim/2'
+    && claims.agentVersionId === claim.agentVersionId;
+}
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
@@ -184,7 +196,8 @@ async function claimMatchesProjection(
     coveredBytes += excerptBytes.byteLength;
     return matches;
   }) && coveredBytes === textBytes.byteLength;
-  if (!authorityClaimKeys.every((key) => claims[key] === claim[key])
+  if (!claimVersionsMatch(claims, claim)
+    || !authorityClaimKeys.every((key) => claims[key] === claim[key])
     || claims.documentSnapshotId !== claim.inputRef.documentSnapshotId
     || claims.documentSnapshotId !== claim.untrustedText.documentSnapshotId
     || claims.artifactId !== claim.inputRef.artifactId
@@ -245,7 +258,9 @@ async function claimMatchesProjection(
 }
 
 function signReceipt(payloadValue: GateAAnalysisGatewayReceiptPayload, secret: string): GateAAnalysisGatewayReceipt {
-  const payload = gateAAnalysisGatewayReceiptPayloadSchema.parse(payloadValue);
+  const payload = payloadValue.schemaVersion === 'gate-a-analysis-gateway-receipt/2'
+    ? gateA2AnalysisGatewayReceiptPayloadSchema.parse(payloadValue)
+    : gateAAnalysisGatewayReceiptPayloadSchema.parse(payloadValue);
   const signature = createHmac('sha256', secret)
     .update(canonicalizeGateAProjection(payload), 'utf8').digest('base64url');
   return gateAAnalysisGatewayReceiptSchema.parse({ payload, signature });
@@ -267,6 +282,36 @@ function parseAgentOutput(claim: GateAAnalysisWorkerClaim, value: unknown): Gate
     throw new GateAProviderProtocolError('provider returned an unknown Evidence candidate key');
   }
   return output;
+}
+
+export function buildGateAProviderOutputJsonSchema(
+  claim: Pick<GateAAnalysisWorkerClaim, 'stepId' | 'evidenceCandidates'>,
+): Record<string, unknown> {
+  const baseSchema = claim.stepId === 'requirement_extract'
+    ? gateARequirementCandidatesSchema
+    : claim.stepId === 'contradiction_check' ? gateAContradictionResultSchema : gateAAnalysisResultSchema;
+  const schema = structuredClone(z.toJSONSchema(baseSchema)) as Record<string, unknown>;
+  const collectionKey = claim.stepId === 'requirement_extract'
+    ? 'requirements' : claim.stepId === 'contradiction_check' ? 'contradictions' : 'statements';
+  const properties = schema.properties;
+  const collection = typeof properties === 'object' && properties !== null && !Array.isArray(properties)
+    ? (properties as Record<string, unknown>)[collectionKey] : undefined;
+  const collectionItems = typeof collection === 'object' && collection !== null && !Array.isArray(collection)
+    ? (collection as Record<string, unknown>).items : undefined;
+  const itemProperties = typeof collectionItems === 'object' && collectionItems !== null && !Array.isArray(collectionItems)
+    ? (collectionItems as Record<string, unknown>).properties : undefined;
+  const evidenceCandidateKeys = typeof itemProperties === 'object' && itemProperties !== null
+    && !Array.isArray(itemProperties)
+    ? (itemProperties as Record<string, unknown>).evidenceCandidateKeys : undefined;
+  if (typeof evidenceCandidateKeys !== 'object' || evidenceCandidateKeys === null
+    || Array.isArray(evidenceCandidateKeys) || claim.evidenceCandidates.length === 0) {
+    throw new GateAProviderProtocolError('provider output schema cannot bind Evidence candidate authority');
+  }
+  (evidenceCandidateKeys as Record<string, unknown>).items = {
+    type: 'string',
+    enum: claim.evidenceCandidates.map(({ candidateKey }) => candidateKey),
+  };
+  return schema;
 }
 
 export type GateAAnalysisProviderResult = Readonly<{
@@ -329,8 +374,10 @@ function receiptPayload(
     retryNotBefore?: string;
   }>,
 ): GateAAnalysisGatewayReceiptPayload {
-  return gateAAnalysisGatewayReceiptPayloadSchema.parse({
-    schemaVersion: 'gate-a-analysis-gateway-receipt/1',
+  const payload = {
+    schemaVersion: claim.schemaVersion === 'analysis-worker-claim/2'
+      ? 'gate-a-analysis-gateway-receipt/2' as const
+      : 'gate-a-analysis-gateway-receipt/1' as const,
     issuer: 'geneway-model-gateway',
     audience: 'geneway-control-plane',
     receiptJti: randomUUID(),
@@ -380,8 +427,12 @@ function receiptPayload(
     usage: input.usage,
     outcome: input.outcome,
     issuedAt: new Date().toISOString(),
+    ...(claim.schemaVersion === 'analysis-worker-claim/2' ? { agentVersionId: claim.agentVersionId } : {}),
     ...(input.retryNotBefore === undefined ? {} : { retryNotBefore: input.retryNotBefore }),
-  });
+  };
+  return payload.schemaVersion === 'gate-a-analysis-gateway-receipt/2'
+    ? gateA2AnalysisGatewayReceiptPayloadSchema.parse(payload)
+    : gateAAnalysisGatewayReceiptPayloadSchema.parse(payload);
 }
 
 export function buildUntrustedAnalysisPrompt(
@@ -449,9 +500,7 @@ export function registerGateAAnalysisRoute(app: FastifyInstance, options: GateAA
         terminal = await options.providerCallForTest({ claim: input.claim, signal: providerAbort.signal });
       } else {
         const openai = createOpenAIOAuth(openaiCredentials({ authFilePath: readiness.authFilePath, ensureFresh: false }));
-        const providerOutputSchema = (input.claim.stepId === 'requirement_extract'
-          ? gateARequirementCandidatesSchema
-          : input.claim.stepId === 'contradiction_check' ? gateAContradictionResultSchema : gateAAnalysisResultSchema) as unknown as typeof gateAAgentOutputSchema;
+        const providerOutputSchema = jsonSchema(buildGateAProviderOutputJsonSchema(input.claim));
         const result = await generateText({
           model: openai(readiness.model),
           system: input.claim.systemPrompt,

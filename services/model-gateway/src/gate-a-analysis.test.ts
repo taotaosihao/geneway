@@ -13,6 +13,7 @@ import {
   type GateAAnalysisWorkerClaim,
 } from '@geneway/contracts';
 import {
+  buildGateAProviderOutputJsonSchema,
   buildUntrustedAnalysisPrompt,
   registerGateAAnalysisRoute,
   type GateAAnalysisProviderResult,
@@ -27,7 +28,7 @@ const SYSTEM_PROMPT = '只分析材料，区分事实、推断、建议和未知
 
 const digestCanonical = (value: unknown): string => digest(canonicalizeGateAProjection(value));
 
-function projectionInput(deadline: string) {
+function projectionInput(deadline: string, version: 1 | 2 = 1) {
   const canonicalTextSha256 = digest(MATERIAL_TEXT);
   const canonicalTextByteLength = Buffer.byteLength(MATERIAL_TEXT, 'utf8');
   const canonicalSelectionProjection = {
@@ -96,7 +97,7 @@ function projectionInput(deadline: string) {
   const providerInputProjection = buildGateAProviderInputProjection({
     material,
     materialProjectionDigest,
-    promptPolicyVersionId: 'xiaowei.solution-analysis.system/1',
+    promptPolicyVersionId: version === 2 ? 'xiaowei.solution-analysis.system/2' : 'xiaowei.solution-analysis.system/1',
     promptPolicyResolvedBytesSha256,
     systemPrompt: SYSTEM_PROMPT,
     evidenceCandidates: [{ candidateKey: locator.candidateKey, excerpt: MATERIAL_TEXT }],
@@ -126,11 +127,22 @@ function projectionInput(deadline: string) {
 }
 
 function tokenClaims(overrides: Readonly<Record<string, unknown>> = {}): GateAAnalysisInvocationTokenClaims {
+  return tokenClaimsForVersion(1, overrides);
+}
+
+function tokenClaimsV2(overrides: Readonly<Record<string, unknown>> = {}): GateAAnalysisInvocationTokenClaims {
+  return tokenClaimsForVersion(2, overrides);
+}
+
+function tokenClaimsForVersion(
+  version: 1 | 2,
+  overrides: Readonly<Record<string, unknown>> = {},
+): GateAAnalysisInvocationTokenClaims {
   const now = Math.floor(Date.now() / 1_000);
   const deadline = new Date(Date.now() + 60_000).toISOString();
-  const projection = projectionInput(deadline);
+  const projection = projectionInput(deadline, version);
   return gateAAnalysisInvocationTokenClaimsSchema.parse({
-    schemaVersion: 'gate-a-analysis-invocation-token/1',
+    schemaVersion: version === 2 ? 'gate-a-analysis-invocation-token/2' : 'gate-a-analysis-invocation-token/1',
     iss: 'geneway-control-plane',
     aud: 'local-model-gateway-analysis',
     tenantId: 'tenant_local',
@@ -147,8 +159,9 @@ function tokenClaims(overrides: Readonly<Record<string, unknown>> = {}): GateAAn
     stepFence: 7,
     modelInvocationId: 'model-invocation-analysis',
     approvalSubjectDigest: digest('approval'),
-    capabilityVersionId: 'cap_solution_analysis_v1_live_1',
-    promptPolicyVersionId: 'xiaowei.solution-analysis.system/1',
+    capabilityVersionId: version === 2 ? 'cap_solution_analysis_v1_live_2' : 'cap_solution_analysis_v1_live_1',
+    promptPolicyVersionId: version === 2 ? 'xiaowei.solution-analysis.system/2' : 'xiaowei.solution-analysis.system/1',
+    ...(version === 2 ? { agentVersionId: 'agent.solution.architect/live-2' } : {}),
     expertTargetDigest: digest('expert-target'),
     documentSnapshotId: projection.inputRef.documentSnapshotId,
     artifactId: projection.inputRef.artifactId,
@@ -187,7 +200,8 @@ function signToken(claims: GateAAnalysisInvocationTokenClaims): string {
 }
 
 function workerClaim(claims = tokenClaims(), overrides: Readonly<Record<string, unknown>> = {}): GateAAnalysisWorkerClaim {
-  const projection = projectionInput(claims.deadline);
+  const version = claims.schemaVersion === 'gate-a-analysis-invocation-token/2' ? 2 : 1;
+  const projection = projectionInput(claims.deadline, version);
   const inputRef = {
     ...projection.inputRef,
     documentSnapshotId: claims.documentSnapshotId,
@@ -217,7 +231,7 @@ function workerClaim(claims = tokenClaims(), overrides: Readonly<Record<string, 
     })),
   };
   return gateAAnalysisWorkerClaimSchema.parse({
-    schemaVersion: 'analysis-worker-claim/1',
+    schemaVersion: version === 2 ? 'analysis-worker-claim/2' : 'analysis-worker-claim/1',
     tenantId: claims.tenantId,
     principalId: claims.principalId,
     conversationId: claims.conversationId,
@@ -233,6 +247,9 @@ function workerClaim(claims = tokenClaims(), overrides: Readonly<Record<string, 
     approvalSubjectDigest: claims.approvalSubjectDigest,
     capabilityVersionId: claims.capabilityVersionId,
     promptPolicyVersionId: claims.promptPolicyVersionId,
+    ...(claims.schemaVersion === 'gate-a-analysis-invocation-token/2'
+      ? { agentVersionId: claims.agentVersionId }
+      : {}),
     expertTargetDigest: claims.expertTargetDigest,
     documentSnapshotId: claims.documentSnapshotId,
     artifactId: claims.artifactId,
@@ -452,6 +469,42 @@ describe('Gate A structured analysis Model Gateway route', () => {
     expect(release).toHaveBeenCalledOnce();
   });
 
+  it('accepts a v2 claim and signs a receipt bound to its exact AgentVersion', async () => {
+    const claim = workerClaim(tokenClaimsV2());
+    const provider = vi.fn(() => Promise.resolve({
+      output: validOutput, providerRevision: 'test-provider/2', modelRevision: 'test-model/2',
+      usage: { outputTokens: 20, inputTokens: 10, totalTokens: 30 }, toolCallCount: 0,
+    }));
+    const app = buildApp({ provider });
+    const response = await inject(app, claim);
+    expect(response.statusCode, response.body).toBe(200);
+    const receipt = gateAAnalysisGatewayReceiptSchema.parse(
+      response.json<Readonly<Record<string, unknown>>>().receipt,
+    );
+    expect(receipt.payload).toMatchObject({
+      schemaVersion: 'gate-a-analysis-gateway-receipt/2',
+      agentVersionId: 'agent.solution.architect/live-2',
+      stepId: 'solution_design',
+      agentRegistryReference: 'agent.solution.architect/live-1',
+    });
+    expect(provider).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a signed v2 token whose AgentVersion does not match its step before authority or provider I/O', async () => {
+    const authorize = vi.fn(() => Promise.resolve(true));
+    const provider = vi.fn(() => Promise.reject(new Error('must not call provider')));
+    const claims = tokenClaimsV2();
+    const invalidClaims = { ...claims, agentVersionId: 'agent.solution.requirement/live-2' };
+    const encoded = Buffer.from(JSON.stringify(invalidClaims), 'utf8').toString('base64url');
+    const signature = createHmac('sha256', invocationSecret).update(encoded, 'utf8').digest('base64url');
+    const claim = workerClaim(claims, { invocationToken: `${encoded}.${signature}` });
+    const app = buildApp({ authorize, provider });
+    const response = await inject(app, claim);
+    expect(response.statusCode).toBe(401);
+    expect(authorize).not.toHaveBeenCalled();
+    expect(provider).not.toHaveBeenCalled();
+  });
+
   it('accepts one fully covering locator merged across more than 128 selected paragraphs', async () => {
     const authorize = vi.fn(() => Promise.resolve(true));
     const provider = vi.fn(() => Promise.resolve({
@@ -574,9 +627,33 @@ describe('Gate A structured analysis Model Gateway route', () => {
     const prompt = buildUntrustedAnalysisPrompt(candidates);
     expect(prompt).toBe(buildGateAProviderUserPrompt(candidates));
     expect(prompt).toContain('candidate-one');
+    expect(prompt).toContain('"allowedEvidenceCandidateKeys":["candidate-one"]');
+    expect(prompt).toContain('禁止把 requirement、statement 或其他前序输出 ID 当作 candidateKey');
     expect(prompt).toContain(JSON.stringify(candidates));
     expect(prompt).not.toContain('documentSnapshotId');
     expect(prompt).not.toContain('selectedLocators');
+  });
+
+  it.each([
+    ['requirement_extract', 'requirements'],
+    ['contradiction_check', 'contradictions'],
+    ['solution_design', 'statements'],
+  ] as const)('narrows %s provider output to the exact approved candidate keys', (stepId, collectionKey) => {
+    const schema = buildGateAProviderOutputJsonSchema({
+      stepId,
+      evidenceCandidates: [
+        { candidateKey: 'candidate-one', excerpt: 'first' },
+        { candidateKey: 'candidate-two', excerpt: 'second' },
+      ],
+    });
+    const properties = schema.properties as Record<string, {
+      items: { properties: { evidenceCandidateKeys: { items: unknown } } };
+    }>;
+    expect(properties[collectionKey]?.items.properties.evidenceCandidateKeys.items).toEqual({
+      type: 'string', enum: ['candidate-one', 'candidate-two'],
+    });
+    expect(JSON.stringify(schema)).not.toContain('first');
+    expect(JSON.stringify(schema)).not.toContain('second');
   });
 
   it('rejects candidate mapping tampering before introspection and provider I/O', async () => {

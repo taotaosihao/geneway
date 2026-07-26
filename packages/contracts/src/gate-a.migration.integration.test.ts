@@ -86,7 +86,7 @@ const seedReportPublishAuthority = async (): Promise<void> => {
      workflow_draft_schema_version,workflow_payload_schema_version,compiler_version,
      canonicalization_version,registry_digest,canonical_entry)
     VALUES ($1,'workflow-template.solution-live/1','workflow-template-version/1',
-      'cap-gate-a-migration','harness-gate-a-migration','workflow-draft.template-v1',
+      'cap_solution_analysis_v1_live_1','harness-gate-a-migration','workflow-draft.template-v1',
       'workflow-version.template-v1','geneway-workflow-compiler/0.2.0','RFC8785/JCS-1',$2,$3)
     ON CONFLICT (tenant_id,template_id) DO NOTHING`, [tenant, hashA, {
     templateId: 'workflow-template.solution-live/1', registryDigest: hashA,
@@ -162,7 +162,7 @@ const seedReportPublishAuthority = async (): Promise<void> => {
      workflow_version_id,workflow_hash,requester_id,status,input_snapshot,expert_target,
      permission_scope,audience_scope,budget,simulation,runtime_mode,business_decision_allowed,
      record_variant,result_record_variant,semantic_fingerprint,result)
-    VALUES ($1,'task-report-finalization','conversation-gate-a-migration','cap-gate-a-migration',
+    VALUES ($1,'task-report-finalization','conversation-gate-a-migration','cap_solution_analysis_v1_live_1',
       'experts-gate-a-migration','harness-gate-a-migration','workflow-live-report-finalization',$2,
       'user-gate-a-migration','running',$3,'{}','{}','{}','{}',false,'model_gateway',false,
       'business-task.live/1',NULL,$4,NULL)`,
@@ -204,7 +204,7 @@ const seedReportPublishAuthority = async (): Promise<void> => {
      receipt_attested,prior_step_outputs_digest,evidence_candidate_projection,agent_registry_reference)
     VALUES ($1,'invocation-report-finalization','task-report-finalization',
       'workflow-live-report-finalization',$2,'solution_design','execution-report-finalization',
-      'solution-attempt-report-finalization',7,3,$3,'cap-gate-a-migration','prompt-report-finalization',
+      'solution-attempt-report-finalization',7,3,$3,'cap_solution_analysis_v1_live_1','prompt-report-finalization',
       $4,'parser-gate-a-report-finalization','snapshot-report-finalization',$6,
       'business.solution.analysis.standard',
       'codex_subscription_dev','C1','completed',$7,'provider-test/1','model-test/1',
@@ -390,6 +390,73 @@ const insertActivation = async (
   return activationId;
 };
 
+type GateAInvocationStep = 'requirement_extract' | 'contradiction_check' | 'solution_design';
+
+const invocationStepAuthority: Record<GateAInvocationStep, {
+  agentRegistryReference: string;
+  outputSchemaVersion: string;
+}> = {
+  requirement_extract: {
+    agentRegistryReference: 'agent.solution.requirement/live-1',
+    outputSchemaVersion: 'analysis.requirement-candidates/1',
+  },
+  contradiction_check: {
+    agentRegistryReference: 'agent.solution.contradiction/live-1',
+    outputSchemaVersion: 'analysis.contradiction/1',
+  },
+  solution_design: {
+    agentRegistryReference: 'agent.solution.architect/live-1',
+    outputSchemaVersion: 'analysis.result-candidate/1',
+  },
+};
+
+const insertAgentBoundInvocation = async (
+  client: pg.PoolClient,
+  id: string,
+  capabilityVersionId: 'cap_solution_analysis_v1_live_1' | 'cap_solution_analysis_v1_live_2',
+  stepId: GateAInvocationStep,
+  agentVersionId: string | null,
+  businessTaskId = capabilityVersionId === 'cap_solution_analysis_v1_live_2'
+    ? 'task-agent-authority-a2'
+    : 'task-report-finalization',
+): Promise<void> => {
+  const authority = invocationStepAuthority[stepId];
+  await client.query(`INSERT INTO gate_a_model_invocations
+    SELECT candidate.*
+    FROM gate_a_model_invocations source
+    CROSS JOIN LATERAL jsonb_populate_record(NULL::gate_a_model_invocations,
+      to_jsonb(source) || jsonb_build_object(
+        'id',$2::text,
+        'business_task_id',$8::text,
+        'step_id',$3::text,
+        'step_attempt_id',concat($2::text,'-attempt'),
+        'capability_version_id',$4::text,
+        'agent_version_id',$5::text,
+        'agent_registry_reference',$6::text,
+        'output_schema_version',$7::text,
+        'status','running',
+        'output_payload_digest',NULL,
+        'provider_revision',NULL,
+        'model_revision',NULL,
+        'usage',NULL,
+        'terminal_at',NULL,
+        'gateway_receipt_jti',NULL,
+        'gateway_receipt_digest',NULL,
+        'gateway_receipt_signature',NULL,
+        'receipt_attested',false
+      )) candidate
+    WHERE source.tenant_id=$1 AND source.id='invocation-report-finalization'`, [
+    tenant,
+    id,
+    stepId,
+    capabilityVersionId,
+    agentVersionId,
+    authority.agentRegistryReference,
+    authority.outputSchemaVersion,
+    businessTaskId,
+  ]);
+};
+
 beforeAll(async () => {
   await pool.query("INSERT INTO tenants(id,name) VALUES ($1,'Gate A migration test')", [tenant]);
   await pool.query(`INSERT INTO users(tenant_id,id,display_name)
@@ -397,7 +464,9 @@ beforeAll(async () => {
   await pool.query(`INSERT INTO conversations(tenant_id,id,user_id)
     VALUES ($1,'conversation-gate-a-migration','user-gate-a-migration')`, [tenant]);
   await pool.query(`INSERT INTO capability_versions(tenant_id,id,capability_id,version,spec)
-    VALUES ($1,'cap-gate-a-migration','solution.analysis.v1',9001,'{}')`, [tenant]);
+    VALUES ($1,'cap-gate-a-migration','solution.analysis.v1',9001,'{}'),
+      ($1,'cap_solution_analysis_v1_live_1','solution.analysis.v1',2,'{}'),
+      ($1,'cap_solution_analysis_v1_live_2','solution.analysis.agent-authority-test',1,'{}')`, [tenant]);
   await pool.query(`INSERT INTO expert_catalog_versions(tenant_id,id,version,catalog)
     VALUES ($1,'experts-gate-a-migration',9001,'{}')`, [tenant]);
   await pool.query(`INSERT INTO harness_versions(tenant_id,id,capability_version_id,version,spec)
@@ -407,25 +476,39 @@ beforeAll(async () => {
     VALUES ($1,'workflow-legacy-gate-a-migration',$2,'RFC8785/JCS-1','{}')`, [tenant, hashA]);
   await pool.query(`INSERT INTO prompt_policy_versions
     (tenant_id,id,policy_id,version,policy)
-    VALUES ($1,'prompt-gate-a-migration','prompt-gate-a-migration',1,'{}')`, [tenant]);
+    VALUES ($1,'prompt-gate-a-migration','prompt-gate-a-migration',1,'{}'),
+      ($1,'prompt-gate-a2-agent-authority','prompt-gate-a2-agent-authority',1,'{}')`, [tenant]);
   await pool.query(`INSERT INTO capability_release_records
     (tenant_id,id,capability_version_id,prompt_policy_version_id,state,sequence,
      previous_release_id,actor,gate_evidence,gate_evidence_digest) VALUES
-    ($1,'release-gate-a-migration-draft','cap-gate-a-migration','prompt-gate-a-migration',
+    ($1,'release-gate-a-migration-draft','cap_solution_analysis_v1_live_1','prompt-gate-a-migration',
       'draft',1,NULL,'test','{}',$2),
-    ($1,'release-gate-a-migration-shadow','cap-gate-a-migration','prompt-gate-a-migration',
+    ($1,'release-gate-a-migration-shadow','cap_solution_analysis_v1_live_1','prompt-gate-a-migration',
       'shadow',2,'release-gate-a-migration-draft','test','{}',$2),
-    ($1,'release-gate-a-migration-internal','cap-gate-a-migration','prompt-gate-a-migration',
-      'internal',3,'release-gate-a-migration-shadow','test','{}',$2)`, [tenant, hashA]);
+    ($1,'release-gate-a-migration-internal','cap_solution_analysis_v1_live_1','prompt-gate-a-migration',
+      'internal',3,'release-gate-a-migration-shadow','test','{}',$2),
+    ($1,'release-gate-a2-agent-draft','cap_solution_analysis_v1_live_2','prompt-gate-a2-agent-authority',
+      'draft',1,NULL,'test','{}',$2),
+    ($1,'release-gate-a2-agent-shadow','cap_solution_analysis_v1_live_2','prompt-gate-a2-agent-authority',
+      'shadow',2,'release-gate-a2-agent-draft','test','{}',$2),
+    ($1,'release-gate-a2-agent-internal','cap_solution_analysis_v1_live_2','prompt-gate-a2-agent-authority',
+      'internal',3,'release-gate-a2-agent-shadow','test','{}',$2)`, [tenant, hashA]);
   await pool.query(`INSERT INTO capability_active_releases
     (tenant_id,capability_id,release_id,pointer_version)
-    VALUES ($1,'solution.analysis.v1','release-gate-a-migration-draft',1)`, [tenant]);
+    VALUES ($1,'solution.analysis.v1','release-gate-a-migration-draft',1),
+      ($1,'solution.analysis.agent-authority-test','release-gate-a2-agent-draft',1)`, [tenant]);
   await pool.query(`UPDATE capability_active_releases
     SET release_id='release-gate-a-migration-shadow',pointer_version=2
     WHERE tenant_id=$1 AND capability_id='solution.analysis.v1'`, [tenant]);
   await pool.query(`UPDATE capability_active_releases
     SET release_id='release-gate-a-migration-internal',pointer_version=3
     WHERE tenant_id=$1 AND capability_id='solution.analysis.v1'`, [tenant]);
+  await pool.query(`UPDATE capability_active_releases
+    SET release_id='release-gate-a2-agent-shadow',pointer_version=2
+    WHERE tenant_id=$1 AND capability_id='solution.analysis.agent-authority-test'`, [tenant]);
+  await pool.query(`UPDATE capability_active_releases
+    SET release_id='release-gate-a2-agent-internal',pointer_version=3
+    WHERE tenant_id=$1 AND capability_id='solution.analysis.agent-authority-test'`, [tenant]);
   await pool.query(`INSERT INTO business_tasks
     (tenant_id,id,conversation_id,capability_version_id,expert_catalog_version_id,harness_version_id,
      workflow_version_id,workflow_hash,requester_id,status,input_snapshot,expert_target,permission_scope,
@@ -462,6 +545,16 @@ beforeAll(async () => {
     VALUES ($1,'link-legacy-gate-a-migration','task-legacy-gate-a-migration',
       'claim-legacy-gate-a-migration','evidence-legacy-gate-a-migration','supports')`, [tenant]);
   await seedReportPublishAuthority();
+  await pool.query(`INSERT INTO business_tasks
+    (tenant_id,id,conversation_id,capability_version_id,expert_catalog_version_id,harness_version_id,
+     workflow_version_id,workflow_hash,requester_id,status,input_snapshot,expert_target,
+     permission_scope,audience_scope,budget,simulation,runtime_mode,business_decision_allowed,
+     record_variant,result_record_variant,semantic_fingerprint,result)
+    SELECT tenant_id,'task-agent-authority-a2',conversation_id,'cap_solution_analysis_v1_live_2',
+      expert_catalog_version_id,harness_version_id,workflow_version_id,workflow_hash,requester_id,
+      status,input_snapshot,expert_target,permission_scope,audience_scope,budget,simulation,runtime_mode,
+      business_decision_allowed,record_variant,result_record_variant,$2,result
+    FROM business_tasks WHERE tenant_id=$1 AND id='task-report-finalization'`, [tenant, hashE]);
 });
 
 afterAll(async () => {
@@ -469,6 +562,156 @@ afterAll(async () => {
 });
 
 describe('Gate A migration fail-closed authority', () => {
+  it('preserves A.1 invocations with a NULL AgentVersion binding', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await expect(insertAgentBoundInvocation(
+        client,
+        'invocation-agent-authority-a1-null',
+        'cap_solution_analysis_v1_live_1',
+        'solution_design',
+        null,
+      )).resolves.toBeUndefined();
+      await expect(client.query<{ agent_version_id: string | null }>(`SELECT agent_version_id
+        FROM gate_a_model_invocations WHERE tenant_id=$1 AND id=$2`, [
+        tenant,
+        'invocation-agent-authority-a1-null',
+      ])).resolves.toMatchObject({ rows: [{ agent_version_id: null }] });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it('rejects an A.1 invocation falsely backfilled with a live-2 AgentVersion', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await expect(insertAgentBoundInvocation(
+        client,
+        'invocation-agent-authority-a1-filled',
+        'cap_solution_analysis_v1_live_1',
+        'solution_design',
+        'agent.solution.architect/live-2',
+      )).rejects.toMatchObject({ code: '23514' });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it('rejects an A.2 invocation without an AgentVersion binding', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await expect(insertAgentBoundInvocation(
+        client,
+        'invocation-agent-authority-a2-missing',
+        'cap_solution_analysis_v1_live_2',
+        'solution_design',
+        null,
+      )).rejects.toMatchObject({ code: '23514' });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it('rejects an A.2 invocation rooted in an A.1 business task', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await expect(insertAgentBoundInvocation(
+        client,
+        'invocation-agent-authority-a2-on-a1-task',
+        'cap_solution_analysis_v1_live_2',
+        'solution_design',
+        'agent.solution.architect/live-2',
+        'task-report-finalization',
+      )).rejects.toMatchObject({ code: '23503' });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it.each<{
+    stepId: GateAInvocationStep;
+    mismatchedAgentVersionId: string;
+    exactAgentVersionId: string;
+  }>([
+    {
+      stepId: 'requirement_extract',
+      mismatchedAgentVersionId: 'agent.solution.contradiction/live-2',
+      exactAgentVersionId: 'agent.solution.requirement/live-2',
+    },
+    {
+      stepId: 'contradiction_check',
+      mismatchedAgentVersionId: 'agent.solution.architect/live-2',
+      exactAgentVersionId: 'agent.solution.contradiction/live-2',
+    },
+    {
+      stepId: 'solution_design',
+      mismatchedAgentVersionId: 'agent.solution.requirement/live-2',
+      exactAgentVersionId: 'agent.solution.architect/live-2',
+    },
+  ])('requires the exact A.2 AgentVersion literal for $stepId', async ({
+    stepId,
+    mismatchedAgentVersionId,
+    exactAgentVersionId,
+  }) => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SAVEPOINT reject_mismatched_agent_version');
+      await expect(insertAgentBoundInvocation(
+        client,
+        `invocation-agent-authority-${stepId}-mismatched`,
+        'cap_solution_analysis_v1_live_2',
+        stepId,
+        mismatchedAgentVersionId,
+      )).rejects.toMatchObject({ code: '23514' });
+      await client.query('ROLLBACK TO SAVEPOINT reject_mismatched_agent_version');
+
+      const invocationId = `invocation-agent-authority-${stepId}-exact`;
+      await expect(insertAgentBoundInvocation(
+        client,
+        invocationId,
+        'cap_solution_analysis_v1_live_2',
+        stepId,
+        exactAgentVersionId,
+      )).resolves.toBeUndefined();
+      await expect(client.query<{ step_id: string; agent_version_id: string }>(`SELECT step_id,agent_version_id
+        FROM gate_a_model_invocations WHERE tenant_id=$1 AND id=$2`, [tenant, invocationId]))
+        .resolves.toMatchObject({ rows: [{ step_id: stepId, agent_version_id: exactAgentVersionId }] });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it('rejects changing an invocation AgentVersion after creation', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await insertAgentBoundInvocation(
+        client,
+        'invocation-agent-authority-immutable',
+        'cap_solution_analysis_v1_live_2',
+        'solution_design',
+        'agent.solution.architect/live-2',
+      );
+      await expect(client.query(`UPDATE gate_a_model_invocations
+        SET agent_version_id='agent.solution.requirement/live-2'
+        WHERE tenant_id=$1 AND id='invocation-agent-authority-immutable'`, [tenant]))
+        .rejects.toMatchObject({ code: 'P0001' });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
   it('rolls the active capability pointer forward to an additive A.2 version without mutating A.1', async () => {
     const client = await pool.connect();
     try {

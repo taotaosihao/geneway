@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { canonicalize } from 'json-canonicalize';
 import { z } from 'zod';
-import { GenewayError } from '@geneway/contracts';
+import a2ExpertRegistry from './fixtures/gate-a/a2-expert-registry.json' with { type: 'json' };
+import { GenewayError, gateA2ExpertRegistrySchema } from '@geneway/contracts';
 
 const idSchema = z.string().regex(/^[a-z][a-z0-9_.:/+-]*$/u);
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -162,6 +163,9 @@ export const SOLUTION_LIVE_V2_TEMPLATE = entry({
   permissionCeiling: { actions: ['R0', 'R1', 'A1'], resourceScopes: ['document-snapshot:approval-subject-bound'],
     dataClasses: ['C0', 'C1'], connectors: [], modelTools: [] },
 });
+export const SOLUTION_LIVE_V2_EXPERT_REGISTRY = freezeRecursively(
+  gateA2ExpertRegistrySchema.parse(a2ExpertRegistry),
+);
 export const WORK_ORDER_STATUS_TEMPLATE = entry({
   schemaVersion: 'workflow-template-version/1', templateId: 'workflow-template.work-order-status/1',
   capabilityVersionId: 'cap_production_work_order_status_v1_1',

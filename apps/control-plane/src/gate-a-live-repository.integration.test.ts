@@ -997,6 +997,26 @@ describe('Gate A live task create authority', () => {
     )).resolves.toMatchObject({ status: 'running', approvalVersion: 2 });
   });
 
+  it('does not decide a pending approval after the task has been canceled', async () => {
+    const created = await repository.createLiveTask(livePrincipal, {
+      conversationId: 'conversation_live', documentSnapshotId: 'snapshot_live',
+      idempotencyKey: 'gate-a-live-cancel-before-approval-0001',
+    });
+    await expect(repository.cancelLiveTask(
+      livePrincipal, created.taskId, 'cancel-before-approval-0001',
+    )).resolves.toMatchObject({ status: 'canceled' });
+
+    await expect(repository.decideLiveApproval(
+      livePrincipal, created.approvalId, 'approved', 'approve-after-cancel-0001',
+    )).rejects.toMatchObject({ code: 'TASK_TERMINAL' });
+    const state = await control.pool.query<{ approval_status: string; task_status: string; decision_events: number }>(`SELECT
+      (SELECT status FROM approval_versions WHERE tenant_id='tenant_local' AND id=$1) approval_status,
+      (SELECT status FROM business_tasks WHERE tenant_id='tenant_local' AND id=$2) task_status,
+      (SELECT count(*)::int FROM business_task_events WHERE tenant_id='tenant_local' AND business_task_id=$2
+        AND event_type='approval.decided') decision_events`, [created.approvalId, created.taskId]);
+    expect(state.rows[0]).toEqual({ approval_status: 'pending', task_status: 'canceled', decision_events: 0 });
+  });
+
   it('does not mint approval versions when immutable execution authority drifts', async () => {
     const created = await repository.createLiveTask(livePrincipal, {
       conversationId: 'conversation_live', documentSnapshotId: 'snapshot_live',

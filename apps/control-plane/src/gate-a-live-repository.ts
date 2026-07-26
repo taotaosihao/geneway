@@ -1901,8 +1901,8 @@ export class GateALiveRepository {
         throw new GenewayError('IDEMPOTENCY_KEY_REQUIRED', 'A stable idempotency key is required', 400);
       }
       const selected = await client.query<{ business_task_id: string; status: string; requester_id: string;
-        is_current: boolean }>(
-        `SELECT approval.business_task_id,approval.status,task.requester_id,
+        task_status: string; is_current: boolean }>(
+        `SELECT approval.business_task_id,approval.status,task.requester_id,task.status task_status,
            NOT EXISTS (SELECT 1 FROM approval_versions newer WHERE newer.tenant_id=approval.tenant_id
              AND newer.business_task_id=approval.business_task_id AND newer.version>approval.version) is_current
          FROM approval_versions approval
@@ -1923,6 +1923,9 @@ export class GateALiveRepository {
           currentApprovalId: current.rows[0]?.id, version: Number(current.rows[0]?.version),
           digest: current.rows[0]?.subject_digest,
         });
+      }
+      if (approval.status === 'pending' && approval.task_status !== 'awaiting_approval') {
+        throw new GenewayError('TASK_TERMINAL', 'Task no longer accepts an approval decision', 409);
       }
       try {
         await this.assertCurrentLiveApprovalAuthority(client, principal, approval.business_task_id, approvalId);

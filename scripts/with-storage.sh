@@ -84,6 +84,8 @@ proxy_sids=()
 proxy_control_fds=()
 proxy_logs=()
 proxy_root=''
+ambient_cleanup_addresses=()
+ambient_cleanup_interfaces=()
 start_proxy() {
   local name="$1" service="$2" network="$3" listen_port="$4" target_port="$5"
   local log="${proxy_root}/loopback-proxies/${COMPOSE_PROJECT_NAME}-${name}.controller.log"
@@ -194,6 +196,65 @@ stop_proxies() {
   return "$failed"
 }
 
+capture_ambient_cleanup_scope() {
+  ambient_cleanup_addresses=()
+  ambient_cleanup_interfaces=()
+  local network_name network_id bridge_name configured_bridge gateway member
+  for network_name in "${COMPOSE_PROJECT_NAME}_default" "${COMPOSE_PROJECT_NAME}_storage"; do
+    network_id="$(docker --host unix:///var/run/docker.sock network inspect "$network_name" --format '{{.Id}}' 2>/dev/null || true)"
+    [[ "$network_id" =~ ^[a-f0-9]{64}$ ]] || continue
+    configured_bridge="$(docker --host unix:///var/run/docker.sock network inspect "$network_id" \
+      --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || true)"
+    [[ "$configured_bridge" =~ ^[A-Za-z0-9_.-]+$ ]] || configured_bridge=''
+    bridge_name="${configured_bridge:-br-${network_id:0:12}}"
+    if ! ip -j link show dev "$bridge_name" >/dev/null 2>&1; then
+      echo "unable to freeze disposable Docker bridge identity: $network_name" >&2
+      return 1
+    fi
+    ambient_cleanup_interfaces+=("$bridge_name")
+    while IFS= read -r gateway; do
+      [[ -n "$gateway" ]] || continue
+      [[ "$gateway" =~ ^[0-9a-fA-F:.]+$ ]] || { echo "unsafe Docker gateway address: $network_name" >&2; return 1; }
+      ambient_cleanup_addresses+=("$gateway")
+    done < <(docker --host unix:///var/run/docker.sock network inspect "$network_id" \
+      --format '{{range .IPAM.Config}}{{if .Gateway}}{{println .Gateway}}{{end}}{{end}}')
+    while IFS= read -r member; do
+      [[ "$member" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "unsafe Docker bridge member name: $network_name" >&2; return 1; }
+      ambient_cleanup_interfaces+=("$member")
+    done < <(ip -j link show master "$bridge_name" | node --input-type=module -e \
+      "let s=''; for await (const c of process.stdin) s+=c; for (const x of JSON.parse(s)) { if (typeof x.ifname !== 'string') process.exit(1); console.log(x.ifname); }")
+  done
+}
+
+wait_for_ambient_cleanup_release() {
+  [[ "${GENEWAY_GATE02B_EGRESS_GUARD:-}" == 'required' ]] || return 0
+  local addresses interfaces snapshot
+  addresses="$(IFS=,; echo "${ambient_cleanup_addresses[*]}")"
+  interfaces="$(IFS=,; echo "${ambient_cleanup_interfaces[*]}")"
+  for _ in $(seq 1 100); do
+    snapshot="$(ss -H -O -ltnpe 2>/dev/null)" || { echo 'unable to inspect ambient listener cleanup' >&2; return 1; }
+    if GENEWAY_AMBIENT_ADDRESSES="$addresses" GENEWAY_AMBIENT_INTERFACES="$interfaces" \
+      node --input-type=module -e '
+const addresses = new Set((process.env.GENEWAY_AMBIENT_ADDRESSES ?? "").split(",").filter(Boolean));
+const interfaces = new Set((process.env.GENEWAY_AMBIENT_INTERFACES ?? "").split(",").filter(Boolean));
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+for (const line of input.split("\n").filter(Boolean)) {
+  if (!line.includes("cgroup:/user.slice/") || !line.includes("/rygel.service")) continue;
+  const local = line.trim().split(/\s+/u)[3] ?? "";
+  const ipv4 = local.match(/^(\d+\.\d+\.\d+\.\d+):\d+$/u);
+  const scoped = local.match(/^\[[0-9a-f:]+\]%([A-Za-z0-9_.-]+):\d+$/iu);
+  if ((ipv4 !== null && addresses.has(ipv4[1])) || (scoped !== null && interfaces.has(scoped[1]))) process.exit(1);
+}
+' <<<"$snapshot"; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo 'ambient Rygel listener did not release the disposable Docker interface before address reuse' >&2
+  return 1
+}
+
 compose=(docker compose -f scripts/docker-compose.yml)
 if [[ "${GENEWAY_GATE02B_EGRESS_GUARD:-}" == "required" ]]; then
   : "${GENEWAY_GATE02B_PROXY_RUN_ROOT:?Gate 0.2B proxy requires explicit run root}"
@@ -247,6 +308,15 @@ const manifest = {
     service('versitygw', 'storage', env.GENEWAY_INVOCATION_S3_PORT, 7070),
     service('storage-adapter', 'storage', env.GENEWAY_INVOCATION_STORAGE_PORT, 7400),
     service('storage-reconciliation-adapter', 'storage', env.GENEWAY_INVOCATION_RECONCILIATION_PORT, 7401)],
+  runtimeServices: [
+    { name: 'postgres', network: 'default' },
+    { name: 'versitygw', network: 'storage' },
+    { name: 'storage-adapter', network: 'storage' },
+    { name: 'storage-reconciliation-adapter', network: 'storage' },
+    { name: 'storage-reconciler', network: 'default' },
+    { name: 'storage-oracle', network: 'storage' },
+    { name: 'storage-provisioner', network: 'storage' },
+  ],
 };
 writeFileSync(env.GENEWAY_INVOCATION_PATH, `${JSON.stringify(manifest)}\n`, { flag: 'wx', mode: 0o600 });
 NODE
@@ -262,9 +332,11 @@ cleanup_once() {
     echo "kept disposable test infrastructure: ${COMPOSE_PROJECT_NAME}" >&2
     return "$proxy_cleanup_failed"
   fi
+  capture_ambient_cleanup_scope || proxy_cleanup_failed=1
   if ! "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1; then
     [[ "${GENEWAY_GATE02B_EGRESS_GUARD:-}" == 'required' ]] && proxy_cleanup_failed=1
   fi
+  wait_for_ambient_cleanup_release || proxy_cleanup_failed=1
   return "$proxy_cleanup_failed"
 }
 on_exit() {

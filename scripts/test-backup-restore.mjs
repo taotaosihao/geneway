@@ -2,7 +2,8 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, readdir, readFile } from 'node:fs/promises';
+import { access, chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,8 +25,90 @@ function assertClosedGate(receipts, label) {
   }
 }
 
+const fullDockerIdPattern = /^[a-f0-9]{64}$/u;
+const dockerAuthoritySources = ['/usr/bin/docker', '/usr/libexec/docker/cli-plugins/docker-compose', '/var/run/docker.sock'];
+
+function hasExactKeys(value, keys) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+}
+
+function validMount(mount) {
+  return hasExactKeys(mount, ['source', 'destination', 'readWrite'])
+    && typeof mount.source === 'string' && typeof mount.destination === 'string' && typeof mount.readWrite === 'boolean';
+}
+
+function expectedContainerNetworkMode(receipt, expectedBackupNetworks) {
+  if (['backup', 'backup-network'].includes(receipt.role)) {
+    return expectedBackupNetworks.has(receipt.networkMode) ? 'data' : null;
+  }
+  if (['worker', 'worker-command', 'provision-docker'].includes(receipt.role)) {
+    return receipt.networkMode === 'none' ? 'none' : null;
+  }
+  const hostRoles = ['provision', 'online', 'oracle', 'online-storage', 'control-plane'];
+  if (hostRoles.includes(receipt.role)) return receipt.networkMode === 'host' ? 'host' : null;
+  return null;
+}
+
+function validateContainerBoundary(receipt, expectedBackupNetworks, guarded, expectedContainerNamePattern) {
+  const exactKeys = ['schemaVersion', 'role', 'action', 'containerName', 'containerId', 'networkMode',
+    'networkAttachment', 'networkInspection', 'mounts', 'dockerAuthority', 'forbiddenNamesPresent', 'checked'];
+  if (!hasExactKeys(receipt, exactKeys) || receipt.schemaVersion !== 'geneway-backup-container-boundary/1'
+    || receipt.checked !== true || !fullDockerIdPattern.test(receipt.containerId)
+    || typeof receipt.role !== 'string' || typeof receipt.action !== 'string'
+    || typeof receipt.containerName !== 'string' || !expectedContainerNamePattern.test(receipt.containerName)
+    || !Array.isArray(receipt.mounts) || receipt.mounts.some((mount) => !validMount(mount))
+    || !Array.isArray(receipt.forbiddenNamesPresent) || receipt.forbiddenNamesPresent.length !== 0) return false;
+
+  const dockerAuthorityAllowed = (guarded && receipt.role === 'provision-docker')
+    || (!guarded && receipt.role === 'provision');
+  const authority = receipt.dockerAuthority;
+  if (!hasExactKeys(authority, ['allowed', 'expectedSources', 'observed', 'passed'])
+    || authority.allowed !== dockerAuthorityAllowed || authority.passed !== true
+    || !Array.isArray(authority.expectedSources) || !Array.isArray(authority.observed)
+    || authority.observed.some((mount) => !validMount(mount))
+    || JSON.stringify(authority.expectedSources) !== JSON.stringify(dockerAuthorityAllowed ? dockerAuthoritySources : [])
+    || (dockerAuthorityAllowed
+      ? authority.observed.length !== dockerAuthoritySources.length
+        || dockerAuthoritySources.some((source) => authority.observed.filter((mount) => mount.source === source).length !== 1)
+        || authority.observed.some((mount) => mount.readWrite !== (mount.source === '/var/run/docker.sock'))
+      : authority.observed.length !== 0)) return false;
+
+  const mode = expectedContainerNetworkMode(receipt, expectedBackupNetworks);
+  if (mode === null) return false;
+  if (mode !== 'data') return receipt.networkAttachment === null && receipt.networkInspection === null;
+  const attachment = receipt.networkAttachment;
+  const inspection = receipt.networkInspection;
+  return hasExactKeys(attachment, ['name', 'id', 'ipAddress'])
+    && hasExactKeys(inspection, ['id', 'name', 'internal', 'driver', 'project'])
+    && fullDockerIdPattern.test(attachment.id) && fullDockerIdPattern.test(inspection.id)
+    && attachment.id === inspection.id && attachment.name === inspection.name
+    && typeof attachment.ipAddress === 'string' && isIP(attachment.ipAddress) > 0
+    && expectedBackupNetworks.has(attachment.name)
+    && (!guarded || inspection.internal === true) && typeof inspection.internal === 'boolean'
+    && inspection.driver === 'bridge'
+    && typeof inspection.project === 'string' && inspection.name === `${inspection.project}_default`;
+}
+
 async function run(testCase) {
   const runId = `backup-restore-suite-${testCase.name}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const projectSuffix = createHash('sha256').update(runId).digest('hex').slice(0, 12);
+  if (process.env.GENEWAY_GATE02B_EGRESS_GUARD === 'required') {
+    const parentProxyRoot = process.env.GENEWAY_GATE02B_PROXY_RUN_ROOT;
+    if (typeof parentProxyRoot !== 'string' || !/^\/tmp\/geneway-runs\/[A-Za-z0-9._-]+$/u.test(parentProxyRoot)) {
+      throw new Error('Gate 0.2B backup invocation registry requires the exact parent proxy root');
+    }
+    const registryRoot = join(parentProxyRoot, 'backup-invocations');
+    await mkdir(registryRoot, { recursive: true, mode: 0o700 });
+    await chmod(registryRoot, 0o700);
+    const manifest = {
+      schemaVersion: 'geneway-gate02b-backup-invocation/1', runId,
+      childProxyRoot: `/tmp/geneway-runs/${runId}-proxies`,
+      projects: [`geneway-br-source-${projectSuffix}`, `geneway-br-target-${projectSuffix}`],
+      networks: [`geneway-br-source-${projectSuffix}_default`, `geneway-br-target-${projectSuffix}_default`],
+    };
+    await writeFile(join(registryRoot, `${runId}.json`), `${JSON.stringify(manifest)}\n`, { flag: 'wx', mode: 0o600 });
+  }
   const exitCode = await new Promise((resolveExit, reject) => {
     const child = spawn(process.execPath, [runner, testCase.name], {
       cwd: resolve(scriptDirectory, '..'),
@@ -40,7 +123,6 @@ async function run(testCase) {
     throw new Error(`${testCase.name} returned unexpected exit code ${String(exitCode)}`);
   }
   const root = join('/tmp/geneway-runs', runId, 'backup-restore');
-  const projectSuffix = createHash('sha256').update(runId).digest('hex').slice(0, 12);
   const summary = JSON.parse(await readFile(join(root, 'summary.json'), 'utf8'));
   if (summary.schemaVersion !== 'geneway-backup-restore-summary/1' || summary.runId !== runId
     || summary.artifactRoot !== root || summary.projectSuffix !== projectSuffix
@@ -67,6 +149,21 @@ async function run(testCase) {
   }
   const expectedBackupNetworks = new Set(['source', 'target'].map((label) =>
     `geneway-br-${label}-${projectSuffix}_default`));
+  const guarded = process.env.GENEWAY_GATE02B_EGRESS_GUARD === 'required';
+  const expectedContainerNamePattern = new RegExp(
+    `^geneway-br-(?:(?:source|target)-)?${projectSuffix}-[a-z0-9][a-z0-9-]{0,50}$`, 'u');
+  const containerBoundaries = boundaries.filter((receipt) =>
+    receipt.schemaVersion === 'geneway-backup-container-boundary/1');
+  const boundaryModes = new Set(containerBoundaries.map((receipt) =>
+    expectedContainerNetworkMode(receipt, expectedBackupNetworks)));
+  if (containerBoundaries.length === 0
+    || new Set(containerBoundaries.map((receipt) => receipt.containerId)).size !== containerBoundaries.length
+    || new Set(containerBoundaries.map((receipt) => receipt.containerName)).size !== containerBoundaries.length
+    || containerBoundaries.some((receipt) => !validateContainerBoundary(receipt, expectedBackupNetworks, guarded,
+      expectedContainerNamePattern))
+    || !['data', 'none', 'host'].every((mode) => boundaryModes.has(mode))) {
+    throw new Error(`${testCase.name} lacks exact container/network/mount authority receipts across all network modes`);
+  }
   const backupContainers = boundaries.filter((receipt) =>
     receipt.schemaVersion === 'geneway-backup-container-boundary/1' && receipt.role === 'backup');
   if (backupContainers.length === 0 || backupContainers.some((receipt) =>

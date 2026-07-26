@@ -14,10 +14,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, createWriteStream, openSync } from 'node:fs';
 import { chmod, mkdir, readFile, rm, stat, writeFile, appendFile } from 'node:fs/promises';
 import { request as httpRequest } from 'node:http';
-import { createServer } from 'node:net';
+import { createServer, isIP } from 'node:net';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import { tryParseSsListenerRow } from './gate02b-ambient-listener-proof.mjs';
 
 const { Pool } = pg;
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
@@ -62,6 +63,7 @@ const activeServiceHandles = new Set();
 const storageClients = new Set();
 const roleContainers = new Set();
 const roleEgressPolicies = new Map();
+const roleContainerBoundaries = new Map();
 const provenBackupNetworkBoundaries = new Set();
 let sourceStack;
 let targetStack;
@@ -229,6 +231,105 @@ function roleContainerMount(source, options = {}) {
   return { source, target: options.target ?? source, readonly: options.readonly ?? true };
 }
 
+const fullDockerIdPattern = /^[a-f0-9]{64}$/u;
+
+function exactContainerAttachment(inspection, networkMode) {
+  const entries = Object.entries(inspection?.NetworkSettings?.Networks ?? {});
+  if (entries.length !== 1 || entries[0][0] !== networkMode) return null;
+  const [name, attachment] = entries[0];
+  if (!fullDockerIdPattern.test(attachment?.NetworkID ?? '') || isIP(attachment?.IPAddress ?? '') === 0) return null;
+  return { name, id: attachment.NetworkID, ipAddress: attachment.IPAddress };
+}
+
+async function captureContainerNetworkBoundary(name, initialInspection, expectedNetworkMode) {
+  const initialId = initialInspection?.Id;
+  const initialMode = initialInspection?.HostConfig?.NetworkMode;
+  if (!fullDockerIdPattern.test(initialId ?? '') || initialMode !== expectedNetworkMode) {
+    return { containerId: initialId ?? null, networkMode: initialMode ?? null,
+      networkAttachment: null, networkInspection: null, passed: false };
+  }
+  if (['none', 'host'].includes(expectedNetworkMode)) {
+    return { containerId: initialId, networkMode: initialMode,
+      networkAttachment: null, networkInspection: null, passed: true };
+  }
+
+  const initialAttachment = exactContainerAttachment(initialInspection, expectedNetworkMode);
+  if (initialAttachment === null) return { containerId: initialId, networkMode: initialMode,
+    networkAttachment: null, networkInspection: null, passed: false };
+  const [containerResult, networkResult] = await Promise.all([
+    runCommand('docker', ['container', 'inspect', name], { allowFailure: true }),
+    runCommand('docker', ['network', 'inspect', expectedNetworkMode], { allowFailure: true }),
+  ]);
+  if (containerResult.code !== 0 || networkResult.code !== 0) return { containerId: initialId, networkMode: initialMode,
+    networkAttachment: initialAttachment, networkInspection: null, passed: false };
+  const repeatedInspection = JSON.parse(containerResult.stdout)[0];
+  const networkInspection = JSON.parse(networkResult.stdout)[0];
+  const repeatedAttachment = exactContainerAttachment(repeatedInspection, expectedNetworkMode);
+  const project = networkInspection?.Labels?.['com.docker.compose.project'];
+  const frozenNetwork = {
+    id: networkInspection?.Id ?? null,
+    name: networkInspection?.Name ?? null,
+    internal: networkInspection?.Internal ?? null,
+    driver: networkInspection?.Driver ?? null,
+    project: project ?? null,
+  };
+  const passed = repeatedInspection?.Id === initialId
+    && repeatedInspection?.HostConfig?.NetworkMode === initialMode
+    && JSON.stringify(repeatedAttachment) === JSON.stringify(initialAttachment)
+    && fullDockerIdPattern.test(frozenNetwork.id ?? '')
+    && frozenNetwork.id === initialAttachment.id && frozenNetwork.name === initialAttachment.name
+    && (!gate02bGuardRequired || frozenNetwork.internal === true) && frozenNetwork.driver === 'bridge'
+    && typeof frozenNetwork.project === 'string' && frozenNetwork.project.length > 0
+    && frozenNetwork.name === `${frozenNetwork.project}_default`;
+  return { containerId: initialId, networkMode: initialMode,
+    networkAttachment: initialAttachment, networkInspection: frozenNetwork, passed };
+}
+
+async function finalizeRoleContainerBoundary(name) {
+  const context = roleContainerBoundaries.get(name);
+  if (context === undefined) return;
+  let networkBoundary = null;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const inspectionResult = await runCommand('docker', ['container', 'inspect', name], { allowFailure: true });
+    if (inspectionResult.code !== 0) break;
+    const inspection = JSON.parse(inspectionResult.stdout)[0];
+    networkBoundary = await captureContainerNetworkBoundary(name, inspection, context.expectedNetworkMode);
+    if (networkBoundary.passed) break;
+    if (['exited', 'dead', 'removing'].includes(inspection?.State?.Status)) break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  networkBoundary ??= { containerId: context.containerId, networkMode: context.expectedNetworkMode,
+    networkAttachment: null, networkInspection: null, passed: false };
+  const boundary = {
+    ...context.base,
+    containerId: networkBoundary.containerId,
+    networkMode: networkBoundary.networkMode,
+    networkAttachment: networkBoundary.networkAttachment,
+    networkInspection: networkBoundary.networkInspection,
+    checked: networkBoundary.passed && context.baseChecksPassed,
+  };
+  await writeJson(context.receiptPath, boundary);
+  if (boundary.checked && context.startBarrierPath !== null) {
+    await runCommand('docker', ['exec', name, 'touch', context.startBarrierPath]);
+  }
+  roleContainerBoundaries.delete(name);
+  if (!boundary.checked) throw new Error(`${context.base.role}/${context.base.action} container boundary inspection failed`);
+}
+
+async function runAttachedRoleContainer(name, options = {}) {
+  const attached = runCommand('docker', ['start', '--attach', name], options)
+    .then((result) => ({ result, error: null }), (error) => ({ result: null, error }));
+  let boundaryError;
+  try { await finalizeRoleContainerBoundary(name); } catch (error) { boundaryError = error; }
+  if (boundaryError !== undefined) {
+    await runCommand('docker', ['stop', '--time', '0', name], { allowFailure: true });
+  }
+  const outcome = await attached;
+  if (boundaryError !== undefined) throw boundaryError;
+  if (outcome.error !== null) throw outcome.error;
+  return outcome.result;
+}
+
 async function createRoleContainer({ name, role, action, networkMode, mounts, environment, command, egressPorts = [] }) {
   const egressRoot = join(rehearsalRoot, 'egress-boundaries');
   const rawReceipt = join(egressRoot, `${name}.raw`);
@@ -267,7 +368,11 @@ async function createRoleContainer({ name, role, action, networkMode, mounts, en
     args.push('--mount', `type=bind,src=${gate02bGuardLibrary},dst=${gate02bGuardLibrary},readonly`);
     args.push('--mount', `type=bind,src=${egressRoot},dst=${egressRoot}`);
   }
-  args.push(roleImage, ...command);
+  const dataNetwork = !['none', 'host'].includes(networkMode);
+  const startBarrierPath = dataNetwork ? `/tmp/geneway-network-boundary-${sha256(Buffer.from(name)).slice(0, 16)}` : null;
+  if (startBarrierPath === null) args.push(roleImage, ...command);
+  else args.push(roleImage, 'sh', '-c', 'while [ ! -f "$1" ]; do sleep 0.01; done; shift; exec "$@"',
+    'geneway-network-boundary', startBarrierPath, ...command);
   await runCommand('docker', args);
   roleContainers.add(name);
   const inspection = JSON.parse((await runCommand('docker', ['inspect', name])).stdout)[0];
@@ -298,25 +403,29 @@ async function createRoleContainer({ name, role, action, networkMode, mounts, en
     : observedDockerAuthority.length === 0;
   const forbiddenMounts = actualMounts.filter((mount) => !allowedSources.has(mount.source)
     || (dockerAuthoritySources.includes(mount.source) && !dockerAuthorityAllowed));
-  const observedNetworkMode = inspection.HostConfig.NetworkMode;
-  const boundary = {
+  const containerIdentityPassed = fullDockerIdPattern.test(inspection?.Id ?? '')
+    && inspection?.HostConfig?.NetworkMode === networkMode;
+  const baseChecksPassed = containerIdentityPassed && forbiddenMounts.length === 0 && dockerAuthorityPassed;
+  const base = {
     schemaVersion: 'geneway-backup-container-boundary/1',
     role,
     action,
     containerName: name,
-    networkMode: observedNetworkMode,
     mounts: actualMounts,
     dockerAuthority: { allowed: dockerAuthorityAllowed, expectedSources: dockerAuthorityAllowed ? dockerAuthoritySources : [],
       observed: observedDockerAuthority, passed: dockerAuthorityPassed },
     forbiddenNamesPresent: forbiddenMounts.map((mount) => mount.source),
-    checked: observedNetworkMode === networkMode && forbiddenMounts.length === 0 && dockerAuthorityPassed,
   };
-  await writeJson(join(rehearsalRoot, 'process-boundaries', `container-${name}.json`), boundary);
-  if (!boundary.checked) throw new Error(`${role}/${action} container boundary inspection failed`);
-  return boundary;
+  const receiptPath = join(rehearsalRoot, 'process-boundaries', `container-${name}.json`);
+  roleContainerBoundaries.set(name, { base, baseChecksPassed, containerId: inspection?.Id ?? null,
+    expectedNetworkMode: networkMode, receiptPath, startBarrierPath });
+  if (!baseChecksPassed || ['none', 'host'].includes(networkMode)) await finalizeRoleContainerBoundary(name);
+  return base;
 }
 
 async function removeRoleContainer(name) {
+  let boundaryFailure;
+  try { await finalizeRoleContainerBoundary(name); } catch (error) { boundaryFailure = error; }
   const policy = roleEgressPolicies.get(name);
   let egressFailure;
   if (policy !== undefined) {
@@ -367,6 +476,8 @@ async function removeRoleContainer(name) {
   const absent = await runCommand('docker', ['inspect', name], { allowFailure: true });
   if (absent.code === 0) throw new Error(`Role container ${name} survived removal`);
   roleContainers.delete(name);
+  roleContainerBoundaries.delete(name);
+  if (boundaryFailure !== undefined) throw boundaryFailure;
   if (egressFailure !== undefined) throw egressFailure;
 }
 
@@ -392,7 +503,7 @@ async function proveBackupCannotReachOnlineControlPlane(stack) {
   });
   let probe;
   try {
-    probe = await runCommand('docker', ['start', '--attach', containerName], { allowFailure: true });
+    probe = await runAttachedRoleContainer(containerName, { allowFailure: true });
   } finally {
     await removeRoleContainer(containerName);
   }
@@ -534,11 +645,15 @@ async function startContainerRoleService({ label, role, stack, roleEnvironmentPa
       command, ...args],
   });
   let childHandle;
+  const childStart = startChild(label, 'docker', ['start', '--attach', containerName], isolatedEnvironment(), ready);
   try {
-    childHandle = await startChild(label, 'docker', ['start', '--attach', containerName], isolatedEnvironment(), ready);
+    await finalizeRoleContainerBoundary(containerName);
+    childHandle = await childStart;
   } catch (error) {
-    await removeRoleContainer(containerName);
-    throw error;
+    let removalError;
+    try { await removeRoleContainer(containerName); } catch (cause) { removalError = cause; }
+    await childStart.catch(() => {});
+    throw removalError ?? error;
   }
   let stopped = false;
   const handle = {
@@ -662,9 +777,48 @@ async function stopStackProxies(stack) {
   stack.proxyHandles = [];
 }
 
+async function captureAmbientStackScope(stack) {
+  if (!gate02bGuardRequired) return { addresses: [], interfaces: [] };
+  const inspected = await runCommand('docker', ['network', 'inspect', `${stack.project}_default`]);
+  const [network] = JSON.parse(inspected.stdout);
+  if (network?.Id === undefined || network?.Internal !== true || network?.Driver !== 'bridge') {
+    throw new Error(`Unable to freeze ambient listener cleanup scope for ${stack.project}`);
+  }
+  const configured = network.Options?.['com.docker.network.bridge.name'];
+  const bridge = typeof configured === 'string' && configured.length > 0 ? configured : `br-${network.Id.slice(0, 12)}`;
+  const members = await runCommand('ip', ['-j', 'link', 'show', 'master', bridge]);
+  const interfaces = [bridge, ...JSON.parse(members.stdout).map((link) => link.ifname)];
+  if (interfaces.some((name) => typeof name !== 'string' || !/^[A-Za-z0-9_.-]+$/u.test(name))) {
+    throw new Error(`Unsafe ambient listener cleanup interface for ${stack.project}`);
+  }
+  const addresses = (network.IPAM?.Config ?? []).flatMap((config) =>
+    typeof config.Gateway === 'string' ? [config.Gateway] : []);
+  if (addresses.length === 0 || addresses.some((address) => !/^[0-9a-f:.]+$/iu.test(address))) {
+    throw new Error(`Unsafe ambient listener cleanup address for ${stack.project}`);
+  }
+  return { addresses, interfaces };
+}
+
+async function waitForAmbientStackListeners(scope, stack) {
+  if (!gate02bGuardRequired) return;
+  const addresses = new Set(scope.addresses);
+  const interfaces = new Set(scope.interfaces);
+  await waitFor(async () => {
+    const snapshot = await runCommand('ss', ['-H', '-O', '-ltnpe']);
+    return snapshot.stdout.split('\n').filter(Boolean).every((line) => {
+      const parsed = tryParseSsListenerRow(line);
+      if (!parsed.ok || parsed.value.owner !== 'rygel' || !/\/rygel\.service$/u.test(parsed.value.cgroup)) return true;
+      return parsed.value.family === 'ipv4'
+        ? !addresses.has(parsed.value.address) : !interfaces.has(parsed.value.scope);
+    });
+  }, 5_000, `ambient Rygel listener cleanup for ${stack.project}`);
+}
+
 async function destroyStack(stack, receiptName) {
   await stopStackProxies(stack);
+  const ambientScope = await captureAmbientStackScope(stack);
   await compose(stack, ['down', '--volumes', '--remove-orphans']);
+  await waitForAmbientStackListeners(ambientScope, stack);
   const queries = await Promise.all([
     runCommand('docker', ['ps', '-aq', '--filter', `label=com.docker.compose.project=${stack.project}`]),
     runCommand('docker', ['volume', 'ls', '-q', '--filter', `label=com.docker.compose.project=${stack.project}`]),
@@ -1421,7 +1575,7 @@ async function invokeRole(role, action, stack, data = {}) {
     command: ['node', '/workspace/scripts/run-backup-restore.mjs', selectedCase],
   });
   try {
-    await runCommand('docker', ['start', '--attach', containerName]);
+    await runAttachedRoleContainer(containerName);
   } finally {
     await removeRoleContainer(containerName);
   }

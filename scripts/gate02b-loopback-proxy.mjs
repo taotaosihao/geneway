@@ -34,6 +34,36 @@ function processIdentity(pid = process.pid) {
     sessionId: Number(fields[3]), hostname: hostname() };
 }
 function processStartTicks(pid = process.pid) { return processIdentity(pid).startTicks; }
+function validIpv4Cidr(value) {
+  if (typeof value !== 'string') return false;
+  const matched = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d|[12]\d|3[0-2])$/u.exec(value);
+  return matched !== null && matched.slice(1, 5).every((octet) => Number(octet) <= 255);
+}
+function ipv4Integer(value) {
+  if (typeof value !== 'string') return null;
+  const matched = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(value);
+  if (matched === null) return null;
+  const octets = matched.slice(1).map(Number);
+  return octets.some((octet) => octet > 255) ? null
+    : octets.reduce((total, octet) => (total << 8) + octet, 0) >>> 0;
+}
+function ipv4InCidr(address, cidr) {
+  const addressInteger = ipv4Integer(address);
+  const [network, prefixText] = typeof cidr === 'string' ? cidr.split('/') : [];
+  const networkInteger = ipv4Integer(network);
+  if (addressInteger === null || networkInteger === null || !validIpv4Cidr(cidr)) return false;
+  const prefix = Number(prefixText);
+  const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+  return (addressInteger & mask) === (networkInteger & mask);
+}
+function exactNetworkSubnets(network) {
+  const subnets = (network?.IPAM?.Config ?? []).flatMap((config) =>
+    typeof config?.Subnet === 'string' ? [config.Subnet] : []).sort();
+  if (subnets.length === 0 || new Set(subnets).size !== subnets.length || subnets.some((subnet) => !validIpv4Cidr(subnet))) {
+    fail('target network subnet evidence is invalid');
+  }
+  return subnets;
+}
 export function validateProxyPolicy(policy, expectedRoot) {
   const servicePorts = { postgres: 5432, versitygw: 7070, 'storage-adapter': 7400, 'storage-reconciliation-adapter': 7401 };
   if (policy?.schemaVersion !== 'geneway-gate02b-loopback-proxy/1' || policy.listen?.host !== '127.0.0.1'
@@ -51,9 +81,15 @@ export function validateProxyPolicy(policy, expectedRoot) {
     || !/^geneway-(?:e2e|storage|br)-[A-Za-z0-9._-]+_(?:default|storage)$/u.test(policy.target?.networkName ?? '')
     || ![`${policy.target?.project}_default`, `${policy.target?.project}_storage`].includes(policy.target?.networkName)
     || !/^[a-f0-9]{64}$/u.test(policy.target?.networkId ?? '')
+    || !Array.isArray(policy.target?.networkSubnets) || policy.target.networkSubnets.length === 0
+    || JSON.stringify(policy.target.networkSubnets) !== JSON.stringify([...policy.target.networkSubnets].sort())
+    || new Set(policy.target.networkSubnets).size !== policy.target.networkSubnets.length
+    || policy.target.networkSubnets.some((subnet) => !validIpv4Cidr(subnet))
     || !/^\d+\.\d+\.\d+\.\d+$/u.test(policy.target?.ip ?? '')
+    || !policy.target.networkSubnets.some((subnet) => ipv4InCidr(policy.target.ip, subnet))
     || policy.target?.networkInternal !== true || servicePorts[policy.target?.service] !== policy.target?.port
-    || policy.target.port !== policy.target.containerPort) fail('invalid policy');
+    || policy.target.port !== policy.target.containerPort
+    || resolve(policy.identityPath) !== resolve(expectedRoot, 'loopback-proxies', `${policy.name}.identity.json`)) fail('invalid policy');
   const normalized = resolve(policy.policyPath);
   if (normalized !== resolve(expectedRoot, 'loopback-proxies', `${policy.name}.policy.json`)) fail('policy path escaped run root');
   return policy;
@@ -78,10 +114,11 @@ function freshBinding(policy) {
   const networks = dockerJson(['network', 'inspect', policy.target.networkId], policy.dockerConfigPath);
   const rebound = resolveProxyTarget(containers, { project: policy.target.project, service: policy.target.service,
     networkName: policy.target.networkName, targetPort: policy.target.port });
+  const networkSubnets = exactNetworkSubnets(networks[0]);
   if (containers[0]?.State?.Running !== true || networks[0]?.Id !== policy.target.networkId
     || networks[0]?.Name !== policy.target.networkName || networks[0]?.Internal !== true
     || networks[0]?.Labels?.['com.docker.compose.project'] !== policy.target.project
-    || JSON.stringify({ ...rebound, networkInternal: true }) !== JSON.stringify(policy.target)) fail('fresh target binding drift');
+    || JSON.stringify({ ...rebound, networkInternal: true, networkSubnets }) !== JSON.stringify(policy.target)) fail('fresh target binding drift');
   return { ...policy.target, running: true };
 }
 export function resolveProxyTarget(inspection, { project, service, networkName, targetPort }) {
@@ -99,6 +136,9 @@ async function serve(policyPath) {
   const policyStat = lstatSync(policyPath);
   if (!policyStat.isFile() || policyStat.isSymbolicLink() || (policyStat.mode & 0o777) !== 0o600) fail('unsafe policy file');
   const policy = validateProxyPolicy(JSON.parse(readFileSync(policyPath, 'utf8')), dirname(dirname(policyPath)));
+  const identity = { schemaVersion: policy.schemaVersion, policyPath, policyHash: policy.policyHash,
+    pid: process.pid, startTicks: processStartTicks(), hostname: hostname() };
+  writeExclusive(policy.identityPath, identity);
   let sequence = 0;
   let connectQueue = Promise.resolve();
   const guardedConnect = () => {
@@ -190,6 +230,7 @@ async function control(args) {
   const artifactName = `${project}-${name}`;
   const policyPath = resolve(root, `${artifactName}.policy.json`);
   const rawPath = resolve(root, `${artifactName}.raw`);
+  const identityPath = resolve(root, `${artifactName}.identity.json`);
   const readyPath = resolve(root, `${artifactName}.ready.json`);
   const attemptsPath = resolve(root, `${artifactName}.attempts.jsonl`);
   const summaryPath = resolve(root, `${artifactName}.json`);
@@ -202,7 +243,8 @@ async function control(args) {
     || network[0]?.Name !== networkName
     || network[0]?.Labels?.['com.docker.compose.project'] !== project) fail('target network is not the frozen internal network');
   target.networkInternal = true;
-  const policy = { schemaVersion: 'geneway-gate02b-loopback-proxy/1', name: artifactName, policyPath, rawPath, readyPath, attemptsPath,
+  target.networkSubnets = exactNetworkSubnets(network[0]);
+  const policy = { schemaVersion: 'geneway-gate02b-loopback-proxy/1', name: artifactName, policyPath, rawPath, identityPath, readyPath, attemptsPath,
     dockerHost: localDockerHost, dockerConfigPath,
     controller: processIdentity(),
     listen: { host: '127.0.0.1', port: listenPort }, target };
@@ -258,9 +300,10 @@ async function control(args) {
     startTicks: line.match(/startTicks=([^\s]+)/u)?.[1] ?? null,
     hostname: line.match(/hostname=([^\s]+)/u)?.[1] ?? null,
   }));
+  const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
   const readyIdentity = JSON.parse(readFileSync(readyPath, 'utf8'));
-  const summary = { schemaVersion: policy.schemaVersion, name: artifactName, policyPath, rawPath, readyPath, attemptsPath,
-    policyHash: policy.policyHash, controller: policy.controller, spawnIdentity, stdoutReady, readyIdentity, startIdentities, target,
+  const summary = { schemaVersion: policy.schemaVersion, name: artifactName, policyPath, rawPath, identityPath, readyPath, attemptsPath,
+    policyHash: policy.policyHash, controller: policy.controller, spawnIdentity, identity, stdoutReady, readyIdentity, startIdentities, target,
     control: { shutdownRequests, failure: controlFailure },
     finalBinding, listen: policy.listen,
     rawSha256: createHash('sha256').update(raw).digest('hex'), rawLineCount: lines.length,
@@ -271,6 +314,7 @@ async function control(args) {
       && controlBuffer === '' && finalBinding?.running === true
       && exit.status === 0 && exit.signal === null && startIdentities.length === 1
       && JSON.stringify(stdoutReady) === JSON.stringify({ ready: true, ...readyIdentity })
+      && JSON.stringify(identity) === JSON.stringify(readyIdentity)
       && spawnIdentity.pid === readyIdentity.pid && spawnIdentity.startTicks === readyIdentity.startTicks
       && readyIdentity.pid === startIdentities[0].pid && readyIdentity.startTicks === startIdentities[0].startTicks
       && readyIdentity.hostname === startIdentities[0].hostname && readyIdentity.policyHash === policy.policyHash

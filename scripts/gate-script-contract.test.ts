@@ -12,10 +12,13 @@ interface GateStep { phase: string; name: string; command: readonly string[]; in
   expectedE2eInvocations?: number; expectedBackupCases?: number }
 interface Gate02bModule {
   backupArtifactRoots: (results: readonly unknown[]) => string[];
+  backupContainerBoundaryReceipts: (expectedRunIds: string[]) => unknown[];
+  backupInvocationManifests: (runRoot: string, expectedRunIds?: string[], enforceExpectedCardinality?: boolean) => unknown[];
   childEnvironment: (runId: string, step: GateStep) => { environment: Readonly<Record<string, string>>; dockerIsolationEnvironment: Readonly<Record<string, string>> };
   collectReachableCommandStrings: (scripts: Readonly<Record<string, string>>, roots: readonly string[], sources?: Readonly<Record<string, string>>) => string[];
   extractNestedVerifierCommands: (source: string) => string[];
   extractStructuredBackupRunIds: (log: string, required: boolean) => string[];
+  exactDockerEventTimeNano: (rawLine: string, event?: Readonly<Record<string, unknown>>) => string | null;
   findForbiddenEnvironmentNames: (names: readonly string[]) => string[];
   gate02bDockerIsolationEnvironment: Readonly<Record<string, string>>;
   gate02bAggregatePassed: (input: Readonly<Record<string, unknown>>) => boolean;
@@ -31,22 +34,29 @@ interface Gate02bModule {
     passed: boolean; violations: string[]; observedContainers: Array<Record<string, unknown>>;
   };
   parseSocketLine: (line: string, kind: 'listener' | 'egress') => { local: string; peer: string; pids: number[] };
+  parseOwnerlessAmbientEnvelope: (line: string) => { family: string; endpoint: string; uid: number;
+    socketInode: string; sk: string; cgroup: string } | null;
   parseProcNetSockets: (text: string, protocol: string) => Array<{ protocol: string; remoteAddress: string; remotePort: number; state: string }>;
   parseBackupRawReceipt: (raw: string, containerId: string, role: string, action: string, allowedPorts: readonly string[],
     allowedUnix?: readonly string[]) => {
     passed: boolean; reloadCount: number; unknownLines: string[]; unexpected: string[];
   };
   proxyTargetBindingMatches: (policy: unknown, container: unknown, network: unknown) => boolean;
+  promoteProxyNetworkEvidence: (state: { networks: Map<string, Record<string, unknown>>; lifecycleEvents: unknown[] },
+    receipts: unknown[]) => void;
   publishedPortsAfterInspect: (previous: unknown[], container: unknown) => unknown[];
   proxyPolicyPathFromCommandLine: (commandLine: string) => string | null;
   networkAttachmentsAfterInspect: (previous: unknown[], container: unknown) => unknown[];
   observedDockerContainer: (containers: ReadonlyMap<string, { id: string; name: string }>, observedId: string,
     name?: string) => { id: string; name: string } | undefined;
+  ownerlessEnvelopeMatchesReleasedProof: (receipt: unknown, state: unknown) => boolean;
   readProcNetSnapshot: (path: string, pid: number, expectedStartTicks: string, dependencies: {
     read: (path: string) => string; observeIdentity: (pid: number) => { status: string; state?: string; startTicks?: string };
     observeNetworkNamespace?: (pid: number) => { status: string; identity?: string; failure?: unknown }; wait: () => void;
   }) => { text: string | null; failure: unknown; exited: boolean; released?: boolean; attempts: number };
-  unresolvedUnsafeListeners: (observations: Array<{ sample: number; unsafe: string[]; validated: string[] }>) => string[];
+  unresolvedUnsafeListeners: (observations: Array<{ sample: number; unsafe: string[]; validated: string[];
+    unsafeSources?: { descendants?: string[] }; unsafeReceipts?: unknown[] }>, terminalStates?: unknown[],
+    transientReleases?: unknown[]) => string[];
   unreachableCachedDockerNetworkContext: (network: {
     bridgeName: string; bridgeIdentity: { ifindex: number; address: string }; gatewayAddresses: Set<string>;
     memberIdentities: Map<string, { ifindex: number; address: string }>;
@@ -63,7 +73,7 @@ interface Gate02bModule {
     container: { id: string; name: string }) => void;
   validateProxyPolicy: (policy: unknown, expectedRoot: string) => unknown;
   validateProxyInventory: (inventory: string[]) => string[];
-  validateProxyIdentityChain: (policy: unknown, ready: unknown, summary: unknown) => boolean;
+  validateProxyIdentityChain: (policy: unknown, identity: unknown, ready: unknown, summary: unknown) => boolean;
   validateProxyRawReceipt: (policy: unknown, summary: unknown, raw: string, attempts?: string) => boolean;
   validateGate02bInvocationTopology: (packageScripts: Readonly<Record<string, string>>, steps: readonly GateStep[],
     nestedSources?: Readonly<Record<string, string>>) => readonly unknown[];
@@ -82,12 +92,15 @@ interface Gate02bModule {
   validateProcessLifecycleReceipt: (receipt: unknown) => boolean;
 }
 const {
-  backupArtifactRoots, childEnvironment, collectReachableCommandStrings, dockerStructuralIsolationReceipt, extractNestedVerifierCommands,
-  extractStructuredBackupRunIds,
+  backupArtifactRoots, backupContainerBoundaryReceipts, backupInvocationManifests, childEnvironment, collectReachableCommandStrings,
+  dockerStructuralIsolationReceipt, extractNestedVerifierCommands,
+  exactDockerEventTimeNano, extractStructuredBackupRunIds,
   findForbiddenEnvironmentNames, gate02bAggregatePassed, gate02bDockerIsolationEnvironment, gateAuthorityRootNames,
   internalDockerListenerBinding, isForbiddenRuntimeCommandLine, isGateAuthorityPath, isInternalDockerAdapterListener,
-  isRepositoryDockerScope, parseBackupRawReceipt, parseProcNetSockets, parseSocketLine, proxyPolicyPathFromCommandLine,
-  networkAttachmentsAfterInspect, observedDockerContainer, processIdentityMatchesProof, proxyTargetBindingMatches, publishedPortsAfterInspect,
+  isRepositoryDockerScope, parseBackupRawReceipt, parseOwnerlessAmbientEnvelope, parseProcNetSockets, parseSocketLine,
+  proxyPolicyPathFromCommandLine,
+  networkAttachmentsAfterInspect, observedDockerContainer, ownerlessEnvelopeMatchesReleasedProof, processIdentityMatchesProof,
+  promoteProxyNetworkEvidence, proxyTargetBindingMatches, publishedPortsAfterInspect,
   readProcNetSnapshot, requiredGate02bSteps, unresolvedUnsafeListeners,
   stableProcessCommandLine, storeObservedDockerContainer, unreachableCachedDockerNetworkContext,
   sourceBindingsMatch, storageInvocationManifests, validateArtifactRoots, validateCleanupReceipt, validateGate02bCommandSafety,
@@ -97,10 +110,11 @@ const {
 // @ts-expect-error The executable is native ESM; this test supplies its complete public contract above.
 } = await import('./verify-gate0.2b.mjs') as unknown as Gate02bModule;
 // @ts-expect-error The executable is native ESM; this test consumes its exported pure invocation builder.
-const { controlledDockerInvocation } = await import('./gate02b-loopback-proxy.mjs') as unknown as {
+const { controlledDockerInvocation, validateProxyPolicy: validateLoopbackProxyPolicy } = await import('./gate02b-loopback-proxy.mjs') as unknown as {
   controlledDockerInvocation: (args: string[], configPath: string) => {
     command: string; args: string[]; options: { timeout: number; killSignal: string; env: Record<string, string | undefined> };
   };
+  validateProxyPolicy: (policy: unknown, expectedRoot: string) => unknown;
 };
 // @ts-expect-error The executable helper is native ESM; this test consumes its pure identity function.
 const { assertSecureRunDirectories, e2eRunIdentity } = await import('./e2e-run-identity.mjs') as unknown as {
@@ -444,13 +458,27 @@ describe('Gate 0.2B joint aggregate script contract', () => {
     expect(backupRunner).toContain("gate02bGuardRequired && role === 'provision-docker'");
     expect(backupRunner).toContain('rawReceiptSha256: sha256(rawBytes)');
     expect(verifier).toMatch(/finally \{\s+try \{ await stopDockerEventMonitor\(dockerEventMonitor, dockerObservation\);/u);
+    expect(verifier).toContain("stdio: ['ignore', eventDescriptor, 'pipe']");
+    expect(verifier).toContain("state.startSentinel = emitDockerEventSentinel(state, 'start')");
+    expect(verifier).toContain("state.endSentinel = emitDockerEventSentinel(state, 'end')");
+    expect(verifier).toContain("source: 'live-raw-file'");
+    expect(verifier).toContain('authoritative: false');
+    expect(verifier).not.toMatch(/catchup\.stdout[\s\S]{0,500}recordDockerEvent\(/u);
+    const runStepSource = verifier.slice(verifier.indexOf('async function runStep'), verifier.indexOf('\nfunction readPassingE2eReceipt'));
+    expect(runStepSource.indexOf('startDockerEventMonitor')).toBeLessThan(runStepSource.indexOf('const child = spawn'));
+    expect(runStepSource.indexOf('waitForDockerBoundaryQuiescence')).toBeLessThan(runStepSource.indexOf('stopDockerEventMonitor'));
     const runtimeSampler = verifier.slice(verifier.indexOf('function runtimeBoundarySample'), verifier.indexOf('\nfunction additions'));
-    const firstListenerSnapshot = runtimeSampler.indexOf('const firstGlobalListeners = globalListenerLines()');
-    const postListenerDockerRefresh = runtimeSampler.indexOf('observeDockerResources(dockerObservation)', firstListenerSnapshot);
-    const internalContext = runtimeSampler.indexOf('const internalDockerContext = internalDockerListenerContext');
+    const preListenerDockerRefresh = runtimeSampler.indexOf('observeDockerResources(dockerObservation)');
+    const firstListenerSnapshot = runtimeSampler.indexOf('const firstGlobalSnapshot = globalListenerSnapshot()');
+    const frozenAmbientWitnesses = runtimeSampler.indexOf('const ambientLiveWitnesses = new Map()', firstListenerSnapshot);
+    const secondListenerSnapshot = runtimeSampler.indexOf('const secondGlobalSnapshot = globalListenerSnapshot()', frozenAmbientWitnesses);
+    const exactAmbientClassification = runtimeSampler.indexOf('const ambient = classifyAmbientOwnedListeners');
+    expect(preListenerDockerRefresh).toBeGreaterThan(0);
+    expect(firstListenerSnapshot).toBeGreaterThan(preListenerDockerRefresh);
     expect(firstListenerSnapshot).toBeGreaterThan(0);
-    expect(postListenerDockerRefresh).toBeGreaterThan(firstListenerSnapshot);
-    expect(internalContext).toBeGreaterThan(postListenerDockerRefresh);
+    expect(frozenAmbientWitnesses).toBeGreaterThan(firstListenerSnapshot);
+    expect(secondListenerSnapshot).toBeGreaterThan(frozenAmbientWitnesses);
+    expect(exactAmbientClassification).toBeGreaterThan(secondListenerSnapshot);
     expect(gate02bDockerIsolationEnvironment).toEqual({
       GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL: 'true',
       GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL: 'true',
@@ -596,26 +624,45 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     const target = {
       containerId: 'a'.repeat(64), project: 'geneway-e2e-proxy-contract', service: 'postgres',
       networkName: 'geneway-e2e-proxy-contract_default', networkId: 'b'.repeat(64), networkInternal: true,
+      networkSubnets: ['172.30.0.0/16'],
       ip: '172.30.0.2', port: 5432, containerPort: 5432,
     };
     const stem = `${target.project}-postgres`;
     const unhashedPolicy = { schemaVersion: 'geneway-gate02b-loopback-proxy/1', name: stem,
       dockerHost: 'unix:///var/run/docker.sock', dockerConfigPath: `${runRoot}/docker-client`,
       policyPath: `${runRoot}/loopback-proxies/${stem}.policy.json`,
-      rawPath: `${runRoot}/loopback-proxies/${stem}.raw`, readyPath: `${runRoot}/loopback-proxies/${stem}.ready.json`,
+      rawPath: `${runRoot}/loopback-proxies/${stem}.raw`, identityPath: `${runRoot}/loopback-proxies/${stem}.identity.json`,
+      readyPath: `${runRoot}/loopback-proxies/${stem}.ready.json`,
       attemptsPath: `${runRoot}/loopback-proxies/${stem}.attempts.jsonl`,
       controller: { pid: 1, parentPid: 2, startTicks: '42', processGroupId: 1, sessionId: 1, hostname: 'host' },
       listen: { host: '127.0.0.1', port: 55433 }, target };
     const policy = { ...unhashedPolicy, policyHash: createHash('sha256').update(JSON.stringify(unhashedPolicy)).digest('hex') };
     expect(validateProxyPolicy(policy, runRoot)).toEqual(policy);
+    expect(validateLoopbackProxyPolicy(policy, runRoot)).toEqual(policy);
+    const policyWithTarget = (changedTarget: Record<string, unknown>) => {
+      const changed = { ...unhashedPolicy, target: changedTarget };
+      return { ...changed, policyHash: createHash('sha256').update(JSON.stringify(changed)).digest('hex') };
+    };
+    for (const invalidTarget of [
+      { ...target, networkSubnets: [] },
+      { ...target, networkSubnets: ['not-a-cidr'] },
+      { ...target, networkSubnets: ['192.168.96.0/20'] },
+    ]) {
+      const invalidPolicy = policyWithTarget(invalidTarget);
+      expect(() => validateProxyPolicy(invalidPolicy, runRoot)).toThrow('unsafe');
+      expect(() => validateLoopbackProxyPolicy(invalidPolicy, runRoot)).toThrow('invalid policy');
+    }
     const container = { Id: target.containerId, Config: { Labels: {
       'com.docker.compose.project': target.project, 'com.docker.compose.service': target.service,
     } }, NetworkSettings: { Networks: { [target.networkName]: { NetworkID: target.networkId, IPAddress: target.ip } } } };
     const network = { Id: target.networkId, Name: target.networkName, Internal: true,
+      IPAM: { Config: [{ Subnet: '172.30.0.0/16' }] },
       Labels: { 'com.docker.compose.project': target.project } };
     expect(proxyTargetBindingMatches(policy, container, network)).toBe(true);
     expect(proxyTargetBindingMatches(policy, { ...container, Id: 'c'.repeat(64) }, network)).toBe(false);
     expect(proxyTargetBindingMatches(policy, container, { ...network, Internal: false })).toBe(false);
+    expect(proxyTargetBindingMatches(policy, container, { ...network, IPAM: { Config: [] } })).toBe(false);
+    expect(proxyTargetBindingMatches(policy, container, { ...network, IPAM: { Config: [{ Subnet: '192.168.96.0/20' }] } })).toBe(false);
     expect(proxyTargetBindingMatches(policy, container, { ...network,
       Labels: { 'com.docker.compose.project': 'geneway-e2e-wrong' } })).toBe(false);
     expect(proxyTargetBindingMatches({ ...policy, target: { ...target, port: 7070, containerPort: 7070 } }, container, network)).toBe(false);
@@ -664,12 +711,15 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
       pid: 1, startTicks: '42', hostname: 'host' };
     const identitySummary = { readyIdentity: ready, stdoutReady: { ready: true, ...ready },
       spawnIdentity: { pid: 1, startTicks: '42', hostname: 'host' } };
-    expect(validateProxyIdentityChain(policy, ready, identitySummary)).toBe(true);
-    expect(validateProxyIdentityChain(policy, ready, { ...identitySummary,
+    expect(validateProxyIdentityChain(policy, ready, ready, { ...identitySummary, identityPath: policy.identityPath, identity: ready })).toBe(true);
+    expect(validateProxyIdentityChain(policy, ready, ready, { ...identitySummary, identityPath: policy.identityPath, identity: ready,
       stdoutReady: { ...identitySummary.stdoutReady, pid: 2 } })).toBe(false);
-    expect(validateProxyIdentityChain(policy, ready, { ...identitySummary,
+    expect(validateProxyIdentityChain(policy, ready, ready, { ...identitySummary, identityPath: policy.identityPath, identity: ready,
       spawnIdentity: { ...identitySummary.spawnIdentity, startTicks: '43' } })).toBe(false);
+    expect(validateProxyIdentityChain(policy, { ...ready, pid: 2 }, ready,
+      { ...identitySummary, identityPath: policy.identityPath, identity: ready })).toBe(false);
     expect(() => validateProxyPolicy({ ...policy, policyPath: '/tmp/escape.policy.json' }, runRoot)).toThrow('unsafe');
+    expect(() => validateProxyPolicy({ ...policy, identityPath: '/tmp/escape.identity.json' }, runRoot)).toThrow('unsafe');
     expect(proxyPolicyPathFromCommandLine(
       `node /home/gewu/work/geneway/scripts/gate02b-loopback-proxy.mjs --serve ${policy.policyPath}`,
     )).toBe(policy.policyPath);
@@ -677,7 +727,7 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     expect(proxyPolicyPathFromCommandLine(
       `node /home/gewu/work/geneway/scripts/gate02b-loopback-proxy.mjs --serve ${policy.policyPath} extra`,
     )).toBeNull();
-    const files = (stem: string) => [`${stem}.policy.json`, `${stem}.raw`, `${stem}.ready.json`,
+    const files = (stem: string) => [`${stem}.policy.json`, `${stem}.raw`, `${stem}.identity.json`, `${stem}.ready.json`,
       `${stem}.attempts.jsonl`, `${stem}.json`, `${stem}.controller.log`];
     const twoProjects = [...files('geneway-e2e-one-postgres'), ...files('geneway-e2e-two-postgres')];
     expect(validateProxyInventory(twoProjects)).toEqual([
@@ -717,6 +767,7 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
         inspectObserved: true, subnets: ['172.30.0.0/16'],
       }]]),
       monitorStarted: true, eventCount: 2, eventParseErrors: [], monitorErrors: [], monitorExit: { signal: 'SIGTERM' },
+      authoritativeEventLedger: { passed: true }, catchupAudit: { passed: true },
     };
     const receipt = dockerStructuralIsolationReceipt(state);
     expect(receipt.passed).toBe(false);
@@ -748,6 +799,7 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
         subnets: ['192.168.96.0/20'], networkIds: new Set(), networkNames: new Set(), memberIdentities: new Map(),
       }]]),
       monitorStarted: true, eventCount: 2, eventParseErrors: [], monitorErrors: [], monitorExit: { status: 143, signal: null },
+      authoritativeEventLedger: { passed: true }, catchupAudit: { passed: true },
       monitorStop: { requested: true, signal: 'SIGTERM', requestSucceeded: true, exit: { status: 143, signal: null } },
     };
     const released = dockerStructuralIsolationReceipt(baseState);
@@ -763,10 +815,86 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     expect(hardFailure.violations).toContain(`container-netns-read-failed:${project}-postgres-1`);
   });
 
+  const structuralState = (containers: Array<[string, Record<string, unknown>]>,
+    networks: Array<[string, Record<string, unknown>]>) => ({
+    containers: new Map(containers), networks: new Map(networks),
+    monitorStarted: true, eventCount: 2, eventParseErrors: [], monitorErrors: [],
+    monitorExit: { status: 143, signal: null }, authoritativeEventLedger: { passed: true }, catchupAudit: { passed: true },
+    monitorStop: { requested: true, signal: 'SIGTERM', requestSucceeded: true, exit: { status: 143, signal: null } },
+  });
+
+  it('fails at network level when artifact-only evidence has no subnet and no socket is observed', () => {
+    const project = 'geneway-storage-artifact-network';
+    const networkId = 'network-id';
+    const receipt = dockerStructuralIsolationReceipt(structuralState([['container-id', {
+      id: 'container-id', name: `${project}-postgres-1`, project, service: 'postgres', repositoryScoped: true,
+      networkMode: `${project}_default`, inspectObserved: true, eventObserved: true,
+      networkIds: new Set([networkId]), networkNames: new Set([`${project}_default`]),
+      publishedPorts: [], extraHosts: [], netnsAttempted: true, netnsErrors: [], netnsSockets: [],
+    }]], [[networkId, {
+      id: networkId, name: `${project}_default`, project, internal: true, driver: 'bridge',
+      inspectObserved: false, artifactProofObserved: true, artifactProofs: [{}],
+      gatewayAddresses: new Set(), interfaceNames: new Set(), memberIdentities: new Map(),
+    }]]));
+    expect(receipt.passed).toBe(false);
+    expect(receipt.violations).toContain(`network-subnet-proof-missing:${project}_default:${networkId}`);
+  });
+
+  it('does not borrow a CIDR from another internal network for an artifact-only target', () => {
+    const project = 'geneway-storage-artifact-network';
+    const networkId = 'target-network-id';
+    const unrelatedProject = 'geneway-storage-unrelated-network';
+    const receipt = dockerStructuralIsolationReceipt(structuralState([['container-id', {
+      id: 'container-id', name: `${project}-postgres-1`, project, service: 'postgres', repositoryScoped: true,
+      networkMode: `${project}_default`, inspectObserved: true, eventObserved: true,
+      networkIds: new Set([networkId]), networkNames: new Set([`${project}_default`]),
+      publishedPorts: [], extraHosts: [], netnsAttempted: true, netnsErrors: [],
+      netnsSockets: [{ protocol: 'tcp', remoteAddress: '192.168.96.2', remotePort: 5432, state: '01' }],
+    }]], [
+      [networkId, { id: networkId, name: `${project}_default`, project, internal: true, driver: 'bridge',
+        inspectObserved: false, artifactProofObserved: true, artifactProofs: [{}] }],
+      ['unrelated-network-id', { id: 'unrelated-network-id', name: `${unrelatedProject}_default`,
+        project: unrelatedProject, internal: true, driver: 'bridge', inspectObserved: true, subnets: ['192.168.96.0/20'] }],
+    ]));
+    expect(receipt.passed).toBe(false);
+    expect(receipt.violations).toContain(`network-subnet-proof-missing:${project}_default:${networkId}`);
+    expect(receipt.violations).toContain(
+      `container-netns-endpoint-forbidden:${project}-postgres-1:tcp:192.168.96.2:5432`,
+    );
+  });
+
+  it('allows only CIDRs from the same container exact multi-network attachments', () => {
+    const project = 'geneway-storage-multi-network';
+    const networkA = { id: 'network-a', name: `${project}_default`, project, internal: true, driver: 'bridge',
+      inspectObserved: true, subnets: ['172.30.0.0/16'] };
+    const networkB = { id: 'network-b', name: `${project}_storage`, project, internal: true, driver: 'bridge',
+      inspectObserved: true, subnets: ['192.168.96.0/20'] };
+    const otherProject = 'geneway-storage-other-network';
+    const networkC = { id: 'network-c', name: `${otherProject}_default`, project: otherProject, internal: true,
+      driver: 'bridge', inspectObserved: true, subnets: ['203.0.113.0/24'] };
+    const receipt = dockerStructuralIsolationReceipt(structuralState([['container-id', {
+      id: 'container-id', name: `${project}-postgres-1`, project, service: 'postgres', repositoryScoped: true,
+      networkMode: `${project}_default`, inspectObserved: true, eventObserved: true,
+      networkIds: new Set([networkA.id, networkB.id]), networkNames: new Set([networkA.name, networkB.name]),
+      publishedPorts: [], extraHosts: [], netnsAttempted: true, netnsErrors: [],
+      netnsSockets: [
+        { protocol: 'tcp', remoteAddress: '192.168.96.2', remotePort: 5432, state: '01' },
+        { protocol: 'tcp', remoteAddress: '203.0.113.7', remotePort: 443, state: '01' },
+      ],
+    }]], [[networkA.id, networkA], [networkB.id, networkB], [networkC.id, networkC]]));
+    expect(receipt.passed).toBe(false);
+    expect(receipt.violations).not.toContain(
+      `container-netns-endpoint-forbidden:${project}-postgres-1:tcp:192.168.96.2:5432`,
+    );
+    expect(receipt.violations).toContain(
+      `container-netns-endpoint-forbidden:${project}-postgres-1:tcp:203.0.113.7:443`,
+    );
+  });
+
   it('accepts status 143 only after a successful verifier-requested SIGTERM monitor stop', () => {
     const cleanState = {
       containers: new Map(), networks: new Map(), monitorStarted: true, eventCount: 36,
-      eventParseErrors: [], monitorErrors: [],
+      eventParseErrors: [], monitorErrors: [], authoritativeEventLedger: { passed: true }, catchupAudit: { passed: true },
     };
     expect(dockerStructuralIsolationReceipt({
       ...cleanState, monitorExit: { status: 143, signal: null }, monitorStop: {
@@ -808,6 +936,81 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it('validates exact backup invocation membership and derives no authority from a mismatched project tuple', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'geneway-backup-invocations-'));
+    const directory = join(root, 'backup-invocations');
+    const runId = 'backup-restore-suite-success-123-abc';
+    const suffix = createHash('sha256').update(runId).digest('hex').slice(0, 12);
+    const projects = [`geneway-br-source-${suffix}`, `geneway-br-target-${suffix}`];
+    const manifest = { schemaVersion: 'geneway-gate02b-backup-invocation/1', runId,
+      childProxyRoot: `/tmp/geneway-runs/${runId}-proxies`, projects,
+      networks: projects.map((project) => `${project}_default`) };
+    try {
+      await mkdir(directory, { mode: 0o700 });
+      await writeFile(join(directory, `${runId}.json`), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+      expect(backupInvocationManifests(root, [runId], true)).toEqual([manifest]);
+      expect(() => backupInvocationManifests(root, ['backup-restore-suite-missing-123'], true))
+        .toThrow('membership does not match');
+      await writeFile(join(directory, `${runId}.json`), `${JSON.stringify({ ...manifest,
+        projects: [...projects].reverse() }, null, 2)}\n`, { mode: 0o600 });
+      expect(() => backupInvocationManifests(root, [runId], true)).toThrow('manifest is invalid');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('binds a backup container boundary receipt to its exact run, full Docker ID, and none network mode', async () => {
+    const runId = `backup-restore-suite-contract-${String(process.pid)}-${String(Date.now())}`;
+    const suffix = createHash('sha256').update(runId).digest('hex').slice(0, 12);
+    const root = join('/tmp/geneway-runs', runId);
+    const directory = join(root, 'backup-restore', 'process-boundaries');
+    const containerName = `geneway-br-${suffix}-worker-main`;
+    const path = join(directory, `container-${containerName}.json`);
+    const receipt = { schemaVersion: 'geneway-backup-container-boundary/1', role: 'worker', action: 'service',
+      containerName, mounts: [], dockerAuthority: { passed: true }, forbiddenNamesPresent: [],
+      containerId: 'a'.repeat(64), networkMode: 'none', networkAttachment: null, networkInspection: null, checked: true };
+    try {
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await chmod(directory, 0o700);
+      await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+      expect(backupContainerBoundaryReceipts([runId])).toEqual([
+        expect.objectContaining({ ...receipt, runId, path }),
+      ]);
+      await writeFile(path, `${JSON.stringify({ ...receipt, containerId: 'short' }, null, 2)}\n`, { mode: 0o600 });
+      expect(() => backupContainerBoundaryReceipts([runId])).toThrow('boundary is invalid');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('promotes only a proxy-frozen exact network that has one matching raw bridge-create event', () => {
+    const networkId = 'a'.repeat(64);
+    const target = { containerId: 'b'.repeat(64), project: 'geneway-storage-proof', service: 'postgres',
+      networkId, networkName: 'geneway-storage-proof_default', networkInternal: true, networkSubnets: ['192.168.96.0/20'], ip: '192.168.96.4' };
+    const state = { networks: new Map<string, Record<string, unknown>>(), lifecycleEvents: [{
+      sequence: 7, timeNano: '1784790123456789123', type: 'network', action: 'create',
+      networkId, networkName: target.networkName, networkDriver: 'bridge',
+    }] };
+    promoteProxyNetworkEvidence(state, [{ proxies: [{ intrinsicValid: true, target, policyPath: '/tmp/policy.json' }] }]);
+    expect(state.networks.get(networkId)).toMatchObject({ id: networkId, name: target.networkName,
+      project: target.project, internal: true, driver: 'bridge', artifactProofObserved: true,
+      subnets: target.networkSubnets, artifactProofs: [{ containerId: target.containerId, subnets: target.networkSubnets, createEventSequence: 7 }] });
+
+    const conflict = { networks: new Map<string, Record<string, unknown>>([
+      [networkId, { id: networkId, project: 'geneway-storage-other' }],
+    ]),
+      lifecycleEvents: state.lifecycleEvents };
+    promoteProxyNetworkEvidence(conflict, [{ proxies: [{ intrinsicValid: true, target, policyPath: '/tmp/policy.json' }] }]);
+    expect(conflict.networks.get(networkId)).toMatchObject({ identityConflict: true });
+    expect(conflict.networks.get(networkId)?.artifactProofObserved).toBeUndefined();
+
+    const missingSubnet = { networks: new Map<string, Record<string, unknown>>(), lifecycleEvents: state.lifecycleEvents };
+    promoteProxyNetworkEvidence(missingSubnet, [{ proxies: [{ intrinsicValid: true,
+      target: { ...target, networkSubnets: [] }, policyPath: '/tmp/missing-subnet-policy.json' }] }]);
+    expect(missingSubnet.networks.get(networkId)).toMatchObject({ identityConflict: true });
+    expect(missingSubnet.networks.get(networkId)?.artifactProofObserved).toBeUndefined();
   });
 
   it('requires exact structured backup child run membership', () => {
@@ -1007,6 +1210,16 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     });
   });
 
+  it('retains kernel cgroup/inode/sk evidence for an ownerless listener teardown row', () => {
+    const cgroup = '/user.slice/user-1000.slice/user@1000.service/app.slice/rygel.service';
+    const row = `LISTEN 0 10 [fe80::6879:e1ff:fe13:8591]%vetha065c33:46822 [::]:* uid:1000 ino:951234567 sk:10abcd cgroup:${cgroup} v6only:1 <->`;
+    expect(parseOwnerlessAmbientEnvelope(row)).toMatchObject({ family: 'ipv6',
+      endpoint: '[fe80::6879:e1ff:fe13:8591]%vetha065c33:46822', uid: 1000,
+      socketInode: '951234567', sk: '10abcd', cgroup });
+    expect(parseOwnerlessAmbientEnvelope(row.replace(` cgroup:${cgroup}`, ''))).toBeNull();
+    expect(parseOwnerlessAmbientEnvelope(row.replace(' uid:1000', ' users:(("rygel",pid=7,fd=3)) uid:1000'))).toBeNull();
+  });
+
   it('normalizes IPv4-mapped IPv6 container peers before internal-subnet checks', () => {
     const procNet = [
       'sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode',
@@ -1179,6 +1392,14 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     expect(() => storeObservedDockerContainer(conflictingState, conflictingObject)).toThrow('correlation conflict');
   });
 
+  it('preserves Docker event timeNano without JavaScript number precision loss', () => {
+    expect(exactDockerEventTimeNano('{"timeNano":1784790123456789123}', { timeNano: 1784790123456789000 }))
+      .toBe('1784790123456789123');
+    expect(exactDockerEventTimeNano('', { timeNano: 42 })).toBe('42');
+    expect(exactDockerEventTimeNano('', { timeNano: 1784790123456789000 })).toBeNull();
+    expect(exactDockerEventTimeNano('{"timeNano":"invalid"}', {})).toBeNull();
+  });
+
   it('never lets a later adapter proof erase an earlier unsafe listener observation', () => {
     expect(unresolvedUnsafeListeners([
       { sample: 1, unsafe: ['lan', 'adapter'], validated: [] },
@@ -1186,6 +1407,39 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     ])).toEqual(['adapter', 'lan']);
     expect(unresolvedUnsafeListeners([{ sample: 1, unsafe: ['descendant-only'], validated: [] }]))
       .toEqual(['descendant-only']);
+  });
+
+  it('resolves an ownerless observation only through the same released strong socket/process/interface instance', () => {
+    const line = '[fe80::1]%br-proof:40202 pids=';
+    const envelope = { endpoint: '[fe80::1]%br-proof:40202', uid: 1000, socketInode: '923136226',
+      sk: 'fd2d2', cgroup: '/user.slice/rygel.service' };
+    const interfaceWitness = { networkId: 'a'.repeat(64), networkName: 'geneway-storage-proof_default',
+      interfaceName: 'br-proof', ifindex: 42, interfaceMac: '02:42:ac:16:00:01', source: { sha256: 'b'.repeat(64) } };
+    const receipt = { schemaVersion: 'geneway-gate02b-ownerless-ambient-pending/1', line, envelope,
+      processProof: { processInstanceKey: 'process-proof' }, interfaceWitness };
+    const state = { status: 'RELEASED', proof: { listener: { ...envelope },
+      process: { processInstanceKey: 'process-proof' }, interfaceWitness } };
+    expect(ownerlessEnvelopeMatchesReleasedProof(receipt, state)).toBe(true);
+    expect(unresolvedUnsafeListeners([{ sample: 1, unsafe: [line], validated: [], unsafeSources: { descendants: [] },
+      unsafeReceipts: [receipt] }], [state])).toEqual([]);
+    expect(unresolvedUnsafeListeners([{ sample: 1, unsafe: [line], validated: [], unsafeSources: { descendants: [line] },
+      unsafeReceipts: [receipt] }], [state])).toEqual([line]);
+    expect(ownerlessEnvelopeMatchesReleasedProof(receipt, { ...state, proof: { ...state.proof,
+      listener: { ...state.proof.listener, socketInode: '923136227' } } })).toBe(false);
+    expect(ownerlessEnvelopeMatchesReleasedProof(receipt, { ...state, proof: { ...state.proof,
+      interfaceWitness: { ...interfaceWitness, ifindex: 43 } } })).toBe(false);
+    const transientRelease = {
+      schemaVersion: 'geneway-gate02b-owned-ambient-transient-release/1', status: 'RELEASED_DURING_OWNER_TEARDOWN',
+      consecutiveAbsenceSnapshots: 2, listener: { ...envelope }, processProof: { processInstanceKey: 'process-proof' },
+      interfaceWitness,
+    };
+    expect(unresolvedUnsafeListeners([{ sample: 1, unsafe: [line], validated: [], unsafeSources: { descendants: [] },
+      unsafeReceipts: [receipt] }], [], [transientRelease])).toEqual([]);
+    expect(unresolvedUnsafeListeners([{ sample: 1, unsafe: [line], validated: [], unsafeSources: { descendants: [] },
+      unsafeReceipts: [receipt] }], [], [{ ...transientRelease, listener: { ...envelope, sk: 'different' } }]))
+      .toEqual([line]);
+    expect(unresolvedUnsafeListeners([{ sample: 1, unsafe: [line], validated: [], unsafeSources: { descendants: [line] },
+      unsafeReceipts: [receipt] }], [], [transientRelease])).toEqual([line]);
   });
 
   it('accepts cached Docker endpoints as unreachable only while no live link reuses their identity or address', () => {
@@ -1256,12 +1510,12 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     const networkName = `${project}_storage`;
     const bridgeName = `br-${networkId.slice(0, 12)}`;
     const policy = { target: { project, service: 'versitygw', port: 7070, containerPort: 7070,
-      containerId: 'a'.repeat(64), networkId, networkName, ip: '192.168.96.4' } };
+      containerId: 'a'.repeat(64), networkId, networkName, networkInternal: true, networkSubnets: ['192.168.96.0/20'], ip: '192.168.96.4' } };
     const container = { Id: policy.target.containerId, Config: { Labels: {
       'com.docker.compose.project': project, 'com.docker.compose.service': 'versitygw',
     } }, NetworkSettings: { Networks: { [networkName]: { NetworkID: networkId, IPAddress: policy.target.ip } } } };
     const network = { Id: networkId, Name: networkName, Internal: true, Driver: 'bridge',
-      Labels: { 'com.docker.compose.project': project }, IPAM: { Config: [{ Gateway: '192.168.96.1' }] } };
+      Labels: { 'com.docker.compose.project': project }, IPAM: { Config: [{ Subnet: '192.168.96.0/20', Gateway: '192.168.96.1' }] } };
     const bridge = [{ ifname: bridgeName }];
     const members = [{ ifname: 'veth7783ad3', master: bridgeName }];
     expect(internalDockerListenerBinding(policy, container, network, bridge, members)).toEqual({
@@ -1287,6 +1541,8 @@ if (JSON.stringify(calls) !== JSON.stringify(['stdin','stdout','stderr','unref']
     expect(source).not.toContain('run --rm -T storage-provisioner');
     expect(source.match(/run -T storage-provisioner/gu)).toHaveLength(2);
     expect(source.match(/\[\[ "\$state" != Z\*/gu)).toHaveLength(3);
+    expect(source).toContain('wait_for_ambient_cleanup_release');
+    expect(source).toContain('ambient Rygel listener did not release the disposable Docker interface before address reuse');
   });
 
   it('fails closed on source drift or any child failure', () => {

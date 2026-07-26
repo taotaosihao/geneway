@@ -351,6 +351,22 @@ describe('Gate A live public API parsing', () => {
     expect(body).not.toHaveProperty('model');
   });
 
+  it.each([
+    [{ mode: 'expert', expertId: 'expert.solution.architect' } as const],
+    [{ mode: 'team', teamId: 'team.solution.core' } as const],
+  ])('sends a frozen A.2 expert selector without internal authority fields', async (expertTarget) => {
+    const fetchMock = stubJson(liveCreateResponse);
+    await api.createTask('conversation_live_1', 'snapshot_live_1', expertTarget);
+    const init = fetchMock.mock.calls[0]?.[1];
+    if (typeof init?.body !== 'string') throw new Error('create task request body was not serialized JSON');
+    expect(JSON.parse(init.body)).toEqual({
+      conversationId: 'conversation_live_1',
+      capabilityId: 'solution.analysis.v1',
+      inputRef: { kind: 'document_snapshot', documentSnapshotId: 'snapshot_live_1' },
+      expertTarget,
+    });
+  });
+
   it('strictly parses live task, nested Evidence and analysis_report while rejecting mixed or secret-bearing records', async () => {
     stubJson(liveTask);
     const parsed = await api.getTask('task_live_1');
@@ -446,6 +462,36 @@ describe('Gate A public Web route parsing', () => {
     await expect(api.getAnalysisCapabilityRoute()).resolves.toMatchObject({
       status: 'internal', executionRoute: 'live', availableExpertModes: ['auto'],
     });
+  });
+
+  it('accepts the A.2 internal route only with all three frozen public modes', async () => {
+    stubJson({
+      capabilityId: 'solution.analysis.v1',
+      status: 'internal',
+      executionRoute: 'live',
+      capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+      availableExpertModes: ['auto', 'expert', 'team'],
+      simulation: false,
+      runtimeMode: 'model_gateway',
+      businessDecisionAllowed: false,
+      internalAcceptance: true,
+    });
+    await expect(api.getAnalysisCapabilityRoute()).resolves.toMatchObject({
+      status: 'internal', executionRoute: 'live', availableExpertModes: ['auto', 'expert', 'team'],
+    });
+
+    stubJson({
+      capabilityId: 'solution.analysis.v1',
+      status: 'internal',
+      executionRoute: 'live',
+      capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+      availableExpertModes: ['auto', 'team'],
+      simulation: false,
+      runtimeMode: 'model_gateway',
+      businessDecisionAllowed: false,
+      internalAcceptance: true,
+    });
+    await expect(api.getAnalysisCapabilityRoute()).rejects.toThrow('CAPABILITY_ROUTE_PROJECTION_INVALID');
   });
 
   it('preserves the existing legacy simulation route and fails closed on unknown shapes', async () => {

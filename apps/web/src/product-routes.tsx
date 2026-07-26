@@ -40,6 +40,22 @@ function statementKindLabel(kind: 'fact' | 'inference' | 'recommendation' | 'unk
   return kind === 'fact' ? '事实' : kind === 'inference' ? '推断' : kind === 'recommendation' ? '建议' : '未知项';
 }
 
+function expertRouteLabel(task: PublicTask): string {
+  if (!isLiveTask(task)) {
+    return task.expertTarget.mode === 'auto' ? '小纬自动安排'
+      : task.expertTarget.mode === 'team' ? '专家团 · 需求、矛盾与方案架构' : '单专家 · 方案架构';
+  }
+  if (task.capabilityVersionId !== 'cap_solution_analysis_v1_live_2') return '小纬自动安排';
+  return task.expertTarget.requested.mode === 'auto' ? '小纬自动安排'
+    : task.expertTarget.requested.mode === 'team' ? '专家团 · 需求、矛盾与方案架构' : '单专家 · 方案架构';
+}
+
+function collaborationLabel(task: PublicTask): string {
+  return isLiveTask(task) && task.capabilityVersionId === 'cap_solution_analysis_v1_live_2'
+    ? '需求分析 → 矛盾分析 → 方案架构'
+    : expertRouteLabel(task);
+}
+
 export type RouteState = 'loading' | 'ready' | 'empty' | 'filtered-empty' | 'forbidden' | 'not-found'
   | 'stale' | 'binding-conflict' | 'approval-stale' | 'offline' | 'server-error' | 'canceled' | 'recovering';
 
@@ -424,7 +440,7 @@ export function TaskDetailPage({ taskId }: Readonly<{ taskId: string }>) {
       <section className="binding-grid">
         <div><span>WorkflowVersion</span><a href={`/tasks/${encodeURIComponent(task.id)}/workflow`} data-testid="task-workflow-id">{task.workflowVersion.id}</a><code data-testid="task-workflow-hash">{task.workflowVersion.hash}</code></div>
         <div><span>ApprovalVersion</span><b>{task.approval.id} · v{task.approval.version}</b><code data-testid="approval-subject-digest">{task.approval.subjectDigest}</code></div>
-        <div><span>专家路线</span><b data-testid="expert-target">{isLiveTask(task) ? `小纬自动安排 · ${task.expertTarget.resolved.expertId}` : task.expertTarget.mode === 'auto' ? '小纬自动安排' : task.expertTarget.mode === 'team' ? `专家团 · ${task.expertTarget.teamId}` : `专家 · ${task.expertTarget.expertId}`}</b><small>专家不是客户消息作者</small></div>
+        <div><span>专家路线</span><b data-testid="expert-target">{expertRouteLabel(task)}</b><small data-testid="expert-collaboration">{collaborationLabel(task)} · 客户可见作者只有小纬</small></div>
       </section>
       <section className="detail-card"><div className="section-heading"><div><span className="eyebrow">Workflow run</span><h2>步骤时间线</h2></div><a href={`/tasks/${encodeURIComponent(task.id)}/workflow`}>查看流程图</a></div><ol className="step-timeline" data-testid="task-steps">
         {task.steps.map((step) => <li key={step.id} data-step-id={step.id} data-step-status={step.status}><span className={`step-dot step-${step.status}`} /><div><b>{STEP_NAMES[step.id] ?? step.id}</b><small>{step.id}</small></div><code>{step.status}</code></li>)}

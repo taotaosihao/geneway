@@ -17,12 +17,14 @@ const STEP_NAMES: Readonly<Record<string, string>> = {
 
 const ROUTES = [
   { value: 'auto', label: '小纬自动安排', disabled: false },
-  { value: 'expert.solution.architect', label: '方案专家 · A.2 验证后开放', disabled: true },
-  { value: 'team.solution.core', label: '方案专家团 · A.2 验证后开放', disabled: true },
+  { value: 'expert.solution.architect', label: '单专家 · 方案架构', disabled: false },
+  { value: 'team.solution.core', label: '专家团 · 需求、矛盾与方案架构', disabled: false },
 ] as const;
+type RouteSelector = typeof ROUTES[number]['value'];
 
 const TASK_ID_KEY = 'geneway.solution-analysis.taskId';
 const TASK_CURSOR_KEY = 'geneway.solution-analysis.cursor';
+const EXPERT_ROUTE_KEY = 'geneway.solution-analysis.expertRoute';
 const LEGACY_TASK_ID_KEY = 'geneway.gate02a.taskId';
 const LEGACY_TASK_CURSOR_KEY = 'geneway.gate02a.cursor';
 
@@ -56,8 +58,41 @@ function snapshotMatchesRoute(projection: DocumentSnapshotView, capabilityRoute:
   return projection.executionEligibility.route === capabilityRoute.executionRoute;
 }
 
+function routeAllowsMode(capabilityRoute: AnalysisCapabilityRoute, mode: 'auto' | 'expert' | 'team'): boolean {
+  return capabilityRoute.availableExpertModes.some((available) => available === mode);
+}
+
 function clearAnalysisRecoveryState(): void {
-  for (const key of [TASK_ID_KEY, TASK_CURSOR_KEY, LEGACY_TASK_ID_KEY, LEGACY_TASK_CURSOR_KEY]) localStorage.removeItem(key);
+  for (const key of [TASK_ID_KEY, TASK_CURSOR_KEY, EXPERT_ROUTE_KEY, LEGACY_TASK_ID_KEY, LEGACY_TASK_CURSOR_KEY]) localStorage.removeItem(key);
+}
+
+function isRouteSelector(value: string | null): value is RouteSelector {
+  return ROUTES.some((route) => route.value === value);
+}
+
+function requestedRoute(task: PublicTask): RouteSelector {
+  if (!isLiveTask(task)) {
+    const requested = task.expertTarget.mode === 'expert' ? task.expertTarget.expertId
+      : task.expertTarget.mode === 'team' ? task.expertTarget.teamId : 'auto';
+    return isRouteSelector(requested) ? requested : 'auto';
+  }
+  if (task.capabilityVersionId === 'cap_solution_analysis_v1_live_2') {
+    const requested = task.expertTarget.requested;
+    return requested.mode === 'expert' ? requested.expertId : requested.mode === 'team' ? requested.teamId : 'auto';
+  }
+  return 'auto';
+}
+
+function routeLabel(task: PublicTask): string {
+  const route = requestedRoute(task);
+  return route === 'expert.solution.architect' ? '单专家 · 方案架构'
+    : route === 'team.solution.core' ? '专家团 · 需求、矛盾与方案架构' : '小纬自动安排';
+}
+
+function collaborationLabel(task: PublicTask): string {
+  return isLiveTask(task) && task.capabilityVersionId === 'cap_solution_analysis_v1_live_2'
+    ? '需求分析 → 矛盾分析 → 方案架构'
+    : routeLabel(task);
 }
 
 
@@ -123,7 +158,10 @@ function ExistingConversationExperience({ conversationId }: Readonly<{ conversat
 function AnalysisConversationExperience({ conversationId: explicitConversationId }: Readonly<{ conversationId?: string }>) {
   const [capabilityRoute, setCapabilityRoute] = useState<AnalysisCapabilityRoute>();
   const [routeError, setRouteError] = useState<string>();
-  const [route, setRoute] = useState('auto');
+  const [route, setRoute] = useState<RouteSelector>(() => {
+    const stored = localStorage.getItem(EXPERT_ROUTE_KEY);
+    return isRouteSelector(stored) ? stored : 'auto';
+  });
   const [conversation, setConversation] = useState<Conversation>();
   const [task, setTask] = useState<PublicTask>();
   const [workflow, setWorkflow] = useState<Workflow>();
@@ -173,8 +211,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
     if (latest?.id === taskId && latest.aggregateVersion > snapshot.aggregateVersion) snapshot = latest;
     else latestTaskSnapshot.current = snapshot;
     const nextCursor = Math.max(streamCursor, snapshot.eventWatermark);
-    const restoredRoute = isLiveTask(snapshot) ? 'auto' : snapshot.expertTarget.mode === 'expert' ? snapshot.expertTarget.expertId
-      : snapshot.expertTarget.mode === 'team' ? snapshot.expertTarget.teamId : 'auto';
+    const restoredRoute = requestedRoute(snapshot);
     setRoute(restoredRoute);
     if (snapshot.inputRef.kind === 'document_snapshot' || snapshot.inputRef.kind === 'live_document_snapshot') {
       setSelectedSnapshotId(snapshot.inputRef.documentSnapshotId);
@@ -183,6 +220,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
     localStorage.setItem('geneway.conversationId', snapshot.conversationId);
     localStorage.setItem(TASK_ID_KEY, taskId);
     localStorage.setItem(TASK_CURSOR_KEY, String(nextCursor));
+    localStorage.setItem(EXPERT_ROUTE_KEY, restoredRoute);
     return { snapshot, cursor: nextCursor };
   }, []);
 
@@ -195,6 +233,15 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
     });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (capabilityRoute === undefined || task !== undefined) return;
+    const selectedMode = route === 'auto' ? 'auto' : route === 'expert.solution.architect' ? 'expert' : 'team';
+    if (!routeAllowsMode(capabilityRoute, selectedMode)) {
+      setRoute('auto');
+      localStorage.setItem(EXPERT_ROUTE_KEY, 'auto');
+    }
+  }, [capabilityRoute, route, task]);
 
   useEffect(() => {
     if (capabilityRoute === undefined) return;
@@ -268,9 +315,15 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
       const current = conversation ?? await ensureConversation(explicitConversationId);
       setConversation(current);
       const conversationId = current.id;
+      const expertMode = route === 'auto' ? 'auto' : route === 'expert.solution.architect' ? 'expert' : 'team';
+      if (!routeAllowsMode(capabilityRoute, expertMode)) {
+        throw new Error('NOT_OPEN: 当前专家路线尚未通过服务端 release gate');
+      }
       await api.addMessage(conversationId, body || '请分析已选择的脱敏方案材料');
-      if (route !== 'auto') throw new Error('NOT_OPEN: 单专家和专家团将在 A.2 验证后开放');
-      const created = await api.createTask(conversationId, selected.documentSnapshot.id, { mode: 'auto' });
+      const expertTarget = route === 'auto' ? { mode: 'auto' } as const
+        : route === 'expert.solution.architect' ? { mode: 'expert', expertId: route } as const
+          : { mode: 'team', teamId: route } as const;
+      const created = await api.createTask(conversationId, selected.documentSnapshot.id, expertTarget);
       latestTaskSnapshot.current = undefined;
       await recover(created.taskId, 0);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
@@ -384,7 +437,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
       <section className="conversation-pane">
         <header className="topbar"><div><h1>小纬</h1><p>{liveTask || capabilityRoute.executionRoute === 'live' ? '材料分析 · 可信本机内部验收' : '通用数字员工 · 当前为模拟运行'}</p></div>{liveTask || capabilityRoute.executionRoute === 'live' ? <InternalAcceptanceNotice /> : <SimulationNotice />}</header>
         <div className="thread" data-testid="message-thread">
-          {(conversation?.messages.length ?? 0) === 0 && <section className="welcome-empty" data-testid="welcome-empty"><div className="avatar">纬</div><div><b>你好，我是小纬</b><p>{isExceptionTask ? '这个私有会话由异常分析任务创建。来源、专家路线、Workflow 与审批均已绑定服务端权威版本。' : liveTask || capabilityRoute.executionRoute === 'live' ? '请上传并明确选择一份获准的 C1 材料。A.1 由小纬自动安排专家，固定 Workflow 会先展示并等待批准。' : '请上传并明确选择一份只读材料。任何 Workflow 都会先展示并等待批准。'}</p></div></section>}
+          {(conversation?.messages.length ?? 0) === 0 && <section className="welcome-empty" data-testid="welcome-empty"><div className="avatar">纬</div><div><b>你好，我是小纬</b><p>{isExceptionTask ? '这个私有会话由异常分析任务创建。来源、专家路线、Workflow 与审批均已绑定服务端权威版本。' : liveTask || capabilityRoute.executionRoute === 'live' ? '请上传并明确选择一份获准的 C1 材料，再选择自动、单专家或专家团。固定 Workflow 会先展示并等待批准。' : '请上传并明确选择一份只读材料。任何 Workflow 都会先展示并等待批准。'}</p></div></section>}
           {conversation?.messages.map((message) => <article className={`message ${message.author}`} key={message.id} data-author={message.author}>
             <div className="avatar">{message.author === 'xiaowei' ? '纬' : '你'}</div><div><b>{message.author === 'xiaowei' ? '小纬' : '你'}</b><p>{message.body}</p></div>
           </article>)}
@@ -429,11 +482,14 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
           {task !== undefined && <section className="task-card" data-testid="task-card" data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}
             data-record-variant={liveTask ? task.recordVariant : 'business-task.simulation/1'} data-model-invocation-id={liveTask ? task.modelInvocation?.id ?? '' : ''}>
             <div className="task-title"><div><span className="eyebrow">{liveTask ? '小纬任务 · 可信本机内部验收' : '小纬任务 · simulation=true'}</span><h2>{task.title}</h2></div><span className={`status status-${task.status}`}>{task.status}</span></div>
-            <p>{liveTask ? 'A.1 由小纬自动安排已登记专家版本，并只经 Model Gateway 执行；客户可见作者仍只有小纬。' : isExceptionTask ? '任务绑定版本固定的异常来源与 Evidence。' : '当前为醒目标记的 legacy 模拟任务；专家只作为后端协作者，客户消息仍只由小纬发出。'}</p>
+            <p>{liveTask ? `分析路线：${routeLabel(task)}。客户可见作者仍只有小纬。` : isExceptionTask ? '任务绑定版本固定的异常来源与 Evidence。' : '当前为醒目标记的 legacy 模拟任务；专家只作为后端协作者，客户消息仍只由小纬发出。'}</p>
             <dl className="task-bindings">
               <div><dt>Snapshot</dt><dd>{taskInputLabel(task.inputRef)}</dd></div>
               <div><dt>{liveTask ? 'Extraction' : 'Profile'}</dt><dd>{taskInputProfile(task.inputRef)}</dd></div>
               <div><dt>Workflow</dt><dd>{task.workflowVersion.id}</dd></div>
+              <div><dt>专家路线</dt><dd data-testid="task-expert-route">{routeLabel(task)}</dd></div>
+              <div><dt>协作来源</dt><dd data-testid="task-collaboration">{collaborationLabel(task)}</dd></div>
+              <div><dt>客户可见作者</dt><dd data-testid="task-customer-author">小纬</dd></div>
               <div><dt>运行边界</dt><dd data-testid="task-execution-boundary">simulation={String(task.simulation)} · runtimeMode={task.runtimeMode} · businessDecisionAllowed={String(task.businessDecisionAllowed)}</dd></div>
               {liveTask && <div><dt>ModelInvocation</dt><dd data-testid="task-model-invocation-id">{task.modelInvocation?.id ?? '等待执行'}</dd></div>}
             </dl>
@@ -489,7 +545,13 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
           {error !== undefined && <div className="error" role="alert">{error}</div>}
         </div>
         {!isExceptionTask && capabilityRoute.status !== 'NOT_OPEN' && <div className="composer-zone">
-          <div className="composer-tools"><label>专家路线<select aria-label="专家路线" value={route} disabled={task !== undefined || working} onChange={(event) => setRoute(event.target.value)}>{ROUTES.map((item) => <option key={item.value} value={item.value} disabled={item.disabled}>{item.label}</option>)}</select></label><span>{selectedSnapshot === undefined ? '请先选择一份可执行材料' : `已选：${selectedSnapshot.documentSnapshot.displayName} · 执行前仍需审批`}</span></div>
+          <div className="composer-tools"><label>专家路线<select aria-label="专家路线" value={route} disabled={task !== undefined || working} onChange={(event) => {
+            const next = event.target.value;
+            if (isRouteSelector(next)) { setRoute(next); localStorage.setItem(EXPERT_ROUTE_KEY, next); }
+          }}>{ROUTES.map((item) => {
+            const mode = item.value === 'auto' ? 'auto' : item.value === 'expert.solution.architect' ? 'expert' : 'team';
+            return <option key={item.value} value={item.value} disabled={item.disabled || !routeAllowsMode(capabilityRoute, mode)}>{item.label}</option>;
+          })}</select></label><span>{selectedSnapshot === undefined ? '请先选择一份可执行材料' : `已选：${selectedSnapshot.documentSnapshot.displayName} · ${ROUTES.find((item) => item.value === route)?.label} · 执行前仍需审批`}</span></div>
           <ComposerPrimitive.Root className="composer"><ComposerPrimitive.Input aria-label="给小纬发消息" placeholder={selectedSnapshot === undefined ? '请先在上方选择可执行材料' : '请小纬分析这份脱敏材料…'} disabled={task !== undefined || working || selectedSnapshot === undefined} /><ComposerPrimitive.Send className="send" disabled={task !== undefined || working || selectedSnapshot === undefined}>{working ? '处理中' : '发送'}</ComposerPrimitive.Send></ComposerPrimitive.Root>
         </div>}
       </section>

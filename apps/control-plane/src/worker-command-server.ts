@@ -41,6 +41,8 @@ import { hashCanonical, readStoredWorkflowVersion } from '@geneway/workflow';
 import { buildApprovalSubject, type ControlPlaneRepository } from './repository.js';
 import type { ChatRepository } from './chat-repository.js';
 import { registerChatWorkerCommands } from './chat-worker-command.js';
+import type { GateALiveRepository } from './gate-a-live-repository.js';
+import { registerGateAWorkerCommands } from './gate-a-worker-command.js';
 
 const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
 const CONSUMER = 'gate0.2a-worker' as const;
@@ -1644,6 +1646,7 @@ export function createWorkerCommandApp(input: Readonly<{
   hooks?: WorkerCommandHooks;
   chatRepository?: ChatRepository;
   invocationTokenSecret?: string;
+  gateALiveRepository?: GateALiveRepository;
 }>): FastifyInstance {
   if (input.token.length < 32) throw new Error('Worker service token must contain at least 32 characters');
   const service = new WorkerCommandService(input.repository, input.storage, input.leaseDurationMs, input.hooks);
@@ -1656,6 +1659,14 @@ export function createWorkerCommandApp(input: Readonly<{
       repository: input.chatRepository,
       workerToken: input.token,
       invocationTokenSecret: input.invocationTokenSecret,
+      leaseDurationMs: input.leaseDurationMs ?? 300_000,
+    });
+  }
+  if (input.gateALiveRepository !== undefined) {
+    registerGateAWorkerCommands(app, {
+      repository: input.gateALiveRepository,
+      storage: input.storage,
+      workerToken: input.token,
       leaseDurationMs: input.leaseDurationMs ?? 300_000,
     });
   }

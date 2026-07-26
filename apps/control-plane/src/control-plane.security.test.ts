@@ -343,14 +343,23 @@ describe('Gate 0.2A public and Worker security boundaries', () => {
     }
   });
 
-  it('fails public projections closed when immutable Workflow or Approval bindings drift', async () => {
+  it('rejects immutable Workflow drift at the database boundary and fails Approval bindings closed', async () => {
     const workflowDrift = await createFixtureTask('workflow-drift');
-    await controlPlane.repository.pool.query("UPDATE business_tasks SET workflow_hash=$2 WHERE tenant_id='tenant_local' AND id=$1", [
-      workflowDrift.taskId, '0'.repeat(64),
+    const driftWorkflowHash = '0'.repeat(64);
+    const driftWorkflowId = `workflow_${driftWorkflowHash.slice(0, 24)}`;
+    await controlPlane.repository.pool.query(`INSERT INTO workflow_versions
+      (tenant_id,id,workflow_hash,canonicalization_version,canonical_json)
+      SELECT tenant_id,$2,$3,canonicalization_version,canonical_json
+      FROM workflow_versions WHERE tenant_id='tenant_local' AND id=$1`, [
+      workflowDrift.workflowVersionId, driftWorkflowId, driftWorkflowHash,
+    ]);
+    await controlPlane.repository.pool.query(`UPDATE business_tasks
+      SET workflow_version_id=$2,workflow_hash=$3 WHERE tenant_id='tenant_local' AND id=$1`, [
+      workflowDrift.taskId, driftWorkflowId, driftWorkflowHash,
     ]);
     for (const url of [
       `/api/business-tasks/${workflowDrift.taskId}`,
-      `/api/workflow-versions/${workflowDrift.workflowVersionId}`,
+      `/api/workflow-versions/${driftWorkflowId}`,
       `/api/business-tasks/${workflowDrift.taskId}/events?after=0`,
     ]) {
       const response = await controlPlane.app.inject({ method: 'GET', url });

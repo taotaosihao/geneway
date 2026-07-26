@@ -7,6 +7,8 @@ import {
   SIMULATION_ENVELOPE,
   isGenewayError,
   resolvedTaskInputRefSchema,
+  gateALiveTaskListItemSchema,
+  gateALiveWorkflowListItemSchema,
   taskListItemSchema,
   taskListResponseSchema,
   taskEventProjectionSchema,
@@ -42,6 +44,7 @@ import {
   createSolutionAnalysisDraft,
   hashCanonical,
   readStoredWorkflowVersion,
+  readStoredTemplateWorkflowVersion,
   type CompiledWorkflowVersion,
 } from '@geneway/workflow';
 
@@ -126,6 +129,7 @@ type TaskRow = {
   execution_fencing_token: string;
   created_at: Date;
   updated_at: Date;
+  record_variant: string | null;
 };
 
 type ApprovalRow = {
@@ -156,6 +160,7 @@ type WorkflowVersionRow = {
   canonicalization_version: 'RFC8785/JCS-1';
   canonical_json: unknown;
   created_at: Date;
+  record_variant: string | null;
 };
 
 type PaginationCursorPayload = Readonly<{
@@ -209,6 +214,21 @@ const TASK_PROJECTION_AUTHORIZATION_SQL = `
           AND readable_snapshot.conversation_id=t.conversation_id
           AND readable_snapshot.created_by=$2
           AND readable_artifact.owner_user_id=$2
+      )
+    )
+    OR (
+      t.input_snapshot->>'kind'='live_document_snapshot'
+      AND t.record_variant='business-task.live/1'
+      AND EXISTS (
+        SELECT 1 FROM document_snapshots readable_live_snapshot
+        JOIN artifacts readable_live_artifact ON readable_live_artifact.tenant_id=readable_live_snapshot.tenant_id
+          AND readable_live_artifact.id=readable_live_snapshot.artifact_id
+        WHERE readable_live_snapshot.tenant_id=t.tenant_id
+          AND readable_live_snapshot.id=t.input_snapshot->>'documentSnapshotId'
+          AND readable_live_snapshot.artifact_id=t.input_snapshot->>'artifactId'
+          AND readable_live_snapshot.created_by=$2 AND readable_live_snapshot.conversation_id=t.conversation_id
+          AND readable_live_artifact.owner_user_id=$2
+          AND readable_live_artifact.content_sha256=t.input_snapshot->>'artifactSha256'
       )
     )
     OR (
@@ -397,18 +417,19 @@ export class ControlPlaneRepository {
 
       if (query.cursor === undefined) {
         const orderColumn = query.sort === 'createdAt' ? 't.created_at' : 't.updated_at';
+        const orderDirection = query.direction === 'asc' ? 'ASC' : 'DESC';
         const candidates = await client.query<TaskRow>(`SELECT t.* FROM business_tasks t
           JOIN capability_versions capability ON capability.tenant_id=t.tenant_id AND capability.id=t.capability_version_id
           WHERE t.tenant_id=$1 AND ${TASK_PROJECTION_AUTHORIZATION_SQL}
             AND ($3::text IS NULL OR t.status=$3)
             AND ($4::text IS NULL OR capability.capability_id=$4)
-          ORDER BY ${orderColumn} DESC,t.id ASC`, [
+          ORDER BY ${orderColumn} ${orderDirection},t.id ${orderDirection}`, [
           principal.tenantId, principal.userId, query.status ?? null, query.capabilityId ?? null,
         ]);
         const readable: TaskRow[] = [];
         for (const candidate of candidates.rows) {
           try {
-            this.assertTaskProjectionContext(candidate);
+            if (candidate.record_variant !== 'business-task.live/1') this.assertTaskProjectionContext(candidate);
             readable.push(candidate);
           } catch (error) {
             if (!this.isListVisibilityError(error)) throw error;
@@ -442,7 +463,10 @@ export class ControlPlaneRepository {
 
       const page = await this.readQuerySnapshotPage(client, principal, snapshot, position, query.limit, async (objectId) => {
         try {
-          return await this.projectTaskListItem(client, await this.requireTaskProjectionReadable(client, principal, objectId));
+          const task = await this.requireTaskProjectionReadable(client, principal, objectId);
+          return task.record_variant === 'business-task.live/1'
+            ? await this.projectLiveTaskListItem(client, task)
+            : await this.projectTaskListItem(client, task);
         } catch (error) {
           if (this.isListVisibilityError(error)) return null;
           throw error;
@@ -1210,6 +1234,22 @@ export class ControlPlaneRepository {
     });
   }
 
+  private async projectLiveTaskListItem(client: PoolClient, task: TaskRow) {
+    const approvalResult = await client.query<ApprovalRow>(`SELECT * FROM approval_versions
+      WHERE tenant_id=$1 AND business_task_id=$2 ORDER BY version DESC LIMIT 1`, [task.tenant_id, task.id]);
+    const approval = approvalResult.rows[0];
+    if (approval === undefined) throw new GenewayError('APPROVAL_NOT_FOUND', 'Task has no approval version', 500);
+    return gateALiveTaskListItemSchema.parse({
+      recordVariant: 'business-task.live/1', id: task.id, capabilityId: 'solution.analysis.v1',
+      status: task.status, title: '方案分析', conversationId: task.conversation_id,
+      workflowVersion: { id: task.workflow_version_id, hash: task.workflow_hash },
+      approvalStatus: approval.status, createdAt: task.created_at.toISOString(),
+      updatedAt: task.updated_at.toISOString(), aggregateVersion: Number(task.aggregate_version),
+      simulation: false, runtimeMode: 'model_gateway', businessDecisionAllowed: false,
+      internalAcceptance: true,
+    });
+  }
+
   private async requireReadableWorkflow(client: PoolClient, principal: Principal, workflowId: string): Promise<WorkflowVersionRow> {
     const candidates = await client.query<{ id: string }>(`SELECT id FROM business_tasks
       WHERE tenant_id=$1 AND workflow_version_id=$2 AND requester_id=$3 ORDER BY created_at,id`, [
@@ -1227,13 +1267,26 @@ export class ControlPlaneRepository {
     }
     if (!readable) throw new GenewayError('WORKFLOW_NOT_FOUND', 'Workflow was not found', 404);
     const result = await client.query<WorkflowVersionRow>(`SELECT id,workflow_hash,canonicalization_version,
-      canonical_json,created_at FROM workflow_versions WHERE tenant_id=$1 AND id=$2`, [principal.tenantId, workflowId]);
+      canonical_json,created_at,record_variant FROM workflow_versions WHERE tenant_id=$1 AND id=$2`, [principal.tenantId, workflowId]);
     const row = result.rows[0];
     if (row === undefined) throw new GenewayError('WORKFLOW_NOT_FOUND', 'Workflow was not found', 404);
     return row;
   }
 
   private projectWorkflowListItem(row: WorkflowVersionRow) {
+    if (row.record_variant === 'workflow-read-model.live/1') {
+      const workflow = readStoredTemplateWorkflowVersion({
+        id: row.id, hash: row.workflow_hash, canonicalizationVersion: row.canonicalization_version,
+        canonicalPayload: row.canonical_json,
+      });
+      return gateALiveWorkflowListItemSchema.parse({
+        recordVariant: 'workflow-read-model.live/1', id: workflow.id, hash: workflow.hash,
+        capabilityVersionId: workflow.payload.capabilityVersionId,
+        harnessVersionId: workflow.payload.harnessVersionId, createdAt: row.created_at.toISOString(),
+        simulation: false, runtimeMode: 'model_gateway', businessDecisionAllowed: false,
+        internalAcceptance: true,
+      });
+    }
     const workflow = readStoredWorkflowVersion({
       id: row.id,
       hash: row.workflow_hash,
@@ -1503,6 +1556,7 @@ export class ControlPlaneRepository {
     ]);
     const task = result.rows[0];
     if (task === undefined) throw new GenewayError('TASK_NOT_FOUND', 'Task was not found', 404);
+    if (task.record_variant === 'business-task.live/1') return task;
     this.assertTaskProjectionContext(task);
     await this.assertTaskProjectionIntegrity(client, task);
     return task;
@@ -1510,15 +1564,20 @@ export class ControlPlaneRepository {
 
   private async assertTaskProjectionIntegrity(client: PoolClient, task: TaskRow): Promise<void> {
     const workflowResult = await client.query<WorkflowVersionRow>(`SELECT id,workflow_hash,canonicalization_version,
-      canonical_json,created_at FROM workflow_versions WHERE tenant_id=$1 AND id=$2`, [task.tenant_id, task.workflow_version_id]);
+      canonical_json,created_at,record_variant FROM workflow_versions WHERE tenant_id=$1 AND id=$2`, [task.tenant_id, task.workflow_version_id]);
     const workflowRow = workflowResult.rows[0];
     if (workflowRow === undefined) throw new GenewayError('TASK_WORKFLOW_BINDING_INVALID', 'Task workflow binding is unavailable', 409);
-    const workflow = readStoredWorkflowVersion({
-      id: workflowRow.id,
-      hash: workflowRow.workflow_hash,
-      canonicalizationVersion: workflowRow.canonicalization_version,
-      canonicalPayload: workflowRow.canonical_json,
-    });
+    let workflow;
+    try {
+      workflow = readStoredWorkflowVersion({
+        id: workflowRow.id,
+        hash: workflowRow.workflow_hash,
+        canonicalizationVersion: workflowRow.canonicalization_version,
+        canonicalPayload: workflowRow.canonical_json,
+      });
+    } catch {
+      throw new GenewayError('TASK_WORKFLOW_BINDING_INVALID', 'Task workflow binding no longer matches canonical authority', 409);
+    }
     if (workflow.id !== task.workflow_version_id || workflow.hash !== task.workflow_hash) {
       throw new GenewayError('TASK_WORKFLOW_BINDING_INVALID', 'Task workflow binding no longer matches the immutable version', 409);
     }

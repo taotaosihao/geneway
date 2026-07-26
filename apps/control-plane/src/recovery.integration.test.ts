@@ -145,10 +145,14 @@ async function loadIntent(caseId: FaultCaseId) {
 async function ingestCounts(intentId: string) {
   const result = await controlPlane.repository.pool.query<{
     status: string;
+    intent_etag_observed: string | null;
+    state_etag_observed: string | null;
     artifacts: string;
     manifests: string;
     ready_snapshots: string;
-  }>(`SELECT intent.status,
+  }>(`SELECT intent.status,intent.etag_observed intent_etag_observed,
+      (SELECT state.etag_observed FROM artifact_states state
+        WHERE state.tenant_id=intent.tenant_id AND state.artifact_id=intent.artifact_id) state_etag_observed,
       (SELECT count(*)::text FROM artifacts artifact WHERE artifact.tenant_id=intent.tenant_id AND artifact.id=intent.artifact_id) artifacts,
       (SELECT count(*)::text FROM artifact_manifests manifest WHERE manifest.tenant_id=intent.tenant_id AND manifest.id=intent.manifest_id) manifests,
       (SELECT count(*)::text FROM document_snapshots snapshot WHERE snapshot.tenant_id=intent.tenant_id AND snapshot.id=intent.document_snapshot_id) ready_snapshots
@@ -157,6 +161,8 @@ async function ingestCounts(intentId: string) {
   if (row === undefined) throw new Error(`Ingest intent ${intentId} disappeared`);
   return {
     intentStatus: row.status,
+    intentETagObserved: row.intent_etag_observed,
+    stateETagObserved: row.state_etag_observed,
     artifacts: Number(row.artifacts),
     manifests: Number(row.manifests),
     readySnapshots: Number(row.ready_snapshots),
@@ -524,6 +530,9 @@ describe.sequential('Gate 0.2A required recovery fault matrix', () => {
     expect(recovered.status, await recovered.clone().text()).toBe(201);
     const final = await ingestCounts(intent.id);
     expect(final).toMatchObject({ intentStatus: 'ready', artifacts: 1, manifests: 1, readySnapshots: 1 });
+    expect(typeof final.intentETagObserved).toBe('string');
+    expect(typeof final.stateETagObserved).toBe('string');
+    expect(final.intentETagObserved).toBe(final.stateETagObserved);
     record({
       case_id: caseId,
       fault_triggered: true,
@@ -559,6 +568,9 @@ describe.sequential('Gate 0.2A required recovery fault matrix', () => {
     expect(recovered.status, await recovered.clone().text()).toBe(201);
     const final = await ingestCounts(intent.id);
     expect(final).toMatchObject({ intentStatus: 'ready', artifacts: 1, manifests: 1, readySnapshots: 1 });
+    expect(typeof final.intentETagObserved).toBe('string');
+    expect(typeof final.stateETagObserved).toBe('string');
+    expect(final.intentETagObserved).toBe(final.stateETagObserved);
     record({
       case_id: caseId,
       fault_triggered: true,

@@ -31,7 +31,12 @@ const keySchema = z.string().min(1).max(512).refine(
 const putSchema = z.object({
   key: keySchema,
   bytesBase64: z.string().max(1_500_000),
-  contentType: z.enum(['text/plain', 'text/markdown']),
+  contentType: z.enum([
+    'text/plain',
+    'text/markdown',
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ]),
   contentSha256: z.string().regex(/^[a-f0-9]{64}$/u),
 }).strict();
 const keyRequestSchema = z.object({ key: keySchema }).strict();

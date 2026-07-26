@@ -12,6 +12,9 @@ import {
   eventCursorSchema,
   executeTaskInputSchema,
   evidenceProjectionSchema,
+  gateACapabilityRouteProjectionSchema,
+  gateADocumentExecutionEligibilitySchema,
+  gateALiveTaskCreateInputSchema,
   GenewayError,
   isGenewayError,
   taskEventListResponseSchema,
@@ -37,8 +40,32 @@ import {
 import { ControlPlaneRepository } from './repository.js';
 import { ChatRepository } from './chat-repository.js';
 import { ArtifactRepository } from './artifact-repository.js';
+import type { ValidatedArtifactUpload } from './artifact-repository.js';
 import { ArtifactService, type ArtifactServiceHooks } from './artifact-service.js';
 import { BusinessExceptionRepository } from './business-exception-repository.js';
+import { GateALiveRepository } from './gate-a-live-repository.js';
+
+function validateArtifactUpload(upload: SingleMultipartUpload): ValidatedArtifactUpload {
+  const lowerName = upload.fileName.toLowerCase();
+  if (lowerName.endsWith('.txt') || lowerName.endsWith('.md')) return validateTextUpload(upload);
+  if (!/^[^/\\\0]{1,120}$/u.test(upload.fileName) || upload.fileName.startsWith('.') || upload.fileName.includes('..')
+    || upload.bytes.byteLength < 1 || upload.bytes.byteLength > MAX_RAW_UPLOAD_BYTES) {
+    throw new GenewayError('INVALID_DOCUMENT_UPLOAD', 'Document file name or size is invalid', 422);
+  }
+  const pdf = lowerName.endsWith('.pdf') && upload.mediaType === 'application/pdf'
+    && Buffer.from(upload.bytes.subarray(0, 5)).toString('ascii') === '%PDF-';
+  const docx = lowerName.endsWith('.docx')
+    && upload.mediaType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    && upload.bytes[0] === 0x50 && upload.bytes[1] === 0x4b && upload.bytes[2] === 0x03 && upload.bytes[3] === 0x04;
+  if (!pdf && !docx) throw new GenewayError('UNSUPPORTED_DOCUMENT_FORMAT', 'Document extension, MIME type, and signature must match', 415);
+  return {
+    bytes: upload.bytes, displayName: upload.fileName,
+    mediaType: pdf ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    extension: pdf ? 'pdf' : 'docx', sizeBytes: upload.bytes.byteLength,
+    contentSha256: createHash('sha256').update(upload.bytes).digest('hex'), simulationProfile: null,
+    profileRegistryVersion: 'gate0.2a-profile-registry/1',
+  };
+}
 
 export { StorageReconciler } from './storage-reconciler.js';
 export type { StorageReconciliationFinding, StorageReconciliationResult } from './storage-reconciler.js';
@@ -61,6 +88,21 @@ const bearerMatches = (header: string | undefined, expected: string): boolean =>
   return supplied.byteLength === wanted.byteLength && timingSafeEqual(supplied, wanted);
 };
 
+const invocationTokenAudience = (token: string): string | null => {
+  const [encoded, signature, extra] = token.split('.');
+  if (encoded === undefined || signature === undefined || extra !== undefined
+    || !/^[A-Za-z0-9_-]+$/u.test(encoded) || Buffer.from(encoded, 'base64url').toString('base64url') !== encoded) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as unknown;
+    const parsed = z.object({ aud: z.string().min(1).max(200) }).passthrough().safeParse(payload);
+    return parsed.success ? parsed.data.aud : null;
+  } catch {
+    return null;
+  }
+};
+
 const requireMutationOrigin = (request: FastifyRequest, allowedOrigins: ReadonlySet<string>): void => {
   if (request.method !== 'GET' && request.method !== 'HEAD' && request.method !== 'OPTIONS') {
     const origin = request.headers.origin;
@@ -76,6 +118,7 @@ export type ControlPlane = Readonly<{
   artifactService: ArtifactService | null;
   chatRepository: ChatRepository;
   businessExceptionRepository: BusinessExceptionRepository;
+  gateALiveRepository: GateALiveRepository | null;
 }>;
 
 export async function createControlPlane(options: Readonly<{
@@ -89,6 +132,7 @@ export async function createControlPlane(options: Readonly<{
   chatRouteAvailable?: () => Promise<boolean>;
   modelGatewayAuthority?: Readonly<{ serviceToken: string; invocationTokenSecret: string }>;
   liveValidationRunId?: string;
+  gateALiveValidationRunId?: string;
   chatReaperIntervalMs?: number;
 }>): Promise<ControlPlane> {
   const cursorHmacSecret = options.cursorHmacSecret ?? process.env.GENEWAY_CURSOR_HMAC_SECRET;
@@ -96,12 +140,56 @@ export async function createControlPlane(options: Readonly<{
   const repository = new ControlPlaneRepository(options.databaseUrl, cursorHmacSecret);
   const artifactRepository = new ArtifactRepository(repository.pool);
   const chatRepository = new ChatRepository(repository.pool, options.liveValidationRunId);
+  if (options.gateALiveValidationRunId !== undefined && options.modelGatewayAuthority === undefined) {
+    throw new Error('Gate A live validation requires Model Gateway authority');
+  }
+  const gateALiveRepository = options.gateALiveValidationRunId === undefined
+    ? null
+    : new GateALiveRepository(repository.pool, options.modelGatewayAuthority!.invocationTokenSecret, options.gateALiveValidationRunId);
   const businessExceptionRepository = new BusinessExceptionRepository(repository.pool, cursorHmacSecret);
   const objectStorage = options.objectStorage === undefined ? createObjectStorageFromEnv() : options.objectStorage;
+  const artifactServiceHooks: ArtifactServiceHooks = {
+    ...options.artifactServiceHooks,
+    ...(gateALiveRepository === null ? {} : { liveCanonicalIngest: true, resolveLiveExecutionEligibility: async (input) => {
+      const modelRouteAvailable = options.chatRouteAvailable === undefined
+        ? false
+        : await options.chatRouteAvailable();
+      const capabilityRoute = gateACapabilityRouteProjectionSchema.parse(await gateALiveRepository.getCapabilityRoute(
+        input.principal,
+        modelRouteAvailable,
+        options.artifactServiceHooks?.parserSandbox !== undefined,
+      ));
+      if (capabilityRoute.status !== 'internal') {
+        return gateADocumentExecutionEligibilitySchema.parse({
+          route: 'not_open',
+          eligible: false,
+          reason: capabilityRoute.reason === 'PARSER_AUTHORITY_UNAVAILABLE'
+            ? 'PARSER_AUTHORITY_UNAVAILABLE'
+            : capabilityRoute.reason === 'DATA_ROUTE_NOT_ALLOWED'
+              ? 'DATA_ROUTE_NOT_ALLOWED'
+              : 'LIVE_RELEASE_NOT_OPEN',
+        });
+      }
+      const eligibility = gateADocumentExecutionEligibilitySchema.parse(
+        await gateALiveRepository.getDocumentExecutionEligibility(input.principal, input.documentSnapshotId),
+      );
+      if (eligibility.route !== 'live') return eligibility;
+      if (eligibility.parserManifestId !== input.parserManifestId
+        || eligibility.parserDigest !== input.parserDigest
+        || eligibility.extractionVersion !== input.extractionVersion
+        || eligibility.canonicalTextSha256 !== input.canonicalTextSha256) {
+        return gateADocumentExecutionEligibilitySchema.parse({
+          route: 'not_open', eligible: false, reason: 'CANONICAL_REPRESENTATION_UNAVAILABLE',
+        });
+      }
+      return eligibility;
+    } }),
+  };
   const artifactService = objectStorage === null
     ? null
-    : new ArtifactService(artifactRepository, objectStorage, options.artifactServiceHooks);
+    : new ArtifactService(artifactRepository, objectStorage, artifactServiceHooks);
   await repository.ensureSystemSeed();
+  await gateALiveRepository?.ensureLiveAuthority();
   const allowedOrigins = new Set(options.allowedOrigins ?? ['http://localhost:3200', 'http://127.0.0.1:3200']);
   const app = Fastify({ logger: options.logger ?? false, trustProxy: false, bodyLimit: MAX_MULTIPART_ENVELOPE_BYTES });
   const resolvePrincipal = options.principalResolver ?? ((request: FastifyRequest) => deriveTrustedLocalPrincipal(request.ip));
@@ -211,7 +299,12 @@ export async function createControlPlane(options: Readonly<{
         return reply.status(401).send({ active: false });
       }
       const body = z.object({ invocationToken: z.string().min(40).max(8_192) }).strict().parse(request.body);
-      const active = await chatRepository.consumeInvocationToken(body.invocationToken, options.modelGatewayAuthority!.invocationTokenSecret);
+      const audience = invocationTokenAudience(body.invocationToken);
+      const active = audience === 'local-model-gateway'
+        ? await chatRepository.consumeInvocationToken(body.invocationToken, options.modelGatewayAuthority!.invocationTokenSecret)
+        : audience === 'local-model-gateway-analysis' && gateALiveRepository !== null
+          ? await gateALiveRepository.consumeAnalysisInvocationToken(body.invocationToken)
+          : false;
       return active ? { active: true } : reply.status(401).send({ active: false });
     });
   }
@@ -311,7 +404,7 @@ export async function createControlPlane(options: Readonly<{
       principal: request.principal,
       conversationId: params.id,
       idempotencyKey: idempotencyKey(request),
-      upload: validateTextUpload(uploaded),
+      upload: validateArtifactUpload(uploaded),
     });
     return reply.status(201).send(result);
   });
@@ -345,6 +438,14 @@ export async function createControlPlane(options: Readonly<{
       return { id: params.id, version: 1, logicalModelPolicy: 'general.chat.standard', toolChoice: 'none', status: 'internal' };
     }
     if (params.id !== 'solution.analysis.v1') return reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'Capability is not open in Gate 0.1' } });
+    if (gateALiveRepository !== null) {
+      const modelRouteAvailable = options.chatRouteAvailable !== undefined && await options.chatRouteAvailable();
+      return gateALiveRepository.getCapabilityRoute(
+        request.principal,
+        modelRouteAvailable,
+        options.artifactServiceHooks?.parserSandbox !== undefined,
+      );
+    }
     return { id: params.id, version: 1, workflowNodeCount: 7, fixtureRef: 'fixture:solution-analysis:v1', simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false };
   });
 
@@ -371,6 +472,35 @@ export async function createControlPlane(options: Readonly<{
   });
 
   app.post('/api/business-tasks', async (request, reply) => {
+    const liveInput = gateALiveTaskCreateInputSchema.safeParse(request.body);
+    if (liveInput.success && gateALiveRepository !== null) {
+      const modelRouteAvailable = options.chatRouteAvailable === undefined
+        ? false
+        : await options.chatRouteAvailable();
+      const capabilityRoute = gateACapabilityRouteProjectionSchema.parse(await gateALiveRepository.getCapabilityRoute(
+        request.principal,
+        modelRouteAvailable,
+        options.artifactServiceHooks?.parserSandbox !== undefined,
+      ));
+      if (capabilityRoute.status !== 'internal') {
+        return reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'Capability is not open' } });
+      }
+      const source = await repository.pool.query<{ simulation_profile: string | null }>(`SELECT snapshot.simulation_profile
+        FROM document_snapshots snapshot
+        JOIN conversations conversation ON conversation.tenant_id=snapshot.tenant_id
+          AND conversation.id=snapshot.conversation_id
+        WHERE snapshot.tenant_id=$1 AND snapshot.id=$2 AND conversation.user_id=$3`, [
+        request.principal.tenantId, liveInput.data.inputRef.documentSnapshotId, request.principal.userId,
+      ]);
+      if (source.rows[0]?.simulation_profile === null || source.rowCount === 0) {
+      const result = await gateALiveRepository.createLiveTaskProjection(request.principal, {
+        conversationId: liveInput.data.conversationId,
+        documentSnapshotId: liveInput.data.inputRef.documentSnapshotId,
+        idempotencyKey: idempotencyKey(request),
+      });
+      return reply.status(201).send(result);
+      }
+    }
     const input = createTaskInputSchema.parse(request.body);
     const result = await repository.createTask(request.principal, input, idempotencyKey(request));
     return reply.status(201).send(result);
@@ -383,6 +513,9 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/business-tasks/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateALiveRepository !== null && await gateALiveRepository.isLiveTask(request.principal, params.id)) {
+      return gateALiveRepository.getLiveTask(request.principal, params.id);
+    }
     return repository.getTask(request.principal, params.id);
   });
 
@@ -394,18 +527,24 @@ export async function createControlPlane(options: Readonly<{
     }).strict().refine((value) => value.after === undefined || value.afterCursor === undefined, {
       message: 'Use only one event cursor parameter',
     }).parse(request.query);
-    const events = await repository.getEvents(request.principal, params.id, query.after ?? query.afterCursor ?? 0);
+    const live = gateALiveRepository !== null && await gateALiveRepository.isLiveTask(request.principal, params.id);
+    const liveResponse = live
+      ? await gateALiveRepository.getLiveEvents(request.principal, params.id, query.after ?? query.afterCursor ?? 0)
+      : null;
+    const events = live
+      ? (liveResponse as Readonly<{ events: readonly Readonly<{ cursor: number; eventType: string }>[] }>).events
+      : await repository.getEvents(request.principal, params.id, query.after ?? query.afterCursor ?? 0);
     if (request.headers.accept?.includes('text/event-stream') === true) {
       reply.raw.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-cache',
         connection: 'keep-alive',
       });
-      for (const event of events) reply.raw.write(`id: ${String(event.cursor)}\nevent: task-event\ndata: ${JSON.stringify(event)}\n\n`);
+      for (const event of events) reply.raw.write(`id: ${String(event.cursor)}\nevent: ${live ? event.eventType : 'task-event'}\ndata: ${JSON.stringify(event)}\n\n`);
       reply.raw.end();
       return reply;
     }
-    return taskEventListResponseSchema.parse({ events });
+    return live ? liveResponse : taskEventListResponseSchema.parse({ events });
   });
 
   app.get('/api/workflow-versions', async (request) => {
@@ -415,28 +554,89 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/workflow-versions/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateALiveRepository !== null && await gateALiveRepository.isLiveWorkflow(request.principal, params.id)) {
+      return gateALiveRepository.getLiveWorkflow(request.principal, params.id);
+    }
     return repository.getWorkflow(request.principal, params.id);
   });
 
   app.get('/api/approvals/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateALiveRepository !== null) {
+      const liveIdentity = await repository.pool.query(`SELECT 1 FROM approval_versions approval
+        JOIN business_tasks task ON task.tenant_id=approval.tenant_id AND task.id=approval.business_task_id
+        WHERE approval.tenant_id=$1 AND approval.id=$2 AND task.record_variant='business-task.live/1'`, [
+        request.principal.tenantId, params.id,
+      ]);
+      const live = await repository.pool.query<{ business_task_id: string }>(`SELECT approval.business_task_id
+        FROM approval_versions approval
+        JOIN business_tasks task ON task.tenant_id=approval.tenant_id AND task.id=approval.business_task_id
+        JOIN document_snapshots snapshot ON snapshot.tenant_id=task.tenant_id
+          AND snapshot.id=task.input_document_snapshot_id AND snapshot.conversation_id=task.conversation_id
+        JOIN artifacts artifact ON artifact.tenant_id=snapshot.tenant_id AND artifact.id=task.input_artifact_id
+          AND artifact.id=snapshot.artifact_id AND artifact.content_sha256=task.input_artifact_sha256
+        JOIN artifact_states state ON state.tenant_id=artifact.tenant_id AND state.artifact_id=artifact.id
+        JOIN document_snapshot_canonical_representations canonical ON canonical.tenant_id=snapshot.tenant_id
+          AND canonical.document_snapshot_id=snapshot.id AND canonical.parser_manifest_id=task.input_parser_manifest_id
+          AND canonical.parser_digest=task.input_parser_digest
+          AND canonical.extraction_version=task.input_extraction_version
+          AND canonical.canonical_text_sha256=task.input_canonical_text_sha256
+        JOIN parser_manifests parser ON parser.tenant_id=canonical.tenant_id AND parser.id=canonical.parser_manifest_id
+          AND parser.manifest_digest=canonical.parser_digest
+        WHERE approval.tenant_id=$1 AND approval.id=$2
+          AND task.record_variant='business-task.live/1' AND task.requester_id=$3
+          AND EXISTS (SELECT 1 FROM roles role_binding WHERE role_binding.tenant_id=task.tenant_id
+            AND role_binding.user_id=$3 AND role_binding.role='solution_reviewer')
+          AND EXISTS (SELECT 1 FROM conversations owned_conversation
+            WHERE owned_conversation.tenant_id=task.tenant_id AND owned_conversation.id=task.conversation_id
+              AND owned_conversation.user_id=$3)
+          AND state.availability='active' AND state.integrity='verified'
+          AND state.retention_status='active' AND state.retention_expires_at>now()
+          AND state.reconcile_status='in_sync'`, [request.principal.tenantId, params.id, request.principal.userId]);
+      const row = live.rows[0];
+      if (row !== undefined) {
+        const task = await gateALiveRepository.getLiveTask(request.principal, row.business_task_id) as Readonly<{
+          approval: Readonly<{ id: string; version: number; status: string; subjectDigest: string }>;
+        }>;
+        if (task.approval.id !== params.id) throw new GenewayError('APPROVAL_NOT_FOUND', 'Approval was not found', 404);
+        return { id: task.approval.id, businessTaskId: row.business_task_id,
+          version: task.approval.version, status: task.approval.status, subjectDigest: task.approval.subjectDigest };
+      }
+      if (liveIdentity.rowCount === 1) throw new GenewayError('APPROVAL_NOT_FOUND', 'Approval was not found', 404);
+    }
     return repository.getApproval(request.principal, params.id);
   });
 
   app.post('/api/approvals/:id/decisions', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ decision: z.enum(['approved', 'rejected']) }).strict().parse(request.body);
+    if (gateALiveRepository !== null) {
+      const live = await repository.pool.query(`SELECT 1 FROM approval_versions approval
+        JOIN business_tasks task ON task.tenant_id=approval.tenant_id AND task.id=approval.business_task_id
+        WHERE approval.tenant_id=$1 AND approval.id=$2 AND task.record_variant='business-task.live/1'`, [
+        request.principal.tenantId, params.id,
+      ]);
+      if (live.rowCount === 1) return gateALiveRepository.decideLiveApproval(
+        request.principal, params.id, body.decision, idempotencyKey(request),
+      );
+    }
     return repository.decideApproval(request.principal, params.id, body.decision, idempotencyKey(request));
   });
 
   app.post('/api/business-tasks/:id/execute', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
     const input = executeTaskInputSchema.parse(request.body);
+    if (gateALiveRepository !== null && await gateALiveRepository.isLiveTask(request.principal, params.id)) {
+      return gateALiveRepository.executeLiveTask(request.principal, params.id, input, idempotencyKey(request));
+    }
     return repository.enqueueExecution(request.principal, params.id, input, idempotencyKey(request));
   });
 
   app.post('/api/business-tasks/:id/cancel', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateALiveRepository !== null && await gateALiveRepository.isLiveTask(request.principal, params.id)) {
+      return gateALiveRepository.cancelLiveTask(request.principal, params.id, idempotencyKey(request));
+    }
     return repository.cancelTask(request.principal, params.id, idempotencyKey(request));
   });
 
@@ -447,6 +647,11 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/evidence/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateALiveRepository !== null) {
+      const live = await repository.pool.query(`SELECT 1 FROM gate_a_live_evidence
+        WHERE tenant_id=$1 AND id=$2 AND record_variant='evidence.live/1'`, [request.principal.tenantId, params.id]);
+      if (live.rowCount === 1) return gateALiveRepository.getLiveEvidence(request.principal, params.id);
+    }
     const raw = await repository.getEvidenceMetadata(request.principal, params.id);
     const source = raw.source as Readonly<Record<string, unknown>>;
     let excerpt: string;
@@ -553,12 +758,14 @@ export async function createControlPlane(options: Readonly<{
     await chatReaperRun;
     await repository.close();
   });
-  return { app, repository, artifactRepository, artifactService, chatRepository, businessExceptionRepository };
+  return { app, repository, artifactRepository, artifactService, chatRepository,
+    businessExceptionRepository, gateALiveRepository };
 }
 
 export { ControlPlaneRepository } from './repository.js';
 export { ArtifactRepository } from './artifact-repository.js';
 export { ArtifactService } from './artifact-service.js';
 export { ChatRepository } from './chat-repository.js';
+export { GateALiveRepository } from './gate-a-live-repository.js';
 export { BusinessExceptionRepository, GATE_0_2B_EXCEPTION_FIXTURES } from './business-exception-repository.js';
 export { createWorkerCommandApp, WorkerCommandService } from './worker-command-server.js';

@@ -1,8 +1,11 @@
 import { constants } from 'node:fs';
 import { chmod, lstat, open, unlink } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
+import { gateAParserStartupApprovalSchema } from '@geneway/contracts';
+import { GateADocumentParserSandboxCandidate, type GateAParsedDocumentCandidate } from '@geneway/ingestion';
 import { parseE2eHookEndpoint, postE2eHook } from './e2e-hook-client.js';
 import { createControlPlane } from './index.js';
+import { GATE_A_APPROVED_C1_TEST_MATERIAL_SHA256 } from './artifact-service.js';
 import { readAllowedWebOrigins } from './server-config.js';
 import { createWorkerCommandApp } from './worker-command-server.js';
 
@@ -57,8 +60,70 @@ const modelGatewayUrl = process.env.GENEWAY_MODEL_GATEWAY_URL;
 const modelGatewayServiceTokenFile = process.env.GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE;
 const modelGatewayInvocationSecretFile = process.env.GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE;
 const liveValidationRunId = process.env.GENEWAY_GATE_A0_LIVE_VALIDATION_RUN_ID;
+const gateALiveValidationRunId = process.env.GENEWAY_GATE_A_LIVE_VALIDATION_RUN_ID;
+const gateAParserImage = process.env.GENEWAY_GATE_A_PARSER_IMAGE;
+const gateAParserApprovalJson = process.env.GENEWAY_GATE_A_PARSER_APPROVAL_JSON;
 if (liveValidationRunId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(liveValidationRunId)) {
   throw new Error('GENEWAY_GATE_A0_LIVE_VALIDATION_RUN_ID is invalid');
+}
+if (gateALiveValidationRunId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(gateALiveValidationRunId)) {
+  throw new Error('GENEWAY_GATE_A_LIVE_VALIDATION_RUN_ID is invalid');
+}
+if ((gateAParserImage === undefined) !== (gateAParserApprovalJson === undefined)) {
+  throw new Error('Gate A parser image and approval JSON must be configured together');
+}
+if (gateAParserImage !== undefined && gateALiveValidationRunId === undefined) {
+  throw new Error('Gate A parser authority requires GENEWAY_GATE_A_LIVE_VALIDATION_RUN_ID');
+}
+let gateAParserSandbox: Readonly<{
+  parse(bytes: Uint8Array): Promise<GateAParsedDocumentCandidate>;
+  parseDocument(input: Readonly<{ fileName: string; mediaType: string; bytes: Uint8Array }>): Promise<GateAParsedDocumentCandidate>;
+}> | undefined;
+if (gateAParserImage !== undefined && gateAParserApprovalJson !== undefined && gateALiveValidationRunId !== undefined) {
+  if (Buffer.byteLength(gateAParserApprovalJson, 'utf8') > 16_384) throw new Error('Gate A parser approval JSON is too large');
+  let rawApproval: unknown;
+  try {
+    rawApproval = JSON.parse(gateAParserApprovalJson) as unknown;
+  } catch {
+    throw new Error('GENEWAY_GATE_A_PARSER_APPROVAL_JSON must be valid JSON');
+  }
+  const approval = gateAParserStartupApprovalSchema.parse(rawApproval);
+  if (approval.runId !== gateALiveValidationRunId || approval.image !== gateAParserImage
+    || Date.parse(approval.approvedAt) > Date.now()) {
+    throw new Error('Gate A parser approval is stale or does not bind the configured run and image');
+  }
+  const sandbox = new GateADocumentParserSandboxCandidate(gateAParserImage, approval);
+  const startupAuthority = await sandbox.resolveAuthority();
+  if (startupAuthority.imageId !== approval.imageId
+    || startupAuthority.executableDigest !== approval.executableDigest
+    || startupAuthority.packageDigest !== approval.packageDigest
+    || startupAuthority.runtimeClosureDigest !== approval.runtimeClosureDigest
+    || startupAuthority.dependencyInventoryDigest !== approval.dependencyInventoryDigest
+    || Object.entries(startupAuthority.manifests).some(([format, manifest]) =>
+      manifest.manifestDigest !== approval.formatManifestDigests[format as 'txt' | 'pdf' | 'docx'])
+    || Date.parse(approval.expiresAt) <= Date.now()) {
+    throw new Error('Gate A parser startup bytes do not match the approved authority');
+  }
+  gateAParserSandbox = {
+    parse: (bytes) => sandbox.parse({ fileName: 'source.txt', mediaType: 'text/plain', bytes }),
+    parseDocument: (input) => sandbox.parse(input),
+  };
+}
+const additionalApprovedC1Hashes = process.env.GENEWAY_GATE_A_APPROVED_C1_SHA256;
+if (additionalApprovedC1Hashes !== undefined && gateALiveValidationRunId === undefined) {
+  throw new Error('Gate A approved C1 hashes require GENEWAY_GATE_A_LIVE_VALIDATION_RUN_ID');
+}
+if (additionalApprovedC1Hashes !== undefined && Buffer.byteLength(additionalApprovedC1Hashes, 'utf8') > 4_096) {
+  throw new Error('GENEWAY_GATE_A_APPROVED_C1_SHA256 is too large');
+}
+const approvedGateAC1Hashes = new Set([GATE_A_APPROVED_C1_TEST_MATERIAL_SHA256]);
+if (additionalApprovedC1Hashes !== undefined) {
+  for (const approvedHash of additionalApprovedC1Hashes.split(',')) {
+    if (!/^[a-f0-9]{64}$/u.test(approvedHash)) {
+      throw new Error('GENEWAY_GATE_A_APPROVED_C1_SHA256 must contain comma-separated lowercase SHA-256 values');
+    }
+    approvedGateAC1Hashes.add(approvedHash);
+  }
 }
 const modelGatewayValues = [modelGatewayUrl, modelGatewayServiceTokenFile, modelGatewayInvocationSecretFile];
 if (modelGatewayValues.some((value) => value === undefined) && modelGatewayValues.some((value) => value !== undefined)) {
@@ -109,32 +174,42 @@ async function reachE2eHook(payload: Readonly<Record<string, unknown>>): Promise
   return postE2eHook(e2eHookEndpoint, workerToken, payload);
 }
 
-const { app, repository, artifactService, chatRepository } = await createControlPlane({
+const artifactServiceHooks = gateAParserSandbox === undefined && e2eHookEndpoint === null
+  ? undefined
+  : {
+      ...(gateAParserSandbox === undefined ? {} : {
+        parserSandbox: gateAParserSandbox,
+        authorizeLiveC1Upload: (input: Readonly<{ contentSha256: string }>) =>
+          approvedGateAC1Hashes.has(input.contentSha256),
+      }),
+      ...(e2eHookEndpoint === null ? {} : {
+        afterIngestIntentPutAuthorityCommitted: (hook: Readonly<Record<string, unknown>>) => reachE2eHook({
+          protocolVersion: 'geneway-e2e-hook/1',
+          hook: 'control-plane.after_ingest_intent_put_authority_committed',
+          ...hook,
+        }).then(() => undefined),
+        afterSourceObjectPut: (hook: Readonly<Record<string, unknown>>) => reachE2eHook({
+          protocolVersion: 'geneway-e2e-hook/1',
+          hook: 'control-plane.after_source_object_put',
+          ...hook,
+        }),
+      }),
+    };
+
+const { app, repository, artifactService, chatRepository, gateALiveRepository } = await createControlPlane({
   databaseUrl,
   logger: true,
   allowedOrigins: readAllowedWebOrigins(process.env, webPort),
   chatRouteAvailable,
   ...(liveValidationRunId === undefined ? {} : { liveValidationRunId }),
+  ...(gateALiveValidationRunId === undefined ? {} : { gateALiveValidationRunId }),
   ...(modelGatewayServiceToken === null || modelGatewayInvocationSecret === null ? {} : {
     modelGatewayAuthority: {
       serviceToken: modelGatewayServiceToken,
       invocationTokenSecret: modelGatewayInvocationSecret,
     },
   }),
-  ...(e2eHookEndpoint === null ? {} : {
-    artifactServiceHooks: {
-      afterIngestIntentPutAuthorityCommitted: (hook: Readonly<Record<string, unknown>>) => reachE2eHook({
-        protocolVersion: 'geneway-e2e-hook/1',
-        hook: 'control-plane.after_ingest_intent_put_authority_committed',
-        ...hook,
-      }).then(() => undefined),
-      afterSourceObjectPut: (hook: Readonly<Record<string, unknown>>) => reachE2eHook({
-        protocolVersion: 'geneway-e2e-hook/1',
-        hook: 'control-plane.after_source_object_put',
-        ...hook,
-      }),
-    },
-  }),
+  ...(artifactServiceHooks === undefined ? {} : { artifactServiceHooks }),
 });
 
 let workerApp: ReturnType<typeof createWorkerCommandApp> | null = null;
@@ -170,6 +245,7 @@ if (workerSocketPath !== undefined && workerTokenFile !== undefined && workerTok
     logger: true,
     leaseDurationMs,
     ...(modelGatewayInvocationSecret === null ? {} : { chatRepository, invocationTokenSecret: modelGatewayInvocationSecret }),
+    ...(gateALiveRepository === null ? {} : { gateALiveRepository }),
     ...(workerCommandHooks === undefined ? {} : { hooks: workerCommandHooks }),
   });
   try {

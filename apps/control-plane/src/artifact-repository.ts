@@ -3,13 +3,31 @@ import type pg from 'pg';
 import type { PoolClient } from 'pg';
 import {
   artifactIngestResponseSchema,
+  gateAParserManifestSchema,
+  verifyGateAParserManifestDigest,
   documentSnapshotSchema,
   GenewayError,
   type ArtifactIngestResponse,
   type DocumentSnapshot,
+  type GateAParserManifest,
   type Principal,
 } from '@geneway/contracts';
-import type { ValidatedTextUpload } from '@geneway/ingestion';
+
+export type GateAUploadMediaType = 'text/plain' | 'text/markdown' | 'application/pdf'
+  | 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+export type ValidatedArtifactUpload = Readonly<{
+  bytes: Uint8Array; displayName: string; mediaType: GateAUploadMediaType;
+  extension: 'txt' | 'md' | 'pdf' | 'docx'; sizeBytes: number; contentSha256: string;
+  text?: string; simulationProfile: 'solution-analysis-demo/v2' | null;
+  profileRegistryVersion: 'gate0.2a-profile-registry/1';
+}>;
+export type GateAParsedArtifactAuthority = Readonly<{
+  canonicalBytes: Uint8Array; canonicalTextSha256: string; parserManifest: GateAParserManifest;
+  parserDigest: string; processReceipt: Readonly<Record<string, unknown>>;
+  extractionVersion?: 'canonical-text/plain-utf8/1' | 'canonical-text/pdf-pages-utf8/1'
+    | 'canonical-text/docx-pages-utf8/1';
+  canonicalPageIndex?: unknown; canonicalPageIndexSha256?: string;
+}>;
 
 const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -50,10 +68,11 @@ export type ArtifactIngestIntent = Readonly<{
   storageBucket: string;
   storageKey: string;
   displayName: string;
-  mediaType: 'text/plain' | 'text/markdown';
+  mediaType: GateAUploadMediaType;
   sizeBytes: number;
   contentSha256: string;
-  extension: 'txt' | 'md';
+  extension: 'txt' | 'md' | 'pdf' | 'docx';
+  ingestMode: 'legacy' | 'live_canonical';
   simulationProfile: 'solution-analysis-demo/v2' | null;
   profileRegistryVersion: 'gate0.2a-profile-registry/1';
 }>;
@@ -71,10 +90,11 @@ type IntentRow = {
   storage_bucket: string;
   storage_key: string;
   display_name: string;
-  media_type: 'text/plain' | 'text/markdown';
+  media_type: GateAUploadMediaType;
   size_bytes: string;
   content_sha256: string;
-  extension: 'txt' | 'md';
+  extension: 'txt' | 'md' | 'pdf' | 'docx';
+  ingest_mode: 'legacy' | 'live_canonical' | null;
   simulation_profile: 'solution-analysis-demo/v2' | null;
   profile_registry_version: 'gate0.2a-profile-registry/1';
   request_digest: string;
@@ -83,14 +103,14 @@ type IntentRow = {
 export type AuthorizedArtifact = Readonly<{
   tenantId: string;
   id: string;
-  kind: 'source_document' | 'simulation_report';
+  kind: 'source_document' | 'simulation_report' | 'analysis_report';
   businessTaskId: string | null;
   rootArtifactId: string | null;
   businessExceptionSourceVersionId: string | null;
   conversationId: string;
   ownerUserId: string;
   displayName: string;
-  mediaType: 'text/plain' | 'text/markdown';
+  mediaType: GateAUploadMediaType;
   sizeBytes: number;
   contentSha256: string;
   manifestId: string;
@@ -111,6 +131,16 @@ export type AuthorizedArtifact = Readonly<{
 export type ArtifactSnapshotRecord = Readonly<{
   documentSnapshot: DocumentSnapshot;
   artifact: AuthorizedArtifact;
+  liveCanonicalAuthority:
+    | Readonly<{
+      eligible: true;
+      parserManifestId: string;
+      parserDigest: string;
+      extractionVersion: 'canonical-text/plain-utf8/1' | 'canonical-text/pdf-pages-utf8/1'
+        | 'canonical-text/docx-pages-utf8/1';
+      canonicalTextSha256: string;
+    }>
+    | Readonly<{ eligible: false }>;
 }>;
 
 function safeStorageSegment(value: string): string {
@@ -136,6 +166,7 @@ function mapIntent(row: IntentRow): ArtifactIngestIntent {
     sizeBytes: Number(row.size_bytes),
     contentSha256: row.content_sha256,
     extension: row.extension,
+    ingestMode: row.ingest_mode ?? 'legacy',
     simulationProfile: row.simulation_profile,
     profileRegistryVersion: row.profile_registry_version,
   };
@@ -149,7 +180,8 @@ export class ArtifactRepository {
     conversationId: string;
     idempotencyKey: string;
     bucket: string;
-    upload: ValidatedTextUpload;
+    upload: ValidatedArtifactUpload;
+    ingestMode?: 'legacy' | 'live_canonical';
   }>): Promise<ArtifactIngestIntent> {
     if (input.idempotencyKey.length < 8 || input.idempotencyKey.length > 200) {
       throw new GenewayError('IDEMPOTENCY_KEY_REQUIRED', 'A stable idempotency-key header is required', 400);
@@ -165,6 +197,7 @@ export class ArtifactRepository {
       contentSha256: input.upload.contentSha256,
       simulationProfile: input.upload.simulationProfile,
       profileRegistryVersion: input.upload.profileRegistryVersion,
+      ingestMode: input.ingestMode ?? 'legacy',
     };
     const requestDigest = digest(semanticRequest);
     return this.withTransaction(async (client) => {
@@ -178,13 +211,13 @@ export class ArtifactRepository {
       await client.query(`INSERT INTO artifact_ingest_intents
         (tenant_id,id,conversation_id,requester_id,idempotency_key,request_digest,status,artifact_id,manifest_id,
          document_snapshot_id,storage_bucket,storage_key,display_name,media_type,size_bytes,content_sha256,extension,
-         simulation_profile,profile_registry_version)
-        VALUES ($1,$2,$3,$4,$5,$6,'intent_created',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+         simulation_profile,profile_registry_version,ingest_mode)
+        VALUES ($1,$2,$3,$4,$5,$6,'intent_created',$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
         ON CONFLICT (tenant_id,requester_id,idempotency_key) DO NOTHING`, [
         input.principal.tenantId, intentId, input.conversationId, input.principal.userId, input.idempotencyKey, requestDigest,
         artifactId, manifestId, documentSnapshotId, input.bucket, storageKey, input.upload.displayName, input.upload.mediaType,
         input.upload.sizeBytes, input.upload.contentSha256, input.upload.extension, input.upload.simulationProfile,
-        input.upload.profileRegistryVersion,
+        input.upload.profileRegistryVersion, input.ingestMode ?? 'legacy',
       ]);
       const selected = await client.query<IntentRow>(`SELECT * FROM artifact_ingest_intents
         WHERE tenant_id=$1 AND requester_id=$2 AND idempotency_key=$3 FOR UPDATE`, [
@@ -243,7 +276,12 @@ export class ArtifactRepository {
     return row === undefined ? null : mapIntent(row);
   }
 
-  async finalizeIntent(principal: Principal, intent: ArtifactIngestIntent, storage: Readonly<{ eTag: string | null }>): Promise<ArtifactIngestResponse> {
+  async finalizeIntent(
+    principal: Principal,
+    intent: ArtifactIngestIntent,
+    storage: Readonly<{ eTag: string | null }>,
+    parsedCanonical?: GateAParsedArtifactAuthority,
+  ): Promise<ArtifactIngestResponse> {
     return this.withTransaction(async (client) => {
       await this.assertWritesOpen(client);
       const selected = await client.query<IntentRow>(
@@ -290,6 +328,46 @@ export class ArtifactRepository {
         current.displayName, current.mediaType, current.sizeBytes, current.contentSha256, audience,
         `artifact:${current.artifactId}`, current.simulationProfile, current.profileRegistryVersion, principal.userId,
       ]);
+      if (parsedCanonical !== undefined) {
+        const parser = parsedCanonical.parserManifest;
+        await client.query(`INSERT INTO parser_manifests
+          (tenant_id,id,schema_version,media_type,parser_name,parser_version,executable_digest,package_digest,
+           manifest_digest,registry_source,upstream_source,lock_resolution,lock_integrity,license,dependencies,
+           conversion_config,canonical_manifest,approved_by,approved_at,expires_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+          ON CONFLICT (tenant_id,id) DO NOTHING`, [
+          principal.tenantId, parser.id, parser.schemaVersion, parser.mediaType, parser.parser.name,
+          parser.parser.version, parser.parser.executableDigest, parser.parser.packageDigest,
+          parser.manifestDigest, parser.parser.registrySource, parser.parser.upstreamSource,
+          parser.parser.lockResolution, parser.parser.lockIntegrity, parser.parser.license,
+          JSON.stringify(parser.dependencies), parser.conversionConfig, parser, parser.approvedBy, parser.approvedAt, parser.expiresAt,
+        ]);
+        const exactParser = await client.query(`SELECT 1 FROM parser_manifests
+          WHERE tenant_id=$1 AND id=$2 AND manifest_digest=$3 AND executable_digest=$4 AND package_digest=$5
+            AND lock_integrity=$6 AND dependencies=$7 AND conversion_config=$8 AND canonical_manifest=$9
+            AND approved_by=$10 AND approved_at=$11 AND expires_at=$12`, [
+          principal.tenantId, parser.id, parser.manifestDigest, parser.parser.executableDigest,
+          parser.parser.packageDigest, parser.parser.lockIntegrity, JSON.stringify(parser.dependencies),
+          parser.conversionConfig, parser, parser.approvedBy, parser.approvedAt, parser.expiresAt,
+        ]);
+        if (exactParser.rowCount !== 1) {
+          throw new GenewayError('PARSER_AUTHORITY_DRIFT', 'Parser manifest authority conflicts with an immutable record', 409);
+        }
+        const extractionVersion = parsedCanonical.extractionVersion ?? 'canonical-text/plain-utf8/1';
+        const canonicalPageIndex = parsedCanonical.canonicalPageIndex ?? null;
+        const canonicalPageIndexSha256 = parsedCanonical.canonicalPageIndexSha256 ?? null;
+        const resourceLimitsVersion = parser.schemaVersion === 'parser-manifest.gate-a/2'
+          ? parser.resourceLimitsVersion
+          : 'gate-a-parser-limits/1';
+        await client.query(`INSERT INTO document_snapshot_canonical_representations
+          (tenant_id,document_snapshot_id,parser_manifest_id,parser_digest,extraction_version,canonical_bytes,
+           canonical_text_sha256,canonical_page_index,canonical_page_index_sha256,resource_limits_version)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [
+          principal.tenantId, current.documentSnapshotId, parser.id, parsedCanonical.parserDigest,
+          extractionVersion, parsedCanonical.canonicalBytes, parsedCanonical.canonicalTextSha256,
+          canonicalPageIndex, canonicalPageIndexSha256, resourceLimitsVersion,
+        ]);
+      }
       const transitioned = await client.query<IntentRow>(`UPDATE artifact_ingest_intents
         SET status='ready',state_version=state_version+1,failure_code=NULL,updated_at=now()
         WHERE tenant_id=$1 AND id=$2 AND requester_id=$3 AND status='object_verified' AND state_version=$4
@@ -301,6 +379,13 @@ export class ArtifactRepository {
         manifestId: current.manifestId,
         documentSnapshotId: current.documentSnapshotId,
         sizeBytes: current.sizeBytes,
+        ...(parsedCanonical === undefined ? {} : {
+          parserManifestId: parsedCanonical.parserManifest.id,
+          parserDigest: parsedCanonical.parserDigest,
+          extractionVersion: parsedCanonical.extractionVersion ?? 'canonical-text/plain-utf8/1',
+          canonicalTextSha256: parsedCanonical.canonicalTextSha256,
+          parserProcessReceipt: parsedCanonical.processReceipt,
+        }),
         contentSha256: current.contentSha256,
       });
       return this.getReadyProjectionWithClient(client, principal, current.id);
@@ -335,16 +420,49 @@ export class ArtifactRepository {
         d.id,d.artifact_id,d.manifest_id,d.conversation_id,d.display_name,d.media_type,d.size_bytes,d.content_sha256,
         d.data_class,d.audience,d.resource_scope,d.trust,d.simulation_profile,d.profile_registry_version,d.created_at,
         a.owner_user_id,m.storage_bucket,m.storage_key,s.availability,s.integrity,s.state_version,
-        s.retention_status,s.retention_expires_at,s.reconcile_status
+        s.retention_status,s.retention_expires_at,s.reconcile_status,
+        canonical.parser_manifest_id live_parser_manifest_id,canonical.parser_digest live_parser_digest,
+        canonical.extraction_version live_extraction_version,canonical.canonical_text_sha256 live_canonical_text_sha256,
+        parser.canonical_manifest live_parser_manifest,parser.expires_at live_parser_expires_at
         FROM document_snapshots d
         JOIN artifacts a ON a.tenant_id=d.tenant_id AND a.id=d.artifact_id
         JOIN artifact_manifests m ON m.tenant_id=d.tenant_id AND m.id=d.manifest_id
         JOIN artifact_states s ON s.tenant_id=d.tenant_id AND s.artifact_id=d.artifact_id
+        LEFT JOIN document_snapshot_canonical_representations canonical
+          ON canonical.tenant_id=d.tenant_id AND canonical.document_snapshot_id=d.id
+        LEFT JOIN parser_manifests parser
+          ON parser.tenant_id=canonical.tenant_id AND parser.id=canonical.parser_manifest_id
         WHERE d.tenant_id=$1 AND d.conversation_id=$2 AND a.owner_user_id=$3
         ORDER BY d.created_at,d.id`, [principal.tenantId, conversationId, principal.userId]);
-      return result.rows.map((raw) => {
+      return Promise.all(result.rows.map(async (raw) => {
         const row = raw as Record<string, unknown>;
         const retentionExpiresAt = row.retention_expires_at;
+        const parserManifest = gateAParserManifestSchema.safeParse(row.live_parser_manifest);
+        const parserExpiresAt = row.live_parser_expires_at;
+        const expectedExtraction = row.media_type === 'text/plain' ? 'canonical-text/plain-utf8/1'
+          : row.media_type === 'application/pdf' ? 'canonical-text/pdf-pages-utf8/1'
+            : row.media_type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+              ? 'canonical-text/docx-pages-utf8/1' : null;
+        const liveCanonicalEligible = row.simulation_profile === null
+          && expectedExtraction !== null
+          && row.live_parser_manifest_id !== null
+          && row.live_parser_digest === parserManifest.data?.manifestDigest
+          && row.live_extraction_version === expectedExtraction
+          && typeof row.live_canonical_text_sha256 === 'string'
+          && parserManifest.success
+          && parserManifest.data.mediaType === row.media_type
+          && parserExpiresAt instanceof Date
+          && parserExpiresAt.getTime() > Date.now()
+          && await verifyGateAParserManifestDigest(parserManifest.data);
+        const liveCanonicalAuthority: ArtifactSnapshotRecord['liveCanonicalAuthority'] = liveCanonicalEligible
+          ? {
+            eligible: true,
+            parserManifestId: String(row.live_parser_manifest_id),
+            parserDigest: String(row.live_parser_digest),
+            extractionVersion: expectedExtraction,
+            canonicalTextSha256: String(row.live_canonical_text_sha256),
+          }
+          : { eligible: false };
         return {
           documentSnapshot: this.mapSnapshot(row),
           artifact: {
@@ -357,7 +475,7 @@ export class ArtifactRepository {
             conversationId: String(row.conversation_id),
             ownerUserId: String(row.owner_user_id),
             displayName: String(row.display_name),
-            mediaType: row.media_type as 'text/plain' | 'text/markdown',
+            mediaType: row.media_type as GateAUploadMediaType,
             sizeBytes: Number(row.size_bytes),
             contentSha256: String(row.content_sha256),
             manifestId: String(row.manifest_id),
@@ -374,22 +492,23 @@ export class ArtifactRepository {
             audience: row.audience,
             resourceScope: String(row.resource_scope),
           },
+          liveCanonicalAuthority,
         };
-      });
+      }));
     });
   }
 
   async getAuthorizedArtifact(principal: Principal, artifactId: string): Promise<AuthorizedArtifact> {
     const result = await this.pool.query<{
       id: string;
-      kind: 'source_document' | 'simulation_report';
+      kind: 'source_document' | 'simulation_report' | 'analysis_report';
       business_task_id: string | null;
       root_artifact_id: string | null;
       business_exception_source_version_id: string | null;
       conversation_id: string;
       owner_user_id: string;
       display_name: string;
-      media_type: 'text/plain' | 'text/markdown';
+      media_type: GateAUploadMediaType;
       size_bytes: string;
       content_sha256: string;
       manifest_id: string;
@@ -416,6 +535,16 @@ export class ArtifactRepository {
       LEFT JOIN document_snapshots d ON d.tenant_id=a.tenant_id AND d.artifact_id=a.id
       JOIN conversations c ON c.tenant_id=a.tenant_id AND c.id=a.conversation_id
       LEFT JOIN business_tasks task ON task.tenant_id=a.tenant_id AND task.id=a.business_task_id
+      LEFT JOIN gate_a_live_reports live_report ON live_report.tenant_id=a.tenant_id
+        AND live_report.business_task_id=a.business_task_id AND live_report.artifact_id=a.id
+      LEFT JOIN gate_a_live_report_publish_intents live_intent ON live_intent.tenant_id=a.tenant_id
+        AND live_intent.business_task_id=a.business_task_id AND live_intent.artifact_id=a.id
+        AND live_intent.manifest_id=m.id AND live_intent.model_invocation_id=live_report.model_invocation_id
+        AND live_intent.workflow_version_id=live_report.workflow_version_id
+        AND live_intent.workflow_hash=live_report.workflow_hash
+        AND live_intent.result_sha256=live_report.result_sha256
+        AND live_intent.storage_bucket=m.storage_bucket AND live_intent.storage_key=m.storage_key
+        AND live_intent.content_sha256=a.content_sha256 AND live_intent.size_bytes=a.size_bytes
       LEFT JOIN artifacts root ON root.tenant_id=a.tenant_id AND root.id=a.root_artifact_id
       LEFT JOIN artifact_states root_state ON root_state.tenant_id=root.tenant_id AND root_state.artifact_id=root.id
       LEFT JOIN document_snapshots root_snapshot ON root_snapshot.tenant_id=root.tenant_id AND root_snapshot.artifact_id=root.id
@@ -480,7 +609,38 @@ export class ArtifactRepository {
             AND exception_scope.user_id=$3 AND (exception_source.resource_scope=exception_scope.resource_scope
               OR exception_source.resource_scope LIKE exception_scope.resource_scope || '/%'))
           )))
-        )`, [principal.tenantId, artifactId, principal.userId]);
+        OR (
+          a.kind='analysis_report' AND a.record_variant='artifact.analysis-report.live/1'
+          AND live_report.record_variant='artifact.analysis-report.live/1'
+          AND live_report.internal_acceptance
+          AND live_intent.status='published' AND live_intent.etag_observed IS NOT NULL
+          AND task.id IS NOT NULL AND task.record_variant='business-task.live/1'
+          AND NOT task.simulation AND task.runtime_mode='model_gateway' AND NOT task.business_decision_allowed
+          AND task.requester_id=$3 AND task.conversation_id=a.conversation_id AND task.status='completed'
+          AND EXISTS (SELECT 1 FROM roles live_role WHERE live_role.tenant_id=task.tenant_id
+            AND live_role.user_id=$3 AND live_role.role='solution_reviewer')
+          AND root.id IS NOT NULL AND root.kind='source_document' AND root.owner_user_id=$3
+          AND root.conversation_id=a.conversation_id
+          AND root_snapshot.id=task.input_snapshot->>'documentSnapshotId'
+          AND root_snapshot.artifact_id=task.input_snapshot->>'artifactId'
+          AND root.content_sha256=task.input_snapshot->>'artifactSha256'
+          AND root_snapshot.resource_scope=task.input_snapshot->>'resourceScope'
+          AND root_snapshot.data_class='C1'
+          AND ('conversation:' || root_snapshot.conversation_id)=task.input_snapshot->>'audience'
+          AND task.permission_scope=jsonb_build_object(
+            'actions',jsonb_build_array('R0','R1','A1'),
+            'resourceScopes',jsonb_build_array(root_snapshot.resource_scope),
+            'dataClasses',jsonb_build_array('C1'),
+            'connectors',jsonb_build_array(),
+            'modelTools',jsonb_build_array())
+          AND task.audience_scope=jsonb_build_object(
+            'kind','private-conversation','ids',jsonb_build_array('conversation:' || a.conversation_id))
+          AND a.root_artifact_id=root.id AND a.resource_scope=root_snapshot.resource_scope AND a.data_class='C1'
+          AND a.audience=jsonb_build_object('kind','private-conversation','conversationId',a.conversation_id)
+          AND root_state.availability='active' AND root_state.integrity='verified'
+          AND root_state.retention_status='active' AND root_state.retention_expires_at>now()
+          AND root_state.reconcile_status='in_sync'
+        ))`, [principal.tenantId, artifactId, principal.userId]);
     const row = result.rows[0];
     if (row === undefined) {
       throw new GenewayError('ARTIFACT_NOT_FOUND', 'Artifact was not found', 404);

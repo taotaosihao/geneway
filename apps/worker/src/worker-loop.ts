@@ -13,6 +13,11 @@ import type { WorkerCommandClient } from './command-client.js';
 import { WorkflowInterpreter, type ClaimedStepHook } from './interpreter.js';
 import { ChatRuntimeError, type ChatRuntimeAdapter } from '@geneway/runtime';
 import type { ChatWorkerCommandClient, ChatTurnClaim } from './chat-command-client.js';
+import {
+  executeGateAAnalysisClaim,
+  type GateAAnalysisCommandPort,
+  type GateAAnalysisRuntimeAdapter,
+} from './gate-a-live-runtime.js';
 
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
@@ -25,6 +30,7 @@ export type WorkerLoopOptions = Readonly<{
   onAfterDeliveryClaim?: (delivery: WorkerDelivery) => Promise<void>;
   onBeforeCompleteStep?: (delivery: WorkerDelivery, step: Parameters<ClaimedStepHook>[0]) => Promise<void>;
   chat?: Readonly<{ client: ChatWorkerCommandClient; runtime: ChatRuntimeAdapter }>;
+  analysis?: Readonly<{ port: GateAAnalysisCommandPort; runtime: GateAAnalysisRuntimeAdapter }>;
 }>;
 
 const AUTHORITY_LOSS_CODES = new Set([
@@ -168,6 +174,13 @@ export async function runWorkerLoop(client: WorkerCommandClient, options: Worker
   if (isAborted(options.signal)) return;
   await options.onReady?.();
   while (!isAborted(options.signal)) {
+    if (options.analysis !== undefined) {
+      const claim = await options.analysis.port.claim(options.signal);
+      if (claim !== null) {
+        await executeGateAAnalysisClaim(options.analysis.port, options.analysis.runtime, claim, options.signal);
+        continue;
+      }
+    }
     if (options.chat !== undefined) {
       const claim = await options.chat.client.claim(options.signal);
       if (claim !== null) {

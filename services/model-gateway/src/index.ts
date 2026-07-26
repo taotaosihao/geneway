@@ -9,9 +9,15 @@ import {
   modelGatewayReceiptPayloadSchema,
   modelGatewayReceiptSchema,
   type ChatErrorClass,
+  type GateAAnalysisInvocationTokenClaims,
+  type GateAAnalysisWorkerClaim,
   type ModelGatewayReceipt,
   type ModelGatewayReceiptPayload,
 } from '@geneway/contracts';
+import {
+  registerGateAAnalysisRoute,
+  type GateAAnalysisProviderResult,
+} from './gate-a-analysis.js';
 import { verifyOwnedPrivateFile, verifyProviderAuthFile, verifyProviderManifest } from './provider-manifest.js';
 
 const tokenClaimsSchema = z.object({
@@ -156,6 +162,10 @@ export type ModelGatewayOptions = Readonly<{
     conversationId: string; modelInvocationId: string; fence: number; deadline: string; signal: AbortSignal;
   }>) => Promise<TestProviderResult>;
   authorizeInvocationForTest?: (claims: z.infer<typeof tokenClaimsSchema>) => Promise<boolean>;
+  analysisProviderCallForTest?: (input: Readonly<{
+    claim: GateAAnalysisWorkerClaim; signal: AbortSignal;
+  }>) => Promise<GateAAnalysisProviderResult>;
+  authorizeAnalysisInvocationForTest?: (claims: GateAAnalysisInvocationTokenClaims) => Promise<boolean>;
 }>;
 
 export async function createModelGateway(options: ModelGatewayOptions): Promise<FastifyInstance> {
@@ -183,6 +193,12 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
   };
 
   let active = false;
+  const acquireProviderSlot = (): boolean => {
+    if (active) return false;
+    active = true;
+    return true;
+  };
+  const releaseProviderSlot = (): void => { active = false; };
   const app = Fastify({ logger: options.logger ?? false, trustProxy: false, bodyLimit: 256 * 1024 });
   app.addHook('onRequest', (request, _reply, done) => {
     if (request.headers.origin !== undefined) {
@@ -219,7 +235,7 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
       || controlPlaneUrl.username !== '' || controlPlaneUrl.password !== '' || controlPlaneUrl.pathname !== '/') {
       return reply.status(503).send({ errorClass: 'MODEL_ROUTE_UNAVAILABLE' });
     }
-    if (active) {
+    if (!acquireProviderSlot()) {
       const receipt = signGatewayReceipt({
         schemaVersion: 'model-gateway-receipt/1', issuer: 'geneway-model-gateway', audience: 'geneway-control-plane',
         receiptJti: randomUUID(), conversationId: input.conversationId, modelInvocationId: input.modelInvocationId,
@@ -228,7 +244,6 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
       }, options.invocationSecret);
       return reply.status(409).send({ errorClass: 'CHAT_BUSY', receipt });
     }
-    active = true;
     try {
       let authorized = false;
       try {
@@ -352,8 +367,22 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
       }
       return reply;
     } finally {
-      active = false;
+      releaseProviderSlot();
     }
+  });
+  registerGateAAnalysisRoute(app, {
+    serviceToken: options.serviceToken,
+    invocationSecret: options.invocationSecret,
+    controlPlaneUrl: options.controlPlaneUrl,
+    resolveReadiness,
+    acquireProviderSlot,
+    releaseProviderSlot,
+    ...(options.analysisProviderCallForTest === undefined ? {} : {
+      providerCallForTest: options.analysisProviderCallForTest,
+    }),
+    ...(options.authorizeAnalysisInvocationForTest === undefined ? {} : {
+      authorizeInvocationForTest: options.authorizeAnalysisInvocationForTest,
+    }),
   });
   return app;
 }

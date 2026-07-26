@@ -191,7 +191,7 @@ async function enterLiveAnalysis(page: Page, request: APIRequestContext): Promis
     capabilityId: 'solution.analysis.v1',
     status: 'internal',
     executionRoute: 'live',
-    availableExpertModes: ['auto'],
+    availableExpertModes: ['auto', 'expert', 'team'],
     simulation: false,
     runtimeMode: 'model_gateway',
     businessDecisionAllowed: false,
@@ -206,10 +206,9 @@ async function enterLiveAnalysis(page: Page, request: APIRequestContext): Promis
   await expect(page.getByTestId('geneway-app')).toBeVisible();
   await expect(page.getByTestId('internal-acceptance-notice')).toContainText('runtimeMode=model_gateway');
   await expect(page.getByLabel('专家路线').locator('option[value="expert.solution.architect"]'))
-    .toHaveAttribute('disabled', '');
+    .toBeEnabled();
   await expect(page.getByLabel('专家路线').locator('option[value="team.solution.core"]'))
-    .toHaveAttribute('disabled', '');
-  await expect(page.getByLabel('专家路线')).toHaveValue('auto');
+    .toBeEnabled();
   return conversationId;
 }
 
@@ -311,12 +310,15 @@ async function createAndStartLiveTask(
   name: string,
   bytes: Buffer,
   prompt: string,
+  route: 'auto' | 'expert.solution.architect' | 'team.solution.core' = 'auto',
 ): Promise<Readonly<{
   conversationId: string;
   material: UploadedMaterial;
   create: ReturnType<typeof gateALiveTaskCreateResponseSchema.parse>;
 }>> {
   const conversationId = await enterLiveAnalysis(page, request);
+  await page.getByLabel('专家路线').selectOption(route);
+  await expect(page.getByLabel('专家路线')).toHaveValue(route);
   const material = await uploadLiveMaterial(page, name, bytes);
   const create = await createTaskFromUi(page, prompt);
   const taskCard = page.getByTestId('task-card');
@@ -329,7 +331,7 @@ async function createAndStartLiveTask(
   return { conversationId, material, create };
 }
 
-test.describe.serial('Gate A.1 real served material analysis', () => {
+test.describe.serial('Gate A.2 real served material analysis', () => {
   test.afterAll(async () => pool.end());
 
   test('默认 Fast Chat 首问、追问、停止与刷新保持零 BusinessTask', async ({ page, request }) => {
@@ -435,8 +437,9 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       },
       expertTarget: {
         requested: { mode: 'auto' },
-        resolved: { mode: 'expert', resolution: 'automatic' },
+        resolved: { mode: 'auto', resolution: 'automatic' },
       },
+      customerFacingAuthor: '小纬',
       simulation: false,
       runtimeMode: 'model_gateway',
       businessDecisionAllowed: false,
@@ -503,7 +506,7 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       id: task.workflowVersion.id,
       hash: task.workflowVersion.hash,
       recordVariant: 'workflow-read-model.live/1',
-      templateId: 'workflow-template.solution-live/1',
+      templateId: 'workflow-template.solution-live/2',
       simulation: false,
       runtimeMode: 'model_gateway',
       internalAcceptance: true,
@@ -630,6 +633,9 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       task_fence: string;
       step_fence: string;
       agent_registry_reference: string;
+      agent_version_id: string;
+      capability_version_id: string;
+      prompt_policy_version_id: string;
       output_schema_version: string;
       prior_step_outputs_digest: string;
       receipt_attested: boolean;
@@ -641,7 +647,8 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       max_output_tokens: number;
     }>(`SELECT invocation.id,invocation.step_id,invocation.status,invocation.step_attempt_id,
       invocation.task_fence::text,invocation.step_fence::text,
-      invocation.agent_registry_reference,invocation.output_schema_version,invocation.prior_step_outputs_digest,
+      invocation.agent_registry_reference,invocation.agent_version_id,invocation.capability_version_id,
+      invocation.prompt_policy_version_id,invocation.output_schema_version,invocation.prior_step_outputs_digest,
       invocation.receipt_attested,invocation.gateway_receipt_jti::text,invocation.gateway_receipt_digest,
       invocation.tool_choice,
       invocation.deadline::text,
@@ -660,6 +667,9 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       step_id: invocation.step_id,
       status: invocation.status,
       agent_registry_reference: invocation.agent_registry_reference,
+      agent_version_id: invocation.agent_version_id,
+      capability_version_id: invocation.capability_version_id,
+      prompt_policy_version_id: invocation.prompt_policy_version_id,
       output_schema_version: invocation.output_schema_version,
       receipt_attested: invocation.receipt_attested,
       tool_choice: invocation.tool_choice,
@@ -669,6 +679,9 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       {
         step_id: 'requirement_extract', status: 'completed',
         agent_registry_reference: 'agent.solution.requirement/live-1',
+        agent_version_id: 'agent.solution.requirement/live-2',
+        capability_version_id: 'cap_solution_analysis_v1_live_2',
+        prompt_policy_version_id: 'xiaowei.solution-analysis.system/2',
         output_schema_version: 'analysis.requirement-candidates/1',
         receipt_attested: true, tool_choice: 'none',
         task_deadline_ms: 300_000, max_output_tokens: 1_024,
@@ -676,6 +689,9 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       {
         step_id: 'contradiction_check', status: 'completed',
         agent_registry_reference: 'agent.solution.contradiction/live-1',
+        agent_version_id: 'agent.solution.contradiction/live-2',
+        capability_version_id: 'cap_solution_analysis_v1_live_2',
+        prompt_policy_version_id: 'xiaowei.solution-analysis.system/2',
         output_schema_version: 'analysis.contradiction/1',
         receipt_attested: true, tool_choice: 'none',
         task_deadline_ms: 300_000, max_output_tokens: 1_024,
@@ -683,6 +699,9 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       {
         step_id: 'solution_design', status: 'completed',
         agent_registry_reference: 'agent.solution.architect/live-1',
+        agent_version_id: 'agent.solution.architect/live-2',
+        capability_version_id: 'cap_solution_analysis_v1_live_2',
+        prompt_policy_version_id: 'xiaowei.solution-analysis.system/2',
         output_schema_version: 'analysis.result-candidate/1',
         receipt_attested: true, tool_choice: 'none',
         task_deadline_ms: 300_000, max_output_tokens: 2_048,
@@ -738,6 +757,7 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       modelInvocations: agentInvocations.rows.map((invocation) => ({
         id: invocation.id, stepId: invocation.step_id, stepAttemptId: invocation.step_attempt_id,
         agentRegistryReference: invocation.agent_registry_reference,
+        agentVersionId: invocation.agent_version_id,
         outputSchemaVersion: invocation.output_schema_version,
         gatewayReceiptJti: invocation.gateway_receipt_jti,
         gatewayReceiptDigest: invocation.gateway_receipt_digest,
@@ -778,6 +798,85 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
     await expect(page.locator(`[data-artifact-id="${report.id}"]`))
       .toHaveAttribute('data-content-sha256', report.contentSha256);
     successfulRun = { task, create: started.create, material: started.material, reportBytes: downloaded.bytes };
+  });
+
+  test('单专家与专家团路线均完成真实分析并保持相同权限上限和 exact AgentVersion', async ({ page, request }) => {
+    test.setTimeout(420_000);
+    const sourceBytes = await loadGateADocumentFixture('chrome-production.pdf.gz.b64');
+    const routes = [
+      { selector: 'expert.solution.architect' as const,
+        requested: { mode: 'expert', expertId: 'expert.solution.architect' },
+        resolved: { mode: 'expert', resolution: 'explicit',
+          expertVersionId: 'expert.solution.architect.live/2',
+          agentVersionId: 'agent.solution.architect/live-2' } },
+      { selector: 'team.solution.core' as const,
+        requested: { mode: 'team', teamId: 'team.solution.core' },
+        resolved: { mode: 'team', resolution: 'explicit',
+          teamVersionId: 'team.solution.core.live/2' } },
+    ] as const;
+    const ceilings = new Set<string>();
+    for (const route of routes) {
+      const started = await createAndStartLiveTask(
+        page,
+        request,
+        `gate-a2-${route.requested.mode}-material.pdf`,
+        sourceBytes,
+        `请小纬使用${route.requested.mode === 'expert' ? '单专家' : '专家团'}路线分析材料，并分别给出事实、推断、建议和未知项。`,
+        route.selector,
+      );
+      const task = await waitForTask(request, started.create.taskId, 'completed');
+      expect(task).toMatchObject({
+        capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+        status: 'completed', customerFacingAuthor: '小纬',
+        workflowVersion: { templateId: 'workflow-template.solution-live/2' },
+        expertTarget: { requested: route.requested, resolved: route.resolved },
+      });
+      expect(task.result).not.toBeNull();
+      expect(task.artifacts.some((artifact) => artifact.kind === 'analysis_report')).toBe(true);
+      await expect(page.getByTestId('result-card')).toBeVisible();
+      const authority = await pool.query<{
+        permission_scope: unknown; audience_scope: unknown; budget: unknown;
+        step_id: string; agent_version_id: string; capability_version_id: string;
+        prompt_policy_version_id: string; status: string; receipt_attested: boolean;
+      }>(`SELECT task.permission_scope,task.audience_scope,task.budget,
+          invocation.step_id,invocation.agent_version_id,invocation.capability_version_id,
+          invocation.prompt_policy_version_id,invocation.status,invocation.receipt_attested
+        FROM business_tasks task
+        JOIN gate_a_model_invocations invocation ON invocation.tenant_id=task.tenant_id
+          AND invocation.business_task_id=task.id
+        WHERE task.tenant_id='tenant_local' AND task.id=$1
+        ORDER BY array_position(ARRAY['requirement_extract','contradiction_check','solution_design']::text[],
+          invocation.step_id)`, [task.id]);
+      expect(authority.rows.map((row) => ({ stepId: row.step_id, agentVersionId: row.agent_version_id,
+        capabilityVersionId: row.capability_version_id, promptPolicyVersionId: row.prompt_policy_version_id,
+        status: row.status, receiptAttested: row.receipt_attested }))).toEqual([
+        { stepId: 'requirement_extract', agentVersionId: 'agent.solution.requirement/live-2',
+          capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+          promptPolicyVersionId: 'xiaowei.solution-analysis.system/2', status: 'completed', receiptAttested: true },
+        { stepId: 'contradiction_check', agentVersionId: 'agent.solution.contradiction/live-2',
+          capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+          promptPolicyVersionId: 'xiaowei.solution-analysis.system/2', status: 'completed', receiptAttested: true },
+        { stepId: 'solution_design', agentVersionId: 'agent.solution.architect/live-2',
+          capabilityVersionId: 'cap_solution_analysis_v1_live_2',
+          promptPolicyVersionId: 'xiaowei.solution-analysis.system/2', status: 'completed', receiptAttested: true },
+      ]);
+      const first = authority.rows[0];
+      if (first === undefined) throw new Error('served ExpertTarget route omitted ModelInvocation authority');
+      expect(first.permission_scope).toEqual({ actions: ['R0', 'R1', 'A1'],
+        resourceScopes: [task.inputRef.resourceScope],
+        dataClasses: ['C1'], connectors: [], modelTools: [] });
+      expect(first.audience_scope).toEqual({ kind: 'private-conversation',
+        ids: [`conversation:${started.conversationId}`] });
+      const permissionScope = first.permission_scope as Readonly<Record<string, unknown>>;
+      const audienceScope = first.audience_scope as Readonly<Record<string, unknown>>;
+      ceilings.add(JSON.stringify({
+        permissionScope: { ...permissionScope,
+          resourceScopes: ['document-snapshot:approval-subject-bound'] },
+        audienceScope: { ...audienceScope, ids: ['conversation:approval-subject-bound'] },
+        budget: first.budget,
+      }));
+    }
+    expect(ceilings.size).toBe(1);
   });
 
   test('真实 DOCX 经同一 Parser authority 形成可选 C1 live snapshot', async ({ page, request }) => {
@@ -1071,7 +1170,7 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       JOIN capability_release_records release ON release.tenant_id=active.tenant_id AND release.id=active.release_id
       WHERE active.tenant_id='tenant_local' AND active.capability_id='solution.analysis.v1'`);
     expect(releaseAuthorityBefore.rows).toEqual([{
-      release_id: expect.stringMatching(/^release_solution_analysis_v1_internal_/u),
+      release_id: expect.stringMatching(/^release_solution_analysis_v1_live_2_internal_/u),
       pointer_version: expect.stringMatching(/^\d+$/u),
       state: 'internal',
     }]);
@@ -1189,7 +1288,7 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
     }
   });
 
-  test('非 auto 与输入失败均 fail closed 且不回退 FakeRuntime', async ({ page, request }) => {
+  test('未知专家标识与不支持输入均 fail closed 且不回退 FakeRuntime', async ({ page, request }) => {
     test.setTimeout(120_000);
     const conversationId = await enterLiveAnalysis(page, request);
     const material = await uploadLiveMaterial(
@@ -1203,19 +1302,24 @@ test.describe.serial('Gate A.1 real served material analysis', () => {
       [conversationId],
     );
 
-    const nonAuto = await request.post('/api/business-tasks', {
-      headers: { 'idempotency-key': `gate-a1-non-auto-${runId}` },
-      data: {
-        conversationId,
-        capabilityId: 'solution.analysis.v1',
-        inputRef: { kind: 'document_snapshot', documentSnapshotId: material.snapshotId },
-        expertTarget: { mode: 'expert', expertId: 'expert.solution.architect' },
-      },
-    });
-    const nonAutoBody = await nonAuto.json() as unknown;
-    expect(nonAuto.status()).toBeGreaterThanOrEqual(400);
-    expect(JSON.stringify(nonAutoBody)).toMatch(/NOT_OPEN|EXPERT|AUTO/iu);
-    expect(JSON.stringify(nonAutoBody)).not.toMatch(forbiddenFallbackPattern);
+    for (const [index, expertTarget] of [
+      { mode: 'expert', expertId: 'expert.solution.unknown' },
+      { mode: 'team', teamId: 'team.solution.unknown' },
+    ].entries()) {
+      const invalid = await request.post('/api/business-tasks', {
+        headers: { 'idempotency-key': `gate-a2-invalid-expert-${index}-${runId}` },
+        data: {
+          conversationId,
+          capabilityId: 'solution.analysis.v1',
+          inputRef: { kind: 'document_snapshot', documentSnapshotId: material.snapshotId },
+          expertTarget,
+        },
+      });
+      const invalidBody = await invalid.json() as unknown;
+      expect(invalid.status()).toBeGreaterThanOrEqual(400);
+      expect(JSON.stringify(invalidBody)).toMatch(/INVALID|EXPERT|TEAM|INPUT/iu);
+      expect(JSON.stringify(invalidBody)).not.toMatch(forbiddenFallbackPattern);
+    }
 
     await page.getByTestId('artifact-upload-input').setInputFiles({
       name: 'gate-a1-unsupported.md',

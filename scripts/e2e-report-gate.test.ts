@@ -36,7 +36,7 @@ describe('E2E report gate', () => {
     if (gateANotOpenSuite === undefined) throw new Error('Expected a Gate A not-open test suite');
     gateALiveSuite.specs.push(...gateANotOpenSuite.specs);
     (gateALiveReport.stats as { expected: number }).expected += gateANotOpenSuite.specs.length;
-    expect(validateE2eReport(gateALiveReport, ['--project=gate-a-live']).expectedCount).toBe(11);
+    expect(validateE2eReport(gateALiveReport, ['--project=gate-a-live']).expectedCount).toBe(12);
   });
 
   it('keeps dependency inventory outside a top-level Gate A file filter', () => {
@@ -51,7 +51,7 @@ describe('E2E report gate', () => {
     expect(validateE2eReport(gateALiveReport, [
       '--project=gate-a-live',
       'gate-a-solution-analysis.spec.ts',
-    ]).expectedCount).toBe(9);
+    ]).expectedCount).toBe(10);
   });
 
   it('rejects a skipped test even when Playwright would exit zero', () => {

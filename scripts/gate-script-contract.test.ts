@@ -272,12 +272,27 @@ describe('Gate 0.2A executable script contract', () => {
     expect(aggregate).toContain("command: ['pnpm', 'gate-a0:deferred-scan']");
   });
 
-  it('binds a resumed Gate A release promotion to the exact immutable chain', async () => {
+  it('binds a resumed Gate A release promotion to the exact additive A.1 then A.2 authority', async () => {
     const helper = await readFile(new URL('./e2e/start-gate-a-release.ts', import.meta.url), 'utf8');
-    expect(helper).toContain('release.capability_version_id=$5 AND release.prompt_policy_version_id=$6');
-    expect(helper).toContain('release.sequence=1 AND release.previous_release_id IS NULL');
-    expect(helper).toContain('release.sequence=2 AND release.previous_release_id=$2 AND release.gate_evidence_digest=$7');
-    expect(helper).toContain('release.sequence=3 AND release.previous_release_id=$3 AND release.gate_evidence_digest=$8');
+    expect(helper).toContain('gateA2LiveValidationCandidateEvidenceSchema.parse');
+    expect(helper).toContain('templateId: SOLUTION_LIVE_V2_TEMPLATE.templateId');
+    expect(helper).toContain('expertCatalogDigest: digest(SOLUTION_LIVE_V2_EXPERT_REGISTRY)');
+    expect(helper).toContain('availableExpertModes: SOLUTION_LIVE_V2_EXPERT_REGISTRY.modeBindings.map');
+    expect(helper).toContain('equalPermissionCeilingDigest: digest(SOLUTION_LIVE_V2_EXPERT_REGISTRY.permissionCeiling)');
+    expect(helper).toContain("label: 'A.1', capabilityVersionId, capabilityVersion: 2");
+    expect(helper).toContain('expertCatalogVersionId, expertCatalogVersion: 2');
+    expect(helper).toContain("label: 'A.2', capabilityVersionId: a2CapabilityVersionId, capabilityVersion: 3");
+    expect(helper).toContain("label: 'A.1 internal'");
+    expect(helper).toContain("label: 'A.2 draft'");
+    expect(helper).toContain('previousReleaseId: null');
+    expect(helper).toContain("label: 'A.2 shadow'");
+    expect(helper).toContain('previousReleaseId: a2DraftReleaseId');
+    expect(helper).toContain("label: 'A.2 internal'");
+    expect(helper).toContain('previousReleaseId: a2ShadowReleaseId');
+    expect(helper).toContain('INSERT INTO capability_release_activation_records');
+    expect(helper).toContain('SET release_id=$2,pointer_version=4,activation_record_id=$3,updated_at=now()');
+    expect(helper).toContain('AND release_id=$4 AND pointer_version=3 AND activation_record_id IS NULL');
+    expect(helper).toContain("current.pointer_version !== '4'");
   });
 
   it('keeps every live Gate A entrypoint on the approved multi-format document parser v2 authority', async () => {

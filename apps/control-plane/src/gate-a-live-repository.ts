@@ -45,6 +45,7 @@ import {
   type GateAAnalysisWorkerClaim,
   type GateACanonicalSelectionProjection,
   type GateALiveTaskSnapshot,
+  type LiveEvidenceLocator,
   type LiveEvidenceLocatorCandidate,
   type LiveResolvedTaskInputRef,
   type Principal,
@@ -1539,10 +1540,12 @@ export class GateALiveRepository {
           GROUP BY claim.tenant_id,claim.id,claim.statement_id,claim.statement_kind,claim.text,
             claim.confidence,claim.status,claim.rejection_code ORDER BY claim.statement_id`, [principal.tenantId, taskId]);
       const evidence = await client.query<{ id: string; business_task_id: string; statement_id: string; locator: unknown;
-          excerpt_bytes: Buffer; excerpt_sha256: string; resource_scope: string; audience: string;
+          excerpt_bytes: Buffer; excerpt_sha256: string; resource_scope: string; data_class: string; audience: string;
+          canonical_bytes: Buffer; canonical_page_index: unknown; canonical_page_index_sha256: string | null;
           created_at: Date; lineage_ids: string[] }>(`SELECT evidence.id,evidence.business_task_id,claim.statement_id,
             evidence.locator,evidence.excerpt_bytes,evidence.excerpt_sha256,evidence.resource_scope,
-            evidence.audience,evidence.created_at,
+            evidence.data_class,evidence.audience,canonical.canonical_bytes,canonical.canonical_page_index,
+            canonical.canonical_page_index_sha256,evidence.created_at,
             coalesce(array_agg(DISTINCT lineage.id ORDER BY lineage.id)
               FILTER (WHERE lineage.id IS NOT NULL),ARRAY[]::text[]) lineage_ids
           FROM gate_a_live_evidence evidence
@@ -1587,7 +1590,8 @@ export class GateALiveRepository {
                 AND published_intent.status='published')
           GROUP BY evidence.tenant_id,evidence.id,evidence.business_task_id,claim.statement_id,
             evidence.locator,evidence.excerpt_bytes,evidence.excerpt_sha256,evidence.resource_scope,
-            evidence.audience,evidence.created_at ORDER BY evidence.created_at,evidence.id`, [
+            evidence.data_class,evidence.audience,canonical.canonical_bytes,canonical.canonical_page_index,
+            canonical.canonical_page_index_sha256,evidence.created_at ORDER BY evidence.created_at,evidence.id`, [
           principal.tenantId, taskId, principal.userId,
         ]);
       const artifacts = await client.query<{ id: string; manifest_id: string; display_name: string; media_type: string;
@@ -1636,17 +1640,16 @@ export class GateALiveRepository {
           [principal.tenantId, taskId]);
       const evidenceProjection = (task.source_authorized ? evidence.rows : []).map((row) => {
         const locator = liveEvidenceLocatorSchema.parse(row.locator);
-        if (sha256(row.excerpt_bytes) !== row.excerpt_sha256 || locator.excerptSha256 !== row.excerpt_sha256) {
-          throw new GenewayError('EVIDENCE_INTEGRITY_FAILED', 'Evidence excerpt no longer matches immutable bytes', 409);
-        }
-        if (!row.audience.startsWith('conversation:') || row.audience.length === 'conversation:'.length) {
-          throw new GenewayError('EVIDENCE_AUTHORITY_INVALID', 'Evidence audience is invalid', 409);
-        }
+        const excerpt = verifyLiveEvidenceAuthority({ locator, storedExcerpt: row.excerpt_bytes,
+          storedExcerptSha256: row.excerpt_sha256, canonicalBytes: row.canonical_bytes,
+          canonicalPageIndex: row.canonical_page_index,
+          canonicalPageIndexSha256: row.canonical_page_index_sha256, inputRef,
+          resourceScope: row.resource_scope, dataClass: row.data_class, audience: row.audience });
         const conversationId = row.audience.slice('conversation:'.length);
         return gateALiveEvidenceProjectionSchema.parse({
           recordVariant: 'evidence.live/1', id: row.id, businessTaskId: row.business_task_id,
           statementId: row.statement_id, source: locator,
-          excerpt: new TextDecoder('utf-8', { fatal: true }).decode(row.excerpt_bytes),
+          excerpt: new TextDecoder('utf-8', { fatal: true }).decode(excerpt),
           resourceScope: row.resource_scope, dataClass: 'C1',
           audience: { kind: 'private-conversation', conversationId },
           lineageRecordIds: row.lineage_ids, createdAt: row.created_at.toISOString(),
@@ -3441,4 +3444,88 @@ function canonicalCandidateBytes(
   }
   return bytes.subarray(page.canonicalStartByte + candidate.startByte,
     page.canonicalStartByte + candidate.endByteExclusive);
+}
+
+export function verifyLiveEvidenceAuthority(input: Readonly<{
+  locator: LiveEvidenceLocator;
+  storedExcerpt: Buffer;
+  storedExcerptSha256: string;
+  canonicalBytes: Buffer;
+  canonicalPageIndex: unknown;
+  canonicalPageIndexSha256: string | null;
+  inputRef: LiveResolvedTaskInputRef;
+  resourceScope: string;
+  dataClass: string;
+  audience: string;
+}>): Buffer {
+  const { locator, inputRef } = input;
+  if (locator.sourceArtifactId !== inputRef.artifactId
+    || locator.sourceArtifactSha256 !== inputRef.artifactSha256
+    || locator.documentSnapshotId !== inputRef.documentSnapshotId
+    || locator.canonicalTextSha256 !== inputRef.canonicalTextSha256
+    || locator.parserManifestId !== inputRef.parserManifestId
+    || locator.parserDigest !== inputRef.parserDigest
+    || locator.extractionVersion !== inputRef.extractionVersion
+    || input.resourceScope !== inputRef.resourceScope
+    || input.dataClass !== inputRef.dataClass
+    || input.audience !== inputRef.audience) {
+    throw new GenewayError('EVIDENCE_AUTHORITY_INVALID', 'Evidence authority no longer matches the task input', 409);
+  }
+  if (input.canonicalBytes.byteLength < 1 || input.canonicalBytes.byteLength > 2 * 1_024 * 1_024
+    || sha256(input.canonicalBytes) !== inputRef.canonicalTextSha256) {
+    throw new GenewayError('EVIDENCE_INTEGRITY_FAILED', 'Evidence canonical source integrity failed', 409);
+  }
+
+  let pageIndex: z.infer<typeof gateACanonicalPageIndexSchema> | null = null;
+  if (inputRef.canonicalPageIndexSha256 === null) {
+    if (input.canonicalPageIndexSha256 !== null || input.canonicalPageIndex !== null) {
+      throw new GenewayError('EVIDENCE_AUTHORITY_INVALID', 'Evidence canonical page authority is unexpected', 409);
+    }
+  } else {
+    try {
+      pageIndex = gateACanonicalPageIndexSchema.parse(input.canonicalPageIndex);
+    } catch {
+      throw new GenewayError('EVIDENCE_AUTHORITY_INVALID', 'Evidence canonical page authority is invalid', 409);
+    }
+    if (input.canonicalPageIndexSha256 !== inputRef.canonicalPageIndexSha256
+      || sha256(Buffer.from(canonicalizeGateAProjection(pageIndex), 'utf8')) !== inputRef.canonicalPageIndexSha256
+      || pageIndex.extractionVersion !== inputRef.extractionVersion
+      || pageIndex.canonicalTextSha256 !== inputRef.canonicalTextSha256
+      || pageIndex.canonicalByteLength !== input.canonicalBytes.byteLength
+      || pageIndex.pages.some((page) => sha256(input.canonicalBytes.subarray(
+        page.canonicalStartByte, page.canonicalEndByteExclusive,
+      )) !== page.canonicalPageSha256)) {
+      throw new GenewayError('EVIDENCE_INTEGRITY_FAILED', 'Evidence canonical page integrity failed', 409);
+    }
+  }
+
+  let excerpt: Buffer;
+  if (locator.kind === 'canonical_text_span') {
+    if (locator.endByteExclusive > input.canonicalBytes.byteLength) {
+      throw new GenewayError('EVIDENCE_AUTHORITY_INVALID', 'Evidence canonical text span is outside its authority', 409);
+    }
+    excerpt = input.canonicalBytes.subarray(locator.startByte, locator.endByteExclusive);
+  } else {
+    const page = pageIndex?.pages[locator.pageIndex];
+    if (page === undefined || page.pageIndex !== locator.pageIndex
+      || locator.endByteExclusive > page.canonicalEndByteExclusive - page.canonicalStartByte) {
+      throw new GenewayError('EVIDENCE_AUTHORITY_INVALID', 'Evidence page span is outside its authority', 409);
+    }
+    excerpt = input.canonicalBytes.subarray(page.canonicalStartByte + locator.startByte,
+      page.canonicalStartByte + locator.endByteExclusive);
+  }
+
+  if (excerpt.byteLength < 1 || excerpt.byteLength > 16 * 1_024
+    || excerpt.byteLength !== locator.excerptByteLength
+    || !excerpt.equals(input.storedExcerpt)
+    || sha256(excerpt) !== locator.excerptSha256
+    || sha256(excerpt) !== input.storedExcerptSha256) {
+    throw new GenewayError('EVIDENCE_INTEGRITY_FAILED', 'Evidence excerpt integrity failed', 409);
+  }
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(excerpt);
+  } catch {
+    throw new GenewayError('EVIDENCE_INTEGRITY_FAILED', 'Evidence excerpt is not an exact UTF-8 byte span', 409);
+  }
+  return excerpt;
 }

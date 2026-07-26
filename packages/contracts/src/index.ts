@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { gateALiveTaskListItemSchema, gateALiveWorkflowListItemSchema } from './gate-a-public.js';
 
 const sha256ValueSchema = z.string().regex(/^[a-f0-9]{64}$/);
 
@@ -225,12 +226,19 @@ export const evidenceProjectionSchema = z.object({
 
 export type EvidenceProjection = z.infer<typeof evidenceProjectionSchema>;
 
+export const artifactMediaTypeSchema = z.enum([
+  'text/plain',
+  'text/markdown',
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+]);
+
 export const taskArtifactProjectionSchema = z.object({
   id: z.string().min(1),
   manifestId: z.string().min(1),
   kind: z.enum(['source_document', 'simulation_report']),
   displayName: z.string().min(1),
-  mediaType: z.enum(['text/plain', 'text/markdown']),
+  mediaType: artifactMediaTypeSchema,
   sizeBytes: z.number().int().positive().max(1_048_576),
   contentSha256: z.string().regex(/^[a-f0-9]{64}$/),
   downloadUrl: z.string().startsWith('/api/artifacts/'),
@@ -381,7 +389,7 @@ export const taskListItemSchema = z.object({
 export type TaskListItem = z.infer<typeof taskListItemSchema>;
 
 export const taskListResponseSchema = z.object({
-  tasks: z.array(taskListItemSchema),
+  tasks: z.array(z.union([taskListItemSchema, gateALiveTaskListItemSchema])),
   ...listMetadataSchema.shape,
   queryVersion: z.literal('business-tasks.list.v1'),
 }).strict();
@@ -392,7 +400,7 @@ export const taskListQuerySchema = z.object({
   status: taskStatusSchema.optional(),
   capabilityId: businessTaskCapabilityIdSchema.optional(),
   sort: z.enum(['createdAt', 'updatedAt']).default('updatedAt'),
-  direction: z.literal('desc').default('desc'),
+  direction: z.enum(['asc', 'desc']).default('desc'),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   cursor: paginationCursorSchema.optional(),
 }).strict();
@@ -726,7 +734,7 @@ export const workflowListItemSchema = z.object({
 export type WorkflowListItem = z.infer<typeof workflowListItemSchema>;
 
 export const workflowListResponseSchema = z.object({
-  workflows: z.array(workflowListItemSchema),
+  workflows: z.array(z.union([workflowListItemSchema, gateALiveWorkflowListItemSchema])),
   ...listMetadataSchema.shape,
   queryVersion: z.literal('workflow-versions.list.v1'),
 }).strict();
@@ -734,7 +742,8 @@ export const workflowListResponseSchema = z.object({
 export type WorkflowListResponse = z.infer<typeof workflowListResponseSchema>;
 
 export const workflowListQuerySchema = z.object({
-  capabilityVersionId: z.enum(['cap_solution_analysis_v1_1', 'cap_operations_exception_assist_v1_shadow_1']).optional(),
+  capabilityVersionId: z.enum(['cap_solution_analysis_v1_1', 'cap_operations_exception_assist_v1_shadow_1',
+    'cap_solution_analysis_v1_live_1']).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   cursor: paginationCursorSchema.optional(),
 }).strict();
@@ -794,7 +803,7 @@ export const documentSnapshotSchema = z.object({
   manifestId: z.string().min(1),
   conversationId: z.string().min(1),
   displayName: z.string().min(1),
-  mediaType: z.enum(['text/plain', 'text/markdown']),
+  mediaType: artifactMediaTypeSchema,
   sizeBytes: z.number().int().positive().max(1_048_576),
   contentSha256: sha256Schema,
   dataClass: z.literal('C1'),
@@ -834,7 +843,7 @@ export const artifactSummarySchema = z.object({
   id: z.string().min(1),
   manifestId: z.string().min(1),
   displayName: z.string().min(1),
-  mediaType: z.enum(['text/plain', 'text/markdown']),
+  mediaType: artifactMediaTypeSchema,
   sizeBytes: z.number().int().positive().max(1_048_576),
   contentSha256: sha256Schema,
   availability: z.literal('active'),
@@ -1146,3 +1155,7 @@ export class GenewayError extends Error {
 }
 
 export const isGenewayError = (value: unknown): value is GenewayError => value instanceof GenewayError;
+
+export * from './gate-a.js';
+export * from './gate-a-public.js';
+export * from './gate-a-release.js';

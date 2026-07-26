@@ -1,0 +1,16 @@
+FROM node:22.21.1-bookworm-slim@sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c
+
+ARG GENEWAY_DOCUMENT_PARSER_PACKAGE_DIGEST
+ARG GENEWAY_DOCUMENT_PARSER_IMAGE_SOURCE_DIGEST
+ARG GENEWAY_PDFJS_INVENTORY_DIGEST
+LABEL org.geneway.parser.name="geneway-document-parser" \
+      org.geneway.parser.version="1.0.0-candidate.1" \
+      org.geneway.parser.package-digest="${GENEWAY_DOCUMENT_PARSER_PACKAGE_DIGEST}" \
+      org.geneway.parser.image-source-digest="${GENEWAY_DOCUMENT_PARSER_IMAGE_SOURCE_DIGEST}" \
+      org.geneway.parser.pdfjs-inventory-digest="${GENEWAY_PDFJS_INVENTORY_DIGEST}" \
+      org.geneway.parser.base-digest="sha256:25b3eb23a00590b7499f2a2ce939322727fcce1b15fdd69754fcd09536a3ae2c"
+
+COPY --chmod=0555 document-parser.mjs /opt/geneway-parser/document-parser.mjs
+COPY --chmod=0555 pdfjs /opt/geneway-parser/pdfjs
+USER 65532:65532
+ENTRYPOINT ["node","--permission","--allow-fs-read=/opt/geneway-parser/document-parser.mjs","--allow-fs-read=/opt/geneway-parser/pdfjs","--no-addons","/opt/geneway-parser/document-parser.mjs"]

@@ -2,6 +2,29 @@ import { createHash } from 'node:crypto';
 import { GenewayError } from '@geneway/contracts';
 
 export { parseSingleMultipartUpload, type SingleMultipartUpload } from './multipart.js';
+export {
+  GateAPlainTextParserSandbox,
+  type GateAParsedCanonicalText,
+  type GateAParserCommandRunner,
+  type GateAParserProcessReceipt,
+} from './gate-a-parser-sandbox.js';
+export {
+  GateADocumentParserSandboxCandidate,
+  inspectGateADocumentParserAuthority,
+  gateADocumentFormats,
+  type GateACanonicalPageCandidate,
+  type GateACanonicalPageIndexCandidate,
+  type GateADocumentExtension,
+  type GateADocumentExtractionVersion,
+  type GateADocumentMediaType,
+  type GateADocumentParserCommandRunner,
+  type GateADocumentParserApprovalCandidate,
+  type GateADocumentParserApprovalMetadata,
+  type GateADocumentParserAuthorityInspection,
+  type GateADocumentParserManifestCandidate,
+  type GateAParsedDocumentCandidate,
+  type GateAParserStartupApproval,
+} from './gate-a-document-parser-sandbox.js';
 
 export const MAX_RAW_UPLOAD_BYTES = 1_048_576;
 export const MAX_MULTIPART_ENVELOPE_BYTES = 1_114_112;

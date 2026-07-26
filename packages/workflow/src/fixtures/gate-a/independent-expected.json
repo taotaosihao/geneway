@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "gate-a-workflow-independent-expected/1",
+  "legacy": {
+    "templateId": "workflow-template.solution-fixture/1",
+    "registryDigest": "95750f3ec8eccc394d16a86205afe812d95a917d005d2a0a76480a79330c0225",
+    "existingWorkflowHash": "be038895345cb58a8f6080bb023b076613379403881eac6ea0f1763e8bd0eca4"
+  },
+  "solutionLive": {
+    "templateId": "workflow-template.solution-live/1",
+    "registryDigest": "4d7f7edebc5d24b3d19048bb0e4e7a4012bbb4626f5fa95345be55852b83b5f6",
+    "workflowId": "workflow_4663f2a5e6c1cad3440457e1",
+    "workflowHash": "4663f2a5e6c1cad3440457e16478636572f202f6211db25fd564150731fb2ae9"
+  },
+  "workOrderStatus": {
+    "templateId": "workflow-template.work-order-status/1",
+    "registryDigest": "ff582a12fac250fa31d6491c051d9fe399f7fbfba2c04d76535a759a2a4aa988",
+    "workflowId": "workflow_82ccc7bf41fdc53ec8bb9a7e",
+    "workflowHash": "82ccc7bf41fdc53ec8bb9a7e1982665a88a1ee30458466f9f1dc0f0f2e45c333"
+  }
+}

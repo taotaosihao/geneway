@@ -1,0 +1,598 @@
+{
+  "schemaVersion": "gate-a-workflow-canonical-fixture/1",
+  "registry": [
+    {
+      "schemaVersion": "workflow-template-version/1",
+      "templateId": "workflow-template.solution-fixture/1",
+      "capabilityVersionId": "cap_solution_analysis_v1_1",
+      "harnessVersionId": "harness_solution_analysis_v1_1",
+      "workflowDraftSchemaVersion": "workflow-draft.fixed-v1",
+      "workflowPayloadSchemaVersion": "workflow-version.fixed-v1",
+      "compilerVersion": "geneway-workflow-compiler/0.1.0",
+      "canonicalizationVersion": "RFC8785/JCS-1",
+      "nodes": [
+        {
+          "id": "document_ingest",
+          "kind": "deterministic",
+          "registryReference": "fixture-reader/1",
+          "inputRefs": [
+            "workflow.input.fixtureRef"
+          ],
+          "outputSchemaId": "document.snapshot/1"
+        },
+        {
+          "id": "requirement_extract",
+          "kind": "agent",
+          "registryReference": "cap_solution_analysis_v1_1+harness_solution_analysis_v1_1",
+          "inputRefs": [
+            "step.document_ingest.output"
+          ],
+          "outputSchemaId": "requirement.candidates/1"
+        },
+        {
+          "id": "contradiction_check",
+          "kind": "agent",
+          "registryReference": "cap_solution_analysis_v1_1+harness_solution_analysis_v1_1",
+          "inputRefs": [
+            "step.requirement_extract.output"
+          ],
+          "outputSchemaId": "contradiction.result/1"
+        },
+        {
+          "id": "solution_design",
+          "kind": "agent",
+          "registryReference": "cap_solution_analysis_v1_1+harness_solution_analysis_v1_1",
+          "inputRefs": [
+            "step.requirement_extract.output",
+            "step.contradiction_check.output"
+          ],
+          "outputSchemaId": "solution.design/1"
+        },
+        {
+          "id": "evidence_verify",
+          "kind": "verification",
+          "registryReference": "claim-evidence-minimum/1",
+          "inputRefs": [
+            "step.solution_design.output"
+          ],
+          "outputSchemaId": "evidence.verdict/1"
+        },
+        {
+          "id": "result_quality_check",
+          "kind": "verification",
+          "registryReference": "simulation-quality/1",
+          "inputRefs": [
+            "step.evidence_verify.output"
+          ],
+          "outputSchemaId": "quality.verdict/1"
+        },
+        {
+          "id": "report_publish",
+          "kind": "deterministic",
+          "registryReference": "simulation-publisher/1",
+          "inputRefs": [
+            "step.result_quality_check.output"
+          ],
+          "outputSchemaId": "report.projection/1"
+        }
+      ],
+      "edges": [
+        {
+          "from": "document_ingest",
+          "to": "requirement_extract"
+        },
+        {
+          "from": "requirement_extract",
+          "to": "contradiction_check"
+        },
+        {
+          "from": "contradiction_check",
+          "to": "solution_design"
+        },
+        {
+          "from": "solution_design",
+          "to": "evidence_verify"
+        },
+        {
+          "from": "evidence_verify",
+          "to": "result_quality_check"
+        },
+        {
+          "from": "result_quality_check",
+          "to": "report_publish"
+        }
+      ],
+      "permissionCeiling": {
+        "actions": [
+          "R0",
+          "R1",
+          "A1"
+        ],
+        "resourceScopes": [
+          "fixture:solution-analysis:v1"
+        ],
+        "dataClasses": [
+          "C0",
+          "C1"
+        ],
+        "connectors": [],
+        "modelTools": []
+      },
+      "registryDigest": "95750f3ec8eccc394d16a86205afe812d95a917d005d2a0a76480a79330c0225"
+    },
+    {
+      "schemaVersion": "workflow-template-version/1",
+      "templateId": "workflow-template.solution-live/1",
+      "capabilityVersionId": "cap_solution_analysis_v1_live_1",
+      "harnessVersionId": "harness_solution_analysis_v1_live_1",
+      "workflowDraftSchemaVersion": "workflow-draft.template-v1",
+      "workflowPayloadSchemaVersion": "workflow-version.template-v1",
+      "compilerVersion": "geneway-workflow-compiler/0.2.0",
+      "canonicalizationVersion": "RFC8785/JCS-1",
+      "nodes": [
+        {
+          "id": "document_ingest",
+          "kind": "deterministic",
+          "registryReference": "document-snapshot-reader/live-1",
+          "inputRefs": [
+            "workflow.input.documentSnapshotId"
+          ],
+          "outputSchemaId": "document.snapshot.live/1"
+        },
+        {
+          "id": "requirement_extract",
+          "kind": "agent",
+          "registryReference": "agent.solution.requirement/live-1",
+          "inputRefs": [
+            "step.document_ingest.output"
+          ],
+          "outputSchemaId": "analysis.requirement-candidates/1"
+        },
+        {
+          "id": "contradiction_check",
+          "kind": "agent",
+          "registryReference": "agent.solution.contradiction/live-1",
+          "inputRefs": [
+            "step.requirement_extract.output"
+          ],
+          "outputSchemaId": "analysis.contradiction/1"
+        },
+        {
+          "id": "solution_design",
+          "kind": "agent",
+          "registryReference": "agent.solution.architect/live-1",
+          "inputRefs": [
+            "step.requirement_extract.output",
+            "step.contradiction_check.output"
+          ],
+          "outputSchemaId": "analysis.result-candidate/1"
+        },
+        {
+          "id": "evidence_verify",
+          "kind": "verification",
+          "registryReference": "claim-evidence-live/1",
+          "inputRefs": [
+            "step.solution_design.output"
+          ],
+          "outputSchemaId": "evidence.verdict/1"
+        },
+        {
+          "id": "result_quality_check",
+          "kind": "verification",
+          "registryReference": "analysis-quality-live/1",
+          "inputRefs": [
+            "step.evidence_verify.output"
+          ],
+          "outputSchemaId": "analysis.quality-verdict/1"
+        },
+        {
+          "id": "report_publish",
+          "kind": "deterministic",
+          "registryReference": "analysis-report-publisher/live-1",
+          "inputRefs": [
+            "step.result_quality_check.output"
+          ],
+          "outputSchemaId": "artifact.analysis-report/1"
+        }
+      ],
+      "edges": [
+        {
+          "from": "document_ingest",
+          "to": "requirement_extract"
+        },
+        {
+          "from": "requirement_extract",
+          "to": "contradiction_check"
+        },
+        {
+          "from": "contradiction_check",
+          "to": "solution_design"
+        },
+        {
+          "from": "solution_design",
+          "to": "evidence_verify"
+        },
+        {
+          "from": "evidence_verify",
+          "to": "result_quality_check"
+        },
+        {
+          "from": "result_quality_check",
+          "to": "report_publish"
+        }
+      ],
+      "permissionCeiling": {
+        "actions": [
+          "R0",
+          "R1",
+          "A1"
+        ],
+        "resourceScopes": [
+          "document-snapshot:approval-subject-bound"
+        ],
+        "dataClasses": [
+          "C0",
+          "C1"
+        ],
+        "connectors": [],
+        "modelTools": []
+      },
+      "registryDigest": "4d7f7edebc5d24b3d19048bb0e4e7a4012bbb4626f5fa95345be55852b83b5f6"
+    },
+    {
+      "schemaVersion": "workflow-template-version/1",
+      "templateId": "workflow-template.work-order-status/1",
+      "capabilityVersionId": "cap_production_work_order_status_v1_1",
+      "harnessVersionId": "harness_production_work_order_status_v1_1",
+      "workflowDraftSchemaVersion": "workflow-draft.template-v1",
+      "workflowPayloadSchemaVersion": "workflow-version.template-v1",
+      "compilerVersion": "geneway-workflow-compiler/0.2.0",
+      "canonicalizationVersion": "RFC8785/JCS-1",
+      "nodes": [
+        {
+          "id": "validate_work_order_ref",
+          "kind": "deterministic",
+          "registryReference": "work-order-ref-validator/1",
+          "inputRefs": [
+            "workflow.input.workOrderRef"
+          ],
+          "outputSchemaId": "work-order.ref/1"
+        },
+        {
+          "id": "fetch_authorized_status",
+          "kind": "deterministic",
+          "registryReference": "gearjob-work-order-status-reader/1",
+          "inputRefs": [
+            "step.validate_work_order_ref.output"
+          ],
+          "outputSchemaId": "connector.work-order-snapshot/1"
+        },
+        {
+          "id": "compute_progress",
+          "kind": "deterministic",
+          "registryReference": "work-order-progress/1",
+          "inputRefs": [
+            "step.fetch_authorized_status.output"
+          ],
+          "outputSchemaId": "work-order.progress/1"
+        },
+        {
+          "id": "explain_status",
+          "kind": "agent",
+          "registryReference": "agent.production.work-order-status/1",
+          "inputRefs": [
+            "step.fetch_authorized_status.output",
+            "step.compute_progress.output"
+          ],
+          "outputSchemaId": "work-order.explanation/1"
+        },
+        {
+          "id": "evidence_verify",
+          "kind": "verification",
+          "registryReference": "connector-evidence/1",
+          "inputRefs": [
+            "step.fetch_authorized_status.output",
+            "step.explain_status.output"
+          ],
+          "outputSchemaId": "evidence.verdict/1"
+        },
+        {
+          "id": "publish_status_card",
+          "kind": "deterministic",
+          "registryReference": "work-order-card-publisher/1",
+          "inputRefs": [
+            "step.fetch_authorized_status.output",
+            "step.compute_progress.output",
+            "step.explain_status.output",
+            "step.evidence_verify.output"
+          ],
+          "outputSchemaId": "work-order-status-card/1"
+        }
+      ],
+      "edges": [
+        {
+          "from": "validate_work_order_ref",
+          "to": "fetch_authorized_status"
+        },
+        {
+          "from": "fetch_authorized_status",
+          "to": "compute_progress"
+        },
+        {
+          "from": "compute_progress",
+          "to": "explain_status"
+        },
+        {
+          "from": "explain_status",
+          "to": "evidence_verify"
+        },
+        {
+          "from": "evidence_verify",
+          "to": "publish_status_card"
+        }
+      ],
+      "permissionCeiling": {
+        "actions": [
+          "R0",
+          "R1",
+          "A1"
+        ],
+        "resourceScopes": [
+          "gearjob-work-order:connector-query-spec-bound"
+        ],
+        "dataClasses": [
+          "C0",
+          "C1"
+        ],
+        "connectors": [
+          "gearjob.work-order-status.read/1"
+        ],
+        "modelTools": []
+      },
+      "registryDigest": "ff582a12fac250fa31d6491c051d9fe399f7fbfba2c04d76535a759a2a4aa988"
+    }
+  ],
+  "compiled": {
+    "solutionLive": {
+      "id": "workflow_4663f2a5e6c1cad3440457e1",
+      "hash": "4663f2a5e6c1cad3440457e16478636572f202f6211db25fd564150731fb2ae9",
+      "canonicalJson": "{\"canonicalizationVersion\":\"RFC8785/JCS-1\",\"capabilityVersionId\":\"cap_solution_analysis_v1_live_1\",\"compilerVersion\":\"geneway-workflow-compiler/0.2.0\",\"edges\":[{\"from\":\"document_ingest\",\"to\":\"requirement_extract\"},{\"from\":\"requirement_extract\",\"to\":\"contradiction_check\"},{\"from\":\"contradiction_check\",\"to\":\"solution_design\"},{\"from\":\"solution_design\",\"to\":\"evidence_verify\"},{\"from\":\"evidence_verify\",\"to\":\"result_quality_check\"},{\"from\":\"result_quality_check\",\"to\":\"report_publish\"}],\"featureSet\":\"fixed-template-v1\",\"harnessVersionId\":\"harness_solution_analysis_v1_live_1\",\"nodes\":[{\"id\":\"document_ingest\",\"inputRefs\":[\"workflow.input.documentSnapshotId\"],\"kind\":\"deterministic\",\"outputSchemaId\":\"document.snapshot.live/1\",\"registryReference\":\"document-snapshot-reader/live-1\"},{\"id\":\"requirement_extract\",\"inputRefs\":[\"step.document_ingest.output\"],\"kind\":\"agent\",\"outputSchemaId\":\"analysis.requirement-candidates/1\",\"registryReference\":\"agent.solution.requirement/live-1\"},{\"id\":\"contradiction_check\",\"inputRefs\":[\"step.requirement_extract.output\"],\"kind\":\"agent\",\"outputSchemaId\":\"analysis.contradiction/1\",\"registryReference\":\"agent.solution.contradiction/live-1\"},{\"id\":\"solution_design\",\"inputRefs\":[\"step.requirement_extract.output\",\"step.contradiction_check.output\"],\"kind\":\"agent\",\"outputSchemaId\":\"analysis.result-candidate/1\",\"registryReference\":\"agent.solution.architect/live-1\"},{\"id\":\"evidence_verify\",\"inputRefs\":[\"step.solution_design.output\"],\"kind\":\"verification\",\"outputSchemaId\":\"evidence.verdict/1\",\"registryReference\":\"claim-evidence-live/1\"},{\"id\":\"result_quality_check\",\"inputRefs\":[\"step.evidence_verify.output\"],\"kind\":\"verification\",\"outputSchemaId\":\"analysis.quality-verdict/1\",\"registryReference\":\"analysis-quality-live/1\"},{\"id\":\"report_publish\",\"inputRefs\":[\"step.result_quality_check.output\"],\"kind\":\"deterministic\",\"outputSchemaId\":\"artifact.analysis-report/1\",\"registryReference\":\"analysis-report-publisher/live-1\"}],\"permissionCeiling\":{\"actions\":[\"R0\",\"R1\",\"A1\"],\"connectors\":[],\"dataClasses\":[\"C0\",\"C1\"],\"modelTools\":[],\"resourceScopes\":[\"document-snapshot:approval-subject-bound\"]},\"registryDigest\":\"4d7f7edebc5d24b3d19048bb0e4e7a4012bbb4626f5fa95345be55852b83b5f6\",\"schemaVersion\":\"workflow-version.template-v1\",\"templateId\":\"workflow-template.solution-live/1\",\"templateSchemaVersion\":\"workflow-template-version/1\"}",
+      "payload": {
+        "schemaVersion": "workflow-version.template-v1",
+        "templateSchemaVersion": "workflow-template-version/1",
+        "compilerVersion": "geneway-workflow-compiler/0.2.0",
+        "canonicalizationVersion": "RFC8785/JCS-1",
+        "featureSet": "fixed-template-v1",
+        "templateId": "workflow-template.solution-live/1",
+        "registryDigest": "4d7f7edebc5d24b3d19048bb0e4e7a4012bbb4626f5fa95345be55852b83b5f6",
+        "capabilityVersionId": "cap_solution_analysis_v1_live_1",
+        "harnessVersionId": "harness_solution_analysis_v1_live_1",
+        "nodes": [
+          {
+            "id": "document_ingest",
+            "kind": "deterministic",
+            "registryReference": "document-snapshot-reader/live-1",
+            "inputRefs": [
+              "workflow.input.documentSnapshotId"
+            ],
+            "outputSchemaId": "document.snapshot.live/1"
+          },
+          {
+            "id": "requirement_extract",
+            "kind": "agent",
+            "registryReference": "agent.solution.requirement/live-1",
+            "inputRefs": [
+              "step.document_ingest.output"
+            ],
+            "outputSchemaId": "analysis.requirement-candidates/1"
+          },
+          {
+            "id": "contradiction_check",
+            "kind": "agent",
+            "registryReference": "agent.solution.contradiction/live-1",
+            "inputRefs": [
+              "step.requirement_extract.output"
+            ],
+            "outputSchemaId": "analysis.contradiction/1"
+          },
+          {
+            "id": "solution_design",
+            "kind": "agent",
+            "registryReference": "agent.solution.architect/live-1",
+            "inputRefs": [
+              "step.requirement_extract.output",
+              "step.contradiction_check.output"
+            ],
+            "outputSchemaId": "analysis.result-candidate/1"
+          },
+          {
+            "id": "evidence_verify",
+            "kind": "verification",
+            "registryReference": "claim-evidence-live/1",
+            "inputRefs": [
+              "step.solution_design.output"
+            ],
+            "outputSchemaId": "evidence.verdict/1"
+          },
+          {
+            "id": "result_quality_check",
+            "kind": "verification",
+            "registryReference": "analysis-quality-live/1",
+            "inputRefs": [
+              "step.evidence_verify.output"
+            ],
+            "outputSchemaId": "analysis.quality-verdict/1"
+          },
+          {
+            "id": "report_publish",
+            "kind": "deterministic",
+            "registryReference": "analysis-report-publisher/live-1",
+            "inputRefs": [
+              "step.result_quality_check.output"
+            ],
+            "outputSchemaId": "artifact.analysis-report/1"
+          }
+        ],
+        "edges": [
+          {
+            "from": "document_ingest",
+            "to": "requirement_extract"
+          },
+          {
+            "from": "requirement_extract",
+            "to": "contradiction_check"
+          },
+          {
+            "from": "contradiction_check",
+            "to": "solution_design"
+          },
+          {
+            "from": "solution_design",
+            "to": "evidence_verify"
+          },
+          {
+            "from": "evidence_verify",
+            "to": "result_quality_check"
+          },
+          {
+            "from": "result_quality_check",
+            "to": "report_publish"
+          }
+        ],
+        "permissionCeiling": {
+          "actions": [
+            "R0",
+            "R1",
+            "A1"
+          ],
+          "resourceScopes": [
+            "document-snapshot:approval-subject-bound"
+          ],
+          "dataClasses": [
+            "C0",
+            "C1"
+          ],
+          "connectors": [],
+          "modelTools": []
+        }
+      }
+    },
+    "workOrderStatus": {
+      "id": "workflow_82ccc7bf41fdc53ec8bb9a7e",
+      "hash": "82ccc7bf41fdc53ec8bb9a7e1982665a88a1ee30458466f9f1dc0f0f2e45c333",
+      "canonicalJson": "{\"canonicalizationVersion\":\"RFC8785/JCS-1\",\"capabilityVersionId\":\"cap_production_work_order_status_v1_1\",\"compilerVersion\":\"geneway-workflow-compiler/0.2.0\",\"edges\":[{\"from\":\"validate_work_order_ref\",\"to\":\"fetch_authorized_status\"},{\"from\":\"fetch_authorized_status\",\"to\":\"compute_progress\"},{\"from\":\"compute_progress\",\"to\":\"explain_status\"},{\"from\":\"explain_status\",\"to\":\"evidence_verify\"},{\"from\":\"evidence_verify\",\"to\":\"publish_status_card\"}],\"featureSet\":\"fixed-template-v1\",\"harnessVersionId\":\"harness_production_work_order_status_v1_1\",\"nodes\":[{\"id\":\"validate_work_order_ref\",\"inputRefs\":[\"workflow.input.workOrderRef\"],\"kind\":\"deterministic\",\"outputSchemaId\":\"work-order.ref/1\",\"registryReference\":\"work-order-ref-validator/1\"},{\"id\":\"fetch_authorized_status\",\"inputRefs\":[\"step.validate_work_order_ref.output\"],\"kind\":\"deterministic\",\"outputSchemaId\":\"connector.work-order-snapshot/1\",\"registryReference\":\"gearjob-work-order-status-reader/1\"},{\"id\":\"compute_progress\",\"inputRefs\":[\"step.fetch_authorized_status.output\"],\"kind\":\"deterministic\",\"outputSchemaId\":\"work-order.progress/1\",\"registryReference\":\"work-order-progress/1\"},{\"id\":\"explain_status\",\"inputRefs\":[\"step.fetch_authorized_status.output\",\"step.compute_progress.output\"],\"kind\":\"agent\",\"outputSchemaId\":\"work-order.explanation/1\",\"registryReference\":\"agent.production.work-order-status/1\"},{\"id\":\"evidence_verify\",\"inputRefs\":[\"step.fetch_authorized_status.output\",\"step.explain_status.output\"],\"kind\":\"verification\",\"outputSchemaId\":\"evidence.verdict/1\",\"registryReference\":\"connector-evidence/1\"},{\"id\":\"publish_status_card\",\"inputRefs\":[\"step.fetch_authorized_status.output\",\"step.compute_progress.output\",\"step.explain_status.output\",\"step.evidence_verify.output\"],\"kind\":\"deterministic\",\"outputSchemaId\":\"work-order-status-card/1\",\"registryReference\":\"work-order-card-publisher/1\"}],\"permissionCeiling\":{\"actions\":[\"R0\",\"R1\",\"A1\"],\"connectors\":[\"gearjob.work-order-status.read/1\"],\"dataClasses\":[\"C0\",\"C1\"],\"modelTools\":[],\"resourceScopes\":[\"gearjob-work-order:connector-query-spec-bound\"]},\"registryDigest\":\"ff582a12fac250fa31d6491c051d9fe399f7fbfba2c04d76535a759a2a4aa988\",\"schemaVersion\":\"workflow-version.template-v1\",\"templateId\":\"workflow-template.work-order-status/1\",\"templateSchemaVersion\":\"workflow-template-version/1\"}",
+      "payload": {
+        "schemaVersion": "workflow-version.template-v1",
+        "templateSchemaVersion": "workflow-template-version/1",
+        "compilerVersion": "geneway-workflow-compiler/0.2.0",
+        "canonicalizationVersion": "RFC8785/JCS-1",
+        "featureSet": "fixed-template-v1",
+        "templateId": "workflow-template.work-order-status/1",
+        "registryDigest": "ff582a12fac250fa31d6491c051d9fe399f7fbfba2c04d76535a759a2a4aa988",
+        "capabilityVersionId": "cap_production_work_order_status_v1_1",
+        "harnessVersionId": "harness_production_work_order_status_v1_1",
+        "nodes": [
+          {
+            "id": "validate_work_order_ref",
+            "kind": "deterministic",
+            "registryReference": "work-order-ref-validator/1",
+            "inputRefs": [
+              "workflow.input.workOrderRef"
+            ],
+            "outputSchemaId": "work-order.ref/1"
+          },
+          {
+            "id": "fetch_authorized_status",
+            "kind": "deterministic",
+            "registryReference": "gearjob-work-order-status-reader/1",
+            "inputRefs": [
+              "step.validate_work_order_ref.output"
+            ],
+            "outputSchemaId": "connector.work-order-snapshot/1"
+          },
+          {
+            "id": "compute_progress",
+            "kind": "deterministic",
+            "registryReference": "work-order-progress/1",
+            "inputRefs": [
+              "step.fetch_authorized_status.output"
+            ],
+            "outputSchemaId": "work-order.progress/1"
+          },
+          {
+            "id": "explain_status",
+            "kind": "agent",
+            "registryReference": "agent.production.work-order-status/1",
+            "inputRefs": [
+              "step.fetch_authorized_status.output",
+              "step.compute_progress.output"
+            ],
+            "outputSchemaId": "work-order.explanation/1"
+          },
+          {
+            "id": "evidence_verify",
+            "kind": "verification",
+            "registryReference": "connector-evidence/1",
+            "inputRefs": [
+              "step.fetch_authorized_status.output",
+              "step.explain_status.output"
+            ],
+            "outputSchemaId": "evidence.verdict/1"
+          },
+          {
+            "id": "publish_status_card",
+            "kind": "deterministic",
+            "registryReference": "work-order-card-publisher/1",
+            "inputRefs": [
+              "step.fetch_authorized_status.output",
+              "step.compute_progress.output",
+              "step.explain_status.output",
+              "step.evidence_verify.output"
+            ],
+            "outputSchemaId": "work-order-status-card/1"
+          }
+        ],
+        "edges": [
+          {
+            "from": "validate_work_order_ref",
+            "to": "fetch_authorized_status"
+          },
+          {
+            "from": "fetch_authorized_status",
+            "to": "compute_progress"
+          },
+          {
+            "from": "compute_progress",
+            "to": "explain_status"
+          },
+          {
+            "from": "explain_status",
+            "to": "evidence_verify"
+          },
+          {
+            "from": "evidence_verify",
+            "to": "publish_status_card"
+          }
+        ],
+        "permissionCeiling": {
+          "actions": [
+            "R0",
+            "R1",
+            "A1"
+          ],
+          "resourceScopes": [
+            "gearjob-work-order:connector-query-spec-bound"
+          ],
+          "dataClasses": [
+            "C0",
+            "C1"
+          ],
+          "connectors": [
+            "gearjob.work-order-status.read/1"
+          ],
+          "modelTools": []
+        }
+      }
+    }
+  }
+}

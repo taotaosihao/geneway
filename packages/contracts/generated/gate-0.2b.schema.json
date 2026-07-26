@@ -904,7 +904,10 @@
         "direction": {
           "default": "desc",
           "type": "string",
-          "const": "desc"
+          "enum": [
+            "asc",
+            "desc"
+          ]
         },
         "limit": {
           "default": 25,
@@ -932,103 +935,223 @@
         "tasks": {
           "type": "array",
           "items": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string",
-                "minLength": 1
-              },
-              "capabilityId": {
-                "type": "string",
-                "enum": [
-                  "solution.analysis.v1",
-                  "operations.exception-assist.v1"
-                ]
-              },
-              "status": {
-                "type": "string",
-                "enum": [
-                  "awaiting_approval",
-                  "approved",
-                  "rejected",
-                  "queued",
-                  "running",
-                  "completed",
-                  "failed",
-                  "canceled"
-                ]
-              },
-              "title": {
-                "type": "string",
-                "enum": [
-                  "方案分析",
-                  "异常分析"
-                ]
-              },
-              "conversationId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "workflowVersion": {
+            "anyOf": [
+              {
                 "type": "object",
                 "properties": {
                   "id": {
                     "type": "string",
                     "minLength": 1
                   },
-                  "hash": {
+                  "capabilityId": {
                     "type": "string",
-                    "pattern": "^[a-f0-9]{64}$"
+                    "enum": [
+                      "solution.analysis.v1",
+                      "operations.exception-assist.v1"
+                    ]
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "awaiting_approval",
+                      "approved",
+                      "rejected",
+                      "queued",
+                      "running",
+                      "completed",
+                      "failed",
+                      "canceled"
+                    ]
+                  },
+                  "title": {
+                    "type": "string",
+                    "enum": [
+                      "方案分析",
+                      "异常分析"
+                    ]
+                  },
+                  "conversationId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "workflowVersion": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "hash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "hash"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "approvalStatus": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "approved",
+                      "rejected"
+                    ]
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "updatedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
                   }
                 },
                 "required": [
                   "id",
-                  "hash"
+                  "capabilityId",
+                  "status",
+                  "title",
+                  "conversationId",
+                  "workflowVersion",
+                  "approvalStatus",
+                  "createdAt",
+                  "updatedAt",
+                  "aggregateVersion",
+                  "simulation"
                 ],
                 "additionalProperties": false
               },
-              "approvalStatus": {
-                "type": "string",
-                "enum": [
-                  "pending",
-                  "approved",
-                  "rejected"
-                ]
-              },
-              "createdAt": {
-                "type": "string",
-                "format": "date-time",
-                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
-              },
-              "updatedAt": {
-                "type": "string",
-                "format": "date-time",
-                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
-              },
-              "aggregateVersion": {
-                "type": "integer",
-                "exclusiveMinimum": 0,
-                "maximum": 9007199254740991
-              },
-              "simulation": {
-                "type": "boolean",
-                "const": true
+              {
+                "type": "object",
+                "properties": {
+                  "recordVariant": {
+                    "type": "string",
+                    "const": "business-task.live/1"
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "capabilityId": {
+                    "type": "string",
+                    "const": "solution.analysis.v1"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "awaiting_approval",
+                      "approved",
+                      "queued",
+                      "running",
+                      "completed",
+                      "failed",
+                      "cancel_requested",
+                      "canceled"
+                    ]
+                  },
+                  "title": {
+                    "type": "string",
+                    "const": "方案分析"
+                  },
+                  "conversationId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "workflowVersion": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                      },
+                      "hash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "hash"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "approvalStatus": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "approved",
+                      "rejected"
+                    ]
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "updatedAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "aggregateVersion": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "model_gateway"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "internalAcceptance": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "recordVariant",
+                  "id",
+                  "capabilityId",
+                  "status",
+                  "title",
+                  "conversationId",
+                  "workflowVersion",
+                  "approvalStatus",
+                  "createdAt",
+                  "updatedAt",
+                  "aggregateVersion",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "internalAcceptance"
+                ],
+                "additionalProperties": false
               }
-            },
-            "required": [
-              "id",
-              "capabilityId",
-              "status",
-              "title",
-              "conversationId",
-              "workflowVersion",
-              "approvalStatus",
-              "createdAt",
-              "updatedAt",
-              "aggregateVersion",
-              "simulation"
-            ],
-            "additionalProperties": false
+            ]
           }
         },
         "nextCursor": {
@@ -1723,7 +1846,9 @@
                 "type": "string",
                 "enum": [
                   "text/plain",
-                  "text/markdown"
+                  "text/markdown",
+                  "application/pdf",
+                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 ]
               },
               "sizeBytes": {
@@ -3585,7 +3710,8 @@
           "type": "string",
           "enum": [
             "cap_solution_analysis_v1_1",
-            "cap_operations_exception_assist_v1_shadow_1"
+            "cap_operations_exception_assist_v1_shadow_1",
+            "cap_solution_analysis_v1_live_1"
           ]
         },
         "limit": {
@@ -3612,43 +3738,107 @@
         "workflows": {
           "type": "array",
           "items": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string",
-                "minLength": 1
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "hash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "capabilityVersionId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "harnessVersionId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "id",
+                  "hash",
+                  "capabilityVersionId",
+                  "harnessVersionId",
+                  "createdAt",
+                  "simulation"
+                ],
+                "additionalProperties": false
               },
-              "hash": {
-                "type": "string",
-                "pattern": "^[a-f0-9]{64}$"
-              },
-              "capabilityVersionId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "harnessVersionId": {
-                "type": "string",
-                "minLength": 1
-              },
-              "createdAt": {
-                "type": "string",
-                "format": "date-time",
-                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
-              },
-              "simulation": {
-                "type": "boolean",
-                "const": true
+              {
+                "type": "object",
+                "properties": {
+                  "recordVariant": {
+                    "type": "string",
+                    "const": "workflow-read-model.live/1"
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "hash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "capabilityVersionId": {
+                    "type": "string",
+                    "const": "cap_solution_analysis_v1_live_1"
+                  },
+                  "harnessVersionId": {
+                    "type": "string",
+                    "const": "harness_solution_analysis_v1_live_1"
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+                  },
+                  "simulation": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "runtimeMode": {
+                    "type": "string",
+                    "const": "model_gateway"
+                  },
+                  "businessDecisionAllowed": {
+                    "type": "boolean",
+                    "const": false
+                  },
+                  "internalAcceptance": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "recordVariant",
+                  "id",
+                  "hash",
+                  "capabilityVersionId",
+                  "harnessVersionId",
+                  "createdAt",
+                  "simulation",
+                  "runtimeMode",
+                  "businessDecisionAllowed",
+                  "internalAcceptance"
+                ],
+                "additionalProperties": false
               }
-            },
-            "required": [
-              "id",
-              "hash",
-              "capabilityVersionId",
-              "harnessVersionId",
-              "createdAt",
-              "simulation"
-            ],
-            "additionalProperties": false
+            ]
           }
         },
         "nextCursor": {

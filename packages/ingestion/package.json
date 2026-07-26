@@ -5,6 +5,10 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "scripts": { "build": "tsc -b", "typecheck": "tsc -b --pretty false" },
-  "dependencies": { "@fastify/busboy": "^3.2.0", "@geneway/contracts": "workspace:*" },
+  "dependencies": {
+    "@fastify/busboy": "^3.2.0",
+    "@geneway/contracts": "workspace:*",
+    "pdfjs-dist": "6.1.200"
+  },
   "devDependencies": { "vitest": "^3.2.4" }
 }

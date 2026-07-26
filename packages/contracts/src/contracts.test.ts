@@ -13,6 +13,8 @@ import {
   workflowDetailProjectionSchema,
   workflowListQuerySchema,
   simulationEnvelopeSchema,
+  artifactSummarySchema,
+  documentSnapshotSchema,
 } from './index.js';
 
 const hash = 'a'.repeat(64);
@@ -32,6 +34,32 @@ const taskListItem = {
 } as const;
 
 describe('wire contracts', () => {
+  it('projects reviewed PDF and DOCX source media without widening unknown media types', () => {
+    const baseSnapshot = {
+      id: 'snapshot_gate_a_document', artifactId: 'artifact_gate_a_document',
+      manifestId: 'manifest_gate_a_document', conversationId: 'conversation_1',
+      displayName: 'source.pdf', sizeBytes: 64, contentSha256: hash, dataClass: 'C1',
+      audience: { kind: 'private-conversation', conversationId: 'conversation_1' },
+      resourceScope: 'artifact:artifact_gate_a_document', trust: 'untrusted_text',
+      simulationProfile: null, profileRegistryVersion: 'gate0.2a-profile-registry/1',
+      createdAt: '2026-07-26T00:00:00.000Z',
+    } as const;
+    const baseArtifact = {
+      id: 'artifact_gate_a_document', manifestId: 'manifest_gate_a_document',
+      displayName: 'source.pdf', sizeBytes: 64, contentSha256: hash,
+      availability: 'active', integrity: 'verified',
+      downloadUrl: '/api/artifacts/artifact_gate_a_document/download',
+    } as const;
+    for (const mediaType of [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ] as const) {
+      expect(documentSnapshotSchema.parse({ ...baseSnapshot, mediaType }).mediaType).toBe(mediaType);
+      expect(artifactSummarySchema.parse({ ...baseArtifact, mediaType }).mediaType).toBe(mediaType);
+    }
+    expect(documentSnapshotSchema.safeParse({ ...baseSnapshot, mediaType: 'application/octet-stream' }).success).toBe(false);
+  });
+
   it('defines the Gate A0 chat input and versioned event union from Zod', () => {
     expect(createChatRunInputSchema.parse({
       capabilityId: 'xiaowei.chat.v1',
@@ -77,7 +105,7 @@ describe('wire contracts', () => {
     expect(taskListQuerySchema.parse({})).toEqual({ sort: 'updatedAt', direction: 'desc', limit: 25 });
     expect(workflowListQuerySchema.parse({ limit: '1' })).toEqual({ limit: 1 });
     expect(taskListQuerySchema.safeParse({ ownerId: 'user_other' }).success).toBe(false);
-    expect(taskListQuerySchema.safeParse({ direction: 'asc' }).success).toBe(false);
+    expect(taskListQuerySchema.parse({ direction: 'asc' }).direction).toBe('asc');
     expect(workflowListQuerySchema.safeParse({ cursor: '7' }).success).toBe(false);
   });
 

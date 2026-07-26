@@ -385,3 +385,5 @@ export function readStoredWorkflowVersion(input: Readonly<{
     payload: Object.freeze(payload),
   });
 }
+
+export * from './gate-a.js';

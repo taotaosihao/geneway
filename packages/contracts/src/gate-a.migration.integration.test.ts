@@ -333,6 +333,63 @@ const stageExactTerminalPublication = async (client: pg.PoolClient): Promise<voi
     WHERE tenant_id=$1 AND id='task-report-finalization'`, [tenant, reportResult]);
 };
 
+const seedRolloverAuthority = async (suffix: string): Promise<{
+  capabilityId: string;
+  v1Id: string;
+  v2Id: string;
+  v1InternalId: string;
+  v2InternalId: string;
+}> => {
+  const capabilityId = `solution.analysis.concurrent-${suffix}`;
+  const v1Id = `cap-gate-a2-concurrent-${suffix}-1`;
+  const v2Id = `cap-gate-a2-concurrent-${suffix}-2`;
+  const promptV1 = `prompt-gate-a2-concurrent-${suffix}-1`;
+  const promptV2 = `prompt-gate-a2-concurrent-${suffix}-2`;
+  const release = (version: 1 | 2, state: 'draft' | 'shadow' | 'internal'): string =>
+    `release-gate-a2-concurrent-${suffix}-${version}-${state}`;
+  await pool.query(`INSERT INTO prompt_policy_versions (tenant_id,id,policy_id,version,policy) VALUES
+    ($1,$2,$4,1,'{}'),($1,$3,$4,2,'{}')`, [tenant, promptV1, promptV2, `prompt-${suffix}`]);
+  await pool.query(`INSERT INTO capability_versions (tenant_id,id,capability_id,version,spec) VALUES
+    ($1,$2,$4,1,'{}'),($1,$3,$4,2,'{}')`, [tenant, v1Id, v2Id, capabilityId]);
+  await pool.query(`INSERT INTO capability_release_records
+    (tenant_id,id,capability_version_id,prompt_policy_version_id,state,sequence,previous_release_id,
+     actor,gate_evidence,gate_evidence_digest) VALUES
+    ($1,$2,$8,$10,'draft',1,NULL,'test','{}',$12),
+    ($1,$3,$8,$10,'shadow',2,$2,'test','{}',$12),
+    ($1,$4,$8,$10,'internal',3,$3,'test','{}',$12),
+    ($1,$5,$9,$11,'draft',1,NULL,'test','{}',$12),
+    ($1,$6,$9,$11,'shadow',2,$5,'test','{}',$12),
+    ($1,$7,$9,$11,'internal',3,$6,'test','{}',$12)`, [
+    tenant, release(1, 'draft'), release(1, 'shadow'), release(1, 'internal'),
+    release(2, 'draft'), release(2, 'shadow'), release(2, 'internal'),
+    v1Id, v2Id, promptV1, promptV2, hashA,
+  ]);
+  await pool.query(`INSERT INTO capability_active_releases
+    (tenant_id,capability_id,release_id,pointer_version) VALUES ($1,$2,$3,1)`,
+  [tenant, capabilityId, release(1, 'draft')]);
+  await pool.query(`UPDATE capability_active_releases SET release_id=$3,pointer_version=2
+    WHERE tenant_id=$1 AND capability_id=$2`, [tenant, capabilityId, release(1, 'shadow')]);
+  await pool.query(`UPDATE capability_active_releases SET release_id=$3,pointer_version=3
+    WHERE tenant_id=$1 AND capability_id=$2`, [tenant, capabilityId, release(1, 'internal')]);
+  return { capabilityId, v1Id, v2Id, v1InternalId: release(1, 'internal'),
+    v2InternalId: release(2, 'internal') };
+};
+
+const insertActivation = async (
+  client: pg.PoolClient,
+  suffix: string,
+  authority: Awaited<ReturnType<typeof seedRolloverAuthority>>,
+): Promise<string> => {
+  const activationId = `activation-gate-a2-concurrent-${suffix}`;
+  await client.query(`INSERT INTO capability_release_activation_records
+    (tenant_id,id,schema_version,capability_id,previous_active_release_id,previous_pointer_version,
+     target_internal_release_id,target_pointer_version,actor,gate_evidence,gate_evidence_digest)
+    VALUES ($1,$2,'capability-release-activation/1',$3,$4,3,$5,4,'test','{}',$6)`, [
+    tenant, activationId, authority.capabilityId, authority.v1InternalId, authority.v2InternalId, hashC,
+  ]);
+  return activationId;
+};
+
 beforeAll(async () => {
   await pool.query("INSERT INTO tenants(id,name) VALUES ($1,'Gate A migration test')", [tenant]);
   await pool.query(`INSERT INTO users(tenant_id,id,display_name)
@@ -348,6 +405,27 @@ beforeAll(async () => {
   await pool.query(`INSERT INTO workflow_versions
     (tenant_id,id,workflow_hash,canonicalization_version,canonical_json)
     VALUES ($1,'workflow-legacy-gate-a-migration',$2,'RFC8785/JCS-1','{}')`, [tenant, hashA]);
+  await pool.query(`INSERT INTO prompt_policy_versions
+    (tenant_id,id,policy_id,version,policy)
+    VALUES ($1,'prompt-gate-a-migration','prompt-gate-a-migration',1,'{}')`, [tenant]);
+  await pool.query(`INSERT INTO capability_release_records
+    (tenant_id,id,capability_version_id,prompt_policy_version_id,state,sequence,
+     previous_release_id,actor,gate_evidence,gate_evidence_digest) VALUES
+    ($1,'release-gate-a-migration-draft','cap-gate-a-migration','prompt-gate-a-migration',
+      'draft',1,NULL,'test','{}',$2),
+    ($1,'release-gate-a-migration-shadow','cap-gate-a-migration','prompt-gate-a-migration',
+      'shadow',2,'release-gate-a-migration-draft','test','{}',$2),
+    ($1,'release-gate-a-migration-internal','cap-gate-a-migration','prompt-gate-a-migration',
+      'internal',3,'release-gate-a-migration-shadow','test','{}',$2)`, [tenant, hashA]);
+  await pool.query(`INSERT INTO capability_active_releases
+    (tenant_id,capability_id,release_id,pointer_version)
+    VALUES ($1,'solution.analysis.v1','release-gate-a-migration-draft',1)`, [tenant]);
+  await pool.query(`UPDATE capability_active_releases
+    SET release_id='release-gate-a-migration-shadow',pointer_version=2
+    WHERE tenant_id=$1 AND capability_id='solution.analysis.v1'`, [tenant]);
+  await pool.query(`UPDATE capability_active_releases
+    SET release_id='release-gate-a-migration-internal',pointer_version=3
+    WHERE tenant_id=$1 AND capability_id='solution.analysis.v1'`, [tenant]);
   await pool.query(`INSERT INTO business_tasks
     (tenant_id,id,conversation_id,capability_version_id,expert_catalog_version_id,harness_version_id,
      workflow_version_id,workflow_hash,requester_id,status,input_snapshot,expert_target,permission_scope,
@@ -391,6 +469,281 @@ afterAll(async () => {
 });
 
 describe('Gate A migration fail-closed authority', () => {
+  it('rolls the active capability pointer forward to an additive A.2 version without mutating A.1', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`INSERT INTO prompt_policy_versions (tenant_id,id,policy_id,version,policy) VALUES
+        ($1,'prompt-gate-a2-rollover-1','prompt-gate-a2-rollover',1,'{}'),
+        ($1,'prompt-gate-a2-rollover-2','prompt-gate-a2-rollover',2,'{}')`, [tenant]);
+      await client.query(`INSERT INTO capability_versions (tenant_id,id,capability_id,version,spec) VALUES
+        ($1,'cap-gate-a2-rollover-1','solution.analysis.rollover-test',1,'{}'),
+        ($1,'cap-gate-a2-rollover-2','solution.analysis.rollover-test',2,'{}')`, [tenant]);
+      await client.query(`INSERT INTO harness_versions (tenant_id,id,capability_version_id,version,spec)
+        VALUES ($1,'harness-gate-a2-rollover-1','cap-gate-a2-rollover-1',1,'{}')`, [tenant]);
+      await client.query(`INSERT INTO capability_release_records
+        (tenant_id,id,capability_version_id,prompt_policy_version_id,state,sequence,previous_release_id,
+         actor,gate_evidence,gate_evidence_digest) VALUES
+        ($1,'release-gate-a2-v1-draft','cap-gate-a2-rollover-1','prompt-gate-a2-rollover-1','draft',1,NULL,'test','{}',$2),
+        ($1,'release-gate-a2-v1-shadow','cap-gate-a2-rollover-1','prompt-gate-a2-rollover-1','shadow',2,
+          'release-gate-a2-v1-draft','test','{}',$2),
+        ($1,'release-gate-a2-v1-internal','cap-gate-a2-rollover-1','prompt-gate-a2-rollover-1','internal',3,
+          'release-gate-a2-v1-shadow','test','{}',$2)`, [tenant, hashA]);
+      await client.query(`INSERT INTO capability_active_releases
+        (tenant_id,capability_id,release_id,pointer_version)
+        VALUES ($1,'solution.analysis.rollover-test','release-gate-a2-v1-draft',1)`, [tenant]);
+      await client.query(`UPDATE capability_active_releases
+        SET release_id='release-gate-a2-v1-shadow',pointer_version=2
+        WHERE tenant_id=$1 AND capability_id='solution.analysis.rollover-test'`, [tenant]);
+      await client.query(`UPDATE capability_active_releases
+        SET release_id='release-gate-a2-v1-internal',pointer_version=3
+        WHERE tenant_id=$1 AND capability_id='solution.analysis.rollover-test'`, [tenant]);
+
+      await client.query(`INSERT INTO capability_release_records
+        (tenant_id,id,capability_version_id,prompt_policy_version_id,state,sequence,previous_release_id,
+         actor,gate_evidence,gate_evidence_digest) VALUES
+        ($1,'release-gate-a2-v2-draft','cap-gate-a2-rollover-2','prompt-gate-a2-rollover-2','draft',1,
+          NULL,'test','{}',$2),
+        ($1,'release-gate-a2-v2-shadow','cap-gate-a2-rollover-2','prompt-gate-a2-rollover-2','shadow',2,
+          'release-gate-a2-v2-draft','test','{}',$2),
+        ($1,'release-gate-a2-v2-internal','cap-gate-a2-rollover-2','prompt-gate-a2-rollover-2','internal',3,
+          'release-gate-a2-v2-shadow','test','{}',$2)`, [tenant, hashB]);
+      await client.query('SAVEPOINT reject_orphan_activation');
+      await client.query(`INSERT INTO capability_release_activation_records
+        (tenant_id,id,schema_version,capability_id,previous_active_release_id,previous_pointer_version,
+         target_internal_release_id,target_pointer_version,actor,gate_evidence,gate_evidence_digest)
+        VALUES ($1,'activation-gate-a2-orphan','capability-release-activation/1',
+          'solution.analysis.rollover-test','release-gate-a2-v1-internal',3,
+          'release-gate-a2-v2-internal',4,'test','{}',$2)`, [tenant, hashC]);
+      await expect(client.query(
+        'SET CONSTRAINTS capability_release_activation_records_committed_pointer IMMEDIATE',
+      )).rejects.toMatchObject({ code: 'P0001' });
+      await client.query('ROLLBACK TO SAVEPOINT reject_orphan_activation');
+      await client.query('SAVEPOINT require_activation_record');
+      await expect(client.query(`UPDATE capability_active_releases
+        SET release_id='release-gate-a2-v2-internal',pointer_version=4,
+          activation_record_id='activation-gate-a2-v2'
+        WHERE tenant_id=$1 AND capability_id='solution.analysis.rollover-test'`, [tenant]))
+        .rejects.toMatchObject({ code: 'P0001' });
+      await client.query('ROLLBACK TO SAVEPOINT require_activation_record');
+      await client.query(`INSERT INTO capability_release_activation_records
+        (tenant_id,id,schema_version,capability_id,previous_active_release_id,previous_pointer_version,
+         target_internal_release_id,target_pointer_version,actor,gate_evidence,gate_evidence_digest)
+        VALUES ($1,'activation-gate-a2-v2','capability-release-activation/1',
+          'solution.analysis.rollover-test','release-gate-a2-v1-internal',3,
+          'release-gate-a2-v2-internal',4,'test','{}',$2)`, [tenant, hashC]);
+      for (const status of ['awaiting_approval', 'approved', 'queued', 'running', 'cancel_requested', 'paused']) {
+        await client.query('SAVEPOINT require_quiescence');
+        await client.query(`INSERT INTO business_tasks
+          (tenant_id,id,conversation_id,capability_version_id,expert_catalog_version_id,harness_version_id,
+           workflow_version_id,workflow_hash,requester_id,status,input_snapshot,expert_target,permission_scope,
+           audience_scope,budget,simulation,runtime_mode,business_decision_allowed)
+          VALUES ($1,'task-gate-a2-rollover-active','conversation-gate-a-migration','cap-gate-a2-rollover-1',
+            'experts-gate-a-migration','harness-gate-a2-rollover-1','workflow-legacy-gate-a-migration',$2,
+            'user-gate-a-migration',$3,'{}','{}','{}','{}','{}',true,'fake',false)`, [tenant, hashA, status]);
+        await expect(client.query(`UPDATE capability_active_releases
+          SET release_id='release-gate-a2-v2-internal',pointer_version=4,
+            activation_record_id='activation-gate-a2-v2'
+          WHERE tenant_id=$1 AND capability_id='solution.analysis.rollover-test'`, [tenant]))
+          .rejects.toMatchObject({ code: 'P0001' });
+        await client.query('ROLLBACK TO SAVEPOINT require_quiescence');
+      }
+      await client.query(`UPDATE capability_active_releases
+        SET release_id='release-gate-a2-v2-internal',pointer_version=4,
+          activation_record_id='activation-gate-a2-v2'
+        WHERE tenant_id=$1 AND capability_id='solution.analysis.rollover-test'`, [tenant]);
+      await expect(client.query<{ release_id: string; pointer_version: string; activation_record_id: string }>(`SELECT release_id,
+        pointer_version::text,activation_record_id FROM capability_active_releases
+        WHERE tenant_id=$1 AND capability_id='solution.analysis.rollover-test'`, [tenant])).resolves.toMatchObject({
+        rows: [{ release_id: 'release-gate-a2-v2-internal', pointer_version: '4',
+          activation_record_id: 'activation-gate-a2-v2' }],
+      });
+
+      await client.query('SAVEPOINT reject_activation_update');
+      await expect(client.query(`UPDATE capability_release_activation_records SET actor='tampered'
+        WHERE tenant_id=$1 AND id='activation-gate-a2-v2'`, [tenant]))
+        .rejects.toMatchObject({ code: 'P0001' });
+      await client.query('ROLLBACK TO SAVEPOINT reject_activation_update');
+      await client.query('SAVEPOINT reject_activation_delete');
+      await expect(client.query(`DELETE FROM capability_release_activation_records
+        WHERE tenant_id=$1 AND id='activation-gate-a2-v2'`, [tenant]))
+        .rejects.toMatchObject({ code: 'P0001' });
+      await client.query('ROLLBACK TO SAVEPOINT reject_activation_delete');
+      await client.query('SAVEPOINT reject_pointer_delete');
+      await expect(client.query(`DELETE FROM capability_active_releases
+        WHERE tenant_id=$1 AND capability_id='solution.analysis.rollover-test'`, [tenant]))
+        .rejects.toMatchObject({ code: 'P0001' });
+      await client.query('ROLLBACK TO SAVEPOINT reject_pointer_delete');
+
+      await client.query('SAVEPOINT reject_downgrade');
+      await expect(client.query(`UPDATE capability_active_releases
+        SET release_id='release-gate-a2-v1-internal',pointer_version=5,
+          activation_record_id='activation-gate-a2-v2'
+        WHERE tenant_id=$1 AND capability_id='solution.analysis.rollover-test'`, [tenant]))
+        .rejects.toMatchObject({ code: 'P0001' });
+      await client.query('ROLLBACK TO SAVEPOINT reject_downgrade');
+
+      await expect(client.query(`UPDATE prompt_policy_versions SET policy='{"tampered":true}'
+        WHERE tenant_id=$1 AND id='prompt-gate-a2-rollover-1'`, [tenant]))
+        .rejects.toMatchObject({ code: 'P0001' });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it('serializes task creation and higher-version activation across real PostgreSQL connections', async () => {
+    const taskFirst = await seedRolloverAuthority('task-first');
+    const taskClient = await pool.connect();
+    const activationClient = await pool.connect();
+    try {
+      await taskClient.query('BEGIN');
+      await taskClient.query(`SELECT release_id FROM capability_active_releases
+        WHERE tenant_id=$1 AND capability_id=$2 FOR SHARE`, [tenant, taskFirst.capabilityId]);
+      await taskClient.query(`INSERT INTO business_tasks
+        (tenant_id,id,conversation_id,capability_version_id,expert_catalog_version_id,harness_version_id,
+         workflow_version_id,workflow_hash,requester_id,status,input_snapshot,expert_target,permission_scope,
+         audience_scope,budget,simulation,runtime_mode,business_decision_allowed)
+        VALUES ($1,'task-gate-a2-concurrent-task-first','conversation-gate-a-migration',$2,
+          'experts-gate-a-migration','harness-gate-a-migration','workflow-legacy-gate-a-migration',$3,
+          'user-gate-a-migration','running','{}','{}','{}','{}','{}',true,'fake',false)`,
+      [tenant, taskFirst.v1Id, hashA]);
+
+      await activationClient.query('BEGIN');
+      await activationClient.query("SET LOCAL lock_timeout='100ms'");
+      await expect(insertActivation(activationClient, 'task-first', taskFirst))
+        .rejects.toMatchObject({ code: '55P03' });
+      await activationClient.query('ROLLBACK');
+      await taskClient.query('COMMIT');
+
+      await activationClient.query('BEGIN');
+      const activationId = await insertActivation(activationClient, 'task-first', taskFirst);
+      await expect(activationClient.query(`UPDATE capability_active_releases
+        SET release_id=$3,pointer_version=4,activation_record_id=$4
+        WHERE tenant_id=$1 AND capability_id=$2`, [
+        tenant, taskFirst.capabilityId, taskFirst.v2InternalId, activationId,
+      ])).rejects.toMatchObject({ code: 'P0001' });
+      await activationClient.query('ROLLBACK');
+      await expect(pool.query(`SELECT release_id,pointer_version::text FROM capability_active_releases
+        WHERE tenant_id=$1 AND capability_id=$2`, [tenant, taskFirst.capabilityId])).resolves.toMatchObject({
+        rows: [{ release_id: taskFirst.v1InternalId, pointer_version: '3' }],
+      });
+      await expect(pool.query(`SELECT id FROM capability_release_activation_records
+        WHERE tenant_id=$1 AND capability_id=$2`, [tenant, taskFirst.capabilityId])).resolves.toMatchObject({ rows: [] });
+    } finally {
+      await taskClient.query('ROLLBACK').catch(() => undefined);
+      await activationClient.query('ROLLBACK').catch(() => undefined);
+      taskClient.release();
+      activationClient.release();
+    }
+
+    const activationFirst = await seedRolloverAuthority('activation-first');
+    const staleTaskClient = await pool.connect();
+    const winningActivationClient = await pool.connect();
+    try {
+      await winningActivationClient.query('BEGIN');
+      const activationId = await insertActivation(winningActivationClient, 'activation-first', activationFirst);
+      await winningActivationClient.query(`UPDATE capability_active_releases
+        SET release_id=$3,pointer_version=4,activation_record_id=$4
+        WHERE tenant_id=$1 AND capability_id=$2`, [
+        tenant, activationFirst.capabilityId, activationFirst.v2InternalId, activationId,
+      ]);
+
+      const insertStaleLiveTask = (): Promise<pg.QueryResult> => staleTaskClient.query(`INSERT INTO business_tasks
+        (tenant_id,id,conversation_id,capability_version_id,expert_catalog_version_id,harness_version_id,
+         workflow_version_id,workflow_hash,requester_id,status,input_snapshot,expert_target,permission_scope,
+         audience_scope,budget,simulation,runtime_mode,business_decision_allowed,record_variant,semantic_fingerprint)
+        VALUES ($1,'task-gate-a2-concurrent-stale','conversation-gate-a-migration',$2,
+          'experts-gate-a-migration','harness-gate-a-migration','workflow-legacy-gate-a-migration',$3,
+          'user-gate-a-migration','queued','{}','{}','{}','{}','{}',false,'model_gateway',false,
+          'business-task.live/1',$4)`, [tenant, activationFirst.v1Id, hashA, hashD]);
+      await staleTaskClient.query('BEGIN');
+      await staleTaskClient.query("SET LOCAL lock_timeout='100ms'");
+      await expect(insertStaleLiveTask()).rejects.toMatchObject({ code: '55P03' });
+      await staleTaskClient.query('ROLLBACK');
+      await winningActivationClient.query('COMMIT');
+
+      await staleTaskClient.query('BEGIN');
+      await expect(insertStaleLiveTask()).rejects.toMatchObject({ code: 'P0001' });
+      await staleTaskClient.query('ROLLBACK');
+      await expect(pool.query(`SELECT release_id,pointer_version::text,activation_record_id
+        FROM capability_active_releases WHERE tenant_id=$1 AND capability_id=$2`,
+      [tenant, activationFirst.capabilityId])).resolves.toMatchObject({
+        rows: [{ release_id: activationFirst.v2InternalId, pointer_version: '4', activation_record_id: activationId }],
+      });
+    } finally {
+      await staleTaskClient.query('ROLLBACK').catch(() => undefined);
+      await winningActivationClient.query('ROLLBACK').catch(() => undefined);
+      staleTaskClient.release();
+      winningActivationClient.release();
+    }
+
+    const doubleActivation = await seedRolloverAuthority('double-activation');
+    const winningClient = await pool.connect();
+    const losingClient = await pool.connect();
+    try {
+      await winningClient.query('BEGIN');
+      const winningId = await insertActivation(winningClient, 'double-activation-winner', doubleActivation);
+      await losingClient.query('BEGIN');
+      await losingClient.query("SET LOCAL lock_timeout='100ms'");
+      await expect(insertActivation(losingClient, 'double-activation-loser', doubleActivation))
+        .rejects.toMatchObject({ code: '55P03' });
+      await losingClient.query('ROLLBACK');
+      await winningClient.query(`UPDATE capability_active_releases
+        SET release_id=$3,pointer_version=4,activation_record_id=$4
+        WHERE tenant_id=$1 AND capability_id=$2`, [
+        tenant, doubleActivation.capabilityId, doubleActivation.v2InternalId, winningId,
+      ]);
+      await winningClient.query('COMMIT');
+
+      await losingClient.query('BEGIN');
+      await expect(insertActivation(losingClient, 'double-activation-loser', doubleActivation))
+        .rejects.toMatchObject({ code: 'P0001' });
+      await losingClient.query('ROLLBACK');
+      await expect(pool.query(`SELECT count(*)::int count FROM capability_release_activation_records
+        WHERE tenant_id=$1 AND capability_id=$2`, [tenant, doubleActivation.capabilityId]))
+        .resolves.toMatchObject({ rows: [{ count: 1 }] });
+    } finally {
+      await winningClient.query('ROLLBACK').catch(() => undefined);
+      await losingClient.query('ROLLBACK').catch(() => undefined);
+      winningClient.release();
+      losingClient.release();
+    }
+  });
+
+  it('admits a separate solution-live /2 workflow while preserving the immutable /1 row', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`INSERT INTO capability_versions(tenant_id,id,capability_id,version,spec)
+        VALUES ($1,'cap-gate-a2-template','solution.analysis.template-test',1,'{}')`, [tenant]);
+      await client.query(`INSERT INTO harness_versions(tenant_id,id,capability_version_id,version,spec)
+        VALUES ($1,'harness-gate-a2-template','cap-gate-a2-template',1,'{}')`, [tenant]);
+      await client.query(`INSERT INTO workflow_template_versions
+        (tenant_id,template_id,schema_version,capability_version_id,harness_version_id,
+         workflow_draft_schema_version,workflow_payload_schema_version,compiler_version,
+         canonicalization_version,registry_digest,canonical_entry)
+        VALUES ($1,'workflow-template.solution-live/2','workflow-template-version/1',
+          'cap-gate-a2-template','harness-gate-a2-template','workflow-draft.template-v1',
+          'workflow-version.template-v1','geneway-workflow-compiler/0.2.0','RFC8785/JCS-1',$2,$3)`, [tenant, hashD, {
+        templateId: 'workflow-template.solution-live/2', registryDigest: hashD,
+      }]);
+      await expect(client.query(`INSERT INTO workflow_versions
+        (tenant_id,id,workflow_hash,canonicalization_version,canonical_json,
+         record_variant,template_id,registry_digest)
+        VALUES ($1,'workflow-gate-a2-template',$2,'RFC8785/JCS-1',
+          '{"schemaVersion":"workflow-version.template-v1"}',
+          'workflow-read-model.live/1','workflow-template.solution-live/2',$3)`, [tenant, hashE, hashD]))
+        .resolves.toBeDefined();
+      await expect(client.query(`UPDATE workflow_template_versions SET compiler_version='tampered'
+        WHERE tenant_id=$1 AND template_id='workflow-template.solution-live/1'`, [tenant]))
+        .rejects.toMatchObject({ code: 'P0001' });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
   it('preserves legacy text rows while admitting PDF and DOCX through every source-artifact relation', async () => {
     const client = await pool.connect();
     const formats = [

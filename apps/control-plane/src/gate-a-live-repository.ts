@@ -358,7 +358,8 @@ async function createLiveTaskAuthority(
       AND shadow.id=release.previous_release_id AND shadow.state='shadow'
       AND shadow.sequence=release.sequence-1 AND shadow.capability_version_id=release.capability_version_id
       AND shadow.prompt_policy_version_id=release.prompt_policy_version_id
-    WHERE active.tenant_id=$1 AND active.capability_id=$2 AND release.state='internal'`,
+    WHERE active.tenant_id=$1 AND active.capability_id=$2 AND release.state='internal'
+    FOR SHARE OF active`,
   [principal.tenantId, LIVE_CAPABILITY_ID]);
   const release = releaseRows.rows[0];
   const liveCandidate = release === undefined

@@ -436,13 +436,11 @@ describe('Gate A live task create authority', () => {
   });
 
   it('returns stable public NOT_OPEN without exposing release or model-route details', async () => {
-    await control.pool.query(`DELETE FROM capability_active_releases
-      WHERE tenant_id='tenant_local' AND capability_id='solution.analysis.v1'`);
     const controlPlane = await createControlPlane({
       databaseUrl: requiredDatabaseUrl,
       cursorHmacSecret: 'gate-a-not-open-cursor-secret-at-least-32-bytes',
       objectStorage: memoryStorage,
-      gateALiveValidationRunId: runId,
+      gateALiveValidationRunId: `${runId}-not-open`,
       modelGatewayAuthority: { serviceToken: modelGatewayToken, invocationTokenSecret: secret },
       chatRouteAvailable: () => Promise.resolve(true),
       artifactServiceHooks: { parserSandbox: { parse: () => Promise.reject(new Error('not called')) } },
@@ -1291,9 +1289,9 @@ describe('Gate A live task create authority', () => {
     expect(reportText).not.toContain('candidate_1');
     expect(reportText).not.toContain('The material requires traceability.');
     expect(reportText).not.toContain('xxxxxxxx');
-    await control.pool.query(`DELETE FROM capability_active_releases
-      WHERE tenant_id=$1 AND capability_id='solution.analysis.v1'`, [claim.tenantId]);
-    await expect(repository.getCapabilityRoute(livePrincipal, true, true)).resolves.toMatchObject({ status: 'NOT_OPEN' });
+    const unavailableRepository = new GateALiveRepository(control.pool, secret, `${runId}-not-open`);
+    await expect(unavailableRepository.getCapabilityRoute(livePrincipal, true, true))
+      .resolves.toMatchObject({ status: 'NOT_OPEN' });
     const historicalSnapshot = await repository.getLiveTask(livePrincipal, claim.taskId);
     expect(historicalSnapshot).toMatchObject({ status: 'completed' });
     expect(historicalSnapshot.result?.statements).toBeInstanceOf(Array);

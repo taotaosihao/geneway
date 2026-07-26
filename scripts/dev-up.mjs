@@ -19,11 +19,12 @@ const HELP = `用法: pnpm dev-up
   GENEWAY_CONTROL_PLANE_PORT     覆盖 Control Plane 端口
   GENEWAY_MODEL_GATEWAY_PORT     覆盖 Model Gateway 端口
   GENEWAY_GATE_A0_RELEASE_PORT   覆盖 loopback release helper 端口
+  GENEWAY_GATE_A_RELEASE_PORT    覆盖 loopback Gate A release helper 端口
 
 同时提供已授权的 GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE 与尚未过期的
 GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE 时，会通过 loopback release helper
-为本次 disposable run 临时开放真实聊天；仅提供其中一项会安全失败，
-两项都未提供时真实聊天保持 NOT_OPEN。
+为本次 disposable run 临时开放真实聊天与 auto 材料分析；仅提供其中一项会安全失败，
+两项都未提供时两个真实 route 都保持 NOT_OPEN。
 
 按 Ctrl+C 停止全部进程并删除本次临时数据库、对象存储和 Worker 凭据。
 `;
@@ -77,12 +78,17 @@ export function readConfiguration(environment, lanHosts = detectLanHosts()) {
   const controlPlanePort = parsePort(environment, 'GENEWAY_CONTROL_PLANE_PORT', 3100);
   const modelGatewayPort = parsePort(environment, 'GENEWAY_MODEL_GATEWAY_PORT', 3150);
   const releaseHelperPort = parsePort(environment, 'GENEWAY_GATE_A0_RELEASE_PORT', 3160);
+  const gateAReleaseHelperPort = parsePort(environment, 'GENEWAY_GATE_A_RELEASE_PORT', 3170);
   if (new Set([webPort, controlPlanePort, modelGatewayPort]).size !== 3) {
     throw new Error('Web, Control Plane, and Model Gateway ports must be different');
   }
   if (environment.GENEWAY_GATE_A0_RELEASE_PORT !== undefined
     && new Set([webPort, controlPlanePort, modelGatewayPort, releaseHelperPort]).size !== 4) {
     throw new Error('Web, Control Plane, Model Gateway, and release helper ports must be different');
+  }
+  if (environment.GENEWAY_GATE_A_RELEASE_PORT !== undefined
+    && new Set([webPort, controlPlanePort, modelGatewayPort, releaseHelperPort, gateAReleaseHelperPort]).size !== 5) {
+    throw new Error('Web, Control Plane, Model Gateway, and both release helper ports must be different');
   }
   const localOrigins = [`http://localhost:${String(webPort)}`, `http://127.0.0.1:${String(webPort)}`];
   const publicOrigins = lanHosts.map((host) => `http://${host}:${String(webPort)}`);
@@ -96,9 +102,58 @@ export function readConfiguration(environment, lanHosts = detectLanHosts()) {
     modelGatewayPort,
     releaseHelperBindHost: '127.0.0.1',
     releaseHelperPort,
+    gateAReleaseHelperBindHost: '127.0.0.1',
+    gateAReleaseHelperPort,
     allowedWebOrigins: [...localOrigins, ...publicOrigins],
     publicUrls: publicOrigins.map((origin) => `${origin}/conversations/new`),
   };
+}
+
+function buildGateAParserImage(environment = process.env) {
+  const output = execFileSync(process.execPath, ['scripts/build-gate-a-document-parser-image.mjs'], {
+    cwd: repositoryRoot,
+    env: minimalEnvironment(environment),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  const line = output.trim().split('\n').at(-1);
+  const metadata = line === undefined ? null : JSON.parse(line);
+  if (metadata?.schemaVersion !== 'gate-a-document-parser-image-build-candidate/2'
+    || !/^geneway-document-parser:[a-f0-9]{16}$/u.test(metadata.image ?? '')
+    || !/^[a-f0-9]{64}$/u.test(metadata.imageSourceDigest ?? '')
+    || !/^[a-f0-9]{64}$/u.test(metadata.packageDigest ?? '')
+    || !/^[a-f0-9]{64}$/u.test(metadata.pdfjsInventoryDigest ?? '')
+    || metadata.image !== `geneway-document-parser:${metadata.imageSourceDigest.slice(0, 16)}`) {
+    throw new Error('Gate A parser image build returned invalid source-bound metadata');
+  }
+  return metadata;
+}
+
+function prepareGateAParserApproval(parserBuild, runId, environment = process.env) {
+  const output = execFileSync('./node_modules/.bin/tsx', ['scripts/prepare-gate-a-document-parser-approval.ts'], {
+    cwd: repositoryRoot,
+    env: {
+      ...minimalEnvironment(environment),
+      GENEWAY_RUN_ID: runId,
+      GENEWAY_GATE_A_PARSER_APPROVED_BY: 'user_local',
+      GENEWAY_GATE_A_PARSER_BUILD_JSON: JSON.stringify(parserBuild),
+    },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  const line = output.trim().split('\n').at(-1);
+  const approval = line === undefined ? null : JSON.parse(line);
+  const digests = approval?.formatManifestDigests;
+  if (approval?.schemaVersion !== 'gate-a-parser-startup-approval/2'
+    || approval.runId !== runId || approval.approvedBy !== 'user_local'
+    || approval.image !== parserBuild.image
+    || !/^sha256:[a-f0-9]{64}$/u.test(approval.imageId ?? '')
+    || ![approval.imageSourceDigest, approval.executableDigest, approval.packageDigest,
+      approval.runtimeClosureDigest, approval.dependencyInventoryDigest,
+      digests?.txt, digests?.pdf, digests?.docx].every((value) => /^[a-f0-9]{64}$/u.test(value ?? ''))) {
+    throw new Error('Gate A parser approval preparation returned invalid immutable authority');
+  }
+  return approval;
 }
 
 export function minimalEnvironment(environment = process.env) {
@@ -140,6 +195,30 @@ export function modelGatewayProviderEnvironment(environment = process.env) {
 const CONTROL_PLANE_WITH_RELEASE_COMMAND = `set -euo pipefail
 control_plane_pid=''
 release_helper_pid=''
+gate_a_release_helper_pid=''
+stop_stack() {
+  trap - EXIT INT TERM
+  [[ -z "$gate_a_release_helper_pid" ]] || kill "$gate_a_release_helper_pid" 2>/dev/null || true
+  [[ -z "$release_helper_pid" ]] || kill "$release_helper_pid" 2>/dev/null || true
+  [[ -z "$control_plane_pid" ]] || kill "$control_plane_pid" 2>/dev/null || true
+  [[ -z "$gate_a_release_helper_pid" ]] || wait "$gate_a_release_helper_pid" 2>/dev/null || true
+  [[ -z "$release_helper_pid" ]] || wait "$release_helper_pid" 2>/dev/null || true
+  [[ -z "$control_plane_pid" ]] || wait "$control_plane_pid" 2>/dev/null || true
+}
+trap stop_stack EXIT INT TERM
+env -u GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE -u GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE \
+  -u GENEWAY_GATE_A0_RELEASE_PORT -u GENEWAY_GATE_A_RELEASE_PORT -u GENEWAY_GATE_A_PARSER_BUILD_JSON \
+  ./node_modules/.bin/tsx apps/control-plane/src/main.ts &
+control_plane_pid=$!
+./node_modules/.bin/tsx scripts/e2e/start-gate-a0-release.ts &
+release_helper_pid=$!
+./node_modules/.bin/tsx scripts/e2e/start-gate-a-release.ts &
+gate_a_release_helper_pid=$!
+wait -n "$control_plane_pid" "$release_helper_pid" "$gate_a_release_helper_pid"`;
+
+const CONTROL_PLANE_WITH_A0_RELEASE_COMMAND = `set -euo pipefail
+control_plane_pid=''
+release_helper_pid=''
 stop_stack() {
   trap - EXIT INT TERM
   [[ -z "$release_helper_pid" ]] || kill "$release_helper_pid" 2>/dev/null || true
@@ -163,6 +242,9 @@ export function buildControlPlaneStackPlan({
   gatewayServiceTokenFile,
   gatewayInvocationSecretFile,
   liveProvider,
+  parserBuild,
+  parserApproval,
+  approvedC1Sha256,
 }) {
   const environmentArguments = [
     `GENEWAY_WEB_ALLOWED_ORIGINS=${configuration.allowedWebOrigins.join(',')}`,
@@ -179,16 +261,38 @@ export function buildControlPlaneStackPlan({
     return {
       arguments: ['scripts/with-storage.sh', 'env', ...environmentArguments, './node_modules/.bin/tsx', 'apps/control-plane/src/main.ts'],
       releaseHealthUrl: null,
+      gateAReleaseHealthUrl: null,
     };
+  }
+  if ((parserBuild === undefined) !== (parserApproval === undefined)) {
+    throw new Error('Gate A parser build and approval metadata must be configured together');
+  }
+  const gateAEnabled = parserBuild !== undefined && parserApproval !== undefined;
+  if (approvedC1Sha256 !== undefined && (!gateAEnabled
+    || Buffer.byteLength(approvedC1Sha256, 'utf8') > 4_096
+    || approvedC1Sha256.split(',').some((hash) => !/^[a-f0-9]{64}$/u.test(hash)))) {
+    throw new Error('Gate A dev C1 allowlist requires parser authority and comma-separated lowercase SHA-256 values');
   }
   environmentArguments.push(
     `GENEWAY_GATE_A0_RELEASE_PORT=${String(configuration.releaseHelperPort)}`,
     `GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE=${liveProvider.authFilePath}`,
     `GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE=${liveProvider.conformanceFilePath}`,
   );
+  if (gateAEnabled) environmentArguments.push(
+    `GENEWAY_GATE_A_RELEASE_PORT=${String(configuration.gateAReleaseHelperPort)}`,
+    `GENEWAY_GATE_A_LIVE_VALIDATION_RUN_ID=${runId}`,
+    `GENEWAY_GATE_A_PARSER_IMAGE=${parserBuild.image}`,
+    `GENEWAY_GATE_A_PARSER_BUILD_JSON=${JSON.stringify(parserBuild)}`,
+    `GENEWAY_GATE_A_PARSER_APPROVAL_JSON=${JSON.stringify(parserApproval)}`,
+    ...(approvedC1Sha256 === undefined ? [] : [`GENEWAY_GATE_A_APPROVED_C1_SHA256=${approvedC1Sha256}`]),
+  );
   return {
-    arguments: ['scripts/with-storage.sh', 'env', ...environmentArguments, 'bash', '-c', CONTROL_PLANE_WITH_RELEASE_COMMAND],
+    arguments: ['scripts/with-storage.sh', 'env', ...environmentArguments, 'bash', '-c',
+      gateAEnabled ? CONTROL_PLANE_WITH_RELEASE_COMMAND : CONTROL_PLANE_WITH_A0_RELEASE_COMMAND],
     releaseHealthUrl: `http://${configuration.releaseHelperBindHost}:${String(configuration.releaseHelperPort)}/health`,
+    gateAReleaseHealthUrl: gateAEnabled
+      ? `http://${configuration.gateAReleaseHelperBindHost}:${String(configuration.gateAReleaseHelperPort)}/health`
+      : null,
   };
 }
 
@@ -312,6 +416,15 @@ async function main() {
       process.env.GENEWAY_GATE_A0_RELEASE_PORT !== undefined,
       'Gate A0 release helper',
     );
+  const gateAReleaseHelperPort = liveProvider === undefined
+    ? configuration.gateAReleaseHelperPort
+    : await resolveUnreservedPort(
+      [configuration.gateAReleaseHelperBindHost],
+      configuration.gateAReleaseHelperPort,
+      new Set([controlPlanePort, modelGatewayPort, webPort, releaseHelperPort]),
+      process.env.GENEWAY_GATE_A_RELEASE_PORT !== undefined,
+      'Gate A release helper',
+    );
   configuration = {
     ...readConfiguration({
       ...process.env,
@@ -320,9 +433,13 @@ async function main() {
       GENEWAY_WEB_PORT: String(webPort),
     }),
     releaseHelperPort,
+    gateAReleaseHelperPort,
   };
 
   const runId = `dev-${String(Date.now())}-${String(process.pid)}`;
+  const parserBuild = liveProvider === undefined ? undefined : buildGateAParserImage(process.env);
+  const parserApproval = parserBuild === undefined ? undefined
+    : prepareGateAParserApproval(parserBuild, runId, process.env);
   const authorityDirectory = mkdtempSync('/tmp/geneway-dev-');
   const tokenFile = `${authorityDirectory}/worker.token`;
   const gatewayServiceTokenFile = `${authorityDirectory}/model-gateway-service.token`;
@@ -409,6 +526,9 @@ async function main() {
       gatewayServiceTokenFile,
       gatewayInvocationSecretFile,
       liveProvider,
+      parserBuild,
+      parserApproval,
+      approvedC1Sha256: process.env.GENEWAY_GATE_A_APPROVED_C1_SHA256,
     });
     process.stdout.write(`启动 Control Plane 与临时基础设施（run ${runId}）…\n`);
     controlPlane = startProcess('bash', controlPlaneStack.arguments, {
@@ -436,6 +556,15 @@ async function main() {
         return body.ready === true && body.state === 'internal';
       }, 'Gate A0 release helper', 60_000, controlPlane)) === 'shutdown') return;
     }
+    if (controlPlaneStack.gateAReleaseHealthUrl !== null) {
+      process.stdout.write('等待本次 disposable Gate A release 进入 internal…\n');
+      if (await waitForLifecycle(waitFor(async () => {
+        const response = await fetch(controlPlaneStack.gateAReleaseHealthUrl);
+        if (!response.ok) return false;
+        const body = await response.json();
+        return body.ready === true && body.state === 'internal' && body.runId === runId;
+      }, 'Gate A release helper', 60_000, controlPlane)) === 'shutdown') return;
+    }
 
     process.stdout.write('启动独立 Worker…\n');
     worker = startProcess('./node_modules/.bin/tsx', ['apps/worker/src/main.ts'], {
@@ -449,6 +578,7 @@ async function main() {
       GENEWAY_WORKER_DEPLOYMENT: 'gate0.2a-local',
       GENEWAY_MODEL_GATEWAY_URL: `http://${configuration.modelGatewayBindHost}:${String(configuration.modelGatewayPort)}`,
       GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: gatewayServiceTokenFile,
+      ...(liveProvider === undefined ? {} : { GENEWAY_GATE_A_LIVE_ENABLED: '1' }),
     });
     watch('Worker', worker);
     if (await waitForLifecycle(waitFor(() => {

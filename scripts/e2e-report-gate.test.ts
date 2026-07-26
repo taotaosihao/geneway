@@ -28,6 +28,30 @@ describe('E2E report gate', () => {
     expect(validateE2eReport(reportFor('gate0.2b-fast-chat-local'), ['--project=gate0.2b-fast-chat-local']).expectedCount).toBe(1);
     expect(validateE2eReport(reportFor('gate-a0-live'), ['--project=gate-a0-live']).expectedCount).toBe(2);
     expect(validateE2eReport(reportFor('gate-a0-lan'), ['--project=gate-a0-lan']).expectedCount).toBe(1);
+    expect(validateE2eReport(reportFor('gate-a-not-open'), ['--project=gate-a-not-open']).expectedCount).toBe(1);
+    const gateALiveReport = reportFor('gate-a-live');
+    const gateALiveSuite = (gateALiveReport.suites as Array<{ specs: unknown[] }>)[0];
+    if (gateALiveSuite === undefined) throw new Error('Expected a Gate A live test suite');
+    const gateANotOpenSuite = (reportFor('gate-a-not-open').suites as Array<{ specs: unknown[] }>)[0];
+    if (gateANotOpenSuite === undefined) throw new Error('Expected a Gate A not-open test suite');
+    gateALiveSuite.specs.push(...gateANotOpenSuite.specs);
+    (gateALiveReport.stats as { expected: number }).expected += gateANotOpenSuite.specs.length;
+    expect(validateE2eReport(gateALiveReport, ['--project=gate-a-live']).expectedCount).toBe(11);
+  });
+
+  it('keeps dependency inventory outside a top-level Gate A file filter', () => {
+    const gateALiveReport = reportFor('gate-a-live');
+    const gateALiveSuite = (gateALiveReport.suites as Array<{ specs: Array<Readonly<{ file: string }>> }>)[0];
+    if (gateALiveSuite === undefined) throw new Error('Expected a Gate A live test suite');
+    gateALiveSuite.specs = gateALiveSuite.specs.filter((spec) => spec.file === 'gate-a-solution-analysis.spec.ts');
+    const gateANotOpenSuite = (reportFor('gate-a-not-open').suites as Array<{ specs: unknown[] }>)[0];
+    if (gateANotOpenSuite === undefined) throw new Error('Expected a Gate A not-open test suite');
+    gateALiveSuite.specs.push(...gateANotOpenSuite.specs as Array<Readonly<{ file: string }>>);
+    (gateALiveReport.stats as { expected: number }).expected = gateALiveSuite.specs.length;
+    expect(validateE2eReport(gateALiveReport, [
+      '--project=gate-a-live',
+      'gate-a-solution-analysis.spec.ts',
+    ]).expectedCount).toBe(9);
   });
 
   it('rejects a skipped test even when Playwright would exit zero', () => {

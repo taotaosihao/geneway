@@ -179,7 +179,10 @@ test('真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gate
   await expect(chat).toHaveAttribute('data-conversation-id', conversationId);
   await expect(page.locator(`[data-message-id="${assistantMessage?.id ?? ''}"]`)).toContainText(assistantMessage?.body ?? '');
   await page.getByTestId('material-analysis-link').click();
-  await expect(page).toHaveURL(/\/conversations\/new\?capability=solution\.analysis\.v1$/u);
+  await expect(page).toHaveURL(new RegExp(
+    `/conversations/${conversationId.replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\?capability=solution\\.analysis\\.v1$`,
+    'u',
+  ));
   await expect(page.getByTestId('geneway-app')).toBeVisible();
   await expect(page.getByTestId('artifact-upload-card')).toBeVisible();
   await expect(page.getByTestId('task-card')).toHaveCount(0);

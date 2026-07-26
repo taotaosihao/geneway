@@ -45,6 +45,17 @@ export const expectedE2eTests: readonly ExpectedE2eTest[] = [
   { project: 'gate-a0-live', file: 'gate-a0-fast-chat.spec.ts', title: '真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gateway audit' },
   { project: 'gate-a0-live', file: 'gate-a0-context-cancel.spec.ts', title: '真实 served Fast Chat 追问上下文并用停止生成完成 cancel fencing' },
   { project: 'gate-a0-lan', file: 'gate-a0-lan-regression.spec.ts', title: '实际 LAN 双浏览器共享 Conversation、上下文、取消并保持材料门' },
+  { project: 'gate-a-not-open', file: 'gate-a-not-open.spec.ts', title: 'internal release 前 public capability、UI 与数据库均保持 NOT_OPEN' },
+  { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: '默认 Fast Chat 首问、追问、停止与刷新保持零 BusinessTask' },
+  { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: 'auto 路线完成真实 C1 分析并关联 UI、API、Postgres、Worker 与 Gateway receipt' },
+  { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: '真实 DOCX 经同一 Parser authority 形成可选 C1 live snapshot' },
+  { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: '已批准 authority 在执行前过期时原 task 生成 v2 pending 并可再次批准' },
+  { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: '取消 live task 后不发布 result、Evidence、analysis_report 或伪 completed' },
+  { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: 'execution 已开始后来源撤销稳定失败且刷新保持零发布' },
+  { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: 'Model Gateway readiness 临时不可用时既有终态仍可恢复且禁止新建' },
+  { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: '非 auto 与输入失败均 fail closed 且不回退 FakeRuntime' },
+  { project: 'gate-a-live', file: 'gate-a0-context-cancel.spec.ts', title: '真实 served Fast Chat 追问上下文并用停止生成完成 cancel fencing' },
+  { project: 'gate-a-live', file: 'gate-a0-fast-chat.spec.ts', title: '真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gateway audit' },
 ];
 
 const resultSchema = z.object({ status: z.string() }).passthrough();
@@ -96,8 +107,15 @@ function expectedSelection(arguments_: readonly string[]): readonly ExpectedE2eT
   for (const project of selectedProjects) {
     if (!expectedE2eTests.some((item) => item.project === project)) throw new Error(`Unknown gated Playwright project: ${project}`);
   }
+  const dependencyProjects = new Set<string>();
+  if (selectedProjects.has('gate-a-live')) {
+    selectedProjects.add('gate-a-not-open');
+    dependencyProjects.add('gate-a-not-open');
+  }
   const selected = expectedE2eTests.filter((item) => selectedProjects.has(item.project)
-    && (fileFilters.length === 0 || fileFilters.some((filter) => item.file.includes(filter))));
+    && (dependencyProjects.has(item.project)
+      || fileFilters.length === 0
+      || fileFilters.some((filter) => item.file.includes(filter))));
   if (selected.length === 0) throw new Error('Playwright selection contains no required gated tests');
   return selected;
 }

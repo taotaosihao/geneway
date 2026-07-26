@@ -1,8 +1,8 @@
 import { Background, Controls, ReactFlow, type Edge, type Node } from '@xyflow/react';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { taskListQuerySchema, workflowListQuerySchema, type TaskListQuery, type TaskSnapshot, type WorkflowDetailProjection } from '@geneway/contracts';
-import { SimulationNotice } from '@geneway/ui';
-import { api, apiErrorCode, apiErrorStatus, mergeTaskEventBatch } from './api.js';
+import { taskListQuerySchema, workflowListQuerySchema, type GateALiveEvidenceProjection, type TaskListQuery } from '@geneway/contracts';
+import { InternalAcceptanceNotice, SimulationNotice } from '@geneway/ui';
+import { api, apiErrorCode, apiErrorStatus, mergeTaskEventBatch, type PublicTask, type PublicWorkflow } from './api.js';
 
 const STEP_NAMES: Readonly<Record<string, string>> = {
   document_ingest: '读取材料',
@@ -19,6 +19,26 @@ const STEP_NAMES: Readonly<Record<string, string>> = {
   evidence_quality_check: '检查证据质量',
   report_publish: '发布结果',
 };
+
+function isLiveTask(task: PublicTask): task is Extract<PublicTask, { recordVariant: 'business-task.live/1' }> {
+  return 'recordVariant' in task && task.recordVariant === 'business-task.live/1';
+}
+
+function isLiveWorkflow(workflow: PublicWorkflow): workflow is Extract<PublicWorkflow, { recordVariant: 'workflow-read-model.live/1' }> {
+  return 'recordVariant' in workflow && workflow.recordVariant === 'workflow-read-model.live/1';
+}
+
+function isLiveEvidence(evidence: PublicTask['evidence'][number]): evidence is GateALiveEvidenceProjection {
+  return 'recordVariant' in evidence && evidence.recordVariant === 'evidence.live/1';
+}
+
+function evidenceHash(evidence: PublicTask['evidence'][number]): string {
+  return isLiveEvidence(evidence) ? evidence.source.excerptSha256 : evidence.excerptSha256;
+}
+
+function statementKindLabel(kind: 'fact' | 'inference' | 'recommendation' | 'unknown'): string {
+  return kind === 'fact' ? '事实' : kind === 'inference' ? '推断' : kind === 'recommendation' ? '建议' : '未知项';
+}
 
 export type RouteState = 'loading' | 'ready' | 'empty' | 'filtered-empty' | 'forbidden' | 'not-found'
   | 'stale' | 'binding-conflict' | 'approval-stale' | 'offline' | 'server-error' | 'canceled' | 'recovering';
@@ -50,6 +70,7 @@ export function ProductShell({
   state,
   children,
   inspector,
+  boundaryNotice,
 }: Readonly<{
   active: 'exceptions' | 'tasks' | 'workflows';
   title: string;
@@ -57,6 +78,7 @@ export function ProductShell({
   state: RouteState;
   children: ReactNode;
   inspector?: ReactNode;
+  boundaryNotice?: ReactNode;
 }>) {
   const [browserOffline, setBrowserOffline] = useState(() => typeof navigator !== 'undefined' && navigator.onLine === false);
   useEffect(() => {
@@ -90,7 +112,7 @@ export function ProductShell({
       </section>
     </aside>
     <section className="product-pane">
-      <header className="topbar product-topbar"><div><h1>{title}</h1><p>{subtitle}</p></div><SimulationNotice /></header>
+      <header className="topbar product-topbar"><div><h1>{title}</h1><p>{subtitle}</p></div>{boundaryNotice ?? <SimulationNotice />}</header>
       <div className="product-content">{children}</div>
     </section>
     <aside className="inspector product-inspector">
@@ -181,7 +203,7 @@ function PaginationControls({
   </nav>;
 }
 
-function WorkflowGraph({ workflow, task }: Readonly<{ workflow: WorkflowDetailProjection; task?: TaskSnapshot }>) {
+function WorkflowGraph({ workflow, task }: Readonly<{ workflow: PublicWorkflow; task?: PublicTask }>) {
   const graph = useMemo(() => {
     const statuses = new Map(task?.steps.map((step) => [step.id, step.status]) ?? []);
     const nodes = workflow.nodes.map((node, index): Node => ({
@@ -209,7 +231,7 @@ function WorkflowGraph({ workflow, task }: Readonly<{ workflow: WorkflowDetailPr
   </div>;
 }
 
-function TaskInspector({ task }: Readonly<{ task: TaskSnapshot }>) {
+function TaskInspector({ task }: Readonly<{ task: PublicTask }>) {
   return <>
     <dl className="facts">
       <Fact label="Task" value={task.id} testId="inspector-task-id" />
@@ -219,7 +241,7 @@ function TaskInspector({ task }: Readonly<{ task: TaskSnapshot }>) {
       <Fact label="Aggregate" value={task.aggregateVersion} />
       <Fact label="Event watermark" value={task.eventWatermark} />
     </dl>
-    <SimulationNotice />
+    {isLiveTask(task) ? <InternalAcceptanceNotice /> : <SimulationNotice />}
   </>;
 }
 
@@ -270,8 +292,9 @@ export function TaskListPage() {
     {state === 'ready' && result !== undefined && <section className="table-card">
       <div className="section-heading"><div><span className="eyebrow">Task authority</span><h2>任务列表</h2></div><span>{result.tasks.length} 条当前页记录</span></div>
       <div className="table-scroll"><table className="product-table" data-testid="task-table"><thead><tr><th>任务</th><th>状态</th><th>Workflow</th><th>审批</th><th>更新时间</th></tr></thead><tbody>
-        {result.tasks.map((task) => <tr key={task.id} data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}>
-          <td><a href={`/tasks/${encodeURIComponent(task.id)}`}><b>{task.title}</b><small>{task.id}</small></a></td>
+        {result.tasks.map((task) => <tr key={task.id} data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}
+          data-record-variant={'recordVariant' in task ? task.recordVariant : 'business-task.simulation/1'}>
+          <td><a href={`/tasks/${encodeURIComponent(task.id)}`}><b>{task.title}</b><small>{task.id}</small><small data-testid="task-list-boundary">{'recordVariant' in task ? '可信本机内部验收' : 'simulation=true'}</small></a></td>
           <td><span className={`status status-${task.status}`}>{task.status}</span></td>
           <td><a className="mono-link" href={`/tasks/${encodeURIComponent(task.id)}/workflow`}>{task.workflowVersion.id}<small>{task.workflowVersion.hash.slice(0, 12)}…</small></a></td>
           <td>{task.approvalStatus}</td>
@@ -296,7 +319,7 @@ export function TaskListPage() {
 export function TaskDetailPage({ taskId }: Readonly<{ taskId: string }>) {
   const [state, setState] = useState<RouteState>('loading');
   const [error, setError] = useState('');
-  const [task, setTask] = useState<TaskSnapshot>();
+  const [task, setTask] = useState<PublicTask>();
   const [acting, setActing] = useState(false);
 
   const loadTask = useCallback(async () => {
@@ -307,7 +330,7 @@ export function TaskDetailPage({ taskId }: Readonly<{ taskId: string }>) {
   }, [taskId]);
 
   useEffect(() => {
-    if (task === undefined || !['queued', 'running'].includes(task.status)) return;
+    if (task === undefined || !['queued', 'running', 'cancel_requested'].includes(task.status)) return;
     let active = true;
     let cursor = task.eventWatermark;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -382,36 +405,45 @@ export function TaskDetailPage({ taskId }: Readonly<{ taskId: string }>) {
     } finally { setActing(false); }
   }, [loadTask, task]);
 
-  return <ProductShell active="tasks" title="任务详情" subtitle="同一个任务的步骤、审批、证据与交付物" state={state} inspector={task === undefined ? undefined : <TaskInspector task={task} />}>
+  return <ProductShell active="tasks" title="任务详情" subtitle="同一个任务的步骤、审批、证据与交付物" state={state} inspector={task === undefined ? undefined : <TaskInspector task={task} />}
+    boundaryNotice={task !== undefined && isLiveTask(task) ? <InternalAcceptanceNotice /> : <SimulationNotice />}>
     {state === 'loading' && <LoadingState />}
     <RouteFailure state={state} message={error} />
     {state === 'recovering' && <section className="route-state route-recovering" data-testid="route-recovering"><span className="route-spinner" /><div><b>Worker 正在恢复同一任务</b><p>从已持久化 checkpoint 与事件游标续传，不会创建第二份结果。</p></div></section>}
-    {task !== undefined && !isFailClosedRouteState(state) && <div className="detail-stack" data-testid="task-detail" data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}>
-      <section className="detail-hero"><div><span className="eyebrow">{task.capabilityId}</span><h2>{task.title}</h2><p>用户只看到小纬；执行时可由小纬调用指定专家或专家团。</p></div><span className={`status status-${task.status}`}>{task.status}</span></section>
+    {task !== undefined && !isFailClosedRouteState(state) && <div className="detail-stack" data-testid="task-detail" data-task-id={task.id} data-workflow-id={task.workflowVersion.id} data-workflow-hash={task.workflowVersion.hash}
+      data-record-variant={isLiveTask(task) ? task.recordVariant : 'business-task.simulation/1'}>
+      <section className="detail-hero"><div><span className="eyebrow">{task.capabilityId}</span><h2>{task.title}</h2><p>{isLiveTask(task) ? '可信本机内部验收：小纬自动安排已登记专家版本，真实模型仅经 Model Gateway；不允许业务决策。' : '用户只看到小纬；当前任务保持醒目标记的 legacy 模拟边界。'}</p></div><span className={`status status-${task.status}`}>{task.status}</span></section>
       <section className="task-action-bar" aria-label="任务操作">
         <div><b>任务操作</b><p>审批和执行仍写入同一个 Control Plane 权威状态。</p></div>
         <div className="actions">
-          {['awaiting_approval', 'approved'].includes(task.status) && <button className="primary" type="button" data-testid="task-approve-execute" disabled={acting} onClick={() => void approveAndExecute()}>{acting ? '正在提交…' : task.status === 'awaiting_approval' ? '批准并执行模拟任务' : '执行模拟任务'}</button>}
-          {['queued', 'running'].includes(task.status) && <button className="secondary" type="button" data-testid="task-detail-cancel" disabled={acting} onClick={() => void cancel()}>{acting ? '正在取消…' : '取消模拟任务'}</button>}
+          {['awaiting_approval', 'approved'].includes(task.status) && <button className="primary" type="button" data-testid="task-approve-execute" disabled={acting} onClick={() => void approveAndExecute()}>{acting ? '正在提交…' : task.status === 'awaiting_approval' ? isLiveTask(task) ? '批准并执行真实分析' : '批准并执行模拟任务' : isLiveTask(task) ? '执行真实分析' : '执行模拟任务'}</button>}
+          {['queued', 'running'].includes(task.status) && <button className="secondary" type="button" data-testid="task-detail-cancel" disabled={acting} onClick={() => void cancel()}>{acting ? '正在取消…' : isLiveTask(task) ? '取消分析任务' : '取消模拟任务'}</button>}
         </div>
       </section>
       {error.length > 0 && <div className="error" role="alert">{error}</div>}
       <section className="binding-grid">
         <div><span>WorkflowVersion</span><a href={`/tasks/${encodeURIComponent(task.id)}/workflow`} data-testid="task-workflow-id">{task.workflowVersion.id}</a><code data-testid="task-workflow-hash">{task.workflowVersion.hash}</code></div>
         <div><span>ApprovalVersion</span><b>{task.approval.id} · v{task.approval.version}</b><code data-testid="approval-subject-digest">{task.approval.subjectDigest}</code></div>
-        <div><span>专家路线</span><b data-testid="expert-target">{task.expertTarget.mode === 'auto' ? '小纬自动安排' : task.expertTarget.mode === 'team' ? `专家团 · ${task.expertTarget.teamId}` : `专家 · ${task.expertTarget.expertId}`}</b><small>专家不是客户消息作者</small></div>
+        <div><span>专家路线</span><b data-testid="expert-target">{isLiveTask(task) ? `小纬自动安排 · ${task.expertTarget.resolved.expertId}` : task.expertTarget.mode === 'auto' ? '小纬自动安排' : task.expertTarget.mode === 'team' ? `专家团 · ${task.expertTarget.teamId}` : `专家 · ${task.expertTarget.expertId}`}</b><small>专家不是客户消息作者</small></div>
       </section>
       <section className="detail-card"><div className="section-heading"><div><span className="eyebrow">Workflow run</span><h2>步骤时间线</h2></div><a href={`/tasks/${encodeURIComponent(task.id)}/workflow`}>查看流程图</a></div><ol className="step-timeline" data-testid="task-steps">
         {task.steps.map((step) => <li key={step.id} data-step-id={step.id} data-step-status={step.status}><span className={`step-dot step-${step.status}`} /><div><b>{STEP_NAMES[step.id] ?? step.id}</b><small>{step.id}</small></div><code>{step.status}</code></li>)}
       </ol></section>
       <section className="detail-card"><div className="section-heading"><div><span className="eyebrow">Claim–Evidence</span><h2>结论与证据</h2></div><span>{task.evidence.length} 条 Evidence</span></div>
-        {task.claims.length === 0 ? <p className="muted-copy">任务尚未发布结论。</p> : task.claims.map((claim) => <article className={`claim ${claim.status}`} key={claim.id} data-claim-id={claim.id}><b>{claim.status === 'published' ? '已核验结论' : '未发布候选'}</b><p>{claim.text}</p><small>{claim.evidenceRefId ?? claim.rejectionCode}</small></article>)}
-        <div className="evidence-grid">{task.evidence.map((evidence) => <article key={evidence.id} data-evidence-id={evidence.id}><span>Evidence</span><b>{evidence.id}</b><code>{evidence.excerptSha256}</code><small>{evidence.resourceScope} · {evidence.dataClass}</small></article>)}</div>
+        {isLiveTask(task)
+          ? task.result === null ? <p className="muted-copy">任务尚未发布结构化结果。</p> : task.result.statements.map((statement) => <article className={`analysis-statement analysis-statement-${statement.kind} ${statement.status}`} key={statement.id}
+              data-testid={`analysis-statement-${statement.kind}`} data-statement-id={statement.id} data-statement-kind={statement.kind} data-statement-status={statement.status}>
+              <div className="analysis-statement-head"><b>{statementKindLabel(statement.kind)}</b><span>{statement.status === 'published' ? '已发布' : '未发布'}</span></div>
+              <p>{statement.text}</p><small>confidence {statement.confidence.toFixed(2)}{statement.rejectionCode === null ? '' : ` · ${statement.rejectionCode}`}</small>
+              {statement.evidenceRefIds.map((evidenceId) => <span className="statement-evidence-link" key={evidenceId}>Evidence · {evidenceId}</span>)}
+            </article>)
+          : task.claims.length === 0 ? <p className="muted-copy">任务尚未发布结论。</p> : task.claims.map((claim) => <article className={`claim ${claim.status}`} key={claim.id} data-claim-id={claim.id}><b>{claim.status === 'published' ? '已核验结论' : '未发布候选'}</b><p>{claim.text}</p><small>{claim.evidenceRefId ?? claim.rejectionCode}</small></article>)}
+        <div className="evidence-grid">{task.evidence.map((evidence) => <article key={evidence.id} data-evidence-id={evidence.id}><span>Evidence</span><b>{evidence.id}</b><code>{evidenceHash(evidence)}</code><small>{evidence.resourceScope} · {evidence.dataClass}</small></article>)}</div>
       </section>
       <section className="detail-card"><div className="section-heading"><div><span className="eyebrow">Artifact</span><h2>交付物</h2></div><span>{task.artifacts.length} 个文件</span></div>
         <div className="artifact-list">{task.artifacts.map((artifact) => <article key={artifact.id} data-artifact-id={artifact.id} data-content-sha256={artifact.contentSha256}><div><b>{artifact.displayName}</b><small>{artifact.kind} · {artifact.sizeBytes} bytes</small></div><code>{artifact.contentSha256}</code><a href={artifact.downloadUrl}>下载</a></article>)}</div>
       </section>
-      {task.result !== null && <section className="detail-card result-summary" data-testid="task-result"><span className="eyebrow">Result</span><h2>{task.result.kind === 'completed' ? task.result.summary : task.result.message}</h2></section>}
+      {task.result !== null && <section className="detail-card result-summary" data-testid="task-result"><span className="eyebrow">{isLiveTask(task) ? '结构化真实分析 · 内部验收' : 'Result'}</span><h2>{isLiveTask(task) ? task.result.summary : task.result.kind === 'completed' ? task.result.summary : task.result.message}</h2></section>}
     </div>}
   </ProductShell>;
 }
@@ -419,8 +451,8 @@ export function TaskDetailPage({ taskId }: Readonly<{ taskId: string }>) {
 export function TaskWorkflowPage({ taskId }: Readonly<{ taskId: string }>) {
   const [state, setState] = useState<RouteState>('loading');
   const [error, setError] = useState('');
-  const [task, setTask] = useState<TaskSnapshot>();
-  const [workflow, setWorkflow] = useState<WorkflowDetailProjection>();
+  const [task, setTask] = useState<PublicTask>();
+  const [workflow, setWorkflow] = useState<PublicWorkflow>();
   const [acting, setActing] = useState(false);
 
   useEffect(() => {
@@ -458,7 +490,8 @@ export function TaskWorkflowPage({ taskId }: Readonly<{ taskId: string }>) {
     } finally { setActing(false); }
   }, [task]);
 
-  return <ProductShell active="tasks" title="任务 Workflow" subtitle="不可变版本叠加当前任务步骤和审批摘要" state={state} inspector={task === undefined ? undefined : <>
+  return <ProductShell active="tasks" title="任务 Workflow" subtitle="不可变版本叠加当前任务步骤和审批摘要" state={state}
+    boundaryNotice={task !== undefined && isLiveTask(task) ? <InternalAcceptanceNotice /> : <SimulationNotice />} inspector={task === undefined ? undefined : <>
     <TaskInspector task={task} />
     <dl className="facts"><Fact label="ApprovalVersion" value={task.approval.version} testId="workflow-approval-version" /><Fact label="ApprovalSubject digest" value={task.approval.subjectDigest} testId="workflow-approval-digest" /></dl>
   </>}>
@@ -468,7 +501,7 @@ export function TaskWorkflowPage({ taskId }: Readonly<{ taskId: string }>) {
       <div className="section-heading"><div><span className="eyebrow">Task-scoped projection</span><h2>{workflow.id}</h2><code data-testid="workflow-hash">{workflow.hash}</code></div><a href={`/workflows/${encodeURIComponent(workflow.id)}`}>查看不可变版本</a></div>
       {task.status === 'approved' && task.approval.status === 'approved' && <section className="task-action-bar" aria-label="Workflow 执行">
         <div><b>执行已审批 Workflow</b><p>提交当前页面冻结的 ApprovalVersion 与 ApprovalSubject digest。</p></div>
-        <button className="primary" type="button" data-testid="task-workflow-execute" disabled={acting} onClick={() => void execute()}>{acting ? '正在提交…' : '执行模拟任务'}</button>
+        <button className="primary" type="button" data-testid="task-workflow-execute" disabled={acting} onClick={() => void execute()}>{acting ? '正在提交…' : isLiveTask(task) ? '执行真实分析' : '执行模拟任务'}</button>
       </section>}
       <WorkflowGraph workflow={workflow} task={task} />
     </section>}
@@ -525,7 +558,7 @@ export function WorkflowListPage() {
 export function WorkflowDetailPage({ workflowId }: Readonly<{ workflowId: string }>) {
   const [state, setState] = useState<RouteState>('loading');
   const [error, setError] = useState('');
-  const [workflow, setWorkflow] = useState<WorkflowDetailProjection>();
+  const [workflow, setWorkflow] = useState<PublicWorkflow>();
 
   useEffect(() => {
     let active = true;
@@ -540,7 +573,8 @@ export function WorkflowDetailPage({ workflowId }: Readonly<{ workflowId: string
     return () => { active = false; };
   }, [workflowId]);
 
-  return <ProductShell active="workflows" title="WorkflowVersion" subtitle="只读、不可变、可校验的流程定义" state={state} inspector={workflow === undefined ? undefined : <dl className="facts">
+  return <ProductShell active="workflows" title="WorkflowVersion" subtitle="只读、不可变、可校验的流程定义" state={state}
+    boundaryNotice={workflow !== undefined && isLiveWorkflow(workflow) ? <InternalAcceptanceNotice /> : <SimulationNotice />} inspector={workflow === undefined ? undefined : <dl className="facts">
     <Fact label="WorkflowVersion" value={workflow.id} testId="workflow-version-id" />
     <Fact label="Hash" value={workflow.hash} testId="workflow-version-hash" />
     <Fact label="Compiler" value={workflow.compilerVersion} />

@@ -9,8 +9,14 @@ type InternalConfiguration = ReturnType<typeof readConfiguration> & Readonly<{
   modelGatewayPort: number;
   releaseHelperBindHost: '127.0.0.1';
   releaseHelperPort: number;
+  gateAReleaseHelperBindHost: '127.0.0.1';
+  gateAReleaseHelperPort: number;
 }>;
-type ControlPlaneStackPlan = Readonly<{ arguments: readonly string[]; releaseHealthUrl: string | null }>;
+type ControlPlaneStackPlan = Readonly<{
+  arguments: readonly string[];
+  releaseHealthUrl: string | null;
+  gateAReleaseHealthUrl: string | null;
+}>;
 const devUpInternals = await import('./dev-up.mjs') as unknown as Readonly<{
   buildControlPlaneStackPlan: (input: Readonly<{
     configuration: InternalConfiguration;
@@ -20,6 +26,28 @@ const devUpInternals = await import('./dev-up.mjs') as unknown as Readonly<{
     gatewayServiceTokenFile: string;
     gatewayInvocationSecretFile: string;
     liveProvider?: Readonly<{ authFilePath: string; conformanceFilePath: string }>;
+    parserBuild?: Readonly<{
+      image: string;
+      imageSourceDigest: string;
+      packageDigest: string;
+      pdfjsInventoryDigest: string;
+    }>;
+    parserApproval?: Readonly<{
+      schemaVersion: 'gate-a-parser-startup-approval/2';
+      runId: string;
+      image: string;
+      imageId: string;
+      imageSourceDigest: string;
+      executableDigest: string;
+      packageDigest: string;
+      runtimeClosureDigest: string;
+      dependencyInventoryDigest: string;
+      formatManifestDigests: Readonly<{ txt: string; pdf: string; docx: string }>;
+      approvedBy: string;
+      approvedAt: string;
+      expiresAt: string;
+    }>;
+    approvedC1Sha256?: string;
   }>) => ControlPlaneStackPlan;
   controlPlaneEnvironment: (environment?: Environment) => Readonly<Record<string, string | undefined>>;
   minimalEnvironment: (environment?: Environment) => Readonly<Record<string, string>>;
@@ -67,6 +95,8 @@ describe('dev-up command contract', () => {
       modelGatewayPort: 3150,
       releaseHelperBindHost: '127.0.0.1',
       releaseHelperPort: 4360,
+      gateAReleaseHelperBindHost: '127.0.0.1',
+      gateAReleaseHelperPort: 3170,
       allowedWebOrigins: [
         'http://localhost:4320',
         'http://127.0.0.1:4320',
@@ -105,6 +135,7 @@ describe('dev-up command contract', () => {
     expect(plan.releaseHealthUrl).toBe('http://127.0.0.1:3160/health');
     expect(plan.arguments).toContain('GENEWAY_RUN_ID=dev-123-456');
     expect(plan.arguments).toContain('GENEWAY_GATE_A0_LIVE_VALIDATION_RUN_ID=dev-123-456');
+    expect(plan.gateAReleaseHealthUrl).toBeNull();
     expect(plan.arguments).toContain('GENEWAY_GATE_A0_RELEASE_PORT=3160');
     expect(plan.arguments).toContain('GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE=/home/gewu/.codex/auth.json');
     expect(plan.arguments).toContain('GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE=/tmp/geneway-conformance.json');
@@ -113,6 +144,79 @@ describe('dev-up command contract', () => {
     expect(stackCommand).toContain('scripts/e2e/start-gate-a0-release.ts');
     expect(stackCommand).toContain('env -u GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE');
     expect(stackCommand).not.toContain('0.0.0.0');
+  });
+
+  it('starts the Gate A helper only with source-bound parser approval and keeps provider authority out of Control Plane', () => {
+    const configuration = readConfiguration({}, ['192.168.0.104']) as InternalConfiguration;
+    const digest = 'a'.repeat(64);
+    const packageDigest = 'b'.repeat(64);
+    const parserBuild = {
+      image: `geneway-document-parser:${digest.slice(0, 16)}`,
+      imageSourceDigest: digest,
+      packageDigest,
+      pdfjsInventoryDigest: 'c'.repeat(64),
+    };
+    const parserApproval = {
+      schemaVersion: 'gate-a-parser-startup-approval/2' as const,
+      runId: 'dev-gate-a-123',
+      image: parserBuild.image,
+      imageId: `sha256:${'d'.repeat(64)}`,
+      imageSourceDigest: digest,
+      executableDigest: 'e'.repeat(64),
+      packageDigest,
+      runtimeClosureDigest: 'f'.repeat(64),
+      dependencyInventoryDigest: '1'.repeat(64),
+      formatManifestDigests: { txt: '2'.repeat(64), pdf: '3'.repeat(64), docx: '4'.repeat(64) },
+      approvedBy: 'user_local',
+      approvedAt: new Date(Date.now() - 1_000).toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    const plan = buildControlPlaneStackPlan({
+      configuration,
+      runId: 'dev-gate-a-123',
+      socketPath: '/tmp/geneway-dev-test/worker.sock',
+      tokenFile: '/tmp/geneway-dev-test/worker.token',
+      gatewayServiceTokenFile: '/tmp/geneway-dev-test/model-gateway-service.token',
+      gatewayInvocationSecretFile: '/tmp/geneway-dev-test/model-gateway-invocation.token',
+      liveProvider: {
+        authFilePath: '/approved/dev/provider-auth.json',
+        conformanceFilePath: '/approved/dev/provider-conformance.json',
+      },
+      parserBuild,
+      parserApproval,
+      approvedC1Sha256: `${'5'.repeat(64)},${'6'.repeat(64)}`,
+    });
+    expect(plan.releaseHealthUrl).toBe('http://127.0.0.1:3160/health');
+    expect(plan.gateAReleaseHealthUrl).toBe('http://127.0.0.1:3170/health');
+    expect(plan.arguments).toContain('GENEWAY_GATE_A_RELEASE_PORT=3170');
+    expect(plan.arguments).toContain('GENEWAY_GATE_A_LIVE_VALIDATION_RUN_ID=dev-gate-a-123');
+    expect(plan.arguments).toContain(`GENEWAY_GATE_A_PARSER_IMAGE=${parserBuild.image}`);
+    expect(plan.arguments).toContain(`GENEWAY_GATE_A_PARSER_BUILD_JSON=${JSON.stringify(parserBuild)}`);
+    expect(plan.arguments).toContain(`GENEWAY_GATE_A_PARSER_APPROVAL_JSON=${JSON.stringify(parserApproval)}`);
+    expect(plan.arguments).toContain(`GENEWAY_GATE_A_APPROVED_C1_SHA256=${'5'.repeat(64)},${'6'.repeat(64)}`);
+    const stackCommand = plan.arguments.at(-1);
+    expect(stackCommand).toContain('scripts/e2e/start-gate-a-release.ts');
+    expect(stackCommand).toContain('env -u GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE');
+    expect(stackCommand).toContain('-u GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE');
+    expect(stackCommand).toContain('-u GENEWAY_GATE_A_PARSER_BUILD_JSON');
+    expect(stackCommand).not.toContain('/approved/dev/provider-auth.json');
+    expect(stackCommand).not.toContain('/approved/dev/provider-conformance.json');
+    expect(stackCommand).not.toContain('0.0.0.0');
+    expect(() => buildControlPlaneStackPlan({
+      configuration,
+      runId: 'dev-gate-a-invalid-c1',
+      socketPath: '/tmp/geneway-dev-test/worker.sock',
+      tokenFile: '/tmp/geneway-dev-test/worker.token',
+      gatewayServiceTokenFile: '/tmp/geneway-dev-test/model-gateway-service.token',
+      gatewayInvocationSecretFile: '/tmp/geneway-dev-test/model-gateway-invocation.token',
+      liveProvider: {
+        authFilePath: '/approved/dev/provider-auth.json',
+        conformanceFilePath: '/approved/dev/provider-conformance.json',
+      },
+      parserBuild,
+      parserApproval,
+      approvedC1Sha256: 'not-a-digest',
+    })).toThrow('comma-separated lowercase SHA-256');
   });
 
   it('projects provider credential paths only to Model Gateway and the release helper', () => {

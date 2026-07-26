@@ -4,7 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import net from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { chromium } from '@playwright/test';
-import { assertSecureRunDirectories, e2eRunIdentity, gate02bEnvironmentNames } from './e2e-run-identity.mjs';
+import { assertSecureRunDirectories, e2eProjectSelection, e2eRunIdentity, gate02bEnvironmentNames } from './e2e-run-identity.mjs';
 import { browserEgressPolicyHash, parseBrowserEgressReceipt } from './browser-egress-receipt.mjs';
 
 async function findAvailablePort(excludedPorts = new Set()) {
@@ -32,17 +32,94 @@ const gate02bGuarded = Object.keys(gate02bEnvironment).length === gate02bEnviron
 const parentRunId = process.env.GENEWAY_RUN_ID ?? `gate-0.1-${Date.now()}-${process.pid}`;
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(parentRunId)) throw new Error('GENEWAY_RUN_ID must be a safe path segment');
 const { runId, selectedProjects } = e2eRunIdentity(parentRunId, forwarded, gate02bGuarded);
+const { gateALive, gateA0Live } = e2eProjectSelection(forwarded);
 const invocationResultPath = process.env.GENEWAY_E2E_INVOCATION_RESULT_PATH;
 const expectedInvocationResultPath = `/tmp/geneway-runs/${parentRunId}/recovery/e2e-invocation-result.json`;
 if (invocationResultPath !== undefined && invocationResultPath !== expectedInvocationResultPath) {
   throw new Error('GENEWAY_E2E_INVOCATION_RESULT_PATH is outside the bounded parent recovery root');
 }
-const gateA0Live = selectedProjects.includes('gate-a0-live');
 const liveAuthFile = process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE;
 const liveConformanceFile = process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE;
 if (gateA0Live && (liveAuthFile === undefined || liveConformanceFile === undefined)) {
   throw new Error('gate-a0-live requires GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE and GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE');
 }
+const parserBuild = gateALive ? (() => {
+  const built = spawnSync(process.execPath, ['scripts/build-gate-a-document-parser-image.mjs'], {
+    cwd: process.cwd(),
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: process.env.HOME ?? '/tmp',
+      TMPDIR: process.env.TMPDIR ?? '/tmp',
+      LANG: process.env.LANG ?? 'C.UTF-8',
+    },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  if (built.error !== undefined) throw built.error;
+  if (built.status !== 0) throw new Error(`Gate A parser image build failed (${String(built.status ?? 1)})`);
+  const line = built.stdout.trim().split('\n').at(-1);
+  const metadata = line === undefined ? null : JSON.parse(line);
+  if (metadata?.schemaVersion !== 'gate-a-document-parser-image-build-candidate/2'
+    || !/^geneway-document-parser:[a-f0-9]{16}$/u.test(metadata.image ?? '')
+    || !/^[a-f0-9]{64}$/u.test(metadata.imageSourceDigest ?? '')
+    || !/^[a-f0-9]{64}$/u.test(metadata.packageDigest ?? '')
+    || !/^[a-f0-9]{64}$/u.test(metadata.pdfjsInventoryDigest ?? '')
+    || metadata.image !== `geneway-document-parser:${metadata.imageSourceDigest.slice(0, 16)}`) {
+    throw new Error('Gate A parser image build returned invalid source-bound metadata');
+  }
+  return metadata;
+})() : undefined;
+const parserApproval = gateALive ? (() => {
+  const prepared = spawnSync('./node_modules/.bin/tsx', ['scripts/prepare-gate-a-document-parser-approval.ts'], {
+    cwd: process.cwd(),
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: process.env.HOME ?? '/tmp',
+      TMPDIR: process.env.TMPDIR ?? '/tmp',
+      LANG: process.env.LANG ?? 'C.UTF-8',
+      GENEWAY_RUN_ID: runId,
+      GENEWAY_GATE_A_PARSER_APPROVED_BY: 'user_local',
+      GENEWAY_GATE_A_PARSER_BUILD_JSON: JSON.stringify(parserBuild),
+    },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  if (prepared.error !== undefined) throw prepared.error;
+  if (prepared.status !== 0) throw new Error(`Gate A parser approval preparation failed (${String(prepared.status ?? 1)})`);
+  const line = prepared.stdout.trim().split('\n').at(-1);
+  const approval = line === undefined ? null : JSON.parse(line);
+  if (approval?.schemaVersion !== 'gate-a-parser-startup-approval/2'
+    || approval.runId !== runId || approval.approvedBy !== 'user_local'
+    || approval.image !== parserBuild.image) {
+    throw new Error('Gate A parser approval preparation returned invalid immutable authority');
+  }
+  return approval;
+})() : undefined;
+const gateAC1Allowlist = gateALive ? (() => {
+  const prepared = spawnSync('./node_modules/.bin/tsx', ['scripts/prepare-gate-a-c1-allowlist.ts'], {
+    cwd: process.cwd(),
+    env: {
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: process.env.HOME ?? '/tmp',
+      TMPDIR: process.env.TMPDIR ?? '/tmp',
+      LANG: process.env.LANG ?? 'C.UTF-8',
+      GENEWAY_RUN_ID: runId,
+    },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  if (prepared.error !== undefined) throw prepared.error;
+  if (prepared.status !== 0) throw new Error(`Gate A C1 allowlist preparation failed (${String(prepared.status ?? 1)})`);
+  const line = prepared.stdout.trim().split('\n').at(-1);
+  const candidate = line === undefined ? null : JSON.parse(line);
+  if (candidate?.schemaVersion !== 'gate-a-c1-served-allowlist/1' || candidate.runId !== runId
+    || !Array.isArray(candidate.hashes) || candidate.hashes.length !== 6
+    || new Set(candidate.hashes).size !== candidate.hashes.length
+    || !candidate.hashes.every((hash) => typeof hash === 'string' && /^[a-f0-9]{64}$/u.test(hash))) {
+    throw new Error('Gate A C1 allowlist preparation returned invalid run-bound authority');
+  }
+  return candidate.hashes.join(',');
+})() : undefined;
 const allocatedPorts = new Set();
 const allocatePort = async () => {
   const port = String(await findAvailablePort(allocatedPorts));
@@ -64,6 +141,7 @@ const controlPlaneSupervisorPort = await allocatePort();
 const modelGatewayPort = await allocatePort();
 const modelGatewaySupervisorPort = await allocatePort();
 const gateA0ReleasePort = await allocatePort();
+const gateAReleasePort = await allocatePort();
 const composeRunId = runId.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 const composeProjectName = `geneway-e2e-${composeRunId}`;
 const databaseUrl = `postgres://geneway:geneway@127.0.0.1:${postgresPort}/geneway_test`;
@@ -90,7 +168,8 @@ const baseEnvironment = {
 const browserEgressRawPath = `/tmp/geneway-runs/${runId}/process-boundaries/browser-egress.raw`;
 const browserEgressSummaryPath = `/tmp/geneway-runs/${runId}/process-boundaries/browser-egress.json`;
 const browserForbiddenPorts = [s3Port, storageAdapterPort, reconciliationAdapterPort, postgresPort, controlPlanePort,
-  controlPlaneSupervisorPort, workerHealthPort, modelGatewayPort, modelGatewaySupervisorPort, gateA0ReleasePort]
+  controlPlaneSupervisorPort, workerHealthPort, modelGatewayPort, modelGatewaySupervisorPort,
+  gateA0ReleasePort, gateAReleasePort]
   .map(Number);
 const browserEgressConformanceRequired = selectedProjects.includes('gate0.2a-success')
   && (forwarded.some((argument) => argument.endsWith('gate-0.2a-storage-thin.spec.ts'))
@@ -249,6 +328,7 @@ try {
       GENEWAY_MODEL_GATEWAY_PORT: modelGatewayPort,
       GENEWAY_MODEL_GATEWAY_SUPERVISOR_PORT: modelGatewaySupervisorPort,
       GENEWAY_GATE_A0_RELEASE_PORT: gateA0ReleasePort,
+      GENEWAY_GATE_A_RELEASE_PORT: gateAReleasePort,
       GENEWAY_WORKER_SOCKET_PATH: workerSocketPath,
       GENEWAY_WORKER_TOKEN_FILE: workerTokenFile,
       GENEWAY_WORKER_INSTANCE_ID: workerInstanceId,
@@ -260,6 +340,15 @@ try {
         GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE: liveConformanceFile,
         GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: modelGatewayServiceTokenFile,
         GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE: modelGatewayInvocationSecretFile,
+      } : {}),
+      ...(gateALive ? {
+        GENEWAY_GATE_A_LIVE: '1',
+        GENEWAY_GATE_A_LIVE_ENABLED: '1',
+        GENEWAY_GATE_A_NOT_OPEN_MARKER_REQUIRED: '1',
+        GENEWAY_GATE_A_PARSER_IMAGE: parserBuild.image,
+        GENEWAY_GATE_A_PARSER_BUILD_JSON: JSON.stringify(parserBuild),
+        GENEWAY_GATE_A_PARSER_APPROVAL_JSON: JSON.stringify(parserApproval),
+        GENEWAY_GATE_A_APPROVED_C1_SHA256: gateAC1Allowlist,
       } : {}),
       DATABASE_URL: databaseUrl,
       GENEWAY_E2E_DATABASE_URL: databaseUrl,

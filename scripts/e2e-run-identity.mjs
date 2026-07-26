@@ -6,12 +6,20 @@ export const gate02bEnvironmentNames = Object.freeze([
   'GENEWAY_GATE02B_COMPOSE_DEFAULT_INTERNAL', 'GENEWAY_GATE02B_COMPOSE_STORAGE_INTERNAL',
 ]);
 
-export function e2eRunIdentity(parentRunId, forwarded, gate02bGuarded) {
+export function e2eProjectSelection(forwarded) {
   const selectedProjects = forwarded.flatMap((argument, index) => {
     if (argument.startsWith('--project=')) return [argument.slice('--project='.length)];
     if (argument === '--project') return [forwarded[index + 1]];
     return [];
   }).filter((value) => typeof value === 'string');
+  const allProjects = !forwarded.some((argument) => argument === '--project' || argument.startsWith('--project='));
+  const gateALive = selectedProjects.some((project) => project === 'gate-a-live' || project === 'gate-a-not-open');
+  const gateA0Live = gateALive || selectedProjects.includes('gate-a0-live');
+  return { selectedProjects, allProjects, gateALive, gateA0Live };
+}
+
+export function e2eRunIdentity(parentRunId, forwarded, gate02bGuarded) {
+  const { selectedProjects } = e2eProjectSelection(forwarded);
   const identityHash = createHash('sha256').update(JSON.stringify({ parentRunId, forwarded, selectedProjects })).digest('hex').slice(0, 16);
   const identityLabel = (selectedProjects[0] ?? 'default').toLowerCase().replace(/[^a-z0-9_-]/gu, '-').slice(0, 32);
   const runId = gate02bGuarded

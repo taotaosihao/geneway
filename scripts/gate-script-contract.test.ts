@@ -117,8 +117,11 @@ const { controlledDockerInvocation, validateProxyPolicy: validateLoopbackProxyPo
   validateProxyPolicy: (policy: unknown, expectedRoot: string) => unknown;
 };
 // @ts-expect-error The executable helper is native ESM; this test consumes its pure identity function.
-const { assertSecureRunDirectories, e2eRunIdentity } = await import('./e2e-run-identity.mjs') as unknown as {
+const { assertSecureRunDirectories, e2eProjectSelection, e2eRunIdentity } = await import('./e2e-run-identity.mjs') as unknown as {
   assertSecureRunDirectories: (paths: string[]) => void;
+  e2eProjectSelection: (forwarded: string[]) => {
+    selectedProjects: string[]; allProjects: boolean; gateALive: boolean; gateA0Live: boolean;
+  };
   e2eRunIdentity: (parentRunId: string, forwarded: string[], guarded: boolean) => { runId: string; selectedProjects: string[] };
 };
 // @ts-expect-error The executable helper is native ESM; this test consumes its pure receipt parser.
@@ -143,6 +146,24 @@ describe('Gate 0.2A executable script contract', () => {
       selectedProjects: ['gate0.2a-recovery-multiprocess'],
     });
     expect(e2eRunIdentity(parentRunId, forwarded, false).runId).toBe(parentRunId);
+  });
+
+  it('selects live harnesses from Playwright project semantics without burdening legacy projects', () => {
+    expect(e2eProjectSelection([])).toEqual({
+      selectedProjects: [], allProjects: true, gateALive: false, gateA0Live: false,
+    });
+    expect(e2eProjectSelection(['--project=gate-a-not-open'])).toEqual({
+      selectedProjects: ['gate-a-not-open'], allProjects: false, gateALive: true, gateA0Live: true,
+    });
+    expect(e2eProjectSelection(['--project', 'gate-a-live'])).toEqual({
+      selectedProjects: ['gate-a-live'], allProjects: false, gateALive: true, gateA0Live: true,
+    });
+    expect(e2eProjectSelection(['--project=gate-a0-live'])).toEqual({
+      selectedProjects: ['gate-a0-live'], allProjects: false, gateALive: false, gateA0Live: true,
+    });
+    expect(e2eProjectSelection(['--project=gate0.2a-success'])).toEqual({
+      selectedProjects: ['gate0.2a-success'], allProjects: false, gateALive: false, gateA0Live: false,
+    });
   });
 
   it('rejects a symlink anywhere a recovery evidence directory is required', async () => {
@@ -251,15 +272,79 @@ describe('Gate 0.2A executable script contract', () => {
     expect(aggregate).toContain("command: ['pnpm', 'gate-a0:deferred-scan']");
   });
 
+  it('binds a resumed Gate A release promotion to the exact immutable chain', async () => {
+    const helper = await readFile(new URL('./e2e/start-gate-a-release.ts', import.meta.url), 'utf8');
+    expect(helper).toContain('release.capability_version_id=$5 AND release.prompt_policy_version_id=$6');
+    expect(helper).toContain('release.sequence=1 AND release.previous_release_id IS NULL');
+    expect(helper).toContain('release.sequence=2 AND release.previous_release_id=$2 AND release.gate_evidence_digest=$7');
+    expect(helper).toContain('release.sequence=3 AND release.previous_release_id=$3 AND release.gate_evidence_digest=$8');
+  });
+
+  it('keeps every live Gate A entrypoint on the approved multi-format document parser v2 authority', async () => {
+    const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as Readonly<{
+      scripts?: Readonly<Record<string, string>>;
+    }>;
+    const [releaseHelper, devUp, runE2e, approvalHelper, c1AllowlistHelper, playwrightConfig, storageAdapter] = await Promise.all([
+      readFile(new URL('./e2e/start-gate-a-release.ts', import.meta.url), 'utf8'),
+      readFile(new URL('./dev-up.mjs', import.meta.url), 'utf8'),
+      readFile(new URL('./run-e2e.mjs', import.meta.url), 'utf8'),
+      readFile(new URL('./prepare-gate-a-document-parser-approval.ts', import.meta.url), 'utf8'),
+      readFile(new URL('./prepare-gate-a-c1-allowlist.ts', import.meta.url), 'utf8'),
+      readFile(new URL('./playwright.config.ts', import.meta.url), 'utf8'),
+      readFile(new URL('./storage-adapter.ts', import.meta.url), 'utf8'),
+    ]);
+
+    expect(manifest.scripts?.['build:gate-a-parser']).toBe(
+      'node scripts/build-gate-a-document-parser-image.mjs',
+    );
+    for (const requiredIntegration of [
+      'packages/contracts/src/gate-a.migration.integration.test.ts',
+      'apps/control-plane/src/artifact.gate-a-parser.integration.test.ts',
+      'apps/control-plane/src/gate-a-live-repository.integration.test.ts',
+    ]) {
+      expect(manifest.scripts?.['test:integration']).toContain(requiredIntegration);
+    }
+    for (const source of [devUp, runE2e]) {
+      expect(source).toContain('build-gate-a-document-parser-image.mjs');
+      expect(source).toContain('prepare-gate-a-document-parser-approval.ts');
+      expect(source).not.toContain('build-gate-a-parser-image.mjs');
+      expect(source).not.toContain('geneway-plain-text-parser');
+      expect(source).not.toContain('gate-a-parser-startup-approval/1');
+    }
+    expect(releaseHelper).toContain('GateADocumentParserSandboxCandidate');
+    expect(releaseHelper).toContain('gateAParserStartupApprovalSchema.parse');
+    expect(releaseHelper).toContain('parserSandbox.resolveAuthority()');
+    expect(releaseHelper).toContain("mediaType: 'application/pdf'");
+    expect(releaseHelper).toContain(
+      "mediaType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'",
+    );
+    expect(releaseHelper).toContain('parsers: parserEvidence');
+    expect(releaseHelper).not.toContain('GateAPlainTextParserSandbox');
+    expect(approvalHelper).toContain('gateAParserStartupApprovalSchema.parse');
+    expect(approvalHelper).toContain("const runId = required('GENEWAY_RUN_ID')");
+    expect(approvalHelper).toContain("if (approvedBy !== 'user_local')");
+    expect(runE2e).toContain("['scripts/prepare-gate-a-c1-allowlist.ts']");
+    expect(runE2e).toContain('GENEWAY_GATE_A_APPROVED_C1_SHA256: gateAC1Allowlist');
+    expect(c1AllowlistHelper).toContain("schemaVersion: 'gate-a-c1-served-allowlist/1'");
+    expect(c1AllowlistHelper).toContain('hashes.length !== 6');
+    expect(playwrightConfig).toContain('GENEWAY_GATE_A_APPROVED_C1_SHA256=${shellQuote');
+    expect(storageAdapter).toContain("'application/pdf'");
+    expect(storageAdapter).toContain(
+      "'application/vnd.openxmlformats-officedocument.wordprocessingml.document'",
+    );
+  });
+
   it('passes only the loopback Gateway client configuration through the E2E Worker supervisor', async () => {
     expect(modelGatewayWorkerEnvironment({
       GENEWAY_MODEL_GATEWAY_URL: 'http://127.0.0.1:3150',
       GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: '/tmp/gateway-authority/service-token',
+      GENEWAY_GATE_A_LIVE_ENABLED: '1',
       GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE: '/tmp/gateway-authority/invocation-secret',
       GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE: '/home/gewu/.codex/auth.json',
     })).toEqual({
       GENEWAY_MODEL_GATEWAY_URL: 'http://127.0.0.1:3150',
       GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: '/tmp/gateway-authority/service-token',
+      GENEWAY_GATE_A_LIVE_ENABLED: '1',
     });
     expect(() => modelGatewayWorkerEnvironment({
       GENEWAY_MODEL_GATEWAY_URL: 'http://127.0.0.1:3150',
@@ -268,6 +353,14 @@ describe('Gate 0.2A executable script contract', () => {
       GENEWAY_MODEL_GATEWAY_URL: 'http://192.168.1.20:3150',
       GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: '/tmp/gateway-authority/service-token',
     })).toThrow('loopback');
+    expect(() => modelGatewayWorkerEnvironment({
+      GENEWAY_GATE_A_LIVE_ENABLED: '1',
+    })).toThrow('requires loopback Model Gateway authority');
+    expect(() => modelGatewayWorkerEnvironment({
+      GENEWAY_MODEL_GATEWAY_URL: 'http://127.0.0.1:3150',
+      GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: '/tmp/gateway-authority/service-token',
+      GENEWAY_GATE_A_LIVE_ENABLED: 'true',
+    })).toThrow('must be 1');
 
     const supervisor = await readFile(new URL('./e2e/start-e2e-worker.ts', import.meta.url), 'utf8');
     expect(supervisor).toContain('...modelGatewayWorkerEnvironment(process.env)');

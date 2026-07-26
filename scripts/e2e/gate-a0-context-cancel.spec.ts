@@ -147,13 +147,18 @@ test('真实 served Fast Chat 追问上下文并用停止生成完成 cancel fen
     await expect(longAnswer).toBeVisible();
     const invocationCountBeforeReconnect = await pool.query<{ count: number }>(`SELECT count(*)::int count FROM model_invocations
       WHERE tenant_id='tenant_local' AND conversation_id=$1`, [conversationId]);
+    const isFollowRequest = (url: string): boolean => {
+      const parsed = new URL(url);
+      return parsed.pathname === `/api/conversations/${conversationId}`
+        || parsed.pathname === `/api/conversations/${conversationId}/chat-runs/${longInvocationId}/events`;
+    };
     let browserTextAtDisconnect = '';
     let successfulResponsesBeforeReconnect = 0;
     try {
       await page.context().setOffline(true);
-      await expect.poll(() => failedBrowserRequests.filter((url) => url.includes(
-        `/chat-runs/${longInvocationId}/events`,
-      )).length, { timeout: 10_000, intervals: [25, 50, 100] }).toBeGreaterThan(0);
+      await expect.poll(() => failedBrowserRequests.filter(isFollowRequest).length, {
+        timeout: 10_000, intervals: [25, 50, 100],
+      }).toBeGreaterThan(0);
       browserTextAtDisconnect = await longAnswer.textContent() ?? '';
       successfulResponsesBeforeReconnect = successfulBrowserEventResponses.filter((url) => url.includes(
         `/chat-runs/${longInvocationId}/events`,
@@ -161,9 +166,7 @@ test('真实 served Fast Chat 追问上下文并用停止生成完成 cancel fen
     } finally {
       await page.context().setOffline(false);
     }
-    const injectedReconnectFailures = failedBrowserRequests.filter((url) => url.includes(
-      `/chat-runs/${longInvocationId}/events`,
-    )).length;
+    const injectedReconnectFailures = failedBrowserRequests.filter(isFollowRequest).length;
     expect(injectedReconnectFailures).toBeGreaterThan(0);
     await expect.poll(() => successfulBrowserEventResponses.filter((url) => url.includes(
       `/chat-runs/${longInvocationId}/events`,

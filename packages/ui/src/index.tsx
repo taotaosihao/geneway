@@ -7,6 +7,12 @@ export function SimulationNotice(): ReactNode {
   </div>;
 }
 
+export function InternalAcceptanceNotice(): ReactNode {
+  return <div className="internal-acceptance-notice" data-testid="internal-acceptance-notice">
+    <span>可信本机内部验收</span><strong>runtimeMode=model_gateway</strong><span>businessDecisionAllowed=false</span>
+  </div>;
+}
+
 export function TaskProgress({ completed, total }: Readonly<{ completed: number; total: number }>): ReactNode {
   const value = total === 0 ? 0 : Math.round((completed / total) * 100);
   return <Progress.Root className="task-progress" value={value}>

@@ -12,6 +12,7 @@ import {
   chatRunProjectionSchema,
   cancelChatRunProjectionSchema,
   documentSnapshotListSchema,
+  documentSnapshotProjectionSchema,
   evidenceProjectionSchema,
   executeTaskInputSchema,
   taskEventProjectionSchema,
@@ -19,6 +20,16 @@ import {
   taskSnapshotSchema,
   workflowDetailProjectionSchema,
   workflowListResponseSchema,
+  gateACapabilityRouteProjectionSchema,
+  gateADocumentExecutionEligibilitySchema,
+  gateALiveCancelTaskResponseSchema,
+  gateALiveEvidenceProjectionSchema,
+  gateALiveExecuteTaskResponseSchema,
+  gateALiveTaskCreateResponseSchema,
+  gateALiveTaskEventProjectionSchema,
+  gateALiveTaskListItemSchema,
+  gateALiveTaskSnapshotSchema,
+  gateALiveWorkflowDetailProjectionSchema,
   type ApprovalProjection,
   type BusinessExceptionDetail,
   type BusinessExceptionListQuery,
@@ -32,6 +43,13 @@ import {
   type CreateExceptionAnalysisTaskResponse,
   type DocumentSnapshotList,
   type EvidenceProjection,
+  type GateACapabilityRouteProjection,
+  type GateADocumentExecutionEligibility,
+  type GateALiveEvidenceProjection,
+  type GateALiveTaskCreateResponse,
+  type GateALiveTaskEventProjection,
+  type GateALiveTaskSnapshot,
+  type GateALiveWorkflowDetailProjection,
   type ExpertTarget,
   type TaskListQuery,
   type TaskListResponse,
@@ -49,9 +67,127 @@ export type CreatedTask = Readonly<{
   workflowHash: string;
 }>;
 
+export type LegacySimulationCapabilityRoute = Readonly<{
+  capabilityId: 'solution.analysis.v1';
+  status: 'legacy-simulation';
+  executionRoute: 'simulation';
+  availableExpertModes: readonly ['auto', 'expert', 'team'];
+}>;
+
+export type AnalysisCapabilityRoute = GateACapabilityRouteProjection | LegacySimulationCapabilityRoute;
+export type PublicTask = TaskSnapshot | GateALiveTaskSnapshot;
+export type PublicTaskEvent = TaskEventProjection | GateALiveTaskEventProjection;
+export type PublicWorkflow = WorkflowDetailProjection | GateALiveWorkflowDetailProjection;
+export type PublicEvidence = EvidenceProjection | GateALiveEvidenceProjection;
+export type PublicCreatedTask = CreatedTask | GateALiveTaskCreateResponse;
+export type GateALiveTaskListItem = ReturnType<typeof gateALiveTaskListItemSchema.parse>;
+export type PublicTaskListItem = TaskListResponse['tasks'][number] | GateALiveTaskListItem;
+export type PublicTaskListResponse = Omit<TaskListResponse, 'tasks'> & Readonly<{ tasks: readonly PublicTaskListItem[] }>;
+export type DocumentSnapshotView = Omit<DocumentSnapshotList['documentSnapshots'][number], 'executionEligibility'> & Readonly<{
+  executionEligibility: GateADocumentExecutionEligibility;
+}>;
+export type DocumentSnapshotViewList = Readonly<{ documentSnapshots: readonly DocumentSnapshotView[] }>;
+
 export type Conversation = ConversationProjection;
-export type Workflow = WorkflowDetailProjection;
+export type Workflow = PublicWorkflow;
 export type Approval = ApprovalProjection;
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseTask(value: unknown): PublicTask {
+  return isRecord(value) && value.recordVariant === 'business-task.live/1'
+    ? gateALiveTaskSnapshotSchema.parse(value)
+    : taskSnapshotSchema.parse(value);
+}
+
+function parseTaskEvent(value: unknown): PublicTaskEvent {
+  return isRecord(value) && value.recordVariant === 'business-task-event.live/1'
+    ? gateALiveTaskEventProjectionSchema.parse(value)
+    : taskEventProjectionSchema.parse(value);
+}
+
+function parseWorkflow(value: unknown): PublicWorkflow {
+  return isRecord(value) && value.recordVariant === 'workflow-read-model.live/1'
+    ? gateALiveWorkflowDetailProjectionSchema.parse(value)
+    : workflowDetailProjectionSchema.parse(value);
+}
+
+function parseEvidence(value: unknown): PublicEvidence {
+  return isRecord(value) && value.recordVariant === 'evidence.live/1'
+    ? gateALiveEvidenceProjectionSchema.parse(value)
+    : evidenceProjectionSchema.parse(value);
+}
+
+function parseLegacyCapabilityRoute(value: unknown): LegacySimulationCapabilityRoute | undefined {
+  if (!isRecord(value) || value.id !== 'solution.analysis.v1' || value.simulation !== true
+    || value.runtimeMode !== 'fake' || value.businessDecisionAllowed !== false) return undefined;
+  return {
+    capabilityId: 'solution.analysis.v1', status: 'legacy-simulation', executionRoute: 'simulation',
+    availableExpertModes: ['auto', 'expert', 'team'],
+  };
+}
+
+function parseDocumentSnapshotViews(value: unknown): DocumentSnapshotViewList {
+  const legacy = documentSnapshotListSchema.safeParse(value);
+  if (legacy.success) {
+    return {
+      documentSnapshots: legacy.data.documentSnapshots.map((projection): DocumentSnapshotView => ({
+        ...projection,
+        executionEligibility: projection.executionEligibility.eligible
+          ? {
+              route: 'simulation', eligible: true, simulationProfile: 'solution-analysis-demo/v2',
+              simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false,
+            }
+          : { route: 'not_open', eligible: false, reason: 'PROFILE_NOT_RECOGNIZED' },
+      })),
+    };
+  }
+  if (!isRecord(value) || !Array.isArray(value.documentSnapshots)) {
+    throw new Error('DOCUMENT_SNAPSHOT_PROJECTION_INVALID');
+  }
+  return {
+    documentSnapshots: value.documentSnapshots.map((raw): DocumentSnapshotView => {
+      if (!isRecord(raw)) throw new Error('DOCUMENT_SNAPSHOT_PROJECTION_INVALID');
+      const eligibility = gateADocumentExecutionEligibilitySchema.parse(raw.executionEligibility);
+      const base = documentSnapshotProjectionSchema.parse({
+        ...raw,
+        executionEligibility: eligibility.eligible
+          ? { eligible: true }
+          : { eligible: false, reason: 'PROFILE_NOT_RECOGNIZED' },
+      });
+      return { ...base, executionEligibility: eligibility };
+    }),
+  };
+}
+
+function parseTaskList(value: unknown): PublicTaskListResponse {
+  const legacy = taskListResponseSchema.safeParse(value);
+  if (legacy.success) return legacy.data;
+  if (!isRecord(value) || !Array.isArray(value.tasks)) throw new Error('TASK_LIST_PROJECTION_INVALID');
+  const envelope = taskListResponseSchema.parse({ ...value, tasks: [] });
+  const tasks = value.tasks.map((raw): PublicTaskListItem => {
+    if (isRecord(raw) && raw.recordVariant === 'business-task.live/1') {
+      return gateALiveTaskListItemSchema.parse(raw);
+    }
+    return taskListResponseSchema.parse({ ...envelope, tasks: [raw] }).tasks[0]!;
+  });
+  return { ...envelope, tasks };
+}
+
+function parseCreatedTask(value: unknown): PublicCreatedTask {
+  if (isRecord(value) && value.recordVariant === 'business-task.live/1') {
+    return gateALiveTaskCreateResponseSchema.parse(value);
+  }
+  if (!isRecord(value) || typeof value.taskId !== 'string' || typeof value.approvalId !== 'string'
+    || typeof value.workflowVersionId !== 'string' || typeof value.workflowHash !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(value.workflowHash)) throw new Error('TASK_CREATE_PROJECTION_INVALID');
+  return {
+    taskId: value.taskId, approvalId: value.approvalId,
+    workflowVersionId: value.workflowVersionId, workflowHash: value.workflowHash,
+  };
+}
 
 const key = (prefix: string): string => {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -66,7 +202,9 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   } catch (cause) {
     throw new ApiError('NETWORK_OFFLINE', 'Control Plane 当前不可连接', 0, { cause });
   }
-  const payload = await response.json().catch(() => ({})) as T & { error?: { code?: string; message?: string } };
+  const payload = await response.json().catch(() => ({})) as T & {
+    error?: { code?: string; message?: string; details?: unknown };
+  };
   if (!response.ok && response.headers.get('x-geneway-upstream-status') === 'offline') {
     throw new ApiError('NETWORK_OFFLINE', 'Control Plane 当前不可连接', response.status);
   }
@@ -74,6 +212,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     payload.error?.code ?? 'REQUEST_FAILED',
     payload.error?.message ?? response.statusText,
     response.status,
+    { details: payload.error?.details },
   );
   return payload;
 }
@@ -83,11 +222,14 @@ export class ApiError extends Error {
     readonly code: string,
     message: string,
     readonly status: number,
-    options?: ErrorOptions,
+    options?: ErrorOptions & Readonly<{ details?: unknown }>,
   ) {
     super(`${code}: ${message}`, options);
     this.name = 'ApiError';
+    this.details = options?.details;
   }
+
+  readonly details: unknown;
 }
 
 export function apiErrorCode(cause: unknown): string {
@@ -101,9 +243,9 @@ export function apiErrorStatus(cause: unknown): number | undefined {
 export function mergeTaskEventBatch(
   taskId: string,
   afterCursor: number,
-  incoming: readonly TaskEventProjection[],
-): Readonly<{ events: readonly TaskEventProjection[]; cursor: number }> {
-  const byCursor = new Map<number, TaskEventProjection>();
+  incoming: readonly PublicTaskEvent[],
+): Readonly<{ events: readonly PublicTaskEvent[]; cursor: number }> {
+  const byCursor = new Map<number, PublicTaskEvent>();
   const ids = new Set<string>();
   for (const event of incoming) {
     if (event.businessTaskId !== taskId) throw new Error('TASK_EVENT_TASK_MISMATCH');
@@ -159,8 +301,16 @@ export const api = {
       method: 'POST', headers: { 'idempotency-key': key('artifact') }, body: form,
     }));
   },
-  getDocumentSnapshots: async (conversationId: string): Promise<DocumentSnapshotList> =>
-    documentSnapshotListSchema.parse(await request(`/api/conversations/${conversationId}/document-snapshots`)),
+  getDocumentSnapshots: async (conversationId: string): Promise<DocumentSnapshotViewList> =>
+    parseDocumentSnapshotViews(await request(`/api/conversations/${conversationId}/document-snapshots`)),
+  getAnalysisCapabilityRoute: async (): Promise<AnalysisCapabilityRoute> => {
+    const value = await request('/api/capabilities/solution.analysis.v1');
+    const live = gateACapabilityRouteProjectionSchema.safeParse(value);
+    if (live.success) return live.data;
+    const legacy = parseLegacyCapabilityRoute(value);
+    if (legacy !== undefined) return legacy;
+    throw new Error('CAPABILITY_ROUTE_PROJECTION_INVALID');
+  },
   createTask: (conversationId: string, documentSnapshotId: string, expertTarget: ExpertTarget) => {
     const input: CreateTaskInput = {
       conversationId,
@@ -168,12 +318,12 @@ export const api = {
       inputRef: { kind: 'document_snapshot', documentSnapshotId },
       expertTarget,
     };
-    return request<CreatedTask>('/api/business-tasks', {
+    return request('/api/business-tasks', {
       method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('task') }, body: JSON.stringify(input),
-    });
+    }).then(parseCreatedTask);
   },
-  getTask: async (taskId: string): Promise<TaskSnapshot> => taskSnapshotSchema.parse(await request(`/api/business-tasks/${taskId}`)),
-  listTasks: async (query: Partial<TaskListQuery> = {}): Promise<TaskListResponse> => {
+  getTask: async (taskId: string): Promise<PublicTask> => parseTask(await request(`/api/business-tasks/${taskId}`)),
+  listTasks: async (query: Partial<TaskListQuery> = {}): Promise<PublicTaskListResponse> => {
     const params = new URLSearchParams();
     if (query.status !== undefined) params.set('status', query.status);
     if (query.capabilityId !== undefined) params.set('capabilityId', query.capabilityId);
@@ -182,7 +332,7 @@ export const api = {
     if (query.limit !== undefined) params.set('limit', String(query.limit));
     if (query.cursor !== undefined) params.set('cursor', query.cursor);
     const suffix = params.size === 0 ? '' : `?${params.toString()}`;
-    return taskListResponseSchema.parse(await request(`/api/business-tasks${suffix}`));
+    return parseTaskList(await request(`/api/business-tasks${suffix}`));
   },
   listBusinessExceptions: async (query: Partial<BusinessExceptionListQuery> = {}): Promise<BusinessExceptionListResponse> => {
     const parsed = businessExceptionListQuerySchema.parse(query);
@@ -220,9 +370,9 @@ export const api = {
       body: JSON.stringify(input),
     }));
   },
-  getEvidence: async (evidenceId: string): Promise<EvidenceProjection> => evidenceProjectionSchema.parse(await request(`/api/evidence/${evidenceId}`)),
+  getEvidence: async (evidenceId: string): Promise<PublicEvidence> => parseEvidence(await request(`/api/evidence/${evidenceId}`)),
   getWorkflow: async (id: string): Promise<Workflow> =>
-    workflowDetailProjectionSchema.parse(await request(`/api/workflow-versions/${id}`)),
+    parseWorkflow(await request(`/api/workflow-versions/${id}`)),
   listWorkflows: async (query: Partial<WorkflowListQuery> = {}): Promise<WorkflowListResponse> => {
     const params = new URLSearchParams();
     if (query.capabilityVersionId !== undefined) params.set('capabilityVersionId', query.capabilityVersionId);
@@ -236,16 +386,18 @@ export const api = {
   approve: (id: string) => request<{ approvalId: string; status: string }>(`/api/approvals/${id}/decisions`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('approval') }, body: JSON.stringify({ decision: 'approved' }),
   }),
-  execute: (taskId: string, approval: Pick<ApprovalProjection, 'version' | 'subjectDigest'>) => request<{ taskId: string; status: string }>(`/api/business-tasks/${taskId}/execute`, {
+  execute: (taskId: string, approval: Pick<ApprovalProjection, 'version' | 'subjectDigest'>) => request(`/api/business-tasks/${taskId}/execute`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key('execute') },
     body: JSON.stringify(executeTaskInputSchema.parse({
       expectedApprovalVersion: approval.version,
       expectedApprovalSubjectDigest: approval.subjectDigest,
     })),
-  }),
-  cancelTask: (taskId: string) => request<{ taskId: string; status: 'canceled' }>(`/api/business-tasks/${taskId}/cancel`, {
+  }).then((value) => isRecord(value) && value.recordVariant === 'business-task.live/1'
+    ? gateALiveExecuteTaskResponseSchema.parse(value) : value),
+  cancelTask: (taskId: string) => request(`/api/business-tasks/${taskId}/cancel`, {
     method: 'POST', headers: { 'idempotency-key': key('cancel') },
-  }),
+  }).then((value) => isRecord(value) && value.recordVariant === 'business-task.live/1'
+    ? gateALiveCancelTaskResponseSchema.parse(value) : value),
   events: async (taskId: string, afterCursor: number) => {
     let response: Response;
     try {
@@ -258,6 +410,6 @@ export const api = {
     }
     if (!response.ok) throw new ApiError('EVENT_STREAM_FAILED', response.statusText, response.status);
     const text = await response.text();
-    return [...text.matchAll(/^data: (.+)$/gm)].map((match) => taskEventProjectionSchema.parse(JSON.parse(match[1] ?? '{}')));
+    return [...text.matchAll(/^data: (.+)$/gm)].map((match) => parseTaskEvent(JSON.parse(match[1] ?? '{}')));
   },
 };

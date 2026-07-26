@@ -13,18 +13,26 @@ const workerSocketPath = process.env.GENEWAY_WORKER_SOCKET_PATH;
 const workerTokenFile = process.env.GENEWAY_WORKER_TOKEN_FILE;
 const workerInstanceId = process.env.GENEWAY_WORKER_INSTANCE_ID;
 const gateA0Live = process.env.GENEWAY_GATE_A0_LIVE === '1';
+const gateALive = process.env.GENEWAY_GATE_A_LIVE === '1';
 const modelGatewayPort = Number(process.env.GENEWAY_MODEL_GATEWAY_PORT ?? 3150);
 const modelGatewaySupervisorPort = Number(process.env.GENEWAY_MODEL_GATEWAY_SUPERVISOR_PORT ?? 3450);
 const gateA0ReleasePort = Number(process.env.GENEWAY_GATE_A0_RELEASE_PORT ?? 3160);
+const gateAReleasePort = Number(process.env.GENEWAY_GATE_A_RELEASE_PORT ?? 3170);
 const modelGatewayServiceTokenFile = process.env.GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE;
 const modelGatewayInvocationSecretFile = process.env.GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE;
 const codexSubscriptionAuthFile = process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE;
 const modelGatewayConformanceFile = process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE;
 const e2eSecretCanary = process.env.GENEWAY_E2E_SECRET_CANARY;
+const gateAParserImage = process.env.GENEWAY_GATE_A_PARSER_IMAGE;
+const gateAParserBuildJson = process.env.GENEWAY_GATE_A_PARSER_BUILD_JSON;
+const gateAParserApprovalJson = process.env.GENEWAY_GATE_A_PARSER_APPROVAL_JSON;
+const gateAApprovedC1Sha256 = process.env.GENEWAY_GATE_A_APPROVED_C1_SHA256;
 if (!Number.isInteger(webPort) || !Number.isInteger(controlPlanePort) || !Number.isInteger(controlPlaneSupervisorPort)
   || !Number.isInteger(workerHealthPort) || !Number.isInteger(modelGatewayPort)
   || !Number.isInteger(modelGatewaySupervisorPort)
-  || !Number.isInteger(gateA0ReleasePort)) throw new Error('GENEWAY ports must be integers');
+  || !Number.isInteger(gateA0ReleasePort) || !Number.isInteger(gateAReleasePort)) {
+  throw new Error('GENEWAY ports must be integers');
+}
 if (workerSocketPath === undefined || workerTokenFile === undefined || workerInstanceId === undefined) throw new Error('E2E Worker authority is required');
 if (!/^\/tmp\/gw-uds-[a-zA-Z0-9]+\/worker\.sock$/u.test(workerSocketPath)
   || !/^\/tmp\/gw-uds-[a-zA-Z0-9]+\/token$/u.test(workerTokenFile)
@@ -39,12 +47,27 @@ if (gateA0Live && ([modelGatewayServiceTokenFile, modelGatewayInvocationSecretFi
 if (gateA0Live && (e2eSecretCanary === undefined || !/^geneway-secret-canary-[a-f0-9]{48}$/u.test(e2eSecretCanary))) {
   throw new Error('gate-a0-live requires a valid secret-isolation canary');
 }
+if (gateALive && (!gateA0Live
+  || gateAParserImage === undefined || !/^geneway-document-parser:[a-f0-9]{16}$/u.test(gateAParserImage)
+  || gateAParserBuildJson === undefined || gateAParserApprovalJson === undefined
+  || gateAApprovedC1Sha256 === undefined
+  || gateAApprovedC1Sha256.split(',').length !== 6
+  || new Set(gateAApprovedC1Sha256.split(',')).size !== 6
+  || gateAApprovedC1Sha256.split(',').some((hash) => !/^[a-f0-9]{64}$/u.test(hash)))) {
+  throw new Error('gate-a-live requires Gate A0 live plus source-bound parser and exact C1 corpus authority');
+}
 const modelGatewayUrl = `http://127.0.0.1:${String(modelGatewayPort)}`;
 const controlPlaneGatewayEnvironment = gateA0Live
   ? ` GENEWAY_MODEL_GATEWAY_URL=${shellQuote(modelGatewayUrl)}`
     + ` GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE=${shellQuote(modelGatewayServiceTokenFile ?? '')}`
     + ` GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE=${shellQuote(modelGatewayInvocationSecretFile ?? '')}`
     + ` GENEWAY_GATE_A0_LIVE_VALIDATION_RUN_ID=${shellQuote(runId)}`
+    + (gateALive
+      ? ` GENEWAY_GATE_A_LIVE_VALIDATION_RUN_ID=${shellQuote(runId)}`
+        + ` GENEWAY_GATE_A_PARSER_IMAGE=${shellQuote(gateAParserImage ?? '')}`
+        + ` GENEWAY_GATE_A_PARSER_APPROVAL_JSON=${shellQuote(gateAParserApprovalJson ?? '')}`
+        + ` GENEWAY_GATE_A_APPROVED_C1_SHA256=${shellQuote(gateAApprovedC1Sha256 ?? '')}`
+      : '')
   : '';
 const workerGatewayEnvironment = gateA0Live
   ? ` GENEWAY_MODEL_GATEWAY_URL=${shellQuote(modelGatewayUrl)}`
@@ -130,10 +153,17 @@ export default defineConfig({
     { name: 'gate-a0-live', testMatch: /gate-a0-(?:fast-chat|context-cancel)\.spec\.ts/u, use: {
       ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, trace: 'on',
     } },
+    { name: 'gate-a-not-open', testMatch: /gate-a-not-open\.spec\.ts/u, use: {
+      ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, trace: 'on',
+    } },
+    { name: 'gate-a-live', dependencies: ['gate-a-not-open'],
+      testMatch: /(?:gate-a-solution-analysis|gate-a0-(?:fast-chat|context-cancel))\.spec\.ts/u, use: {
+      ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, trace: 'on',
+    } },
   ],
   webServer: [
     {
-      command: `cd .. && exec env GENEWAY_STORAGE_TARGET_ROLE=control-plane GENEWAY_START_STORAGE_RECONCILER=1 PORT=${String(controlPlanePort)} GENEWAY_WEB_PORT=${String(webPort)} bash scripts/with-storage.sh env GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT=${String(controlPlaneSupervisorPort)} GENEWAY_WORKER_SOCKET_PATH=${workerSocketPath} GENEWAY_WORKER_TOKEN_FILE=${workerTokenFile} GENEWAY_WORKER_LEASE_MS=1000 GENEWAY_E2E_HOOK_URL=http://127.0.0.1:${String(workerHealthPort)} GENEWAY_E2E_HOOK_TOKEN_FILE=${workerTokenFile}${controlPlaneGatewayEnvironment} ./node_modules/.bin/tsx scripts/e2e/start-e2e-control-plane.ts`,
+      command: `cd .. && exec env -u GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE -u GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE -u GENEWAY_GATE_A_PARSER_BUILD_JSON GENEWAY_STORAGE_TARGET_ROLE=control-plane GENEWAY_START_STORAGE_RECONCILER=1 PORT=${String(controlPlanePort)} GENEWAY_WEB_PORT=${String(webPort)} bash scripts/with-storage.sh env GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT=${String(controlPlaneSupervisorPort)} GENEWAY_WORKER_SOCKET_PATH=${workerSocketPath} GENEWAY_WORKER_TOKEN_FILE=${workerTokenFile} GENEWAY_WORKER_LEASE_MS=1000 GENEWAY_E2E_HOOK_URL=http://127.0.0.1:${String(workerHealthPort)} GENEWAY_E2E_HOOK_TOKEN_FILE=${workerTokenFile}${controlPlaneGatewayEnvironment} ./node_modules/.bin/tsx scripts/e2e/start-e2e-control-plane.ts`,
       url: `http://127.0.0.1:${String(controlPlaneSupervisorPort)}/health`,
       timeout: 60_000,
       gracefulShutdown: { signal: 'SIGTERM', timeout: 30_000 },
@@ -142,7 +172,7 @@ export default defineConfig({
       stderr: 'pipe',
     },
     {
-      command: `cd .. && exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${process.env.TMPDIR ?? '/tmp'}" LANG="${process.env.LANG ?? 'C.UTF-8'}" NODE_ENV=test GENEWAY_RUN_ID=${runId} GENEWAY_WORKER_HEALTH_PORT=${String(workerHealthPort)} GENEWAY_WORKER_SOCKET_PATH=${workerSocketPath} GENEWAY_WORKER_TOKEN_FILE=${workerTokenFile} GENEWAY_WORKER_INSTANCE_ID=${workerInstanceId} GENEWAY_WORKER_CONSUMER=gate0.2a-worker GENEWAY_WORKER_DEPLOYMENT=gate0.2a-local${workerGatewayEnvironment} ./node_modules/.bin/tsx scripts/e2e/start-e2e-worker.ts`,
+      command: `cd .. && exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${process.env.TMPDIR ?? '/tmp'}" LANG="${process.env.LANG ?? 'C.UTF-8'}" NODE_ENV=test GENEWAY_RUN_ID=${runId} GENEWAY_WORKER_HEALTH_PORT=${String(workerHealthPort)} GENEWAY_WORKER_SOCKET_PATH=${workerSocketPath} GENEWAY_WORKER_TOKEN_FILE=${workerTokenFile} GENEWAY_WORKER_INSTANCE_ID=${workerInstanceId} GENEWAY_WORKER_CONSUMER=gate0.2a-worker GENEWAY_WORKER_DEPLOYMENT=gate0.2a-local${workerGatewayEnvironment}${gateALive ? ' GENEWAY_GATE_A_LIVE_ENABLED=1' : ''} ./node_modules/.bin/tsx scripts/e2e/start-e2e-worker.ts`,
       url: `http://127.0.0.1:${String(workerHealthPort)}/health`,
       timeout: 60_000,
       reuseExistingServer: false,
@@ -167,6 +197,14 @@ export default defineConfig({
     }, {
       command: `cd .. && exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${process.env.TMPDIR ?? '/tmp'}" LANG="${process.env.LANG ?? 'C.UTF-8'}" NODE_ENV=test GENEWAY_RUN_ID=${shellQuote(runId)} DATABASE_URL=${shellQuote(process.env.DATABASE_URL ?? '')} GENEWAY_GATE_A0_RELEASE_PORT=${String(gateA0ReleasePort)} GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE=${shellQuote(codexSubscriptionAuthFile ?? '')} GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE=${shellQuote(modelGatewayConformanceFile ?? '')} ./node_modules/.bin/tsx scripts/e2e/start-gate-a0-release.ts`,
       url: `http://127.0.0.1:${String(gateA0ReleasePort)}/health`,
+      timeout: 60_000,
+      reuseExistingServer: false,
+      stdout: 'pipe' as const,
+      stderr: 'pipe' as const,
+    }] : []),
+    ...(gateALive ? [{
+      command: `cd .. && exec env -i PATH="$PATH" HOME="$HOME" TMPDIR="${process.env.TMPDIR ?? '/tmp'}" LANG="${process.env.LANG ?? 'C.UTF-8'}" NODE_ENV=test GENEWAY_RUN_ID=${shellQuote(runId)} DATABASE_URL=${shellQuote(process.env.DATABASE_URL ?? '')} GENEWAY_GATE_A_RELEASE_PORT=${String(gateAReleasePort)} GENEWAY_GATE_A_NOT_OPEN_MARKER_REQUIRED=1 GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE=${shellQuote(codexSubscriptionAuthFile ?? '')} GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE=${shellQuote(modelGatewayConformanceFile ?? '')} GENEWAY_GATE_A_PARSER_IMAGE=${shellQuote(gateAParserImage ?? '')} GENEWAY_GATE_A_PARSER_BUILD_JSON=${shellQuote(gateAParserBuildJson ?? '')} GENEWAY_GATE_A_PARSER_APPROVAL_JSON=${shellQuote(gateAParserApprovalJson ?? '')} ./node_modules/.bin/tsx scripts/e2e/start-gate-a-release.ts`,
+      url: `http://127.0.0.1:${String(gateAReleasePort)}/health`,
       timeout: 60_000,
       reuseExistingServer: false,
       stdout: 'pipe' as const,

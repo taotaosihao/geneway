@@ -148,13 +148,22 @@ export function FastChatExperience({ conversationId: explicitConversationId }: R
       <div className="brand"><span className="brand-mark">纬</span><div><strong>geneway</strong><small>制造业数字员工</small></div></div>
       <a className="new-task" href="/conversations/new">＋ 新建会话</a>
       <nav><b>工作区</b><a className="nav-active" href="/conversations/new">小纬</a><a href="/exceptions">异常与待办</a><a href="/tasks">我的任务</a><a href="/workflows">Workflow</a></nav>
-      <a className="material-analysis-link" data-testid="material-analysis-link"
-        href={conversation === undefined
-          ? '/conversations/new?capability=solution.analysis.v1'
-          : `/conversations/${conversation.id}?capability=solution.analysis.v1`}>分析材料</a>
+      <div className="capability-entry-list">
+        <a className="material-analysis-link" data-testid="material-analysis-link"
+          href={conversation === undefined
+            ? '/conversations/new?capability=solution.analysis.v1'
+            : `/conversations/${conversation.id}?capability=solution.analysis.v1`}>分析材料</a>
+        <a className="work-order-entry-link" data-testid="work-order-entry-link" href="/work-orders/new">
+          查询工单<small>独立只读通道</small>
+        </a>
+      </div>
     </aside>
     <section className="fast-chat-pane">
-      <header className="topbar"><div><h1>小纬</h1><p>普通聊天 · 真实模型 · 无工具</p></div><span className="live-boundary">trusted-local</span></header>
+      <header className="topbar"><div><h1>小纬</h1><p>普通聊天 · 真实模型 · 无工具</p></div><div className="fast-chat-top-actions">
+        <a href={conversation === undefined ? '/conversations/new?capability=solution.analysis.v1' : `/conversations/${conversation.id}?capability=solution.analysis.v1`}>分析材料</a>
+        <a data-testid="work-order-top-entry" href="/work-orders/new">查询工单</a>
+        <span className="live-boundary">trusted-local</span>
+      </div></header>
       <div className="thread" data-testid="message-thread">
         {(conversation?.messages.length ?? 0) === 0 && <section className="welcome-empty" data-testid="welcome-empty">
           <div className="avatar">纬</div><div><b>你好，我是小纬</b><p>直接输入普通文本即可开始，无需上传材料。我不会在此模式访问联网搜索、企业知识或生产系统。</p></div>

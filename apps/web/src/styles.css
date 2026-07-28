@@ -160,11 +160,41 @@ nav .nav-active { background: #e0e2dc; color: var(--ink); font-weight: 650; }
 .bound-recovery-note { margin: 13px 0 0; padding: 10px; border-radius: 8px; background: var(--accent-soft); color: #4c655b; font-size: 10px; }.bound-recovery-note a { color: var(--accent); font-weight: 750; }
 .analysis-binding > .simulation-notice { margin-top: 15px; }.immutable-digests { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }.immutable-digests > div { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 11px; }.immutable-digests span, .immutable-digests a, .immutable-digests b, .immutable-digests code { display: block; }.immutable-digests span { color: var(--muted); font-size: 9px; text-transform: uppercase; }.immutable-digests a, .immutable-digests b { margin-top: 6px; color: var(--ink); font-size: 10px; text-decoration: none; }.immutable-digests code { margin-top: 7px; font-size: 8px; overflow-wrap: anywhere; }
 
+.work-order-create-card, .work-order-task-hero, .work-order-workflow, .work-order-approval, .work-order-card, .work-order-explanation, .work-order-evidence-index, .work-order-unavailable { border: 1px solid var(--line); border-radius: 14px; background: white; box-shadow: 0 12px 34px rgba(42,45,38,.045); }
+.work-order-create-card { max-width: 780px; margin: 20px auto; padding: 28px; }
+.work-order-create-card h1, .work-order-task-hero h1 { margin: 6px 0 8px; font-size: 24px; }
+.work-order-create-card > div > p, .work-order-task-hero p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.work-order-create-card form { margin-top: 24px; }
+.work-order-create-card form > label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.work-order-create-card form > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; }
+.work-order-create-card input { min-width: 0; height: 42px; border: 1px solid #cfd3ca; border-radius: 9px; padding: 0 12px; font: 12px ui-monospace, monospace; }
+.work-order-create-card form small { display: block; margin-top: 7px; color: #9b3d26; font-size: 10px; }
+.work-order-create-card .error { margin-top: 14px; }
+.work-order-create-card aside { margin-top: 22px; padding: 14px 16px; border-left: 3px solid var(--accent); border-radius: 0 9px 9px 0; background: var(--accent-soft); }
+.work-order-create-card aside b, .work-order-create-card aside p { display: block; margin: 0; }.work-order-create-card aside b { font-size: 11px; }.work-order-create-card aside p { margin-top: 5px; color: #4c655b; font-size: 10px; line-height: 1.55; }
+.work-order-unavailable { max-width: 680px; margin: 24px auto; padding: 30px; text-align: center; }.work-order-unavailable > span { color: #a44931; font: 700 11px ui-monospace, monospace; }.work-order-unavailable h2 { margin: 9px 0 5px; }.work-order-unavailable p { color: var(--muted); font-size: 12px; line-height: 1.55; }.work-order-unavailable > div { display: flex; justify-content: center; gap: 8px; margin-top: 18px; }.work-order-unavailable a { text-decoration: none; font-size: 11px; }
+.work-order-task-stack { display: grid; gap: 15px; }
+.work-order-task-hero { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 22px; }.work-order-task-state { display: flex; align-items: center; gap: 8px; }.work-order-task-state .secondary { font-size: 10px; }
+.work-order-authority-grid, .work-order-result-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(290px, .85fr); gap: 15px; align-items: start; }
+.work-order-workflow, .work-order-approval, .work-order-card, .work-order-explanation, .work-order-evidence-index { padding: 18px; }
+.work-order-workflow-identity { display: grid; grid-template-columns: minmax(150px, .65fr) minmax(260px, 1.35fr); gap: 7px; margin-bottom: 10px; }.work-order-workflow-identity code { min-width: 0; padding: 7px 9px; border-radius: 7px; background: #f1f3ee; font-size: 8px; overflow-wrap: anywhere; }
+.work-order-workflow ol { margin: 0; padding: 0; list-style: none; }.work-order-workflow li { display: grid; grid-template-columns: 24px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 10px 2px; border-top: 1px solid #ecece7; }.work-order-workflow li > span:first-child { color: #9a9d94; font: 8px ui-monospace, monospace; }.work-order-workflow li b, .work-order-workflow li small { display: block; }.work-order-workflow li b { font-size: 11px; }.work-order-workflow li small { margin-top: 3px; color: var(--muted); font: 8px ui-monospace, monospace; }
+.work-order-approval dl { margin: 0 0 14px; }.work-order-approval dl > div { padding: 9px 0; border-top: 1px solid #ecece7; }.work-order-approval dt { color: var(--muted); font-size: 9px; }.work-order-approval dd { margin: 5px 0 0; font: 9px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }.work-order-approval .primary { width: 100%; }.work-order-approval > p { color: var(--muted); font-size: 10px; }
+.work-order-card { border-left: 3px solid var(--accent); }.work-order-card-head, .work-order-explanation-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }.work-order-card-head h2, .work-order-explanation h2 { margin: 5px 0 0; font-size: 17px; }.read-only-badge { border-radius: 999px; padding: 6px 9px; background: var(--accent-soft); color: var(--accent); font-size: 9px; font-weight: 750; }
+.work-order-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 17px 0; }.work-order-metrics > div { min-width: 0; padding: 11px; border-radius: 9px; background: #f5f6f2; }.work-order-metrics dt { color: var(--muted); font-size: 9px; }.work-order-metrics dd { margin: 6px 0 0; font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }.work-order-metrics time { font: 8px ui-monospace, monospace; }
+.work-order-field-evidence h3 { margin: 0 0 8px; font-size: 11px; }.work-order-evidence-link { display: block; margin: 5px 0; color: var(--accent); font: 8px/1.45 ui-monospace, monospace; overflow-wrap: anywhere; }.work-order-deterministic-note { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; line-height: 1.55; }
+.work-order-explanation { border-left: 3px solid #8c968e; }.work-order-explanation-head { justify-content: flex-start; align-items: center; }.work-order-explanation > p { margin: 16px 0 12px; font-size: 13px; line-height: 1.65; }.work-order-explanation-statements { display: grid; gap: 8px; }.work-order-explanation-statements article { padding: 11px; border-radius: 9px; background: #f5f6f2; }.work-order-explanation-statements article > span { color: var(--accent); font-size: 9px; font-weight: 750; }.work-order-explanation-statements article > p { margin: 6px 0; font-size: 11px; line-height: 1.55; }.work-order-explanation-statements article > small { display: block; color: var(--muted); font-size: 8px; }
+.work-order-evidence-index > p { color: var(--muted); font-size: 10px; }.work-order-evidence-index > div:last-child { display: flex; flex-wrap: wrap; gap: 7px; }.work-order-evidence-index code { scroll-margin-top: 20px; border-radius: 6px; padding: 6px 8px; background: #f1f3ee; font-size: 8px; }.work-order-evidence-index code:target { outline: 2px solid var(--accent); background: var(--accent-soft); }
+.work-order-terminal { min-height: 160px; }
+
 .fast-chat-shell { min-height: 100vh; display: grid; grid-template-columns: 240px minmax(0, 1fr); background: var(--paper); color: var(--ink); }
 .fast-chat-pane { min-width: 0; min-height: 100vh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; background: #fff; }
 .fast-chat-pane .thread { width: min(860px, 100%); margin: 0 auto; padding: 34px 30px 80px; overflow-y: auto; }
-.material-analysis-link { display: block; margin: auto 18px 20px; border: 1px solid #d8ddd4; border-radius: 10px; padding: 11px 12px; background: #f7f8f4; color: var(--accent); font-size: 11px; font-weight: 750; text-align: center; text-decoration: none; }
-.material-analysis-link:hover { border-color: var(--accent); background: #f0f5ef; }
+.capability-entry-list { display: grid; gap: 7px; margin: auto 18px 20px; }
+.material-analysis-link, .work-order-entry-link { display: block; border: 1px solid #d8ddd4; border-radius: 10px; padding: 10px 12px; background: #f7f8f4; color: var(--accent); font-size: 11px; font-weight: 750; text-align: center; text-decoration: none; }
+.material-analysis-link:hover, .work-order-entry-link:hover { border-color: var(--accent); background: #f0f5ef; }
+.work-order-entry-link small { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; font-weight: 500; }
+.fast-chat-top-actions { display: flex; align-items: center; gap: 7px; }.fast-chat-top-actions a { border-radius: 8px; padding: 7px 9px; background: #f1f3ee; color: var(--accent); font-size: 9px; font-weight: 700; text-decoration: none; }
 .live-boundary { border: 1px solid #d8ddd4; border-radius: 999px; padding: 6px 9px; color: var(--muted); font: 9px ui-monospace, monospace; }
 .fast-chat-composer { width: min(860px, calc(100% - 60px)); margin: 0 auto 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; border: 1px solid #d7dad2; border-radius: 16px; padding: 10px; background: #fff; box-shadow: 0 8px 28px rgba(35, 45, 38, .08); }
 .fast-chat-composer textarea { min-height: 52px; max-height: 180px; resize: vertical; border: 0; outline: 0; padding: 9px 10px; color: var(--ink); background: transparent; font: inherit; line-height: 1.5; }
@@ -182,6 +212,9 @@ nav .nav-active { background: #e0e2dc; color: var(--ink); font-weight: 650; }
   .fast-chat-composer { width: calc(100% - 24px); }
   .product-content { padding: 14px; }
   .binding-grid, .evidence-grid { grid-template-columns: 1fr; }
+  .work-order-authority-grid, .work-order-result-grid, .work-order-metrics, .work-order-workflow-identity { grid-template-columns: 1fr; }
+  .work-order-task-hero { flex-direction: column; }
+  .work-order-create-card form > div { grid-template-columns: 1fr; }
   .exception-filters, .source-facts, .source-evidence-grid, .immutable-digests { grid-template-columns: 1fr; }
   .simulation-banner, .analysis-request-row { align-items: stretch; grid-template-columns: 1fr; flex-direction: column; }
   .artifact-list article { grid-template-columns: 1fr; }

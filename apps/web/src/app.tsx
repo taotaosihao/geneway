@@ -426,7 +426,7 @@ function AnalysisConversationExperience({ conversationId: explicitConversationId
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">纬</span><div><strong>geneway</strong><small>制造业数字员工</small></div></div>
         <a className="new-task" href="/conversations/new?capability=solution.analysis.v1" onClick={clearAnalysisRecoveryState}>＋ 新建会话</a>
-        <nav><b>工作区</b><a className="nav-active" href="/conversations/new?capability=solution.analysis.v1">小纬</a><a href="/exceptions">异常与待办</a><a href="/tasks">我的任务</a><a href="/workflows">Workflow</a><span>生产日报 · 即将开放</span></nav>
+        <nav><b>工作区</b><a className="nav-active" href="/conversations/new?capability=solution.analysis.v1">小纬</a><a href="/work-orders/new">查询工单</a><a href="/exceptions">异常与待办</a><a href="/tasks">我的任务</a><a href="/workflows">Workflow</a><span>生产日报 · 即将开放</span></nav>
         <section className="operations-preview" aria-label="制造业状态入口">
           <h3>现场动态</h3>
           <a href="/exceptions?exceptionType=equipment_alarm"><span className="signal danger" />设备异常待处理<small>模拟数据</small></a>

@@ -30,6 +30,9 @@ import {
   gateALiveTaskListItemSchema,
   gateALiveTaskSnapshotSchema,
   gateALiveWorkflowDetailProjectionSchema,
+  gateA3CreateTaskInputVariantSchema,
+  gateA3PublicEvidenceProjectionSchema,
+  gateA3PublicTaskSnapshotSchema,
   type ApprovalProjection,
   type BusinessExceptionDetail,
   type BusinessExceptionListQuery,
@@ -50,6 +53,8 @@ import {
   type GateALiveTaskEventProjection,
   type GateALiveTaskSnapshot,
   type GateALiveWorkflowDetailProjection,
+  type GateA3PublicTaskSnapshot,
+  type GateA3PublicEvidenceProjection,
   type ExpertTarget,
   type TaskListQuery,
   type TaskListResponse,
@@ -92,8 +97,60 @@ export type Conversation = ConversationProjection;
 export type Workflow = PublicWorkflow;
 export type Approval = ApprovalProjection;
 
+export type WorkOrderCapabilityRoute = Readonly<{
+  capabilityId: 'production.work-order-status.v1';
+  status: 'internal' | 'NOT_OPEN';
+  executionRoute: 'live' | 'not_open';
+}>;
+
+export type CreatedWorkOrderTask = Readonly<{
+  taskId: string;
+  approvalId: string;
+  workflowVersionId: string;
+  workflowHash: string;
+}>;
+
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function parseWorkOrderCapabilityRoute(value: unknown): WorkOrderCapabilityRoute {
+  if (!isRecord(value) || value.capabilityId !== 'production.work-order-status.v1') {
+    throw new Error('WORK_ORDER_CAPABILITY_ROUTE_INVALID');
+  }
+  const allowedKeys = new Set([
+    'capabilityId', 'status', 'executionRoute', 'capabilityVersionId', 'simulation',
+    'runtimeMode', 'businessDecisionAllowed', 'internalAcceptance', 'reason',
+  ]);
+  if (Object.keys(value).some((field) => !allowedKeys.has(field))) {
+    throw new Error('WORK_ORDER_CAPABILITY_ROUTE_INVALID');
+  }
+  if (value.status === 'NOT_OPEN' && value.executionRoute === 'not_open') {
+    return { capabilityId: value.capabilityId, status: value.status, executionRoute: value.executionRoute };
+  }
+  if (value.status === 'internal' && value.executionRoute === 'live'
+    && value.simulation === false && value.runtimeMode === 'model_gateway'
+    && value.businessDecisionAllowed === false && value.internalAcceptance === true) {
+    return { capabilityId: value.capabilityId, status: value.status, executionRoute: value.executionRoute };
+  }
+  throw new Error('WORK_ORDER_CAPABILITY_ROUTE_INVALID');
+}
+
+export function parseCreatedWorkOrderTask(value: unknown): CreatedWorkOrderTask {
+  const allowedKeys = new Set(['taskId', 'approvalId', 'workflowVersionId', 'workflowHash']);
+  if (!isRecord(value) || typeof value.taskId !== 'string' || typeof value.approvalId !== 'string'
+    || typeof value.workflowVersionId !== 'string' || typeof value.workflowHash !== 'string'
+    || value.taskId.length === 0 || value.approvalId.length === 0 || value.workflowVersionId.length === 0
+    || !/^[a-f0-9]{64}$/u.test(value.workflowHash)
+    || Object.keys(value).some((field) => !allowedKeys.has(field))) {
+    throw new Error('WORK_ORDER_TASK_CREATE_PROJECTION_INVALID');
+  }
+  return {
+    taskId: value.taskId,
+    approvalId: value.approvalId,
+    workflowVersionId: value.workflowVersionId,
+    workflowHash: value.workflowHash,
+  };
 }
 
 function parseTask(value: unknown): PublicTask {
@@ -118,6 +175,10 @@ function parseEvidence(value: unknown): PublicEvidence {
   return isRecord(value) && value.recordVariant === 'evidence.live/1'
     ? gateALiveEvidenceProjectionSchema.parse(value)
     : evidenceProjectionSchema.parse(value);
+}
+
+export function parseWorkOrderEvidence(value: unknown): GateA3PublicEvidenceProjection {
+  return gateA3PublicEvidenceProjectionSchema.parse(value);
 }
 
 function parseLegacyCapabilityRoute(value: unknown): LegacySimulationCapabilityRoute | undefined {
@@ -311,6 +372,22 @@ export const api = {
     if (legacy !== undefined) return legacy;
     throw new Error('CAPABILITY_ROUTE_PROJECTION_INVALID');
   },
+  getWorkOrderCapabilityRoute: async (): Promise<WorkOrderCapabilityRoute> =>
+    parseWorkOrderCapabilityRoute(await request('/api/capabilities/production.work-order-status.v1')),
+  createWorkOrderTask: async (conversationId: string, workOrderRef: string): Promise<CreatedWorkOrderTask> => {
+    const input = gateA3CreateTaskInputVariantSchema.parse({
+      conversationId,
+      capabilityId: 'production.work-order-status.v1',
+      inputRef: { kind: 'work_order', workOrderRef },
+    });
+    return parseCreatedWorkOrderTask(await request('/api/business-tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'idempotency-key': key('work-order-task') },
+      body: JSON.stringify(input),
+    }));
+  },
+  getWorkOrderTask: async (taskId: string): Promise<GateA3PublicTaskSnapshot> =>
+    gateA3PublicTaskSnapshotSchema.parse(await request(`/api/business-tasks/${taskId}`)),
   createTask: (conversationId: string, documentSnapshotId: string, expertTarget: ExpertTarget) => {
     const input: CreateTaskInput = {
       conversationId,
@@ -371,6 +448,8 @@ export const api = {
     }));
   },
   getEvidence: async (evidenceId: string): Promise<PublicEvidence> => parseEvidence(await request(`/api/evidence/${evidenceId}`)),
+  getWorkOrderEvidence: async (evidenceId: string): Promise<GateA3PublicEvidenceProjection> =>
+    parseWorkOrderEvidence(await request(`/api/evidence/${evidenceId}`)),
   getWorkflow: async (id: string): Promise<Workflow> =>
     parseWorkflow(await request(`/api/workflow-versions/${id}`)),
   listWorkflows: async (query: Partial<WorkflowListQuery> = {}): Promise<WorkflowListResponse> => {

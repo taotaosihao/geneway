@@ -15,6 +15,10 @@ import {
   gateACapabilityRouteProjectionSchema,
   gateADocumentExecutionEligibilitySchema,
   gateALiveTaskCreateInputSchema,
+  gateA3ConnectorCurrentAuthorityRequestSchema,
+  gateA3CreateTaskInputVariantSchema,
+  gateA3EvidenceSourceRevocationInputSchema,
+  gateA3EvidenceSourceRevocationResponseSchema,
   GenewayError,
   isGenewayError,
   taskEventListResponseSchema,
@@ -44,6 +48,7 @@ import type { ValidatedArtifactUpload } from './artifact-repository.js';
 import { ArtifactService, type ArtifactServiceHooks } from './artifact-service.js';
 import { BusinessExceptionRepository } from './business-exception-repository.js';
 import { GateALiveRepository } from './gate-a-live-repository.js';
+import { GateA3WorkOrderRepository, type GateA3Authority } from './gate-a3-work-order-repository.js';
 
 function validateArtifactUpload(upload: SingleMultipartUpload): ValidatedArtifactUpload {
   const lowerName = upload.fileName.toLowerCase();
@@ -90,6 +95,9 @@ const liveDocumentTaskCandidateSchema = z.object({
   }).strict(),
 }).passthrough();
 
+const mutationIdempotencyKeySchema = z.string().min(1).max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+
 const bearerMatches = (header: string | undefined, expected: string): boolean => {
   if (header === undefined || !header.startsWith('Bearer ')) return false;
   const supplied = Buffer.from(header.slice('Bearer '.length), 'utf8');
@@ -128,6 +136,7 @@ export type ControlPlane = Readonly<{
   chatRepository: ChatRepository;
   businessExceptionRepository: BusinessExceptionRepository;
   gateALiveRepository: GateALiveRepository | null;
+  gateA3WorkOrderRepository: GateA3WorkOrderRepository | null;
 }>;
 
 export async function createControlPlane(options: Readonly<{
@@ -142,6 +151,8 @@ export async function createControlPlane(options: Readonly<{
   modelGatewayAuthority?: Readonly<{ serviceToken: string; invocationTokenSecret: string }>;
   liveValidationRunId?: string;
   gateALiveValidationRunId?: string;
+  gateA3Authority?: GateA3Authority;
+  gateA3RouteAvailable?: () => Promise<boolean>;
   chatReaperIntervalMs?: number;
 }>): Promise<ControlPlane> {
   const cursorHmacSecret = options.cursorHmacSecret ?? process.env.GENEWAY_CURSOR_HMAC_SECRET;
@@ -155,6 +166,12 @@ export async function createControlPlane(options: Readonly<{
   const gateALiveRepository = options.gateALiveValidationRunId === undefined
     ? null
     : new GateALiveRepository(repository.pool, options.modelGatewayAuthority!.invocationTokenSecret, options.gateALiveValidationRunId);
+  if (options.gateA3Authority !== undefined && options.modelGatewayAuthority === undefined) {
+    throw new Error('Gate A.3 Work Order requires Model Gateway service authority');
+  }
+  const gateA3WorkOrderRepository = options.gateA3Authority === undefined
+    ? null
+    : new GateA3WorkOrderRepository(repository.pool, options.gateA3Authority);
   const businessExceptionRepository = new BusinessExceptionRepository(repository.pool, cursorHmacSecret);
   const objectStorage = options.objectStorage === undefined ? createObjectStorageFromEnv() : options.objectStorage;
   const artifactServiceHooks: ArtifactServiceHooks = {
@@ -313,8 +330,26 @@ export async function createControlPlane(options: Readonly<{
         ? await chatRepository.consumeInvocationToken(body.invocationToken, options.modelGatewayAuthority!.invocationTokenSecret)
         : audience === 'local-model-gateway-analysis' && gateALiveRepository !== null
           ? await gateALiveRepository.consumeAnalysisInvocationToken(body.invocationToken)
+          : audience === 'local-model-gateway-work-order-explanation' && gateA3WorkOrderRepository !== null
+            ? await gateA3WorkOrderRepository.consumeModelInvocationToken(body.invocationToken)
           : false;
       return active ? { active: true } : reply.status(401).send({ active: false });
+    });
+  }
+
+  if (gateA3WorkOrderRepository !== null && options.gateA3Authority !== undefined) {
+    app.post('/internal/connector-gateway/v1/introspect', async (request, reply) => {
+      if (request.headers.origin !== undefined
+        || !bearerMatches(request.headers.authorization, options.gateA3Authority!.connectorGatewayServiceToken)) {
+        return reply.status(401).send({
+          schemaVersion: 'gate-a3-connector-current-authority-response/1', active: false,
+        });
+      }
+      const body = gateA3ConnectorCurrentAuthorityRequestSchema.parse(request.body);
+      const result = await gateA3WorkOrderRepository.consumeConnectorInvocationToken(
+        body.invocationToken, body.gatewayRequestDigest,
+      );
+      return result.active ? result : reply.status(401).send(result);
     });
   }
 
@@ -428,13 +463,19 @@ export async function createControlPlane(options: Readonly<{
     const chatAvailable = options.chatRouteAvailable !== undefined
       && await chatRepository.isInternalRelease('tenant_local')
       && await options.chatRouteAvailable();
+    const workOrderAvailable = gateA3WorkOrderRepository !== null && options.gateA3RouteAvailable !== undefined
+      && await gateA3WorkOrderRepository.isInternalRelease('tenant_local')
+      && await options.gateA3RouteAvailable();
+    const workOrder = !workOrderAvailable
+      ? { id: 'production.work-order-status.v1', version: 1, name: '只读工单查询', status: 'NOT_OPEN' }
+      : { id: 'production.work-order-status.v1', version: 1, name: '只读工单查询', status: 'internal' };
     return [{
       id: 'xiaowei.chat.v1', version: 1, name: '小纬聊天', status: chatAvailable ? 'internal' : 'NOT_OPEN',
       simulation: false, toolChoice: 'none', dataClasses: ['C0', 'C1'],
     }, {
       id: 'solution.analysis.v1', version: 1, name: '方案分析', fixtureOnly: true,
       simulation: true, runtimeMode: 'fake', businessDecisionAllowed: false,
-    }];
+    }, workOrder];
   });
 
   app.get('/api/capabilities/:id', async (request, reply) => {
@@ -445,6 +486,13 @@ export async function createControlPlane(options: Readonly<{
         && await options.chatRouteAvailable();
       if (!available) return reply.status(503).send({ error: { code: 'MODEL_ROUTE_UNAVAILABLE', message: '真实模型通道未配置或不可用' } });
       return { id: params.id, version: 1, logicalModelPolicy: 'general.chat.standard', toolChoice: 'none', status: 'internal' };
+    }
+    if (params.id === 'production.work-order-status.v1') {
+      if (gateA3WorkOrderRepository === null || options.gateA3RouteAvailable === undefined
+        || !await options.gateA3RouteAvailable()) return {
+        capabilityId: params.id, status: 'NOT_OPEN', executionRoute: 'not_open',
+      };
+      return gateA3WorkOrderRepository.getCapabilityRoute(request.principal);
     }
     if (params.id !== 'solution.analysis.v1') return reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'Capability is not open in Gate 0.1' } });
     if (gateALiveRepository !== null) {
@@ -481,6 +529,17 @@ export async function createControlPlane(options: Readonly<{
   });
 
   app.post('/api/business-tasks', async (request, reply) => {
+    const workOrderCandidate = gateA3CreateTaskInputVariantSchema.safeParse(request.body);
+    if (workOrderCandidate.success) {
+      if (gateA3WorkOrderRepository === null || options.gateA3RouteAvailable === undefined
+        || !await options.gateA3RouteAvailable()) {
+        return reply.status(422).send({ error: { code: 'NOT_OPEN', message: 'Work Order capability is not open' } });
+      }
+      const result = await gateA3WorkOrderRepository.createTask(request.principal, {
+        ...workOrderCandidate.data, idempotencyKey: idempotencyKey(request),
+      });
+      return reply.status(201).send(result);
+    }
     const liveCandidate = liveDocumentTaskCandidateSchema.safeParse(request.body);
     if (liveCandidate.success && gateALiveRepository !== null) {
       const source = await repository.pool.query<{ simulation_profile: string | null }>(`SELECT snapshot.simulation_profile
@@ -524,6 +583,9 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/business-tasks/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateA3WorkOrderRepository !== null && await gateA3WorkOrderRepository.isTask(request.principal, params.id)) {
+      return gateA3WorkOrderRepository.getTask(request.principal, params.id);
+    }
     if (gateALiveRepository !== null && await gateALiveRepository.isLiveTask(request.principal, params.id)) {
       return gateALiveRepository.getLiveTask(request.principal, params.id);
     }
@@ -538,7 +600,12 @@ export async function createControlPlane(options: Readonly<{
     }).strict().refine((value) => value.after === undefined || value.afterCursor === undefined, {
       message: 'Use only one event cursor parameter',
     }).parse(request.query);
-    const live = gateALiveRepository !== null && await gateALiveRepository.isLiveTask(request.principal, params.id);
+    const workOrder = gateA3WorkOrderRepository !== null
+      && await gateA3WorkOrderRepository.isTask(request.principal, params.id);
+    const live = !workOrder && gateALiveRepository !== null && await gateALiveRepository.isLiveTask(request.principal, params.id);
+    if (workOrder) return gateA3WorkOrderRepository.getEvents(
+      request.principal, params.id, query.after ?? query.afterCursor ?? 0,
+    );
     const liveResponse = live
       ? await gateALiveRepository.getLiveEvents(request.principal, params.id, query.after ?? query.afterCursor ?? 0)
       : null;
@@ -565,6 +632,13 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/workflow-versions/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateA3WorkOrderRepository !== null) {
+      const workOrder = await repository.pool.query(`SELECT 1 FROM business_tasks WHERE tenant_id=$1
+        AND requester_id=$2 AND workflow_version_id=$3 AND record_variant='business-task.work-order.live/1'`, [
+        request.principal.tenantId, request.principal.userId, params.id,
+      ]);
+      if (workOrder.rowCount === 1) return gateA3WorkOrderRepository.getWorkflow(request.principal, params.id);
+    }
     if (gateALiveRepository !== null && await gateALiveRepository.isLiveWorkflow(request.principal, params.id)) {
       return gateALiveRepository.getLiveWorkflow(request.principal, params.id);
     }
@@ -573,6 +647,20 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/approvals/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateA3WorkOrderRepository !== null) {
+      const workOrder = await repository.pool.query<{ business_task_id: string }>(`SELECT approval.business_task_id
+        FROM approval_versions approval JOIN business_tasks task ON task.tenant_id=approval.tenant_id
+          AND task.id=approval.business_task_id WHERE approval.tenant_id=$1 AND approval.id=$2
+          AND task.requester_id=$3 AND task.record_variant='business-task.work-order.live/1'`, [
+        request.principal.tenantId, params.id, request.principal.userId,
+      ]);
+      const row = workOrder.rows[0];
+      if (row !== undefined) {
+        const task = await gateA3WorkOrderRepository.getTask(request.principal, row.business_task_id);
+        return { id: task.approval.id, businessTaskId: task.taskId, version: task.approval.version,
+          status: task.approval.status, subjectDigest: task.approval.subjectDigest };
+      }
+    }
     if (gateALiveRepository !== null) {
       const liveIdentity = await repository.pool.query(`SELECT 1 FROM approval_versions approval
         JOIN business_tasks task ON task.tenant_id=approval.tenant_id AND task.id=approval.business_task_id
@@ -621,6 +709,16 @@ export async function createControlPlane(options: Readonly<{
   app.post('/api/approvals/:id/decisions', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
     const body = z.object({ decision: z.enum(['approved', 'rejected']) }).strict().parse(request.body);
+    if (gateA3WorkOrderRepository !== null) {
+      const workOrder = await repository.pool.query(`SELECT 1 FROM approval_versions approval
+        JOIN business_tasks task ON task.tenant_id=approval.tenant_id AND task.id=approval.business_task_id
+        WHERE approval.tenant_id=$1 AND approval.id=$2 AND task.requester_id=$3
+          AND task.record_variant='business-task.work-order.live/1'`, [request.principal.tenantId,
+        params.id, request.principal.userId]);
+      if (workOrder.rowCount === 1) return gateA3WorkOrderRepository.decideApproval(
+        request.principal, params.id, body.decision, idempotencyKey(request),
+      );
+    }
     if (gateALiveRepository !== null) {
       const live = await repository.pool.query(`SELECT 1 FROM approval_versions approval
         JOIN business_tasks task ON task.tenant_id=approval.tenant_id AND task.id=approval.business_task_id
@@ -637,6 +735,9 @@ export async function createControlPlane(options: Readonly<{
   app.post('/api/business-tasks/:id/execute', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
     const input = executeTaskInputSchema.parse(request.body);
+    if (gateA3WorkOrderRepository !== null && await gateA3WorkOrderRepository.isTask(request.principal, params.id)) {
+      return gateA3WorkOrderRepository.executeTask(request.principal, params.id, input, idempotencyKey(request));
+    }
     if (gateALiveRepository !== null && await gateALiveRepository.isLiveTask(request.principal, params.id)) {
       return gateALiveRepository.executeLiveTask(request.principal, params.id, input, idempotencyKey(request));
     }
@@ -645,6 +746,9 @@ export async function createControlPlane(options: Readonly<{
 
   app.post('/api/business-tasks/:id/cancel', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateA3WorkOrderRepository !== null && await gateA3WorkOrderRepository.isTask(request.principal, params.id)) {
+      return gateA3WorkOrderRepository.cancelTask(request.principal, params.id, idempotencyKey(request));
+    }
     if (gateALiveRepository !== null && await gateALiveRepository.isLiveTask(request.principal, params.id)) {
       return gateALiveRepository.cancelLiveTask(request.principal, params.id, idempotencyKey(request));
     }
@@ -658,6 +762,14 @@ export async function createControlPlane(options: Readonly<{
 
   app.get('/api/evidence/:id', async (request) => {
     const params = z.object({ id: z.string() }).parse(request.params);
+    if (gateA3WorkOrderRepository !== null) {
+      const workOrder = await repository.pool.query(`SELECT 1 FROM gate_a3_connector_evidence evidence
+        JOIN business_tasks task ON task.tenant_id=evidence.tenant_id AND task.id=evidence.business_task_id
+        WHERE evidence.tenant_id=$1 AND evidence.id=$2 AND task.requester_id=$3`, [
+        request.principal.tenantId, params.id, request.principal.userId,
+      ]);
+      if (workOrder.rowCount === 1) return gateA3WorkOrderRepository.getEvidence(request.principal, params.id);
+    }
     if (gateALiveRepository !== null) {
       const live = await repository.pool.query(`SELECT 1 FROM gate_a_live_evidence
         WHERE tenant_id=$1 AND id=$2 AND record_variant='evidence.live/1'`, [request.principal.tenantId, params.id]);
@@ -734,6 +846,23 @@ export async function createControlPlane(options: Readonly<{
     });
   });
 
+  app.post('/api/evidence/:id/revoke', async (request) => {
+    const params = z.object({ id: z.string().min(1).max(256) }).parse(request.params);
+    const body = gateA3EvidenceSourceRevocationInputSchema.parse(request.body);
+    const mutationKey = mutationIdempotencyKeySchema.parse(idempotencyKey(request));
+    if (gateA3WorkOrderRepository === null) {
+      throw new GenewayError('EVIDENCE_NOT_FOUND', 'Evidence was not found', 404);
+    }
+    const reasonDigest = createHash('sha256')
+      .update(['gate-a3-evidence-source-revocation/1', request.principal.tenantId,
+        request.principal.userId, params.id, body.reasonCode, mutationKey].join('\u0000'), 'utf8')
+      .digest('hex');
+    await gateA3WorkOrderRepository.revokeConnectorEvidenceSourceAccess(
+      request.principal, params.id, reasonDigest,
+    );
+    return gateA3EvidenceSourceRevocationResponseSchema.parse({ revoked: true });
+  });
+
   app.get('/api/artifacts/:id/download', async (request, reply) => {
     const params = z.object({ id: z.string().min(1) }).parse(request.params);
     if (artifactService === null) throw new GenewayError('STORAGE_NOT_CONFIGURED', 'Artifact storage is not configured', 503);
@@ -770,7 +899,7 @@ export async function createControlPlane(options: Readonly<{
     await repository.close();
   });
   return { app, repository, artifactRepository, artifactService, chatRepository,
-    businessExceptionRepository, gateALiveRepository };
+    businessExceptionRepository, gateALiveRepository, gateA3WorkOrderRepository };
 }
 
 export { ControlPlaneRepository } from './repository.js';
@@ -778,5 +907,7 @@ export { ArtifactRepository } from './artifact-repository.js';
 export { ArtifactService } from './artifact-service.js';
 export { ChatRepository } from './chat-repository.js';
 export { GateALiveRepository } from './gate-a-live-repository.js';
+export { GateA3WorkOrderRepository } from './gate-a3-work-order-repository.js';
+export type { GateA3Authority } from './gate-a3-work-order-repository.js';
 export { BusinessExceptionRepository, GATE_0_2B_EXCEPTION_FIXTURES } from './business-exception-repository.js';
 export { createWorkerCommandApp, WorkerCommandService } from './worker-command-server.js';

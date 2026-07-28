@@ -8,6 +8,11 @@ import { createControlPlane } from './index.js';
 import { GATE_A_APPROVED_C1_TEST_MATERIAL_SHA256 } from './artifact-service.js';
 import { readAllowedWebOrigins } from './server-config.js';
 import { createWorkerCommandApp } from './worker-command-server.js';
+import {
+  assertGateA3ControlPlaneAuthorityCurrent,
+  readGateA3ControlPlaneAuthorityBundle,
+} from './gate-a3-prelaunch-authority.js';
+import { startGateA3LoopbackProxy, type GateA3LoopbackProxy } from './gate-a3-loopback-proxy.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 if (databaseUrl === undefined) throw new Error('DATABASE_URL is required');
@@ -59,6 +64,13 @@ async function readOwnedSecretFile(filePath: string, label: string): Promise<str
 const modelGatewayUrl = process.env.GENEWAY_MODEL_GATEWAY_URL;
 const modelGatewayServiceTokenFile = process.env.GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE;
 const modelGatewayInvocationSecretFile = process.env.GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE;
+const modelGatewayWorkOrderReceiptSecretFile = process.env.GENEWAY_MODEL_GATEWAY_WORK_ORDER_RECEIPT_SECRET_FILE;
+const gateA3ControlPlaneBundleFile = process.env.GENEWAY_GATE_A3_CONTROL_PLANE_BUNDLE_FILE;
+const gateA3ControlPlaneBundleSha256 = process.env.GENEWAY_GATE_A3_CONTROL_PLANE_BUNDLE_SHA256;
+const connectorGatewayServiceTokenFile = process.env.GENEWAY_CONNECTOR_GATEWAY_SERVICE_TOKEN_FILE;
+const connectorGatewayUrl = process.env.GENEWAY_CONNECTOR_GATEWAY_URL;
+const connectorInvocationSecretFile = process.env.GENEWAY_CONNECTOR_GATEWAY_INVOCATION_SECRET_FILE;
+const connectorGatewayReceiptSecretFile = process.env.GENEWAY_CONNECTOR_GATEWAY_RECEIPT_SECRET_FILE;
 const liveValidationRunId = process.env.GENEWAY_GATE_A0_LIVE_VALIDATION_RUN_ID;
 const gateALiveValidationRunId = process.env.GENEWAY_GATE_A_LIVE_VALIDATION_RUN_ID;
 const gateAParserImage = process.env.GENEWAY_GATE_A_PARSER_IMAGE;
@@ -131,6 +143,7 @@ if (modelGatewayValues.some((value) => value === undefined) && modelGatewayValue
 }
 let modelGatewayServiceToken: string | null = null;
 let modelGatewayInvocationSecret: string | null = null;
+let modelGatewayWorkOrderReceiptSecret: string | null = null;
 if (modelGatewayUrl !== undefined && modelGatewayServiceTokenFile !== undefined && modelGatewayInvocationSecretFile !== undefined) {
   const parsed = new URL(modelGatewayUrl);
   if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1' || parsed.username !== '' || parsed.password !== '' || parsed.pathname !== '/') {
@@ -138,6 +151,89 @@ if (modelGatewayUrl !== undefined && modelGatewayServiceTokenFile !== undefined 
   }
   modelGatewayServiceToken = await readOwnedSecretFile(modelGatewayServiceTokenFile, 'Model Gateway service token file');
   modelGatewayInvocationSecret = await readOwnedSecretFile(modelGatewayInvocationSecretFile, 'Model Gateway invocation secret file');
+}
+const gateA3Values = [gateA3ControlPlaneBundleFile, gateA3ControlPlaneBundleSha256,
+  connectorGatewayUrl, connectorGatewayServiceTokenFile, connectorInvocationSecretFile, connectorGatewayReceiptSecretFile,
+  modelGatewayWorkOrderReceiptSecretFile];
+if (gateA3Values.some((value) => value === undefined) && gateA3Values.some((value) => value !== undefined)) {
+  throw new Error('Gate A.3 authority, Connector Gateway files, and Model receipt file must be configured together');
+}
+let gateA3Authority: Parameters<typeof createControlPlane>[0]['gateA3Authority'];
+let gateA3LoopbackProxy: GateA3LoopbackProxy | null = null;
+if (gateA3ControlPlaneBundleFile !== undefined && gateA3ControlPlaneBundleSha256 !== undefined
+  && connectorGatewayUrl !== undefined && connectorGatewayServiceTokenFile !== undefined && connectorInvocationSecretFile !== undefined
+  && connectorGatewayReceiptSecretFile !== undefined && modelGatewayWorkOrderReceiptSecretFile !== undefined) {
+  const connectorOrigin = new URL(connectorGatewayUrl);
+  if (connectorOrigin.protocol !== 'http:' || connectorOrigin.hostname !== '127.0.0.1'
+    || connectorOrigin.username !== '' || connectorOrigin.password !== '' || connectorOrigin.pathname !== '/'
+    || connectorOrigin.search !== '' || connectorOrigin.hash !== '') {
+    throw new Error('Connector Gateway URL must be an exact credential-free IPv4 loopback origin');
+  }
+  if (modelGatewayInvocationSecret === null || modelGatewayServiceToken === null || workerToken === null) {
+    throw new Error('Gate A.3 requires configured Model Gateway and Worker authority');
+  }
+  modelGatewayWorkOrderReceiptSecret = await readOwnedSecretFile(
+    modelGatewayWorkOrderReceiptSecretFile, 'Model Gateway Work Order receipt secret file',
+  );
+  const gateA3Bundle = await readGateA3ControlPlaneAuthorityBundle({
+    bundleFile: gateA3ControlPlaneBundleFile,
+    expectedRawSha256: gateA3ControlPlaneBundleSha256,
+  });
+  gateA3LoopbackProxy = await startGateA3LoopbackProxy(gateA3Bundle.prelaunchReceipt.runtimeIpv4);
+  gateA3Authority = {
+    envelope: gateA3Bundle.envelope,
+    validationRunId: gateA3Bundle.acceptanceAdmission.runId,
+    connectorGatewayServiceToken: await readOwnedSecretFile(
+      connectorGatewayServiceTokenFile, 'Connector Gateway service token file',
+    ),
+    connectorInvocationTokenSecret: await readOwnedSecretFile(
+      connectorInvocationSecretFile, 'Connector invocation secret file',
+    ),
+    connectorGatewayReceiptSecret: await readOwnedSecretFile(
+      connectorGatewayReceiptSecretFile, 'Connector Gateway receipt secret file',
+    ),
+    modelInvocationTokenSecret: modelGatewayInvocationSecret,
+    modelGatewayReceiptSecret: modelGatewayWorkOrderReceiptSecret,
+    controlPlaneAuthorityBundle: gateA3Bundle,
+    assertRuntimeAuthority: async () => {
+      assertGateA3ControlPlaneAuthorityCurrent(gateA3Bundle);
+    },
+  };
+  const distinctSecrets = new Set([gateA3Authority.connectorGatewayServiceToken,
+    gateA3Authority.connectorInvocationTokenSecret, gateA3Authority.connectorGatewayReceiptSecret,
+    gateA3Authority.modelInvocationTokenSecret, gateA3Authority.modelGatewayReceiptSecret]);
+  if (distinctSecrets.size !== 5) throw new Error('Gate A.3 authority secrets must be pairwise distinct');
+}
+
+async function gateA3RouteAvailable(): Promise<boolean> {
+  if (gateA3Authority === undefined || connectorGatewayUrl === undefined
+    || modelGatewayUrl === undefined || modelGatewayServiceToken === null) return false;
+  try {
+    await gateA3Authority.assertRuntimeAuthority();
+    const [connectorReady, modelReady] = await Promise.all([
+      fetch(new URL('/internal/connector-gateway/v1/readiness', connectorGatewayUrl), {
+        headers: { authorization: `Bearer ${gateA3Authority.connectorGatewayServiceToken}` },
+        signal: AbortSignal.timeout(1_500),
+      }),
+      fetch(new URL('/internal/model-gateway/v1/work-order-readiness', modelGatewayUrl), {
+        headers: { authorization: `Bearer ${modelGatewayServiceToken}` },
+        signal: AbortSignal.timeout(1_500),
+      }),
+    ]);
+    if (!connectorReady.ok || !modelReady.ok) return false;
+    const [connectorBody, modelBody] = await Promise.all([
+      connectorReady.json() as Promise<{ ready?: unknown; profile?: unknown; receiver?: unknown }>,
+      modelReady.json() as Promise<{ ready?: unknown; profile?: unknown; route?: unknown }>,
+    ]);
+    return connectorBody.ready === true
+      && connectorBody.profile === 'gearjob-work-order-status-dev/1'
+      && connectorBody.receiver === 'invocation-authority-required'
+      && modelBody.ready === true
+      && modelBody.profile === 'codex_subscription_dev'
+      && modelBody.route === 'work-order-explanation/1';
+  } catch {
+    return false;
+  }
 }
 
 async function chatRouteAvailable(): Promise<boolean> {
@@ -196,7 +292,8 @@ const artifactServiceHooks = gateAParserSandbox === undefined && e2eHookEndpoint
       }),
     };
 
-const { app, repository, artifactService, chatRepository, gateALiveRepository } = await createControlPlane({
+const { app, repository, artifactService, chatRepository, gateALiveRepository,
+  gateA3WorkOrderRepository } = await createControlPlane({
   databaseUrl,
   logger: true,
   allowedOrigins: readAllowedWebOrigins(process.env, webPort),
@@ -210,6 +307,8 @@ const { app, repository, artifactService, chatRepository, gateALiveRepository } 
     },
   }),
   ...(artifactServiceHooks === undefined ? {} : { artifactServiceHooks }),
+  ...(gateA3Authority === undefined ? {} : { gateA3Authority }),
+  ...(gateA3Authority === undefined ? {} : { gateA3RouteAvailable }),
 });
 
 let workerApp: ReturnType<typeof createWorkerCommandApp> | null = null;
@@ -246,6 +345,7 @@ if (workerSocketPath !== undefined && workerTokenFile !== undefined && workerTok
     leaseDurationMs,
     ...(modelGatewayInvocationSecret === null ? {} : { chatRepository, invocationTokenSecret: modelGatewayInvocationSecret }),
     ...(gateALiveRepository === null ? {} : { gateALiveRepository }),
+    ...(gateA3WorkOrderRepository === null ? {} : { gateA3WorkOrderRepository }),
     ...(workerCommandHooks === undefined ? {} : { hooks: workerCommandHooks }),
   });
   try {
@@ -261,6 +361,7 @@ await app.listen({ host: '127.0.0.1', port: Number(process.env.PORT ?? 3100) });
 const shutdown = async (): Promise<void> => {
   if (workerApp !== null) await workerApp.close();
   await app.close();
+  if (gateA3LoopbackProxy !== null) await gateA3LoopbackProxy.close();
   if (workerSocketPath !== undefined) {
     try {
       await unlink(workerSocketPath);

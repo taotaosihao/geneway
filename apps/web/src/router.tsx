@@ -7,6 +7,7 @@ import {
   WorkflowDetailPage,
   WorkflowListPage,
 } from './product-routes.js';
+import { WorkOrderPage } from './work-order-routes.js';
 
 function decodePathSegment(value: string): string | undefined {
   try {
@@ -55,6 +56,12 @@ export function App() {
   if (segments.length === 2 && segments[0] === 'workflows') {
     const workflowId = decodePathSegment(segments[1] ?? '');
     return workflowId === undefined ? <NotFoundPage /> : <WorkflowDetailPage workflowId={workflowId} />;
+  }
+
+  if (segments.length === 2 && segments[0] === 'work-orders') {
+    if (segments[1] === 'new') return <WorkOrderPage />;
+    const taskId = decodePathSegment(segments[1] ?? '');
+    return taskId === undefined ? <NotFoundPage /> : <WorkOrderPage taskId={taskId} />;
   }
 
   return <NotFoundPage />;

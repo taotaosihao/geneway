@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { taskEventProjectionSchema, type TaskEventProjection } from '@geneway/contracts';
-import { ApiError, api, mergeTaskEventBatch } from './api.js';
+import { ApiError, api, mergeTaskEventBatch, parseCreatedWorkOrderTask, parseWorkOrderCapabilityRoute } from './api.js';
 import { routeStateForError } from './product-routes.js';
 
 function event(cursor: number, id = `event_${String(cursor)}`): TaskEventProjection {
@@ -238,6 +238,120 @@ const liveTask = {
   eventWatermark: 7,
   ...liveBoundary,
 } as const;
+
+const workOrderTaskSnapshot = {
+  schemaVersion: 'gate-a3-public-task-snapshot/1',
+  recordVariant: 'business-task.work-order.live/1',
+  taskId: 'task_work_order_1',
+  conversationId: 'conversation_work_order_1',
+  capabilityId: 'production.work-order-status.v1',
+  status: 'awaiting_approval',
+  inputRef: { kind: 'work_order', workOrderRef: 'WO-Abc.01:QA' },
+  workflowVersionId: 'workflow_work_order_1',
+  workflowHash: shaA,
+  workflow: {
+    templateId: 'workflow-template.work-order-status/1',
+    workflowVersionId: 'workflow_work_order_1',
+    workflowHash: shaA,
+    steps: [
+      ['validate_work_order_ref', 'deterministic'],
+      ['fetch_authorized_status', 'deterministic'],
+      ['compute_progress', 'deterministic'],
+      ['explain_status', 'agent'],
+      ['evidence_verify', 'verification'],
+      ['publish_status_card', 'deterministic'],
+    ].map(([id, kind]) => ({ id, kind, status: 'queued', attemptId: null, fence: null })),
+  },
+  approval: {
+    id: 'approval_work_order_1',
+    version: 1,
+    status: 'pending',
+    subjectDigest: shaB,
+    expiresAt: '2026-07-23T09:00:00.000Z',
+  },
+  connectorQuerySpecHash: shaC,
+  result: null,
+  createdAt: timestamp,
+  updatedAt: timestamp,
+} as const;
+
+describe('Gate A.3 work-order API boundary', () => {
+  it('parses only the public capability state and rejects secret-bearing projections', () => {
+    expect(parseWorkOrderCapabilityRoute({
+      capabilityId: 'production.work-order-status.v1',
+      status: 'NOT_OPEN',
+      executionRoute: 'not_open',
+      reason: 'PREFLIGHT_NOT_APPROVED',
+    })).toEqual({
+      capabilityId: 'production.work-order-status.v1',
+      status: 'NOT_OPEN',
+      executionRoute: 'not_open',
+    });
+    expect(() => parseWorkOrderCapabilityRoute({
+      capabilityId: 'production.work-order-status.v1',
+      status: 'internal',
+      executionRoute: 'live',
+      simulation: false,
+      runtimeMode: 'model_gateway',
+      businessDecisionAllowed: false,
+      internalAcceptance: true,
+      endpoint: 'http://internal.example',
+    })).toThrow('WORK_ORDER_CAPABILITY_ROUTE_INVALID');
+  });
+
+  it('preserves the exact workOrderRef bytes in the strict create-task variant', async () => {
+    const fetchMock = stubJson({
+      taskId: 'task_work_order_1',
+      approvalId: 'approval_work_order_1',
+      workflowVersionId: 'workflow_work_order_1',
+      workflowHash: shaA,
+    });
+    await expect(api.createWorkOrderTask('conversation_work_order_1', 'WO-Abc.01:QA')).resolves.toEqual({
+      taskId: 'task_work_order_1',
+      approvalId: 'approval_work_order_1',
+      workflowVersionId: 'workflow_work_order_1',
+      workflowHash: shaA,
+    });
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(request?.body).toBe(JSON.stringify({
+      conversationId: 'conversation_work_order_1',
+      capabilityId: 'production.work-order-status.v1',
+      inputRef: { kind: 'work_order', workOrderRef: 'WO-Abc.01:QA' },
+    }));
+    await expect(api.createWorkOrderTask('conversation_work_order_1', ' WO-Abc.01:QA ')).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects malformed create responses instead of accepting raw connector metadata', () => {
+    expect(() => parseCreatedWorkOrderTask({
+      taskId: 'task_work_order_1',
+      approvalId: 'approval_work_order_1',
+      workflowVersionId: 'workflow_work_order_1',
+      workflowHash: shaA,
+      rawReceipt: { credential: 'secret' },
+    })).toThrow('WORK_ORDER_TASK_CREATE_PROJECTION_INVALID');
+    expect(() => parseCreatedWorkOrderTask({
+      taskId: 'task_work_order_1',
+      approvalId: 'approval_work_order_1',
+      workflowVersionId: 'workflow_work_order_1',
+      workflowHash: 'not-a-hash',
+    })).toThrow('WORK_ORDER_TASK_CREATE_PROJECTION_INVALID');
+  });
+
+  it('strictly parses the public work-order task snapshot and rejects non-public fields', async () => {
+    stubJson(workOrderTaskSnapshot);
+    const projection = await api.getWorkOrderTask('task_work_order_1');
+    expect(projection).toMatchObject({
+      recordVariant: 'business-task.work-order.live/1',
+      taskId: 'task_work_order_1',
+      workflow: { templateId: 'workflow-template.work-order-status/1' },
+      approval: { id: 'approval_work_order_1', status: 'pending' },
+    });
+    expect(projection.workflow.steps).toHaveLength(6);
+    stubJson({ ...workOrderTaskSnapshot, endpoint: 'http://internal.example' });
+    await expect(api.getWorkOrderTask('task_work_order_1')).rejects.toThrow();
+  });
+});
 const liveCreateResponse = {
   recordVariant: 'business-task.live/1',
   executionRoute: 'live',
@@ -401,6 +515,19 @@ describe('Gate A live public API parsing', () => {
 
     stubText('data: ' + JSON.stringify({ ...liveEvent, recordVariant: 'business-task-event.unknown/1' }) + '\n\n');
     await expect(api.events('task_live_1', 0)).rejects.toThrow();
+  });
+
+  it('strictly parses the authorized public Work Order Evidence projection and rejects secret extras', async () => {
+    const workOrderEvidence = {
+      id: 'evidence_work_order_status_1', kind: 'connector_snapshot_field', fieldName: 'status',
+      value: 'In Process', sourceRevision: '2026-07-27 08:01:02.123456',
+      sourceAsOf: '2026-07-27T00:01:02.123456Z', dataClass: 'C1', readOnly: true,
+    } as const;
+    stubJson(workOrderEvidence);
+    await expect(api.getWorkOrderEvidence(workOrderEvidence.id)).resolves.toEqual(workOrderEvidence);
+
+    stubJson({ ...workOrderEvidence, endpoint: 'http://127.0.0.1:8100/internal' });
+    await expect(api.getWorkOrderEvidence(workOrderEvidence.id)).rejects.toThrow();
   });
 
   it('accepts mixed live/legacy task-list items and rejects unknown selectors or secret extras', async () => {

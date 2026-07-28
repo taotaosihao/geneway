@@ -1,16 +1,54 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes, verify as verifySignature } from 'node:crypto';
+import {
+  chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdtempSync, openSync,
+  readFileSync, rmSync, writeFileSync,
+} from 'node:fs';
 import net from 'node:net';
+import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { canonicalize } from 'json-canonicalize';
 
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
+const tsxCli = createRequire(import.meta.url).resolve('tsx/cli');
+const connectorGatewayDefaultPort = 3155;
+const gearJobOrigin = 'http://127.0.0.1:8100';
+const gateA3AuthorityDirectory = '/home/gewu/.codex/workflow/artifacts/20260723-008-geneway-gate-a-gearjob/team/sdd/slices/gate-a-business-mvp';
+const gateA3ApprovedPreflightFile = `${gateA3AuthorityDirectory}/gearjob-preflight.approved.json`;
+const gateA3ControllerAdmissionFile = `${gateA3AuthorityDirectory}/gearjob-preflight.controller-admission.json`;
+const gateA3InternalValidationAdmissionFile = `${gateA3AuthorityDirectory}/gate-a3-internal-validation.admission.json`;
+const gearJobRepository = '/home/gewu/work/gearjob';
+const gearJobPrivateDirectory = `${gearJobRepository}/development/frappe-bench/sites/dev.localhost/private/geneway-gate-a3`;
+const gearJobServiceCredentialFile = `${gearJobPrivateDirectory}/service-credential.json`;
+const gearJobInvocationSecretFile = `${gearJobPrivateDirectory}/invocation.secret`;
+const gearJobComposeFile = `${gearJobRepository}/deploy/docker-compose.yml`;
+const gearJobGateA3ComposeFile = `${gearJobRepository}/deploy/docker-compose.gate-a3.yml`;
+const gateA3DockerExecutable = '/usr/bin/docker';
+const gateA3GitExecutable = '/usr/bin/git';
+const gateA3ComposeProject = 'gearjob_dev';
+const gateA3ComposeNetwork = `${gateA3ComposeProject}_gate-a3-internal`;
+const gateA3RuntimeContainerName = `${gateA3ComposeProject}-frappe-1`;
+const emptySha256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+const gateA3LocalAdmissionKeyId = 'geneway-gate-a3-local-admission-root/1';
+const gateA3LocalAdmissionPublicKey = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA5K9Fxlmd7Mp/2KsLDlTbaDVg5SujoN4qTNyBaGh/ekM=
+-----END PUBLIC KEY-----
+`;
+const gateA3RuntimeEntrypoint = Object.freeze([
+  '/home/frappe/.pyenv/versions/3.14.2/bin/python3', '-I', '-S',
+  '/usr/local/libexec/gate-a3-runtime-verify.py',
+]);
+export const GATE_A3_STARTUP_ORDER = Object.freeze([
+  'model-gateway', 'control-plane', 'connector-gateway', 'gate-a3-readiness', 'worker', 'web',
+]);
 const HELP = `用法: pnpm dev-up
 
 启动一次性的 geneway 本地验收栈，并把 Web 暴露到本机可用的 192.168/16 与 10/8 网络：
   Web                  <局域网 IPv4>:3200（全部入口共用，占用时自动顺延）
   Control Plane        127.0.0.1:3100（默认，占用时自动顺延）
   Model Gateway        127.0.0.1:3150（默认，占用时自动顺延）
+  Connector Gateway    127.0.0.1:3155（占用时自动顺延）
+  GearJob facade       127.0.0.1:8100（Control Plane 独占 loopback proxy）
   PostgreSQL / storage 随机 loopback 端口
   Worker               本机 Unix-domain socket
 
@@ -20,14 +58,464 @@ const HELP = `用法: pnpm dev-up
   GENEWAY_MODEL_GATEWAY_PORT     覆盖 Model Gateway 端口
   GENEWAY_GATE_A0_RELEASE_PORT   覆盖 loopback release helper 端口
   GENEWAY_GATE_A_RELEASE_PORT    覆盖 loopback Gate A release helper 端口
+  GENEWAY_GATE_A3_RELEASE_PORT   覆盖 loopback Gate A.3 release helper 端口
 
 同时提供已授权的 GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE 与尚未过期的
 GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE 时，会通过 loopback release helper
 为本次 disposable run 临时开放真实聊天与 auto 材料分析；仅提供其中一项会安全失败，
 两项都未提供时两个真实 route 都保持 NOT_OPEN。
 
-按 Ctrl+C 停止全部进程并删除本次临时数据库、对象存储和 Worker 凭据。
+启动前会自动校验已批准的 Gate A.3 三层 authority 与 immutable GearJob runtime；签名
+镜像缺失时仅从签名 commit 的干净源码自动构建，并复用本地数据库与 Redis volume。
+无需手工准备 Gate A.3 环境变量。
+
+按 Ctrl+C 停止全部进程并删除本次临时数据库、对象存储和 geneway 临时凭据。
 `;
+
+const canonicalDigest = (value) => createHash('sha256').update(canonicalize(value), 'utf8').digest('hex');
+
+function verifyGateA3InternalAdmissionSignature(admission) {
+  const signature = admission?.admission_signature?.signature;
+  if (typeof signature !== 'string' || !/^[A-Za-z0-9_-]{86}$/u.test(signature)) return false;
+  const signed = structuredClone(admission);
+  delete signed.integrity.canonical_sha256;
+  delete signed.admission_signature.signature;
+  return verifySignature(null, Buffer.from(canonicalize(signed), 'utf8'),
+    gateA3LocalAdmissionPublicKey, Buffer.from(signature, 'base64url'));
+}
+
+const gateA3AuthoritySchemaParseProgram = `
+import { readFileSync } from 'node:fs';
+import {
+  gateA3ControllerAdmissionArtifactSchema,
+  gateA3InternalValidationAdmissionArtifactSchema,
+  gateA3PreflightArtifactSchema,
+} from './packages/contracts/src/gate-a3-authority.ts';
+const input = JSON.parse(readFileSync(0, 'utf8'));
+process.stdout.write(JSON.stringify({
+  preflight: gateA3PreflightArtifactSchema.parse(input.preflight),
+  admission: gateA3ControllerAdmissionArtifactSchema.parse(input.admission),
+  validationAdmission: gateA3InternalValidationAdmissionArtifactSchema.parse(input.validationAdmission),
+}));
+`;
+
+function parseGateA3AuthorityArtifacts(input) {
+  try {
+    const output = execFileSync(process.execPath, [tsxCli, '--eval', gateA3AuthoritySchemaParseProgram], {
+      cwd: repositoryRoot,
+      env: { PATH: '/usr/bin:/bin', HOME: '/tmp', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' },
+      input: JSON.stringify(input),
+      encoding: 'utf8',
+      maxBuffer: 512 * 1_024,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return JSON.parse(output);
+  } catch {
+    throw new Error('Gate A.3 authority artifacts failed strict canonical schema validation');
+  }
+}
+
+function readOwnedRegularFile(filePath, label, minimumBytes = 1, maximumBytes = 256 * 1_024) {
+  const stat = lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.()
+    || (stat.mode & 0o777) !== 0o600 || stat.size < minimumBytes || stat.size > maximumBytes) {
+    throw new Error(`${label} must be an owned regular 0600 file`);
+  }
+  const descriptor = openSync(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const openedStat = fstatSync(descriptor);
+    if (openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) throw new Error(`${label} changed while it was opened`);
+    const contents = readFileSync(descriptor, 'utf8');
+    const afterStat = fstatSync(descriptor);
+    if (afterStat.size !== openedStat.size || afterStat.mtimeMs !== openedStat.mtimeMs
+      || afterStat.ctimeMs !== openedStat.ctimeMs) {
+      throw new Error(`${label} changed while it was read`);
+    }
+    return contents;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function assertOwnedRegularFile(filePath, label, minimumBytes = 1, maximumBytes = 256 * 1_024) {
+  const stat = lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.uid !== process.getuid?.()
+    || (stat.mode & 0o777) !== 0o600 || stat.size < minimumBytes || stat.size > maximumBytes) {
+    throw new Error(`${label} must be an owned regular 0600 file`);
+  }
+  const descriptor = openSync(filePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const openedStat = fstatSync(descriptor);
+    if (openedStat.dev !== stat.dev || openedStat.ino !== stat.ino) throw new Error(`${label} changed while it was opened`);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+export function deriveApprovedGateA3Authority({ preflight: rawPreflight, admission: rawAdmission,
+  validationAdmission: rawValidationAdmission }, now = new Date()) {
+  const { preflight, admission, validationAdmission } = parseGateA3AuthorityArtifacts({
+    preflight: rawPreflight, admission: rawAdmission, validationAdmission: rawValidationAdmission,
+  });
+  const digest = preflight.integrity?.canonical_sha256;
+  if (!/^[a-f0-9]{64}$/u.test(digest ?? '')
+    || preflight.release_admission?.required_tuple?.approvedPreflightDigest !== digest) {
+    throw new Error('Gate A.3 approved preflight digest tuple is invalid');
+  }
+  const digestInput = structuredClone(preflight);
+  delete digestInput.integrity.canonical_sha256;
+  digestInput.release_admission.required_tuple.approvedPreflightDigest = 'TO_BE_FILLED';
+  const computedDigest = canonicalDigest(digestInput);
+  if (computedDigest !== digest) throw new Error('Gate A.3 approved preflight canonical digest does not match');
+  const runtimeAuthority = preflight.runtime_authority;
+  const runtimeAuthorityDigest = canonicalDigest(runtimeAuthority);
+  const dynamicAuthorityDigest = canonicalDigest(runtimeAuthority.dynamicAuthority);
+  const distributionInventoryDigest = canonicalDigest(runtimeAuthority.pythonDistributionInventory);
+  const startupFilesDigest = canonicalDigest(runtimeAuthority.pythonStartupFiles);
+  const runtimeImageId = runtimeAuthority.containerProjection.imageId;
+  if (runtimeAuthorityDigest !== preflight.runtime_authority_digest
+    || dynamicAuthorityDigest !== runtimeAuthority.dynamicAuthorityDigest
+    || distributionInventoryDigest !== runtimeAuthority.pythonDistributionInventorySha256
+    || startupFilesDigest !== runtimeAuthority.pythonStartupFilesSha256
+    || preflight.verification.gearjob_commit !== runtimeAuthority.gearjob.commit) {
+    throw new Error('Gate A.3 preflight runtime authority digest bindings are invalid');
+  }
+  const tuple = preflight.release_admission.required_tuple;
+  if (tuple.runtimeAuthorityDigest !== runtimeAuthorityDigest
+    || tuple.dynamicAuthorityDigest !== dynamicAuthorityDigest || tuple.runtimeImageId !== runtimeImageId) {
+    throw new Error('Gate A.3 preflight runtime tuple is invalid');
+  }
+  const preflightControllerAdmissionDigest = canonicalDigest(admission);
+  if (admission.required_tuple.gearjob_commit !== runtimeAuthority.gearjob.commit
+    || admission.required_tuple.approved_preflight_digest !== digest
+    || admission.required_tuple.connector_profile_version !== tuple.connectorProfileVersion
+    || admission.required_tuple.field_mask_version !== tuple.fieldMaskVersion
+    || admission.required_tuple.invocation_token_schema_version !== tuple.invocationTokenSchemaVersion
+    || admission.required_tuple.response_schema_version !== tuple.responseSchemaVersion
+    || admission.required_tuple.card_schema_version !== tuple.cardSchemaVersion
+    || admission.required_tuple.runtime_authority_digest !== runtimeAuthorityDigest
+    || admission.required_tuple.dynamic_authority_digest !== dynamicAuthorityDigest
+    || admission.required_tuple.runtime_image_id !== runtimeImageId) {
+    throw new Error('Gate A.3 controller admission tuple is invalid');
+  }
+  if (!verifyGateA3InternalAdmissionSignature(validationAdmission)) {
+    throw new Error('Gate A.3 internal-validation admission signature is not trusted');
+  }
+  const validationAdmissionDigest = validationAdmission.integrity?.canonical_sha256;
+  if (!/^[a-f0-9]{64}$/u.test(validationAdmissionDigest ?? '')) {
+    throw new Error('Gate A.3 internal-validation admission digest is invalid');
+  }
+  const validationDigestInput = structuredClone(validationAdmission);
+  delete validationDigestInput.integrity.canonical_sha256;
+  const computedValidationAdmissionDigest = canonicalDigest(validationDigestInput);
+  if (computedValidationAdmissionDigest !== validationAdmissionDigest) {
+    throw new Error('Gate A.3 internal-validation admission canonical digest does not match');
+  }
+  if (validationAdmission.required_tuple.approved_preflight_digest !== digest
+    || validationAdmission.required_tuple.preflight_controller_admission_digest
+      !== preflightControllerAdmissionDigest
+    || validationAdmission.required_tuple.gearjob_commit !== runtimeAuthority.gearjob.commit
+    || validationAdmission.required_tuple.runtime_authority_digest !== runtimeAuthorityDigest
+    || validationAdmission.required_tuple.dynamic_authority_digest !== dynamicAuthorityDigest
+    || validationAdmission.required_tuple.runtime_image_id !== runtimeImageId) {
+    throw new Error('Gate A.3 internal-validation admission tuple is invalid');
+  }
+  const effectiveAt = Math.max(Date.parse(preflight.approved_at), Date.parse(admission.decided_at),
+    Date.parse(validationAdmission.decided_at));
+  const expiresAt = Math.min(Date.parse(preflight.expires_at), Date.parse(validationAdmission.expires_at));
+  if (!Number.isFinite(effectiveAt) || !Number.isFinite(expiresAt)
+    || effectiveAt > now.getTime() || expiresAt <= now.getTime() || effectiveAt >= expiresAt) {
+    throw new Error('Gate A.3 authority is not currently effective');
+  }
+  return {
+    artifactId: preflight.artifact_id,
+    approvedPreflightDigest: digest,
+    internalValidationAdmissionDigest: validationAdmissionDigest,
+    admissionRootKeyId: gateA3LocalAdmissionKeyId,
+    admissionSignatureVerified: true,
+    approvedPreflightFile: gateA3ApprovedPreflightFile,
+    controllerAdmissionFile: gateA3ControllerAdmissionFile,
+    internalValidationAdmissionFile: gateA3InternalValidationAdmissionFile,
+    expiresAt: new Date(expiresAt).toISOString(),
+    gearjobCommit: runtimeAuthority.gearjob.commit,
+    nestedAppCommits: Object.fromEntries(runtimeAuthority.nestedApps.map((app) => [app.app, app.commit])),
+    runtimeAuthority,
+    runtimeAuthorityDigest,
+    dynamicAuthorityDigest,
+    runtimeImageId,
+  };
+}
+
+export function readApprovedGateA3Authority(now = new Date()) {
+  const authority = deriveApprovedGateA3Authority({
+    preflight: JSON.parse(readOwnedRegularFile(gateA3ApprovedPreflightFile, 'Gate A.3 approved preflight')),
+    admission: JSON.parse(readOwnedRegularFile(gateA3ControllerAdmissionFile, 'Gate A.3 controller admission')),
+    validationAdmission: JSON.parse(readOwnedRegularFile(
+      gateA3InternalValidationAdmissionFile, 'Gate A.3 internal-validation admission',
+    )),
+  }, now);
+  // dev-up validates and forwards paths only; Connector Gateway alone reads
+  // the service credential contents.
+  assertOwnedRegularFile(gearJobServiceCredentialFile, 'GearJob service credential', 32, 4_096);
+  const connectorInvocationSecret = readOwnedRegularFile(
+    gearJobInvocationSecretFile, 'GearJob invocation secret', 32, 4_096,
+  ).trim();
+  if (connectorInvocationSecret.length < 32 || /\s/u.test(connectorInvocationSecret)) {
+    throw new Error('GearJob invocation secret is malformed');
+  }
+  return {
+    ...authority,
+    gearJobServiceCredentialFile,
+    connectorInvocationSecretFile: gearJobInvocationSecretFile,
+    existingSecretDigests: [createHash('sha256').update(connectorInvocationSecret, 'utf8').digest('hex')],
+  };
+}
+
+function writeDistinctSecrets(authorityDirectory, fileNames, existingDigests) {
+  const digests = new Set(existingDigests);
+  return Object.fromEntries(Object.entries(fileNames).map(([name, fileName]) => {
+    let value;
+    let valueDigest;
+    do {
+      value = randomBytes(32).toString('hex');
+      valueDigest = createHash('sha256').update(value, 'utf8').digest('hex');
+    } while (digests.has(valueDigest));
+    digests.add(valueDigest);
+    const filePath = `${authorityDirectory}/${fileName}`;
+    writeFileSync(filePath, `${value}\n`, { flag: 'wx', mode: 0o600 });
+    chmodSync(filePath, 0o600);
+    return [name, filePath];
+  }));
+}
+
+function gateA3ToolEnvironment(authority) {
+  return {
+    PATH: '/usr/bin:/bin',
+    HOME: '/tmp',
+    LANG: 'C.UTF-8',
+    LC_ALL: 'C.UTF-8',
+    DOCKER_HOST: 'unix:///var/run/docker.sock',
+    GENEWAY_GATE_A3_RUNTIME_IMAGE_ID: authority.runtimeImageId,
+    GENEWAY_GATE_A3_RUNTIME_AUTHORITY_SHA256: authority.runtimeAuthorityDigest,
+    GENEWAY_GATE_A3_DYNAMIC_AUTHORITY_SHA256: authority.dynamicAuthorityDigest,
+    GEARJOB_GATE_A3_GEARJOB_COMMIT: authority.gearjobCommit,
+    GEARJOB_GATE_A3_FRAPPE_COMMIT: authority.nestedAppCommits.frappe,
+    GEARJOB_GATE_A3_ERPNEXT_COMMIT: authority.nestedAppCommits.erpnext,
+    GEARJOB_GATE_A3_HRMS_COMMIT: authority.nestedAppCommits.hrms,
+    GEARJOB_GATE_A3_PRINT_DESIGNER_COMMIT: authority.nestedAppCommits.print_designer,
+  };
+}
+
+const gateA3ComposeArguments = Object.freeze([
+  'compose', '-p', gateA3ComposeProject,
+  '-f', gearJobComposeFile, '-f', gearJobGateA3ComposeFile,
+]);
+
+export function buildGateA3RuntimePlan(authority, imagePresent) {
+  const environment = gateA3ToolEnvironment(authority);
+  return {
+    executable: gateA3DockerExecutable,
+    environment,
+    buildArguments: imagePresent ? null : [
+      ...gateA3ComposeArguments, '--profile', 'gate-a3-build', 'build', 'gate-a3-runtime-build',
+    ],
+    upArguments: [
+      ...gateA3ComposeArguments, 'up', '-d', '--no-build',
+      'mariadb', 'redis-cache', 'redis-queue', 'frappe',
+    ],
+    retainedOnCleanup: true,
+  };
+}
+
+function execGateA3Docker(authority, arguments_, { inherit = false } = {}) {
+  return execFileSync(gateA3DockerExecutable, arguments_, {
+    cwd: gearJobRepository,
+    env: gateA3ToolEnvironment(authority),
+    encoding: 'utf8',
+    maxBuffer: 256 * 1_024,
+    stdio: inherit ? ['ignore', 'inherit', 'inherit'] : ['ignore', 'pipe', 'pipe'],
+  }) ?? '';
+}
+
+function execGateA3Git(repository, arguments_) {
+  return execFileSync(gateA3GitExecutable, [
+    '-C', repository, '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', ...arguments_,
+  ], {
+    env: {
+      PATH: '/usr/bin:/bin', HOME: '/tmp', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8',
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+    },
+    encoding: 'utf8',
+    maxBuffer: 256 * 1_024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function assertGateA3BuildSources(authority) {
+  const gearJobHead = execGateA3Git(gearJobRepository, ['rev-parse', 'HEAD']);
+  const rootStatus = execGateA3Git(gearJobRepository, [
+    'status', '--porcelain=v1', '--untracked-files=all', '--',
+    ...authority.runtimeAuthority.gearjob.cleanScopes,
+  ]);
+  if (gearJobHead !== authority.gearjobCommit || rootStatus !== ''
+    || authority.runtimeAuthority.gearjob.cleanStatusSha256 !== emptySha256) {
+    throw new Error('Gate A.3 runtime image is missing and the signed GearJob build scopes are not clean');
+  }
+  for (const [app, commit] of Object.entries(authority.nestedAppCommits)) {
+    const repository = `${gearJobRepository}/development/frappe-bench/apps/${app}`;
+    const head = execGateA3Git(repository, ['rev-parse', 'HEAD']);
+    const status = execGateA3Git(repository, ['status', '--porcelain=v1', '--untracked-files=all']);
+    const signed = authority.runtimeAuthority.nestedApps.find((entry) => entry.app === app);
+    if (head !== commit || status !== '' || signed?.cleanStatusSha256 !== emptySha256) {
+      throw new Error(`Gate A.3 runtime image is missing and the signed ${app} build source is not clean`);
+    }
+  }
+}
+
+function assertGateA3ComposeBytes(authority) {
+  const boundary = new Map(authority.runtimeAuthority.gearjob.boundaryFileManifest
+    .map((entry) => [entry.path, entry.sha256]));
+  for (const [relativePath, absolutePath] of [
+    ['deploy/docker-compose.yml', gearJobComposeFile],
+    ['deploy/docker-compose.gate-a3.yml', gearJobGateA3ComposeFile],
+  ]) {
+    const stat = lstatSync(absolutePath);
+    const digest = stat.isFile() && !stat.isSymbolicLink()
+      ? createHash('sha256').update(readFileSync(absolutePath)).digest('hex')
+      : null;
+    if (digest === null || digest !== boundary.get(relativePath)) {
+      throw new Error(`Gate A.3 signed Compose boundary drifted: ${relativePath}`);
+    }
+  }
+}
+
+function exactContainerId(value, label) {
+  const ids = value.trim().split('\n').filter((entry) => entry !== '');
+  if (ids.length !== 1 || !/^[a-f0-9]{64}$/u.test(ids[0] ?? '')) {
+    throw new Error(`${label} did not resolve to one exact container generation`);
+  }
+  return ids[0];
+}
+
+function assertNoPublishedPorts(inspected, label) {
+  const bindings = inspected.HostConfig?.PortBindings ?? {};
+  if (Object.values(bindings).some((value) => Array.isArray(value) && value.length > 0)) {
+    throw new Error(`${label} unexpectedly publishes a host port`);
+  }
+}
+
+function inspectGateA3Topology(authority) {
+  const serviceNames = ['mariadb', 'redis-cache', 'redis-queue', 'frappe'];
+  const serviceIds = Object.fromEntries(serviceNames.map((service) => [service, exactContainerId(
+    execGateA3Docker(authority, [...gateA3ComposeArguments, 'ps', '-q', service]),
+    `Gate A.3 ${service}`,
+  )]));
+  const inspected = JSON.parse(execGateA3Docker(authority, [
+    'inspect', ...serviceNames.map((service) => serviceIds[service]),
+  ]));
+  if (!Array.isArray(inspected) || inspected.length !== serviceNames.length) {
+    throw new Error('Gate A.3 Compose topology inspect is incomplete');
+  }
+  const byService = new Map(inspected.map((container) => [container.Config?.Labels?.['com.docker.compose.service'], container]));
+  for (const service of serviceNames) {
+    const container = byService.get(service);
+    const labels = container?.Config?.Labels ?? {};
+    const networks = Object.keys(container?.NetworkSettings?.Networks ?? {});
+    if (container?.Id !== serviceIds[service] || container?.State?.Running !== true
+      || labels['com.docker.compose.project'] !== gateA3ComposeProject
+      || labels['com.docker.compose.service'] !== service
+      || networks.length !== 1 || networks[0] !== gateA3ComposeNetwork
+      || container.HostConfig?.NetworkMode !== gateA3ComposeNetwork) {
+      throw new Error(`Gate A.3 ${service} is not running on the exact internal topology`);
+    }
+    assertNoPublishedPorts(container, `Gate A.3 ${service}`);
+  }
+  const runtime = byService.get('frappe');
+  const runtimeLabels = runtime?.Config?.Labels ?? {};
+  const signedLabels = authority.runtimeAuthority.containerProjection.imageLabels;
+  const runtimeLabelKeys = Object.keys(runtimeLabels).filter((key) => key.startsWith('dev.geneway.gate-a3.')).sort();
+  if (runtime === undefined || runtime.Image !== authority.runtimeImageId || runtime.Config?.Image !== authority.runtimeImageId
+    || runtime.HostConfig?.ReadonlyRootfs !== true || runtime.HostConfig?.Privileged !== false
+    || canonicalize(runtime.HostConfig?.CapDrop) !== canonicalize(['ALL'])
+    || !Array.isArray(runtime.HostConfig?.SecurityOpt)
+    || !runtime.HostConfig.SecurityOpt.includes('no-new-privileges:true')
+    || canonicalize(runtimeLabelKeys) !== canonicalize(Object.keys(signedLabels).sort())
+    || Object.entries(signedLabels).some(([key, value]) => runtimeLabels[key] !== value)) {
+    throw new Error('Gate A.3 Frappe runtime container does not match the signed immutable topology');
+  }
+  return serviceIds.frappe;
+}
+
+export function assertGateA3FullRuntimeReceipt(authority, full) {
+  if (canonicalize(Object.keys(full).sort())
+      !== canonicalize([
+        'runtimeAuthorityDigest', 'runtimeImageId', 'runtimeTopologyDigest', 'schemaVersion', 'verified',
+      ].sort())
+    || full.schemaVersion !== 'gearjob-gate-a3-runtime-verification/1'
+    || full.runtimeAuthorityDigest !== authority.runtimeAuthorityDigest
+    || full.runtimeImageId !== authority.runtimeImageId
+    || full.runtimeTopologyDigest !== authority.runtimeAuthority.runtimeTopologyDigest
+    || full.verified !== true) {
+    throw new Error('Gate A.3 full runtime verification is not bound to the signed authority');
+  }
+}
+
+export function assertGateA3LiveRuntimeReceipt(authority, live) {
+  if (canonicalize(Object.keys(live).sort())
+      !== canonicalize([
+        'dynamicAuthorityDigest', 'runtimeImageId', 'runtimeTopologyDigest', 'schemaVersion', 'verified',
+      ].sort())
+    || live.schemaVersion !== 'gearjob-gate-a3-live-verification/1'
+    || live.dynamicAuthorityDigest !== authority.dynamicAuthorityDigest
+    || live.runtimeImageId !== authority.runtimeImageId
+    || live.runtimeTopologyDigest !== authority.runtimeAuthority.runtimeTopologyDigest
+    || live.verified !== true) {
+    throw new Error('Gate A.3 live runtime verification is not bound to the signed authority');
+  }
+}
+
+function verifyGateA3RuntimeInsideContainer(authority, containerId) {
+  const full = JSON.parse(execGateA3Docker(authority, [
+    'exec', containerId, ...gateA3RuntimeEntrypoint, 'verify',
+  ]));
+  assertGateA3FullRuntimeReceipt(authority, full);
+  const live = JSON.parse(execGateA3Docker(authority, [
+    'exec', containerId, ...gateA3RuntimeEntrypoint, 'verify-live',
+  ]));
+  assertGateA3LiveRuntimeReceipt(authority, live);
+}
+
+export function ensureGateA3Runtime(authority) {
+  assertGateA3ComposeBytes(authority);
+  // Prove the daemon is reachable before interpreting a failed image inspect
+  // as an absent signed image.
+  execGateA3Docker(authority, ['version', '--format', '{{.Server.Version}}']);
+  let imagePresent = false;
+  try {
+    imagePresent = execGateA3Docker(authority, [
+      'image', 'inspect', '--format', '{{.Id}}', authority.runtimeImageId,
+    ]).trim() === authority.runtimeImageId;
+  } catch {
+    imagePresent = false;
+  }
+  const plan = buildGateA3RuntimePlan(authority, imagePresent);
+  if (!imagePresent) {
+    assertGateA3BuildSources(authority);
+    process.stdout.write('构建签名 Gate A.3 GearJob runtime image…\n');
+    execGateA3Docker(authority, plan.buildArguments, { inherit: true });
+    const builtImageId = execGateA3Docker(authority, [
+      'image', 'inspect', '--format', '{{.Id}}', 'geneway/gearjob-gate-a3-runtime:candidate',
+    ]).trim();
+    if (builtImageId !== authority.runtimeImageId) {
+      throw new Error('Gate A.3 rebuilt image ID does not equal the signed runtime image ID');
+    }
+  }
+  process.stdout.write('启动或复用 internal-only Gate A.3 GearJob runtime…\n');
+  execGateA3Docker(authority, plan.upArguments, { inherit: true });
+  const runtimeContainerId = inspectGateA3Topology(authority);
+  verifyGateA3RuntimeInsideContainer(authority, runtimeContainerId);
+  return { imageBuilt: !imagePresent, runtimeContainerId };
+}
 
 function parsePort(environment, name, fallback) {
   const value = Number(environment[name] ?? fallback);
@@ -79,6 +567,7 @@ export function readConfiguration(environment, lanHosts = detectLanHosts()) {
   const modelGatewayPort = parsePort(environment, 'GENEWAY_MODEL_GATEWAY_PORT', 3150);
   const releaseHelperPort = parsePort(environment, 'GENEWAY_GATE_A0_RELEASE_PORT', 3160);
   const gateAReleaseHelperPort = parsePort(environment, 'GENEWAY_GATE_A_RELEASE_PORT', 3170);
+  const gateA3ReleaseHelperPort = parsePort(environment, 'GENEWAY_GATE_A3_RELEASE_PORT', 3175);
   if (new Set([webPort, controlPlanePort, modelGatewayPort]).size !== 3) {
     throw new Error('Web, Control Plane, and Model Gateway ports must be different');
   }
@@ -89,6 +578,11 @@ export function readConfiguration(environment, lanHosts = detectLanHosts()) {
   if (environment.GENEWAY_GATE_A_RELEASE_PORT !== undefined
     && new Set([webPort, controlPlanePort, modelGatewayPort, releaseHelperPort, gateAReleaseHelperPort]).size !== 5) {
     throw new Error('Web, Control Plane, Model Gateway, and both release helper ports must be different');
+  }
+  if (environment.GENEWAY_GATE_A3_RELEASE_PORT !== undefined
+    && new Set([webPort, controlPlanePort, modelGatewayPort, releaseHelperPort,
+      gateAReleaseHelperPort, gateA3ReleaseHelperPort]).size !== 6) {
+    throw new Error('Web, Control Plane, Model Gateway, and all release helper ports must be different');
   }
   const localOrigins = [`http://localhost:${String(webPort)}`, `http://127.0.0.1:${String(webPort)}`];
   const publicOrigins = lanHosts.map((host) => `http://${host}:${String(webPort)}`);
@@ -104,6 +598,8 @@ export function readConfiguration(environment, lanHosts = detectLanHosts()) {
     releaseHelperPort,
     gateAReleaseHelperBindHost: '127.0.0.1',
     gateAReleaseHelperPort,
+    gateA3ReleaseHelperBindHost: '127.0.0.1',
+    gateA3ReleaseHelperPort,
     allowedWebOrigins: [...localOrigins, ...publicOrigins],
     publicUrls: publicOrigins.map((origin) => `${origin}/conversations/new`),
   };
@@ -169,6 +665,17 @@ export function controlPlaneEnvironment(environment = process.env) {
   return Object.fromEntries(Object.entries(environment).filter(([name]) => ![
     'GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE',
     'GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE',
+    'GENEWAY_GATE_A3_VALIDATION_RUN_ID',
+    'GENEWAY_GATE_A3_APPROVED_PREFLIGHT_FILE',
+    'GENEWAY_GATE_A3_CONTROLLER_ADMISSION_FILE',
+    'GENEWAY_GATE_A3_INTERNAL_VALIDATION_ADMISSION_FILE',
+    'GENEWAY_CONNECTOR_GATEWAY_URL',
+    'GENEWAY_CONNECTOR_GATEWAY_SERVICE_TOKEN_FILE',
+    'GENEWAY_CONNECTOR_INVOCATION_SECRET_FILE',
+    'GENEWAY_CONNECTOR_GATEWAY_INVOCATION_SECRET_FILE',
+    'GENEWAY_CONNECTOR_GATEWAY_RECEIPT_SECRET_FILE',
+    'GENEWAY_MODEL_GATEWAY_WORK_ORDER_RECEIPT_SECRET_FILE',
+    'GENEWAY_GEARJOB_SERVICE_CREDENTIAL_FILE',
   ].includes(name)));
 }
 
@@ -196,12 +703,22 @@ const CONTROL_PLANE_WITH_RELEASE_COMMAND = `set -euo pipefail
 control_plane_pid=''
 release_helper_pid=''
 gate_a_release_helper_pid=''
+gate_a3_release_helper_pid=''
+run_optional_gate_a3_release() {
+  if ./node_modules/.bin/tsx scripts/e2e/start-gate-a3-release.ts; then
+    return
+  fi
+  printf '%s\n' 'Gate A.3 release helper failed; route remains NOT_OPEN while the base stack continues.' >&2
+  while kill -0 "$control_plane_pid" 2>/dev/null; do sleep 1; done
+}
 stop_stack() {
   trap - EXIT INT TERM
+  [[ -z "$gate_a3_release_helper_pid" ]] || kill "$gate_a3_release_helper_pid" 2>/dev/null || true
   [[ -z "$gate_a_release_helper_pid" ]] || kill "$gate_a_release_helper_pid" 2>/dev/null || true
   [[ -z "$release_helper_pid" ]] || kill "$release_helper_pid" 2>/dev/null || true
   [[ -z "$control_plane_pid" ]] || kill "$control_plane_pid" 2>/dev/null || true
   [[ -z "$gate_a_release_helper_pid" ]] || wait "$gate_a_release_helper_pid" 2>/dev/null || true
+  [[ -z "$gate_a3_release_helper_pid" ]] || wait "$gate_a3_release_helper_pid" 2>/dev/null || true
   [[ -z "$release_helper_pid" ]] || wait "$release_helper_pid" 2>/dev/null || true
   [[ -z "$control_plane_pid" ]] || wait "$control_plane_pid" 2>/dev/null || true
 }
@@ -214,16 +731,30 @@ control_plane_pid=$!
 release_helper_pid=$!
 ./node_modules/.bin/tsx scripts/e2e/start-gate-a-release.ts &
 gate_a_release_helper_pid=$!
-wait -n "$control_plane_pid" "$release_helper_pid" "$gate_a_release_helper_pid"`;
+if [[ -n "\${GENEWAY_GATE_A3_APPROVED_PREFLIGHT_FILE:-}" ]]; then
+  run_optional_gate_a3_release &
+  gate_a3_release_helper_pid=$!
+fi
+wait -n "$control_plane_pid" "$release_helper_pid" "$gate_a_release_helper_pid" \${gate_a3_release_helper_pid:+"$gate_a3_release_helper_pid"}`;
 
 const CONTROL_PLANE_WITH_A0_RELEASE_COMMAND = `set -euo pipefail
 control_plane_pid=''
 release_helper_pid=''
+gate_a3_release_helper_pid=''
+run_optional_gate_a3_release() {
+  if ./node_modules/.bin/tsx scripts/e2e/start-gate-a3-release.ts; then
+    return
+  fi
+  printf '%s\n' 'Gate A.3 release helper failed; route remains NOT_OPEN while the base stack continues.' >&2
+  while kill -0 "$control_plane_pid" 2>/dev/null; do sleep 1; done
+}
 stop_stack() {
   trap - EXIT INT TERM
+  [[ -z "$gate_a3_release_helper_pid" ]] || kill "$gate_a3_release_helper_pid" 2>/dev/null || true
   [[ -z "$release_helper_pid" ]] || kill "$release_helper_pid" 2>/dev/null || true
   [[ -z "$control_plane_pid" ]] || kill "$control_plane_pid" 2>/dev/null || true
   [[ -z "$release_helper_pid" ]] || wait "$release_helper_pid" 2>/dev/null || true
+  [[ -z "$gate_a3_release_helper_pid" ]] || wait "$gate_a3_release_helper_pid" 2>/dev/null || true
   [[ -z "$control_plane_pid" ]] || wait "$control_plane_pid" 2>/dev/null || true
 }
 trap stop_stack EXIT INT TERM
@@ -232,7 +763,11 @@ env -u GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE -u GENEWAY_MODEL_GATEWAY_CONFORMANCE
 control_plane_pid=$!
 ./node_modules/.bin/tsx scripts/e2e/start-gate-a0-release.ts &
 release_helper_pid=$!
-wait -n "$control_plane_pid" "$release_helper_pid"`;
+if [[ -n "\${GENEWAY_GATE_A3_APPROVED_PREFLIGHT_FILE:-}" ]]; then
+  run_optional_gate_a3_release &
+  gate_a3_release_helper_pid=$!
+fi
+wait -n "$control_plane_pid" "$release_helper_pid" \${gate_a3_release_helper_pid:+"$gate_a3_release_helper_pid"}`;
 
 export function buildControlPlaneStackPlan({
   configuration,
@@ -245,6 +780,7 @@ export function buildControlPlaneStackPlan({
   parserBuild,
   parserApproval,
   approvedC1Sha256,
+  gateA3,
 }) {
   const environmentArguments = [
     `GENEWAY_WEB_ALLOWED_ORIGINS=${configuration.allowedWebOrigins.join(',')}`,
@@ -255,11 +791,31 @@ export function buildControlPlaneStackPlan({
     `GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE=${gatewayInvocationSecretFile}`,
     `GENEWAY_RUN_ID=${runId}`,
     `GENEWAY_GATE_A0_LIVE_VALIDATION_RUN_ID=${runId}`,
-    'GENEWAY_WORKER_LEASE_MS=1000',
+    // Live provider calls routinely exceed one second. Keep the disposable
+    // execution lease long enough for the bounded model call while preserving
+    // the repository's expired-lease reclaim/fence behavior.
+    'GENEWAY_WORKER_LEASE_MS=60000',
   ];
+  if (gateA3 !== undefined) environmentArguments.push(
+    `GENEWAY_GATE_A3_VALIDATION_RUN_ID=${runId}`,
+    `GENEWAY_CONTROL_PLANE_URL=http://${configuration.controlPlaneBindHost}:${String(configuration.controlPlanePort)}`,
+    `GENEWAY_GATE_A3_RELEASE_PORT=${String(configuration.gateA3ReleaseHelperPort)}`,
+    `GENEWAY_GATE_A3_APPROVED_PREFLIGHT_FILE=${gateA3.approvedPreflightFile}`,
+    `GENEWAY_GATE_A3_CONTROLLER_ADMISSION_FILE=${gateA3.controllerAdmissionFile}`,
+    `GENEWAY_GATE_A3_INTERNAL_VALIDATION_ADMISSION_FILE=${gateA3.internalValidationAdmissionFile}`,
+    `GENEWAY_CONNECTOR_GATEWAY_URL=${gateA3.connectorGatewayUrl}`,
+    `GENEWAY_CONNECTOR_GATEWAY_SERVICE_TOKEN_FILE=${gateA3.connectorGatewayServiceTokenFile}`,
+    `GENEWAY_CONNECTOR_GATEWAY_INVOCATION_SECRET_FILE=${gateA3.connectorGatewayInvocationSecretFile}`,
+    `GENEWAY_CONNECTOR_GATEWAY_RECEIPT_SECRET_FILE=${gateA3.connectorGatewayReceiptSecretFile}`,
+    `GENEWAY_MODEL_GATEWAY_WORK_ORDER_RECEIPT_SECRET_FILE=${gateA3.modelGatewayWorkOrderReceiptSecretFile}`,
+  );
+  if (gateA3 !== undefined && liveProvider === undefined) {
+    throw new Error('Gate A.3 requires the configured live model provider authority');
+  }
   if (liveProvider === undefined) {
     return {
-      arguments: ['scripts/with-storage.sh', 'env', ...environmentArguments, './node_modules/.bin/tsx', 'apps/control-plane/src/main.ts'],
+      arguments: ['scripts/with-storage.sh', 'env', ...environmentArguments,
+        './node_modules/.bin/tsx', 'apps/control-plane/src/main.ts'],
       releaseHealthUrl: null,
       gateAReleaseHealthUrl: null,
     };
@@ -407,12 +963,19 @@ async function main() {
     resolvePort(['127.0.0.1'], configuration.modelGatewayPort, process.env.GENEWAY_MODEL_GATEWAY_PORT !== undefined, 'Model Gateway'),
     resolvePort(configuration.webBindHosts, configuration.webPort, process.env.GENEWAY_WEB_PORT !== undefined, 'Web'),
   ]);
+  const connectorGatewayPort = await resolveUnreservedPort(
+    ['127.0.0.1'],
+    connectorGatewayDefaultPort,
+    new Set([controlPlanePort, modelGatewayPort, webPort]),
+    false,
+    'Connector Gateway',
+  );
   const releaseHelperPort = liveProvider === undefined
     ? configuration.releaseHelperPort
     : await resolveUnreservedPort(
       [configuration.releaseHelperBindHost],
       configuration.releaseHelperPort,
-      new Set([controlPlanePort, modelGatewayPort, webPort]),
+      new Set([controlPlanePort, modelGatewayPort, connectorGatewayPort, webPort]),
       process.env.GENEWAY_GATE_A0_RELEASE_PORT !== undefined,
       'Gate A0 release helper',
     );
@@ -421,9 +984,19 @@ async function main() {
     : await resolveUnreservedPort(
       [configuration.gateAReleaseHelperBindHost],
       configuration.gateAReleaseHelperPort,
-      new Set([controlPlanePort, modelGatewayPort, webPort, releaseHelperPort]),
+      new Set([controlPlanePort, modelGatewayPort, connectorGatewayPort, webPort, releaseHelperPort]),
       process.env.GENEWAY_GATE_A_RELEASE_PORT !== undefined,
       'Gate A release helper',
+    );
+  const gateA3ReleaseHelperPort = liveProvider === undefined
+    ? configuration.gateA3ReleaseHelperPort
+    : await resolveUnreservedPort(
+      [configuration.gateA3ReleaseHelperBindHost],
+      configuration.gateA3ReleaseHelperPort,
+      new Set([controlPlanePort, modelGatewayPort, connectorGatewayPort, webPort,
+        releaseHelperPort, gateAReleaseHelperPort]),
+      process.env.GENEWAY_GATE_A3_RELEASE_PORT !== undefined,
+      'Gate A.3 release helper',
     );
   configuration = {
     ...readConfiguration({
@@ -434,27 +1007,52 @@ async function main() {
     }),
     releaseHelperPort,
     gateAReleaseHelperPort,
+    gateA3ReleaseHelperPort,
   };
 
   const runId = `dev-${String(Date.now())}-${String(process.pid)}`;
+  let gateA3Authority;
+  let gateA3Runtime;
+  let gateA3UnavailableReason;
+  if (liveProvider === undefined) {
+    gateA3UnavailableReason = 'live model provider authority is unavailable';
+  } else {
+    try {
+      gateA3Authority = readApprovedGateA3Authority();
+      gateA3Runtime = ensureGateA3Runtime(gateA3Authority);
+    } catch (error) {
+      gateA3UnavailableReason = error instanceof Error ? error.message : 'Gate A.3 authority or runtime is unavailable';
+      process.stderr.write(`Gate A.3 未开放；Fast Chat 与材料分析继续启动：${gateA3UnavailableReason}\n`);
+    }
+  }
   const parserBuild = liveProvider === undefined ? undefined : buildGateAParserImage(process.env);
   const parserApproval = parserBuild === undefined ? undefined
     : prepareGateAParserApproval(parserBuild, runId, process.env);
   const authorityDirectory = mkdtempSync('/tmp/geneway-dev-');
-  const tokenFile = `${authorityDirectory}/worker.token`;
-  const gatewayServiceTokenFile = `${authorityDirectory}/model-gateway-service.token`;
-  const gatewayInvocationSecretFile = `${authorityDirectory}/model-gateway-invocation.token`;
+  const authorityFiles = writeDistinctSecrets(authorityDirectory, {
+    tokenFile: 'worker.token',
+    gatewayServiceTokenFile: 'model-gateway-service.token',
+    gatewayInvocationSecretFile: 'model-gateway-invocation.token',
+    ...(gateA3Authority === undefined ? {} : {
+      modelGatewayWorkOrderReceiptSecretFile: 'model-gateway-work-order-receipt.secret',
+      connectorGatewayServiceTokenFile: 'connector-gateway-service.token',
+      connectorGatewayReceiptSecretFile: 'connector-gateway-receipt.secret',
+    }),
+  }, gateA3Authority?.existingSecretDigests ?? []);
+  const {
+    tokenFile,
+    gatewayServiceTokenFile,
+    gatewayInvocationSecretFile,
+    modelGatewayWorkOrderReceiptSecretFile,
+    connectorGatewayServiceTokenFile,
+    connectorGatewayReceiptSecretFile,
+  } = authorityFiles;
   const socketPath = `${authorityDirectory}/worker.sock`;
   const workerInstanceId = `dev-worker-${String(process.pid)}-${String(Date.now())}`;
   const receiptPath = `/tmp/geneway-runs/${runId}/process-boundaries/worker.json`;
-  writeFileSync(tokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
-  chmodSync(tokenFile, 0o600);
-  writeFileSync(gatewayServiceTokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
-  writeFileSync(gatewayInvocationSecretFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
-  chmodSync(gatewayServiceTokenFile, 0o600);
-  chmodSync(gatewayInvocationSecretFile, 0o600);
 
   let modelGateway;
+  let connectorGateway;
   let controlPlane;
   let worker;
   let webs = [];
@@ -487,6 +1085,15 @@ async function main() {
       releaseFatal();
     });
   };
+  let gateA3ConnectorReady = false;
+  const watchOptionalConnector = (child) => {
+    child.once('exit', (code, signal) => {
+      if (stopping) return;
+      gateA3ConnectorReady = false;
+      gateA3UnavailableReason = `Connector Gateway exited: code=${String(code)} signal=${String(signal)}`;
+      process.stderr.write(`Gate A.3 已转为 NOT_OPEN；Fast Chat 与材料分析继续：${gateA3UnavailableReason}\n`);
+    });
+  };
 
   const cleanup = async () => {
     if (stopping) return;
@@ -495,6 +1102,7 @@ async function main() {
     for (const web of [...webs].reverse()) await stopProcess(web, 5_000);
     await stopProcess(worker, 5_000);
     await stopProcess(controlPlane, 20_000);
+    await stopProcess(connectorGateway, 5_000);
     await stopProcess(modelGateway, 5_000);
     if (!authorityDirectory.startsWith('/tmp/geneway-dev-')) throw new Error('Refusing to clean an unexpected authority directory');
     rmSync(authorityDirectory, { recursive: true, force: true });
@@ -511,6 +1119,9 @@ async function main() {
       GENEWAY_CONTROL_PLANE_URL: `http://127.0.0.1:${String(configuration.controlPlanePort)}`,
       GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: gatewayServiceTokenFile,
       GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE: gatewayInvocationSecretFile,
+      ...(modelGatewayWorkOrderReceiptSecretFile === undefined ? {} : {
+        GENEWAY_MODEL_GATEWAY_WORK_ORDER_RECEIPT_SECRET_FILE: modelGatewayWorkOrderReceiptSecretFile,
+      }),
     });
     watch('Model Gateway', modelGateway);
     if (await waitForLifecycle(waitFor(
@@ -518,7 +1129,7 @@ async function main() {
       'Model Gateway', 30_000, modelGateway,
     )) === 'shutdown') return;
 
-    const controlPlaneStack = buildControlPlaneStackPlan({
+    const buildStackPlan = (authority) => buildControlPlaneStackPlan({
       configuration,
       runId,
       socketPath,
@@ -529,23 +1140,82 @@ async function main() {
       parserBuild,
       parserApproval,
       approvedC1Sha256: process.env.GENEWAY_GATE_A_APPROVED_C1_SHA256,
+      gateA3: authority === undefined ? undefined : {
+        approvedPreflightFile: authority.approvedPreflightFile,
+        controllerAdmissionFile: authority.controllerAdmissionFile,
+        internalValidationAdmissionFile: authority.internalValidationAdmissionFile,
+        connectorGatewayUrl: `http://127.0.0.1:${String(connectorGatewayPort)}`,
+        connectorGatewayServiceTokenFile,
+        connectorGatewayInvocationSecretFile: authority.connectorInvocationSecretFile,
+        connectorGatewayReceiptSecretFile,
+        modelGatewayWorkOrderReceiptSecretFile,
+      },
     });
-    process.stdout.write(`启动 Control Plane 与临时基础设施（run ${runId}）…\n`);
-    controlPlane = startProcess('bash', controlPlaneStack.arguments, {
-      ...controlPlaneEnvironment(),
-      GENEWAY_STORAGE_TARGET_ROLE: 'control-plane',
-      GENEWAY_START_STORAGE_RECONCILER: '1',
-      GENEWAY_RUN_ID: runId,
-      PORT: String(configuration.controlPlanePort),
-      GENEWAY_WEB_PORT: String(configuration.webPort),
-    });
-    watch('Control Plane', controlPlane);
-    if (await waitForLifecycle(waitFor(
-      async () => (await fetch(`http://127.0.0.1:${String(configuration.controlPlanePort)}/health`)).ok && existsSync(socketPath) && lstatSync(socketPath).isSocket(),
-      'Control Plane and Worker UDS',
-      60_000,
-      controlPlane,
-    )) === 'shutdown') return;
+    let controlPlaneStack = buildStackPlan(gateA3Authority);
+    for (;;) {
+      process.stdout.write(`启动 Control Plane 与临时基础设施（run ${runId}）…\n`);
+      controlPlane = startProcess('bash', controlPlaneStack.arguments, {
+        ...controlPlaneEnvironment(),
+        GENEWAY_STORAGE_TARGET_ROLE: 'control-plane',
+        GENEWAY_START_STORAGE_RECONCILER: '1',
+        GENEWAY_RUN_ID: runId,
+        PORT: String(configuration.controlPlanePort),
+        GENEWAY_WEB_PORT: String(configuration.webPort),
+      });
+      try {
+        if (await waitForLifecycle(waitFor(
+          async () => (await fetch(`http://127.0.0.1:${String(configuration.controlPlanePort)}/health`)).ok
+            && existsSync(socketPath) && lstatSync(socketPath).isSocket(),
+          'Control Plane and Worker UDS',
+          60_000,
+          controlPlane,
+        )) === 'shutdown') return;
+        watch('Control Plane', controlPlane);
+        break;
+      } catch (error) {
+        if (gateA3Authority === undefined || fatalError !== undefined) throw error;
+        await stopProcess(controlPlane, 20_000);
+        controlPlane = undefined;
+        gateA3UnavailableReason = error instanceof Error
+          ? `Control Plane rejected Gate A.3 startup authority: ${error.message}`
+          : 'Control Plane rejected Gate A.3 startup authority';
+        gateA3Authority = undefined;
+        gateA3Runtime = undefined;
+        process.stderr.write(`Gate A.3 未开放；正在不带 A.3 authority 重启基础栈：${gateA3UnavailableReason}\n`);
+        controlPlaneStack = buildStackPlan(undefined);
+      }
+    }
+
+    // The Control Plane owns 127.0.0.1:8100 and establishes its signed proxy
+    // before the Connector Gateway can issue any facade request.
+    if (gateA3Authority !== undefined) {
+      process.stdout.write('启动 loopback Connector Gateway…\n');
+      connectorGateway = startProcess('./node_modules/.bin/tsx', ['services/connector-gateway/src/main.ts'], {
+        ...minimalEnvironment(process.env),
+        NODE_ENV: 'development',
+        GENEWAY_CONNECTOR_GATEWAY_PORT: String(connectorGatewayPort),
+        GENEWAY_CONTROL_PLANE_URL: `http://127.0.0.1:${String(configuration.controlPlanePort)}`,
+        GENEWAY_GEARJOB_FACADE_URL: gearJobOrigin,
+        GENEWAY_CONNECTOR_GATEWAY_SERVICE_TOKEN_FILE: connectorGatewayServiceTokenFile,
+        GENEWAY_CONNECTOR_GATEWAY_INVOCATION_SECRET_FILE: gateA3Authority.connectorInvocationSecretFile,
+        GENEWAY_CONNECTOR_GATEWAY_RECEIPT_SECRET_FILE: connectorGatewayReceiptSecretFile,
+        GENEWAY_GEARJOB_SERVICE_CREDENTIAL_FILE: gateA3Authority.gearJobServiceCredentialFile,
+      });
+      try {
+        if (await waitForLifecycle(waitFor(
+          async () => (await fetch(`http://127.0.0.1:${String(connectorGatewayPort)}/health`)).ok,
+          'Connector Gateway', 30_000, connectorGateway,
+        )) === 'shutdown') return;
+        gateA3ConnectorReady = true;
+        watchOptionalConnector(connectorGateway);
+      } catch (error) {
+        if (fatalError !== undefined) throw error;
+        await stopProcess(connectorGateway, 5_000);
+        connectorGateway = undefined;
+        gateA3UnavailableReason = error instanceof Error ? error.message : 'Connector Gateway is unavailable';
+        process.stderr.write(`Gate A.3 保持 NOT_OPEN；Fast Chat 与材料分析继续：${gateA3UnavailableReason}\n`);
+      }
+    }
 
     if (controlPlaneStack.releaseHealthUrl !== null) {
       process.stdout.write('等待本次 disposable chat release 进入 internal…\n');
@@ -566,6 +1236,25 @@ async function main() {
       }, 'Gate A release helper', 60_000, controlPlane)) === 'shutdown') return;
     }
 
+    if (gateA3Authority !== undefined && gateA3ConnectorReady) {
+      process.stdout.write('等待 Gate A.3 authority 与双 Gateway readiness…\n');
+      try {
+        if (await waitForLifecycle(waitFor(async () => {
+          const response = await fetch(
+            `http://127.0.0.1:${String(configuration.controlPlanePort)}/api/capabilities/production.work-order-status.v1`,
+          );
+          if (!response.ok) return false;
+          const body = await response.json();
+          return body.status === 'internal' && body.executionRoute === 'live';
+        }, 'Gate A.3 authority and Gateway readiness', 30_000, controlPlane)) === 'shutdown') return;
+      } catch (error) {
+        if (fatalError !== undefined) throw error;
+        gateA3ConnectorReady = false;
+        gateA3UnavailableReason = error instanceof Error ? error.message : 'Gate A.3 readiness is unavailable';
+        process.stderr.write(`Gate A.3 保持 NOT_OPEN；Fast Chat 与材料分析继续：${gateA3UnavailableReason}\n`);
+      }
+    }
+
     process.stdout.write('启动独立 Worker…\n');
     worker = startProcess('./node_modules/.bin/tsx', ['apps/worker/src/main.ts'], {
       ...minimalEnvironment(process.env),
@@ -578,6 +1267,11 @@ async function main() {
       GENEWAY_WORKER_DEPLOYMENT: 'gate0.2a-local',
       GENEWAY_MODEL_GATEWAY_URL: `http://${configuration.modelGatewayBindHost}:${String(configuration.modelGatewayPort)}`,
       GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE: gatewayServiceTokenFile,
+      ...(!gateA3ConnectorReady ? {} : {
+        GENEWAY_GATE_A3_WORK_ORDER_ENABLED: '1',
+        GENEWAY_CONNECTOR_GATEWAY_URL: `http://127.0.0.1:${String(connectorGatewayPort)}`,
+        GENEWAY_CONNECTOR_GATEWAY_SERVICE_TOKEN_FILE: connectorGatewayServiceTokenFile,
+      }),
       ...(liveProvider === undefined ? {} : { GENEWAY_GATE_A_LIVE_ENABLED: '1' }),
     });
     watch('Worker', worker);
@@ -606,7 +1300,10 @@ async function main() {
     if (await waitForLifecycle(webReadiness) === 'shutdown') return;
 
     const displayedUrls = configuration.publicUrls.map((url) => `  ${url}`).join('\n');
-    process.stdout.write(`\n✓ geneway 开发环境已启动\n\n局域网入口（本机同样使用）：\n${displayedUrls}\n\nWeb 只监听 ${configuration.lanHosts.join('、')}；按 Ctrl+C 停止并清理全部临时数据。\n`);
+    const gateA3Summary = gateA3Authority === undefined || !gateA3ConnectorReady
+      ? `Gate A.3: NOT_OPEN (${gateA3UnavailableReason ?? 'authority unavailable'})`
+      : `Gate A.3 authority: ${gateA3Authority.artifactId}\nPreflight digest: ${gateA3Authority.approvedPreflightDigest}\nRuntime image: ${gateA3Authority.runtimeImageId}\nRuntime container: ${gateA3Runtime?.runtimeContainerId ?? gateA3RuntimeContainerName}\nConnector Gateway: 127.0.0.1:${String(connectorGatewayPort)}\nGearJob facade proxy: ${gearJobOrigin}`;
+    process.stdout.write(`\n✓ geneway 开发环境已启动\n\n${gateA3Summary}\n\n局域网入口（本机同样使用）：\n${displayedUrls}\n\nWeb 只监听 ${configuration.lanHosts.join('、')}；按 Ctrl+C 停止并清理 geneway 临时数据。GearJob runtime 与 volume 会保留并复用。\n`);
     const outcome = await Promise.race([fatal.then(() => 'fatal'), shutdown.then(() => 'shutdown')]);
     if (outcome === 'fatal') throw fatalError;
   } finally {

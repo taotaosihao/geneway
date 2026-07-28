@@ -13,7 +13,9 @@ export function e2eProjectSelection(forwarded) {
     return [];
   }).filter((value) => typeof value === 'string');
   const allProjects = !forwarded.some((argument) => argument === '--project' || argument.startsWith('--project='));
-  const gateALive = selectedProjects.some((project) => project === 'gate-a-live' || project === 'gate-a-not-open');
+  const gateALive = selectedProjects.some((project) =>
+    project === 'gate-a-live' || project === 'gate-a-not-open' || project === 'gate-a-browser-egress'
+      || project === 'gate-a-recovery');
   const gateA0Live = gateALive || selectedProjects.includes('gate-a0-live');
   return { selectedProjects, allProjects, gateALive, gateA0Live };
 }

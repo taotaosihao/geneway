@@ -46,6 +46,7 @@ export const expectedE2eTests: readonly ExpectedE2eTest[] = [
   { project: 'gate-a0-live', file: 'gate-a0-context-cancel.spec.ts', title: '真实 served Fast Chat 追问上下文并用停止生成完成 cancel fencing' },
   { project: 'gate-a0-lan', file: 'gate-a0-lan-regression.spec.ts', title: '实际 LAN 双浏览器共享 Conversation、上下文、取消并保持材料门' },
   { project: 'gate-a-not-open', file: 'gate-a-not-open.spec.ts', title: 'internal release 前 public capability、UI 与数据库均保持 NOT_OPEN' },
+  { project: 'gate-a-browser-egress', file: 'gate-a-browser-egress.setup.ts', title: 'kernel boundary 仅允许浏览器连接 Web port，并拒绝全部内部服务端口' },
   { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: '默认 Fast Chat 首问、追问、停止与刷新保持零 BusinessTask' },
   { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: 'auto 路线完成真实 C1 分析并关联 UI、API、Postgres、Worker 与 Gateway receipt' },
   { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: '单专家与专家团路线均完成真实分析并保持相同权限上限和 exact AgentVersion' },
@@ -57,6 +58,8 @@ export const expectedE2eTests: readonly ExpectedE2eTest[] = [
   { project: 'gate-a-live', file: 'gate-a-solution-analysis.spec.ts', title: '未知专家标识与不支持输入均 fail closed 且不回退 FakeRuntime' },
   { project: 'gate-a-live', file: 'gate-a0-context-cancel.spec.ts', title: '真实 served Fast Chat 追问上下文并用停止生成完成 cancel fencing' },
   { project: 'gate-a-live', file: 'gate-a0-fast-chat.spec.ts', title: '真实 served Fast Chat 首问关联 UI、API、Postgres、Worker 与 Gateway audit' },
+  { project: 'gate-a-live', file: 'gate-a-work-order-status.spec.ts', title: '真实单工单 served flow 关联 immutable authority、10 Evidence 与 GearJob 零写边界' },
+  { project: 'gate-a-recovery', file: 'gate-a-recovery.spec.ts', title: 'Gate A 单工单在 Connector、Control Plane 与 Worker 真实恢复后保持单一终态并可继续新任务' },
 ];
 
 const resultSchema = z.object({ status: z.string() }).passthrough();
@@ -109,7 +112,11 @@ function expectedSelection(arguments_: readonly string[]): readonly ExpectedE2eT
     if (!expectedE2eTests.some((item) => item.project === project)) throw new Error(`Unknown gated Playwright project: ${project}`);
   }
   const dependencyProjects = new Set<string>();
-  if (selectedProjects.has('gate-a-live')) {
+  if (selectedProjects.has('gate-a-live') || selectedProjects.has('gate-a-recovery')) {
+    selectedProjects.add('gate-a-browser-egress');
+    dependencyProjects.add('gate-a-browser-egress');
+  }
+  if (selectedProjects.has('gate-a-browser-egress')) {
     selectedProjects.add('gate-a-not-open');
     dependencyProjects.add('gate-a-not-open');
   }

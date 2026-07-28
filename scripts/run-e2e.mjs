@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { chromium } from '@playwright/test';
 import { assertSecureRunDirectories, e2eProjectSelection, e2eRunIdentity, gate02bEnvironmentNames } from './e2e-run-identity.mjs';
 import { browserEgressPolicyHash, parseBrowserEgressReceipt } from './browser-egress-receipt.mjs';
+import { ensureGateA3Runtime, readApprovedGateA3Authority } from './dev-up.mjs';
 
 async function findAvailablePort(excludedPorts = new Set()) {
   while (true) {
@@ -33,6 +34,10 @@ const parentRunId = process.env.GENEWAY_RUN_ID ?? `gate-0.1-${Date.now()}-${proc
 if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(parentRunId)) throw new Error('GENEWAY_RUN_ID must be a safe path segment');
 const { runId, selectedProjects } = e2eRunIdentity(parentRunId, forwarded, gate02bGuarded);
 const { gateALive, gateA0Live } = e2eProjectSelection(forwarded);
+const browserGuarded = gate02bGuarded || gateALive;
+const browserGuardLibraryPath = gate02bGuarded
+  ? gate02bEnvironment.GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY
+  : gateALive ? `/tmp/geneway-runs/${runId}/browser-egress-guard.so` : undefined;
 const invocationResultPath = process.env.GENEWAY_E2E_INVOCATION_RESULT_PATH;
 const expectedInvocationResultPath = `/tmp/geneway-runs/${parentRunId}/recovery/e2e-invocation-result.json`;
 if (invocationResultPath !== undefined && invocationResultPath !== expectedInvocationResultPath) {
@@ -43,6 +48,8 @@ const liveConformanceFile = process.env.GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE;
 if (gateA0Live && (liveAuthFile === undefined || liveConformanceFile === undefined)) {
   throw new Error('gate-a0-live requires GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE and GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE');
 }
+const gateA3Authority = gateALive ? readApprovedGateA3Authority() : undefined;
+if (gateA3Authority !== undefined) ensureGateA3Runtime(gateA3Authority);
 const parserBuild = gateALive ? (() => {
   const built = spawnSync(process.execPath, ['scripts/build-gate-a-document-parser-image.mjs'], {
     cwd: process.cwd(),
@@ -140,8 +147,11 @@ const workerHealthPort = await allocatePort();
 const controlPlaneSupervisorPort = await allocatePort();
 const modelGatewayPort = await allocatePort();
 const modelGatewaySupervisorPort = await allocatePort();
+const connectorGatewayPort = await allocatePort();
+const connectorGatewaySupervisorPort = await allocatePort();
 const gateA0ReleasePort = await allocatePort();
 const gateAReleasePort = await allocatePort();
+const gateA3ReleasePort = await allocatePort();
 const composeRunId = runId.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
 const composeProjectName = `geneway-e2e-${composeRunId}`;
 const databaseUrl = `postgres://geneway:geneway@127.0.0.1:${postgresPort}/geneway_test`;
@@ -153,6 +163,11 @@ const workerInstanceId = `e2e-worker-${process.pid}-${Date.now()}`;
 const modelGatewayAuthorityDirectory = gateA0Live ? mkdtempSync('/tmp/gw-mgw-') : undefined;
 const modelGatewayServiceTokenFile = modelGatewayAuthorityDirectory === undefined ? undefined : `${modelGatewayAuthorityDirectory}/service-token`;
 const modelGatewayInvocationSecretFile = modelGatewayAuthorityDirectory === undefined ? undefined : `${modelGatewayAuthorityDirectory}/invocation-secret`;
+const gateA3AuthorityDirectory = gateALive ? mkdtempSync('/tmp/gw-a3-') : undefined;
+const connectorGatewayServiceTokenFile = gateA3AuthorityDirectory === undefined ? undefined : `${gateA3AuthorityDirectory}/connector-service-token`;
+const connectorGatewayReceiptSecretFile = gateA3AuthorityDirectory === undefined ? undefined : `${gateA3AuthorityDirectory}/connector-receipt-secret`;
+const modelGatewayWorkOrderReceiptSecretFile = gateA3AuthorityDirectory === undefined ? undefined : `${gateA3AuthorityDirectory}/model-receipt-secret`;
+const connectorGatewaySupervisorTokenFile = gateA3AuthorityDirectory === undefined ? undefined : `${gateA3AuthorityDirectory}/supervisor-token`;
 const e2eSecretCanary = gateA0Live ? `geneway-secret-canary-${randomBytes(24).toString('hex')}` : undefined;
 const baseEnvironment = {
   PATH: process.env.PATH ?? '/usr/bin:/bin',
@@ -169,11 +184,13 @@ const browserEgressRawPath = `/tmp/geneway-runs/${runId}/process-boundaries/brow
 const browserEgressSummaryPath = `/tmp/geneway-runs/${runId}/process-boundaries/browser-egress.json`;
 const browserForbiddenPorts = [s3Port, storageAdapterPort, reconciliationAdapterPort, postgresPort, controlPlanePort,
   controlPlaneSupervisorPort, workerHealthPort, modelGatewayPort, modelGatewaySupervisorPort,
-  gateA0ReleasePort, gateAReleasePort]
+  connectorGatewayPort, connectorGatewaySupervisorPort, gateA0ReleasePort, gateAReleasePort,
+  gateA3ReleasePort, ...(gateALive ? ['8100'] : [])]
   .map(Number);
-const browserEgressConformanceRequired = selectedProjects.includes('gate0.2a-success')
+const browserEgressConformanceRequired = (selectedProjects.includes('gate0.2a-success')
   && (forwarded.some((argument) => argument.endsWith('gate-0.2a-storage-thin.spec.ts'))
-    || !forwarded.some((argument) => argument.endsWith('.spec.ts')));
+    || !forwarded.some((argument) => argument.endsWith('.spec.ts'))))
+  || gateALive;
 
 function processIdentityMatches(pid, procStartTicks) {
   try {
@@ -227,8 +244,17 @@ function writeSourceBinding() {
 }
 
 function prepareBrowserEgressBoundary() {
-  if (!gate02bGuarded) return null;
-  const libraryPath = gate02bEnvironment.GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY;
+  if (!browserGuarded || browserGuardLibraryPath === undefined) return null;
+  const libraryPath = browserGuardLibraryPath;
+  if (!gate02bGuarded) {
+    const compiled = spawnSync('cc', [
+      '-std=gnu17', '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror', '-ldl',
+      '-o', libraryPath, 'scripts/backup-restore/gate02b-egress-guard.c',
+    ], { cwd: process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (compiled.error !== undefined) throw compiled.error;
+    if (compiled.status !== 0) throw new Error(`Gate A browser egress guard compilation failed: ${compiled.stderr}`);
+    chmodSync(libraryPath, 0o555);
+  }
   const libraryStat = lstatSync(libraryPath);
   if (!libraryPath.startsWith('/') || !libraryStat.isFile() || libraryStat.isSymbolicLink()
     || libraryStat.uid !== process.getuid() || (libraryStat.mode & 0o022) !== 0 || realpathSync(libraryPath) !== libraryPath) {
@@ -253,7 +279,7 @@ function prepareBrowserEgressBoundary() {
 }
 
 function verifyBrowserEgressBoundary(prepared) {
-  if (!gate02bGuarded || prepared === null) return { checked: false, passed: true, reason: 'not-guarded' };
+  if (!browserGuarded || prepared === null) return { checked: false, passed: true, reason: 'not-guarded' };
   const rawStat = lstatSync(browserEgressRawPath);
   if (!rawStat.isFile() || rawStat.isSymbolicLink() || rawStat.uid !== process.getuid()
     || (rawStat.mode & 0o777) !== 0o600 || rawStat.nlink !== 1
@@ -306,16 +332,37 @@ try {
   if ((statSync(workerTokenFile).mode & 0o777) !== 0o600 || Buffer.byteLength(workerSocketPath, 'utf8') > 100) {
     throw new Error('E2E Worker authority did not satisfy the 0600 token or short UDS boundary');
   }
+  const secretDigests = new Set(gateA3Authority?.existingSecretDigests ?? []);
+  const writeDistinctSecret = (filePath) => {
+    let value;
+    let digest;
+    do {
+      value = randomBytes(32).toString('hex');
+      digest = createHash('sha256').update(value, 'utf8').digest('hex');
+    } while (secretDigests.has(digest));
+    secretDigests.add(digest);
+    writeFileSync(filePath, `${value}\n`, { flag: 'wx', mode: 0o600 });
+    chmodSync(filePath, 0o600);
+  };
   if (modelGatewayServiceTokenFile !== undefined && modelGatewayInvocationSecretFile !== undefined) {
-    writeFileSync(modelGatewayServiceTokenFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
-    writeFileSync(modelGatewayInvocationSecretFile, `${randomBytes(32).toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
-    chmodSync(modelGatewayServiceTokenFile, 0o600);
-    chmodSync(modelGatewayInvocationSecretFile, 0o600);
+    writeDistinctSecret(modelGatewayServiceTokenFile);
+    writeDistinctSecret(modelGatewayInvocationSecretFile);
+  }
+  if (connectorGatewayServiceTokenFile !== undefined && connectorGatewayReceiptSecretFile !== undefined
+    && modelGatewayWorkOrderReceiptSecretFile !== undefined && connectorGatewaySupervisorTokenFile !== undefined) {
+    writeDistinctSecret(connectorGatewayServiceTokenFile);
+    writeDistinctSecret(connectorGatewayReceiptSecretFile);
+    writeDistinctSecret(modelGatewayWorkOrderReceiptSecretFile);
+    writeDistinctSecret(connectorGatewaySupervisorTokenFile);
   }
   result = spawnSync('pnpm', ['exec', 'playwright', 'test', '-c', 'scripts/playwright.config.ts', ...forwarded], {
     cwd: new URL('..', import.meta.url),
     env: {
       ...baseEnvironment,
+      ...(browserGuarded ? {
+        GENEWAY_GATE02B_EGRESS_GUARD: 'required',
+        GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY: browserGuardLibraryPath,
+      } : {}),
       GENEWAY_RUN_ID: runId,
       GENEWAY_CONTROL_PLANE_PORT: controlPlanePort,
       GENEWAY_WEB_PORT: webPort,
@@ -327,8 +374,11 @@ try {
       GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT: controlPlaneSupervisorPort,
       GENEWAY_MODEL_GATEWAY_PORT: modelGatewayPort,
       GENEWAY_MODEL_GATEWAY_SUPERVISOR_PORT: modelGatewaySupervisorPort,
+      GENEWAY_CONNECTOR_GATEWAY_PORT: connectorGatewayPort,
+      GENEWAY_CONNECTOR_GATEWAY_SUPERVISOR_PORT: connectorGatewaySupervisorPort,
       GENEWAY_GATE_A0_RELEASE_PORT: gateA0ReleasePort,
       GENEWAY_GATE_A_RELEASE_PORT: gateAReleasePort,
+      GENEWAY_GATE_A3_RELEASE_PORT: gateA3ReleasePort,
       GENEWAY_WORKER_SOCKET_PATH: workerSocketPath,
       GENEWAY_WORKER_TOKEN_FILE: workerTokenFile,
       GENEWAY_WORKER_INSTANCE_ID: workerInstanceId,
@@ -344,11 +394,24 @@ try {
       ...(gateALive ? {
         GENEWAY_GATE_A_LIVE: '1',
         GENEWAY_GATE_A_LIVE_ENABLED: '1',
+        GENEWAY_GATE_A3_WORK_ORDER_ENABLED: '1',
+        GENEWAY_GATE_A3_VALIDATION_RUN_ID: runId,
         GENEWAY_GATE_A_NOT_OPEN_MARKER_REQUIRED: '1',
         GENEWAY_GATE_A_PARSER_IMAGE: parserBuild.image,
         GENEWAY_GATE_A_PARSER_BUILD_JSON: JSON.stringify(parserBuild),
         GENEWAY_GATE_A_PARSER_APPROVAL_JSON: JSON.stringify(parserApproval),
         GENEWAY_GATE_A_APPROVED_C1_SHA256: gateAC1Allowlist,
+        GENEWAY_GATE_A3_APPROVED_PREFLIGHT_FILE: gateA3Authority.approvedPreflightFile,
+        GENEWAY_GATE_A3_CONTROLLER_ADMISSION_FILE: gateA3Authority.controllerAdmissionFile,
+        GENEWAY_GATE_A3_INTERNAL_VALIDATION_ADMISSION_FILE: gateA3Authority.internalValidationAdmissionFile,
+        GENEWAY_CONNECTOR_GATEWAY_URL: `http://127.0.0.1:${connectorGatewayPort}`,
+        GENEWAY_CONNECTOR_GATEWAY_SERVICE_TOKEN_FILE: connectorGatewayServiceTokenFile,
+        GENEWAY_CONNECTOR_GATEWAY_INVOCATION_SECRET_FILE: gateA3Authority.connectorInvocationSecretFile,
+        GENEWAY_CONNECTOR_GATEWAY_RECEIPT_SECRET_FILE: connectorGatewayReceiptSecretFile,
+        GENEWAY_CONNECTOR_GATEWAY_SUPERVISOR_TOKEN_FILE: connectorGatewaySupervisorTokenFile,
+        GENEWAY_MODEL_GATEWAY_WORK_ORDER_RECEIPT_SECRET_FILE: modelGatewayWorkOrderReceiptSecretFile,
+        GENEWAY_GEARJOB_SERVICE_CREDENTIAL_FILE: gateA3Authority.gearJobServiceCredentialFile,
+        GENEWAY_GEARJOB_FACADE_URL: 'http://127.0.0.1:8100',
       } : {}),
       DATABASE_URL: databaseUrl,
       GENEWAY_E2E_DATABASE_URL: databaseUrl,
@@ -362,8 +425,8 @@ try {
     browserEgressFailed = browserEgress.passed !== true;
     if (browserEgressFailed) console.error('guarded browser egress receipt failed');
   } catch (error) {
-    browserEgressFailed = gate02bGuarded;
-    if (gate02bGuarded) console.error(`unable to verify guarded browser egress receipt: ${String(error)}`);
+    browserEgressFailed = browserGuarded;
+    if (browserGuarded) console.error(`unable to verify guarded browser egress receipt: ${String(error)}`);
   }
   if (result.status === 0 && !browserEgressFailed) {
     const reportGate = spawnSync('pnpm', ['exec', 'tsx', 'scripts/e2e-report-gate.ts',
@@ -495,6 +558,12 @@ try {
     rmSync(modelGatewayAuthorityDirectory, { recursive: true, force: true });
     modelGatewayAuthorityCleaned = !existsSync(modelGatewayAuthorityDirectory);
   }
+  let gateA3AuthorityCleaned = true;
+  if (gateA3AuthorityDirectory !== undefined) {
+    if (!gateA3AuthorityDirectory.startsWith('/tmp/gw-a3-')) throw new Error('Refusing to clean an unexpected Gate A.3 authority directory');
+    rmSync(gateA3AuthorityDirectory, { recursive: true, force: true });
+    gateA3AuthorityCleaned = !existsSync(gateA3AuthorityDirectory);
+  }
   mkdirSync(`/tmp/geneway-runs/${runId}`, { recursive: true });
   writeFileSync(`/tmp/geneway-runs/${runId}/worker-authority-cleanup.json`, `${JSON.stringify({
     workerReceiptFound,
@@ -519,11 +588,12 @@ try {
     })),
     authorityCleaned,
     modelGatewayAuthorityCleaned,
+    gateA3AuthorityCleaned,
     tokenRemoved: !existsSync(workerTokenFile),
     socketRemoved: !existsSync(workerSocketPath),
     socketRemovedByControlPlane,
   })}\n`, { mode: 0o600 });
-  if (!authorityCleaned || !modelGatewayAuthorityCleaned) cleanupFailed = true;
+  if (!authorityCleaned || !modelGatewayAuthorityCleaned || !gateA3AuthorityCleaned) cleanupFailed = true;
 }
 const exitCode = cleanupFailed || reportGateFailed || browserEgressFailed ? 1 : (result?.status ?? 1);
 if (invocationResultPath !== undefined) {

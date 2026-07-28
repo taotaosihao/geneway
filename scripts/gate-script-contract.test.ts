@@ -158,6 +158,12 @@ describe('Gate 0.2A executable script contract', () => {
     expect(e2eProjectSelection(['--project', 'gate-a-live'])).toEqual({
       selectedProjects: ['gate-a-live'], allProjects: false, gateALive: true, gateA0Live: true,
     });
+    expect(e2eProjectSelection(['--project=gate-a-browser-egress'])).toEqual({
+      selectedProjects: ['gate-a-browser-egress'], allProjects: false, gateALive: true, gateA0Live: true,
+    });
+    expect(e2eProjectSelection(['--project=gate-a-recovery'])).toEqual({
+      selectedProjects: ['gate-a-recovery'], allProjects: false, gateALive: true, gateA0Live: true,
+    });
     expect(e2eProjectSelection(['--project=gate-a0-live'])).toEqual({
       selectedProjects: ['gate-a0-live'], allProjects: false, gateALive: false, gateA0Live: true,
     });
@@ -237,6 +243,17 @@ describe('Gate 0.2A executable script contract', () => {
     });
     expect(partial.status).not.toBe(0);
     expect(partial.stderr).toContain('Gate 0.2B E2E environment tuple is incomplete');
+  });
+
+  it('keeps Gate A public traces enabled without embedding credential-bearing test sources', async () => {
+    const [servedConfig, lanConfig] = await Promise.all([
+      readFile(new URL('./playwright.config.ts', import.meta.url), 'utf8'),
+      readFile(new URL('./playwright.lan.config.ts', import.meta.url), 'utf8'),
+    ]);
+    expect(servedConfig.match(/trace: \{ mode: 'on', sources: false \}/gu)).toHaveLength(4);
+    expect(lanConfig).toContain("trace: { mode: 'on', sources: false }");
+    expect(lanConfig).toContain("screenshot: 'only-on-failure'");
+    expect(lanConfig).toContain("video: 'retain-on-failure'");
   });
 
   it('keeps the Gate A0.1 live first-turn oracle in its executable verification command', async () => {

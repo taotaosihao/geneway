@@ -18,7 +18,15 @@ import {
   registerGateAAnalysisRoute,
   type GateAAnalysisProviderResult,
 } from './gate-a-analysis.js';
+import {
+  registerGateA3WorkOrderRoute,
+  type GateA3WorkOrderModelTokenClaims,
+  type GateA3WorkOrderProviderInput,
+  type GateA3WorkOrderProviderResult,
+} from './gate-a-work-order.js';
 import { verifyOwnedPrivateFile, verifyProviderAuthFile, verifyProviderManifest } from './provider-manifest.js';
+
+export const MODEL_GATEWAY_WORK_ORDER_READINESS_PATH = '/internal/model-gateway/v1/work-order-readiness' as const;
 
 const tokenClaimsSchema = z.object({
   iss: z.literal('geneway-control-plane'),
@@ -154,6 +162,7 @@ export function chunkProviderDelta(delta: string): readonly string[] {
 export type ModelGatewayOptions = Readonly<{
   serviceToken: string;
   invocationSecret: string;
+  workOrderReceiptSecret?: string;
   controlPlaneUrl: string;
   authFilePath?: string;
   conformanceFilePath?: string;
@@ -166,10 +175,20 @@ export type ModelGatewayOptions = Readonly<{
     claim: GateAAnalysisWorkerClaim; signal: AbortSignal;
   }>) => Promise<GateAAnalysisProviderResult>;
   authorizeAnalysisInvocationForTest?: (claims: GateAAnalysisInvocationTokenClaims) => Promise<boolean>;
+  workOrderProviderCallForTest?: (input: Readonly<{
+    providerInput: GateA3WorkOrderProviderInput; signal: AbortSignal;
+  }>) => Promise<GateA3WorkOrderProviderResult>;
+  authorizeWorkOrderInvocationForTest?: (claims: GateA3WorkOrderModelTokenClaims) => Promise<boolean>;
 }>;
 
 export async function createModelGateway(options: ModelGatewayOptions): Promise<FastifyInstance> {
-  if (options.serviceToken.length < 32 || options.invocationSecret.length < 32) throw new Error('Model Gateway authority secrets are too short');
+  if (options.serviceToken.length < 32 || options.invocationSecret.length < 32
+    || (options.workOrderReceiptSecret !== undefined && options.workOrderReceiptSecret.length < 32)) {
+    throw new Error('Model Gateway authority secrets are too short');
+  }
+  if (options.workOrderReceiptSecret !== undefined && options.invocationSecret === options.workOrderReceiptSecret) {
+    throw new Error('Work-order invocation-token and receipt-signing secrets must be distinct');
+  }
   const resolveReadiness = async (): Promise<
     Readonly<{ ready: true; authFilePath: string; model: 'gpt-5.4-mini'; manifestDigest: string }>
     | Readonly<{ ready: false; reason: string }>
@@ -214,6 +233,25 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
     return readiness.ready
       ? { ready: true, profile: 'codex_subscription_dev', manifestDigest: readiness.manifestDigest }
       : reply.status(503).send({ ready: false, profile: 'codex_subscription_dev', reason: 'provider gates not satisfied' });
+  });
+  app.get(MODEL_GATEWAY_WORK_ORDER_READINESS_PATH, async (request, reply) => {
+    if (!bearerMatches(request.headers.authorization, options.serviceToken)) return reply.status(401).send({ ready: false });
+    if (options.workOrderReceiptSecret === undefined) {
+      return reply.status(503).send({ ready: false, profile: 'codex_subscription_dev', route: 'work-order-explanation/1' });
+    }
+    const readiness = await resolveReadiness();
+    return readiness.ready
+      ? {
+          ready: true,
+          profile: 'codex_subscription_dev',
+          route: 'work-order-explanation/1',
+          manifestDigest: readiness.manifestDigest,
+        }
+      : reply.status(503).send({
+          ready: false,
+          profile: 'codex_subscription_dev',
+          route: 'work-order-explanation/1',
+        });
   });
   app.post('/internal/model-gateway/v1/stream', async (request, reply) => {
     if (!bearerMatches(request.headers.authorization, options.serviceToken)) return reply.status(401).send({ errorClass: 'MODEL_AUTH_FAILED' });
@@ -384,7 +422,38 @@ export async function createModelGateway(options: ModelGatewayOptions): Promise<
       authorizeInvocationForTest: options.authorizeAnalysisInvocationForTest,
     }),
   });
+  if (options.workOrderReceiptSecret !== undefined) {
+    registerGateA3WorkOrderRoute(app, {
+      serviceToken: options.serviceToken,
+      invocationSecret: options.invocationSecret,
+      receiptSecret: options.workOrderReceiptSecret,
+      controlPlaneUrl: options.controlPlaneUrl,
+      resolveReadiness,
+      acquireProviderSlot,
+      releaseProviderSlot,
+      ...(options.workOrderProviderCallForTest === undefined ? {} : {
+        providerCallForTest: options.workOrderProviderCallForTest,
+      }),
+      ...(options.authorizeWorkOrderInvocationForTest === undefined ? {} : {
+        authorizeInvocationForTest: options.authorizeWorkOrderInvocationForTest,
+      }),
+    });
+  }
   return app;
 }
+
+export {
+  digestGateA3WorkOrderModelValue,
+  gateA3WorkOrderModelReceiptPayloadSchema,
+  gateA3WorkOrderModelReceiptSchema,
+  gateA3WorkOrderModelTokenClaimsSchema,
+  registerGateA3WorkOrderRoute,
+  type GateA3WorkOrderModelReceipt,
+  type GateA3WorkOrderModelRequest,
+  type GateA3WorkOrderModelTokenClaims,
+  type GateA3WorkOrderProgress,
+  type GateA3WorkOrderProviderInput,
+  type GateA3WorkOrderProviderResult,
+} from './gate-a-work-order.js';
 
 export { hashInstalledPackage, verifyOwnedPrivateFile, verifyProviderAuthFile, verifyProviderManifest } from './provider-manifest.js';

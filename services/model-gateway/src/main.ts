@@ -22,6 +22,12 @@ async function readSecret(filePath: string | undefined, name: string): Promise<s
 const app = await createModelGateway({
   serviceToken: await readSecret(process.env.GENEWAY_MODEL_GATEWAY_SERVICE_TOKEN_FILE, 'Model Gateway service token'),
   invocationSecret: await readSecret(process.env.GENEWAY_MODEL_GATEWAY_INVOCATION_SECRET_FILE, 'Model Gateway invocation secret'),
+  ...(process.env.GENEWAY_MODEL_GATEWAY_WORK_ORDER_RECEIPT_SECRET_FILE === undefined ? {} : {
+    workOrderReceiptSecret: await readSecret(
+      process.env.GENEWAY_MODEL_GATEWAY_WORK_ORDER_RECEIPT_SECRET_FILE,
+      'Model Gateway work-order receipt secret',
+    ),
+  }),
   controlPlaneUrl: process.env.GENEWAY_CONTROL_PLANE_URL ?? 'http://127.0.0.1:3100',
   ...(process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE === undefined ? {} : {
     authFilePath: process.env.GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE,

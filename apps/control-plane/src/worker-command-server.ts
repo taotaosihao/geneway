@@ -43,6 +43,8 @@ import type { ChatRepository } from './chat-repository.js';
 import { registerChatWorkerCommands } from './chat-worker-command.js';
 import type { GateALiveRepository } from './gate-a-live-repository.js';
 import { registerGateAWorkerCommands } from './gate-a-worker-command.js';
+import { registerGateA3WorkOrderCommands } from './gate-a3-worker-command.js';
+import type { GateA3WorkOrderRepository } from './gate-a3-work-order-repository.js';
 
 const id = (prefix: string): string => `${prefix}_${randomUUID()}`;
 const CONSUMER = 'gate0.2a-worker' as const;
@@ -1647,6 +1649,7 @@ export function createWorkerCommandApp(input: Readonly<{
   chatRepository?: ChatRepository;
   invocationTokenSecret?: string;
   gateALiveRepository?: GateALiveRepository;
+  gateA3WorkOrderRepository?: GateA3WorkOrderRepository;
 }>): FastifyInstance {
   if (input.token.length < 32) throw new Error('Worker service token must contain at least 32 characters');
   const service = new WorkerCommandService(input.repository, input.storage, input.leaseDurationMs, input.hooks);
@@ -1666,6 +1669,13 @@ export function createWorkerCommandApp(input: Readonly<{
     registerGateAWorkerCommands(app, {
       repository: input.gateALiveRepository,
       storage: input.storage,
+      workerToken: input.token,
+      leaseDurationMs: input.leaseDurationMs ?? 300_000,
+    });
+  }
+  if (input.gateA3WorkOrderRepository !== undefined) {
+    registerGateA3WorkOrderCommands(app, {
+      repository: input.gateA3WorkOrderRepository,
       workerToken: input.token,
       leaseDurationMs: input.leaseDurationMs ?? 300_000,
     });

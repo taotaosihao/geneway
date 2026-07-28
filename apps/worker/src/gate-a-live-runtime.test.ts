@@ -392,4 +392,42 @@ describe('Gate A live Worker runtime', () => {
     expect(completed).toHaveBeenCalledOnce();
     expect(claimDelivery).not.toHaveBeenCalled();
   });
+
+  it('keeps the analysis lane live when the independent work-order lane fails closed', async () => {
+    const value = claim();
+    const shutdown = new AbortController();
+    const completed = vi.fn(() => { shutdown.abort(); return Promise.resolve(); });
+    let analysisClaimed = false;
+    const analysisPort = port({
+      claim: () => {
+        if (analysisClaimed) return Promise.resolve(null);
+        analysisClaimed = true;
+        return Promise.resolve(value);
+      },
+      completed,
+    });
+    const laneFailures: Array<Readonly<{ lane: string; code: string; retryDelayMs: number }>> = [];
+    const legacy = {
+      authenticate: () => Promise.resolve(),
+      claimDelivery: () => Promise.reject(new Error('legacy delivery must not be polled')),
+    } as unknown as WorkerCommandClient;
+    const runtime = { execute: () => Promise.resolve(result(value)) } as unknown as GateAAnalysisRuntimeAdapter;
+    const failingWorkOrder = {
+      port: { claim: () => Promise.reject(new GenewayError('GATE_A3_NOT_OPEN', 'sensitive detail', 503)) },
+      connectorRuntime: {},
+      modelRuntime: {},
+    } as never;
+
+    await runWorkerLoop(legacy, {
+      signal: shutdown.signal,
+      pollIntervalMs: 10,
+      workOrder: failingWorkOrder,
+      analysis: { port: analysisPort, runtime },
+      onLaneFailure: (lane, failure) => { laneFailures.push({ lane, ...failure }); },
+    });
+
+    expect(completed).toHaveBeenCalledOnce();
+    expect(laneFailures).toEqual([{ lane: 'work_order', code: 'GATE_A3_NOT_OPEN', retryDelayMs: 20 }]);
+    expect(JSON.stringify(laneFailures)).not.toContain('sensitive detail');
+  });
 });

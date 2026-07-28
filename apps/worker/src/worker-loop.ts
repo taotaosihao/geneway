@@ -18,6 +18,12 @@ import {
   type GateAAnalysisCommandPort,
   type GateAAnalysisRuntimeAdapter,
 } from './gate-a-live-runtime.js';
+import {
+  executeGateA3WorkOrderClaim,
+  type GateA3ConnectorRuntimeAdapter,
+  type GateA3WorkOrderCommandPort,
+  type GateA3WorkOrderModelRuntimeAdapter,
+} from './gate-a3-work-order-runtime.js';
 
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
@@ -29,8 +35,17 @@ export type WorkerLoopOptions = Readonly<{
   onDeliveryAbandoned?: (delivery: WorkerDelivery, error: GenewayError) => void | Promise<void>;
   onAfterDeliveryClaim?: (delivery: WorkerDelivery) => Promise<void>;
   onBeforeCompleteStep?: (delivery: WorkerDelivery, step: Parameters<ClaimedStepHook>[0]) => Promise<void>;
+  onLaneFailure?: (
+    lane: 'work_order' | 'analysis' | 'chat',
+    failure: Readonly<{ code: string; retryDelayMs: number }>,
+  ) => void | Promise<void>;
   chat?: Readonly<{ client: ChatWorkerCommandClient; runtime: ChatRuntimeAdapter }>;
   analysis?: Readonly<{ port: GateAAnalysisCommandPort; runtime: GateAAnalysisRuntimeAdapter }>;
+  workOrder?: Readonly<{
+    port: GateA3WorkOrderCommandPort;
+    connectorRuntime: GateA3ConnectorRuntimeAdapter;
+    modelRuntime: GateA3WorkOrderModelRuntimeAdapter;
+  }>;
 }>;
 
 const AUTHORITY_LOSS_CODES = new Set([
@@ -173,19 +188,70 @@ export async function runWorkerLoop(client: WorkerCommandClient, options: Worker
   await client.authenticate(options.signal);
   if (isAborted(options.signal)) return;
   await options.onReady?.();
+  const laneFailures = new Map<'work_order' | 'analysis' | 'chat', Readonly<{ count: number; retryAt: number }>>();
+  const laneReady = (lane: 'work_order' | 'analysis' | 'chat'): boolean => (
+    (laneFailures.get(lane)?.retryAt ?? 0) <= Date.now()
+  );
+  const laneSucceeded = (lane: 'work_order' | 'analysis' | 'chat'): void => { laneFailures.delete(lane); };
+  const laneFailed = async (lane: 'work_order' | 'analysis' | 'chat', error: unknown): Promise<void> => {
+    const count = Math.min((laneFailures.get(lane)?.count ?? 0) + 1, 8);
+    const retryDelayMs = Math.min(5_000, Math.max(20, pollIntervalMs) * (2 ** Math.min(count - 1, 5)));
+    laneFailures.set(lane, { count, retryAt: Date.now() + retryDelayMs });
+    const code = error instanceof GenewayError && /^[A-Z][A-Z0-9_]{1,127}$/u.test(error.code)
+      ? error.code : 'UNEXPECTED_LANE_FAILURE';
+    try {
+      await options.onLaneFailure?.(lane, { code, retryDelayMs });
+    } catch {
+      // Audit delivery is observability-only and must not couple otherwise independent worker lanes.
+    }
+  };
   while (!isAborted(options.signal)) {
-    if (options.analysis !== undefined) {
-      const claim = await options.analysis.port.claim(options.signal);
-      if (claim !== null) {
-        await executeGateAAnalysisClaim(options.analysis.port, options.analysis.runtime, claim, options.signal);
-        continue;
+    if (options.workOrder !== undefined && laneReady('work_order')) {
+      try {
+        const claim = await options.workOrder.port.claim(options.signal);
+        if (claim !== null) {
+          await executeGateA3WorkOrderClaim(
+            options.workOrder.port,
+            options.workOrder.connectorRuntime,
+            options.workOrder.modelRuntime,
+            claim,
+            options.signal,
+          );
+          laneSucceeded('work_order');
+          continue;
+        }
+        laneSucceeded('work_order');
+      } catch (error) {
+        if (isAborted(options.signal)) return;
+        await laneFailed('work_order', error);
       }
     }
-    if (options.chat !== undefined) {
-      const claim = await options.chat.client.claim(options.signal);
-      if (claim !== null) {
-        await executeChatTurn(options.chat.client, options.chat.runtime, claim, options.signal);
-        continue;
+    if (options.analysis !== undefined && laneReady('analysis')) {
+      try {
+        const claim = await options.analysis.port.claim(options.signal);
+        if (claim !== null) {
+          await executeGateAAnalysisClaim(options.analysis.port, options.analysis.runtime, claim, options.signal);
+          laneSucceeded('analysis');
+          continue;
+        }
+        laneSucceeded('analysis');
+      } catch (error) {
+        if (isAborted(options.signal)) return;
+        await laneFailed('analysis', error);
+      }
+    }
+    if (options.chat !== undefined && laneReady('chat')) {
+      try {
+        const claim = await options.chat.client.claim(options.signal);
+        if (claim !== null) {
+          await executeChatTurn(options.chat.client, options.chat.runtime, claim, options.signal);
+          laneSucceeded('chat');
+          continue;
+        }
+        laneSucceeded('chat');
+      } catch (error) {
+        if (isAborted(options.signal)) return;
+        await laneFailed('chat', error);
       }
     }
     let delivery: WorkerDelivery | null;

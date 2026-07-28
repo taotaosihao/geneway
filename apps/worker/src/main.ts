@@ -5,6 +5,11 @@ import {
   GateAAnalysisRuntimeAdapter,
   GateAAnalysisWorkerCommandClient,
 } from './gate-a-live-runtime.js';
+import {
+  GateA3ConnectorRuntimeAdapter,
+  GateA3WorkOrderModelRuntimeAdapter,
+  GateA3WorkOrderWorkerCommandClient,
+} from './gate-a3-work-order-runtime.js';
 import { createWorkerProcessReceipt, readWorkerProcessConfiguration } from './process-receipt.js';
 import { runWorkerLoop } from './worker-loop.js';
 
@@ -33,6 +38,32 @@ const analysis = gateALiveEnabled !== '1' || modelGatewayUrl === undefined || mo
       port: new GateAAnalysisWorkerCommandClient(configuration.socketPath, token, configuration.identity.workerInstanceId),
       runtime: new GateAAnalysisRuntimeAdapter(modelGatewayUrl, modelGatewayServiceToken),
     };
+const gateA3WorkOrderEnabled = process.env.GENEWAY_GATE_A3_WORK_ORDER_ENABLED;
+if (gateA3WorkOrderEnabled !== undefined && gateA3WorkOrderEnabled !== '1') {
+  throw new Error('GENEWAY_GATE_A3_WORK_ORDER_ENABLED must be 1 when configured');
+}
+const connectorGatewayUrl = process.env.GENEWAY_CONNECTOR_GATEWAY_URL;
+const connectorGatewayServiceTokenFile = process.env.GENEWAY_CONNECTOR_GATEWAY_SERVICE_TOKEN_FILE;
+if ((connectorGatewayUrl === undefined) !== (connectorGatewayServiceTokenFile === undefined)) {
+  throw new Error('Connector Gateway URL and service token file must be configured together');
+}
+const connectorGatewayServiceToken = connectorGatewayServiceTokenFile === undefined
+  ? undefined : await readWorkerToken(connectorGatewayServiceTokenFile);
+if (gateA3WorkOrderEnabled === '1' && (
+  modelGatewayUrl === undefined || modelGatewayServiceToken === undefined
+  || connectorGatewayUrl === undefined || connectorGatewayServiceToken === undefined
+)) {
+  throw new Error('Gate A.3 work-order execution requires both Model and Connector Gateway configuration');
+}
+const workOrder = gateA3WorkOrderEnabled !== '1'
+  || modelGatewayUrl === undefined || modelGatewayServiceToken === undefined
+  || connectorGatewayUrl === undefined || connectorGatewayServiceToken === undefined
+  ? undefined
+  : {
+      port: new GateA3WorkOrderWorkerCommandClient(configuration.socketPath, token, configuration.identity.workerInstanceId),
+      connectorRuntime: new GateA3ConnectorRuntimeAdapter(connectorGatewayUrl, connectorGatewayServiceToken),
+      modelRuntime: new GateA3WorkOrderModelRuntimeAdapter(modelGatewayUrl, modelGatewayServiceToken),
+    };
 const e2eHookUrl = process.env.GENEWAY_E2E_HOOK_URL;
 const e2eHookTokenFile = process.env.GENEWAY_E2E_HOOK_TOKEN_FILE;
 if ((e2eHookUrl === undefined) !== (e2eHookTokenFile === undefined)) throw new Error('E2E hook URL and token file must be configured together');
@@ -60,6 +91,7 @@ try {
     stepPacingMs: configuration.stepDelayMs,
     ...(chat === undefined ? {} : { chat }),
     ...(analysis === undefined ? {} : { analysis }),
+    ...(workOrder === undefined ? {} : { workOrder }),
     onReady: async () => {
       await processReceipt.markReady();
       process.stdout.write(`GENEWAY_WORKER_READY pid=${String(process.pid)} instance=${configuration.identity.workerInstanceId} consumer=${configuration.identity.consumer} deployment=${configuration.identity.deploymentId}\n`);
@@ -70,6 +102,14 @@ try {
         taskId: delivery.taskId,
         attemptId: delivery.lease.attemptId,
         code: error.code,
+      })}\n`);
+    },
+    onLaneFailure: (lane, failure) => {
+      process.stderr.write(`${JSON.stringify({
+        event: 'worker.lane_failure',
+        lane,
+        code: failure.code,
+        retryDelayMs: failure.retryDelayMs,
       })}\n`);
     },
     onAfterDeliveryClaim: (delivery) => reachE2eHook({

@@ -1159,3 +1159,8 @@ export const isGenewayError = (value: unknown): value is GenewayError => value i
 export * from './gate-a.js';
 export * from './gate-a-public.js';
 export * from './gate-a-release.js';
+export * from './gate-a3-work-order.js';
+export * from './gate-a3-authority.js';
+export * from './gate-a3-acceptance-authority.js';
+export * from './gate-a3-preflight.js';
+export * from './gate-a3-runtime-authority.js';

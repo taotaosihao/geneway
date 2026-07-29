@@ -2,16 +2,20 @@
 
 ## Product contract
 
-Before any continuation from the completed Phase 0B Discovery L1, read in order:
+Before any synthetic MVP implementation, test, service or browser action, read in order:
 
-1. `/home/gewu/.codex/workflow/artifacts/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/current-authority.json`
-2. `/home/gewu/.codex/workflow/artifacts/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/discovery-l1-final-manifest.json`
-3. `/home/gewu/.codex/workflow/artifacts/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/authority-transition.json`
-4. `/home/gewu/.codex/workflow/artifacts/20260729-013-geneway-discovery-l1-team-review-findings-repair/authority-repair-transition.json`
-5. `doc/plans/atlas-workflow/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/discovery-contract.final.md`
-6. `/home/gewu/.codex/workflow/artifacts/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/discovery-admission.json`
+1. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/current-authority.json`
+2. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/activation-ack.json`
+3. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/implementation-admission.json`
+4. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/authority-transition.json`
+5. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/implementation-contract.final.md`
+6. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/team/sdd/slices/synthetic-production-brief/brief.json`
+7. `/home/gewu/.codex/workflow/artifacts/20260729-014-geneway-l2/clarify.md`
+8. `/home/gewu/.codex/workflow/artifacts/20260729-014-geneway-l2/team/decision.md`
+9. `/home/gewu/.codex/workflow/artifacts/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/current-authority.json`
+10. `/home/gewu/.codex/workflow/artifacts/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/discovery-l1-final-manifest.json`
 
-`current-authority.json` is the only durable current authority pointer. It records Discovery L1 as terminal `BLOCKED_FOR_L2` and binds the activation/repair transitions, final manifest, discovery contract/admission, `AGENTS.md`, and exact repository commit. It grants no continuing discovery or implementation authority. A missing, non-terminal, stale, non-regular, symlinked, or digest-mismatched pointer means `NO_EXECUTION` and every new route remains `NOT_OPEN`.
+The 20260730 task `current-authority.json` is the only durable current authority pointer. It opens only the exact local synthetic Slice 1 route after all bound files, repository base, clean worktree, Team execute admission and activation ACK match. A missing, inactive, stale, non-regular, symlinked or digest-mismatched pointer/ACK means `NO_EXECUTION`. Slice 2 remains closed until the user returns `CONTINUE`; MCP and every real/external route remain closed.
 
 Gate A0 has historical closure assertions and evidence, but its canonical source-bound closure pin has not been verified for import into a new route. Gate R、Gate 0.1、Gate 0.2A、Gate 0.2B 与 Gate A0 的 historical conclusions are consumed only after their exact pinned closure receipts and dependency-sensitive regressions are verified. Gate A is an `UNCLOSED_CHECKPOINT`; its brief, contract, progress, admission, code, data, receipts, controller findings, and migrations are historical/migration inputs rather than current implementation authority.
 
@@ -33,6 +37,10 @@ Gate A0 has historical closure assertions and evidence, but its canonical source
 
 The previous Gate A admission is `SUSPENDED_NO_IMPLICIT_RESUME`. It cannot authorize product implementation, service/test execution, credential issuance, GearJob setup/fixes, validation, finalization, promotion, or cross-repository mutation.
 
-Phase 0B Discovery L1 is terminated with `BLOCKED_FOR_L2`. The final preflight, legacy disposition, dependency impact and terminal authority state are immutable evidence only; they grant no further source inspection, artifact mutation, product-code edits, service starts, real API calls, credential access, real 5-case data, authenticated WorkBuddy tenant actions, external mutation, push, PR, deployment, release, production/customer routes, production writes, or secret disclosure.
+Phase 0B Discovery L1 remains terminated with `BLOCKED_FOR_L2`; its final artifacts are immutable historical evidence. The 20260730 transition supersedes its `NO_EXECUTION` conclusion only for the local, deterministic, credential-free synthetic MVP named by the current pointer. It does not reopen Discovery L2 or import historical Gate A closure.
 
-Phase 0B L2 and every product route remain `NOT_OPEN`. A later exact, action-specific overlay may authorize only its named probe or smoke after binding the owners, tenant/endpoints, data class, resource selectors, credential handle/version, TTL, revocation and allowed actions needed for that action. One overlay does not activate another action or Phase 1. Any authority, source, scope, digest, identity or repository mismatch fails closed.
+Current executable scope is Slice 1 `SCN-NORMAL`: selectively migrate the `b18ade0` UI shell, remove browser-side fixtures/decision/timer orchestration, and implement `Web -> Control Plane synchronous Application API -> production.work_order_equipment_brief.v1 -> bounded loopback synthetic Connector Gateway -> GearJob/Hive synthetic adapters`. The sole decision rubric lives in the Control Plane. The synthetic Gateway is a separate entrypoint and must not modify or reuse the credentialed `createConnectorGateway`/Gate A.3 receiver.
+
+Owned and forbidden paths, tests, services, ports, TTL, revocation and local commit boundaries come only from the current admission and brief. In every case `apps/worker/**`, `packages/runtime/**`, `packages/workflow/**`, migrations, Gate A.3 work-order/task/lease/worker-command files, the credentialed Connector Gateway entrypoint, Model Gateway, real Provider configuration and `pnpm-lock.yaml` remain forbidden.
+
+The Slice 1 terminal checkpoint is a user product decision: `CONTINUE | REVISE | STOP`. `CONTINUE` is required before Slice 2 implementation; neither Team nor automated checks may synthesize it. MCP requires `ACCEPT_SYNTHETIC_WEDGE` plus a later independent admission. Real GearJob/Hive APIs or data, credentials, authenticated WorkBuddy, external mutation, push, PR, deployment, release, public/customer and production routes remain `NOT_OPEN`. Any authority, source, scope, digest, identity, repository or route mismatch fails closed.

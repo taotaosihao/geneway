@@ -116,7 +116,8 @@ export function ProductShell({
         <b>工作区</b>
         <a href="/conversations/new">小纬</a>
         <a href="/conversations/new?capability=solution.analysis.v1">材料分析</a>
-        <a className={navigationClass(active, 'work-orders')} href="/work-orders/new">查询工单</a>
+        <a className={navigationClass(active, 'work-orders')} href="/work-orders/mock">工单设备简报</a>
+        <a href="/work-orders/new">单工单只读</a>
         <a className={navigationClass(active, 'exceptions')} href="/exceptions">异常与待办</a>
         <a className={navigationClass(active, 'tasks')} href="/tasks">我的任务</a>
         <a className={navigationClass(active, 'workflows')} href="/workflows">Workflow</a>

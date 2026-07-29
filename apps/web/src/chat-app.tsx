@@ -153,15 +153,15 @@ export function FastChatExperience({ conversationId: explicitConversationId }: R
           href={conversation === undefined
             ? '/conversations/new?capability=solution.analysis.v1'
             : `/conversations/${conversation.id}?capability=solution.analysis.v1`}>分析材料</a>
-        <a className="work-order-entry-link" data-testid="work-order-entry-link" href="/work-orders/new">
-          查询工单<small>独立只读通道</small>
+        <a className="work-order-entry-link" data-testid="work-order-entry-link" href="/work-orders/mock">
+          工单设备简报<small>端到端业务演示</small>
         </a>
       </div>
     </aside>
     <section className="fast-chat-pane">
       <header className="topbar"><div><h1>小纬</h1><p>普通聊天 · 真实模型 · 无工具</p></div><div className="fast-chat-top-actions">
         <a href={conversation === undefined ? '/conversations/new?capability=solution.analysis.v1' : `/conversations/${conversation.id}?capability=solution.analysis.v1`}>分析材料</a>
-        <a data-testid="work-order-top-entry" href="/work-orders/new">查询工单</a>
+        <a data-testid="work-order-top-entry" href="/work-orders/mock">工单设备简报</a>
         <span className="live-boundary">trusted-local</span>
       </div></header>
       <div className="thread" data-testid="message-thread">

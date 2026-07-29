@@ -84,7 +84,8 @@ describe('Gate A.3 served work-order UI projection', () => {
     expect(html).toContain('data-testid="material-analysis-link"');
     expect(html).toContain('data-testid="work-order-entry-link"');
     expect(html).toContain('data-testid="work-order-top-entry"');
-    expect(html).toContain('href="/work-orders/new"');
+    expect(html).toContain('href="/work-orders/mock"');
+    expect(html).toContain('端到端业务演示');
   });
 
   it('renders the frozen six-node Workflow and Approval without connector internals', () => {

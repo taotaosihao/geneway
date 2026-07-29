@@ -2,15 +2,16 @@
 
 ## Product contract
 
-Before current Gate A implementation, read:
+Before current Phase 0B discovery, read in order:
 
-1. `/home/gewu/.codex/workflow/artifacts/20260723-002-geneway-fast-chat/team/sdd/slices/gate-a0-fast-chat/brief.md`
-2. `doc/plans/atlas-workflow/20260723-002-geneway-fast-chat/implementation-contract.final.md`
-3. `/home/gewu/.codex/workflow/artifacts/20260723-008-geneway-gate-a-gearjob/team/sdd/slices/gate-a-business-mvp/brief.md`
-4. `doc/plans/atlas-workflow/20260723-008-geneway-gate-a-gearjob/implementation-contract.final.md`
-5. `/home/gewu/.codex/workflow/artifacts/20260723-008-geneway-gate-a-gearjob/team/sdd/slices/gate-a-business-mvp/current-execution-admission.json`
+1. `/home/gewu/.codex/workflow/artifacts/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/current-authority.json`
+2. `/home/gewu/.codex/workflow/artifacts/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/authority-transition.json`
+3. `doc/plans/atlas-workflow/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/discovery-contract.final.md`
+4. `/home/gewu/.codex/workflow/artifacts/20260729-010-geneway-phase-0a-authority-transition-phase-0b-discovery-admissi/discovery-admission.json`
 
-Gate A0 remains the closed Fast Chat baseline. The Gate A brief defines the stable Goal refs, the Gate A final contract is the current product scope body, and `current-execution-admission.json` is the only durable source for the current user implementation/cross-repo authorization and its prohibitions. Historical Gate closures are consumed through pinned receipts and dependency-sensitive regressions; they are not silently reimplemented by Gate A. Read the technical appendix, UI ADR, roadmap, and spec pointers only when the current implementation question needs them; they cannot add acceptance, exit conditions, or implementation scope.
+`current-authority.json` is the only durable current authority pointer. It binds the transition, discovery contract, discovery admission, `AGENTS.md`, and exact repository commit. A missing, inactive, stale, non-regular, symlinked, or digest-mismatched pointer means `NO_EXECUTION` and every new route remains `NOT_OPEN`.
+
+Gate A0 remains the closed Fast Chat baseline. Gate R、Gate 0.1、Gate 0.2A、Gate 0.2B 与 Gate A0 的 historical conclusions are consumed only through their pinned closure receipts and dependency-sensitive regressions. Gate A is an `UNCLOSED_CHECKPOINT`; its brief, contract, progress, admission, code, data, receipts, controller findings, and migrations are historical/migration inputs rather than current implementation authority.
 
 ## Core rules
 
@@ -28,4 +29,8 @@ Gate A0 remains the closed Fast Chat baseline. The Gate A brief defines the stab
 
 ## Current authority slice
 
-Gate R、Gate 0.1、Gate 0.2A、Gate 0.2B 与 Gate A0 的既有结论由各自 pinned closure receipts 控制。当前 SDD authority 覆盖 Gate A 非生产内部验收；实施与必要的 local-dev GearJob setup/窄修复只按 `current-execution-admission.json` 继续。Public/customer route 默认 `NOT_OPEN`；合同、brief、controller、source manifest 或 admission 任一不一致时必须停在 `shadow`。当前授权不包含 push、PR、部署、客户生产、生产写、secret 披露或其他 GearJob 业务改动。
+The previous Gate A admission is `SUSPENDED_NO_IMPLICIT_RESUME`. It cannot authorize product implementation, service/test execution, credential issuance, GearJob setup/fixes, validation, finalization, promotion, or cross-repository mutation.
+
+Current authority covers Phase 0B Discovery L1 only: local/public read-only inspection of geneway, GearJob, and Hive source/docs/tests/schema/Git metadata; writing the single workflow `discovery-preflight.md`; and authority-document maintenance. It does not authorize product-code edits, service starts, real API calls, credential access, real 5-case data, authenticated WorkBuddy tenant actions, external mutation, push, PR, deployment, release, production/customer routes, production writes, or secret disclosure.
+
+Phase 0B L2 and every product route remain `NOT_OPEN` until a later exact overlay admission binds named owners, tenant/endpoints, data class, resource selectors, credential handle/version, TTL, revocation, and allowed actions. Any authority, source, scope, digest, identity, or repository mismatch fails closed.

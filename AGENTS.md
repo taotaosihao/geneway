@@ -8,7 +8,7 @@ Before any synthetic MVP implementation, test, service or browser action, read i
 2. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/activation-ack.json`
 3. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/implementation-admission.json`
 4. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/authority-transition.json`
-5. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/implementation-contract.final.md`
+5. `doc/plans/atlas-workflow/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/implementation-contract.final.md`
 6. `/home/gewu/.codex/workflow/artifacts/20260730-001-geneway-synthetic-e2e-mvp-slice-0-2/team/sdd/slices/synthetic-production-brief/brief.json`
 7. `/home/gewu/.codex/workflow/artifacts/20260729-014-geneway-l2/clarify.md`
 8. `/home/gewu/.codex/workflow/artifacts/20260729-014-geneway-l2/team/decision.md`

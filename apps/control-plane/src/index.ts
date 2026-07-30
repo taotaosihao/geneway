@@ -49,6 +49,11 @@ import { ArtifactService, type ArtifactServiceHooks } from './artifact-service.j
 import { BusinessExceptionRepository } from './business-exception-repository.js';
 import { GateALiveRepository } from './gate-a-live-repository.js';
 import { GateA3WorkOrderRepository, type GateA3Authority } from './gate-a3-work-order-repository.js';
+import {
+  ProductionWorkOrderEquipmentBriefService,
+  type ProductionCapabilityPort,
+} from './production-work-order-equipment-brief.js';
+import { productionWorkOrderEquipmentBriefRequestSchema } from '@geneway/contracts';
 
 function validateArtifactUpload(upload: SingleMultipartUpload): ValidatedArtifactUpload {
   const lowerName = upload.fileName.toLowerCase();
@@ -154,6 +159,7 @@ export async function createControlPlane(options: Readonly<{
   gateA3Authority?: GateA3Authority;
   gateA3RouteAvailable?: () => Promise<boolean>;
   chatReaperIntervalMs?: number;
+  productionCapabilityPort?: ProductionCapabilityPort;
 }>): Promise<ControlPlane> {
   const cursorHmacSecret = options.cursorHmacSecret ?? process.env.GENEWAY_CURSOR_HMAC_SECRET;
   if (cursorHmacSecret === undefined) throw new Error('GENEWAY_CURSOR_HMAC_SECRET is required');
@@ -318,6 +324,12 @@ export async function createControlPlane(options: Readonly<{
   });
 
   app.get('/health', () => ({ ok: true, service: 'geneway-control-plane' }));
+
+  if (options.productionCapabilityPort !== undefined) {
+    const productionBriefService = new ProductionWorkOrderEquipmentBriefService(options.productionCapabilityPort);
+    app.post('/api/production/work-order-equipment-brief', async (request) =>
+      productionBriefService.run(productionWorkOrderEquipmentBriefRequestSchema.parse(request.body)));
+  }
 
   if (options.modelGatewayAuthority !== undefined) {
     app.post('/internal/model-gateway/v1/introspect', async (request, reply) => {
@@ -908,6 +920,7 @@ export { ArtifactService } from './artifact-service.js';
 export { ChatRepository } from './chat-repository.js';
 export { GateALiveRepository } from './gate-a-live-repository.js';
 export { GateA3WorkOrderRepository } from './gate-a3-work-order-repository.js';
+export * from './production-work-order-equipment-brief.js';
 export type { GateA3Authority } from './gate-a3-work-order-repository.js';
 export { BusinessExceptionRepository, GATE_0_2B_EXCEPTION_FIXTURES } from './business-exception-repository.js';
 export { createWorkerCommandApp, WorkerCommandService } from './worker-command-server.js';

@@ -64,6 +64,12 @@ import {
   type WorkflowListQuery,
   type WorkflowListResponse,
 } from '@geneway/contracts';
+import {
+  PRODUCTION_BRIEF_CAPABILITY_ID,
+  PRODUCTION_BRIEF_EVALUATION_AS_OF,
+  productionWorkOrderEquipmentBriefResponseSchema,
+  type ProductionWorkOrderEquipmentBriefResponse,
+} from '@geneway/contracts';
 
 export type CreatedTask = Readonly<{
   taskId: string;
@@ -322,6 +328,16 @@ export function mergeTaskEventBatch(
 }
 
 export const api = {
+  runProductionWorkOrderEquipmentBrief: async (): Promise<ProductionWorkOrderEquipmentBriefResponse> =>
+    productionWorkOrderEquipmentBriefResponseSchema.parse(await request('/api/production/work-order-equipment-brief', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        capabilityId: PRODUCTION_BRIEF_CAPABILITY_ID,
+        scenarioRef: 'SCN-NORMAL',
+        evaluationAsOf: PRODUCTION_BRIEF_EVALUATION_AS_OF,
+      }),
+    })),
   createConversation: () => request<{ id: string }>('/api/conversations', {
     method: 'POST', headers: { 'idempotency-key': key('conversation') },
   }),

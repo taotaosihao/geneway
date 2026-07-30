@@ -13,6 +13,7 @@ import {
   readGateA3ControlPlaneAuthorityBundle,
 } from './gate-a3-prelaunch-authority.js';
 import { startGateA3LoopbackProxy, type GateA3LoopbackProxy } from './gate-a3-loopback-proxy.js';
+import { createProductionCapabilityHttpClient } from './production-work-order-equipment-brief.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 if (databaseUrl === undefined) throw new Error('DATABASE_URL is required');
@@ -73,6 +74,11 @@ const connectorInvocationSecretFile = process.env.GENEWAY_CONNECTOR_GATEWAY_INVO
 const connectorGatewayReceiptSecretFile = process.env.GENEWAY_CONNECTOR_GATEWAY_RECEIPT_SECRET_FILE;
 const liveValidationRunId = process.env.GENEWAY_GATE_A0_LIVE_VALIDATION_RUN_ID;
 const gateALiveValidationRunId = process.env.GENEWAY_GATE_A_LIVE_VALIDATION_RUN_ID;
+const syntheticProductionGatewayUrl = process.env.GENEWAY_SYNTHETIC_PRODUCTION_GATEWAY_URL;
+const syntheticProductionServiceTokenFile = process.env.GENEWAY_SYNTHETIC_PRODUCTION_SERVICE_TOKEN_FILE;
+if ((syntheticProductionGatewayUrl === undefined) !== (syntheticProductionServiceTokenFile === undefined)) {
+  throw new Error('Synthetic production gateway URL and service token file must be configured together');
+}
 const gateAParserImage = process.env.GENEWAY_GATE_A_PARSER_IMAGE;
 const gateAParserApprovalJson = process.env.GENEWAY_GATE_A_PARSER_APPROVAL_JSON;
 if (liveValidationRunId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(liveValidationRunId)) {
@@ -195,8 +201,13 @@ if (gateA3ControlPlaneBundleFile !== undefined && gateA3ControlPlaneBundleSha256
     modelInvocationTokenSecret: modelGatewayInvocationSecret,
     modelGatewayReceiptSecret: modelGatewayWorkOrderReceiptSecret,
     controlPlaneAuthorityBundle: gateA3Bundle,
-    assertRuntimeAuthority: async () => {
-      assertGateA3ControlPlaneAuthorityCurrent(gateA3Bundle);
+    assertRuntimeAuthority: () => {
+      try {
+        assertGateA3ControlPlaneAuthorityCurrent(gateA3Bundle);
+        return Promise.resolve();
+      } catch (error) {
+        return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+      }
     },
   };
   const distinctSecrets = new Set([gateA3Authority.connectorGatewayServiceToken,
@@ -309,6 +320,14 @@ const { app, repository, artifactService, chatRepository, gateALiveRepository,
   ...(artifactServiceHooks === undefined ? {} : { artifactServiceHooks }),
   ...(gateA3Authority === undefined ? {} : { gateA3Authority }),
   ...(gateA3Authority === undefined ? {} : { gateA3RouteAvailable }),
+  ...(syntheticProductionGatewayUrl === undefined || syntheticProductionServiceTokenFile === undefined ? {} : {
+    productionCapabilityPort: createProductionCapabilityHttpClient({
+      gatewayUrl: syntheticProductionGatewayUrl,
+      serviceToken: await readOwnedSecretFile(
+        syntheticProductionServiceTokenFile, 'Synthetic production service token file',
+      ),
+    }),
+  }),
 });
 
 let workerApp: ReturnType<typeof createWorkerCommandApp> | null = null;

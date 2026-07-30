@@ -21,6 +21,39 @@ function event(cursor: number, id = `event_${String(cursor)}`): TaskEventProject
 
 afterEach(() => { vi.unstubAllGlobals(); });
 
+describe('production work order equipment brief API', () => {
+  it('posts the fixed SCN-NORMAL request through the relative Vite /api route', async () => {
+    const response = {
+      capabilityId: 'production.work_order_equipment_brief.v1', scenarioRef: 'SCN-NORMAL', provenance: 'SYNTHETIC_DEMO',
+      evaluationAsOf: '2026-07-29T08:30:00.000Z',
+      workOrder: { workOrderRef: 'WO-260729-001', itemName: '主轴箱体 A', status: 'IN_PROGRESS', planQty: 120,
+        completedQty: 87, unit: '件', progressPct: 72.5, expectedProgressPct: 70, plannedEnd: '2026-07-29T16:00:00.000Z',
+        source: { system: 'GearJob', operationId: 'production.work_order.get.v1', revision: 'r1', observedAt: '2026-07-29T08:29:42.000Z' } },
+      mapping: { cardinality: 'single', workstations: ['CNC-精加工-01'], equipmentRefs: ['CNC-001'], selectedEquipmentRef: 'CNC-001',
+        source: { system: 'GearJob', operationId: 'production.work_order.equipment.resolve.v1', revision: 'r1', observedAt: '2026-07-29T08:29:42.000Z' } },
+      runtimeStatus: { knownState: 'KNOWN', status: 'RUN', source: { system: 'Hive', operationId: 'equipment.runtime_status.get.v1', revision: 'r1', observedAt: '2026-07-29T08:29:42.000Z' } },
+      alarms: { start: '2026-07-29T00:30:00.000Z', end: '2026-07-29T08:30:00.000Z', coverage: 'COMPLETE', segments: [],
+        source: { system: 'Hive', operationId: 'equipment.alarm_segments.list.v1', revision: 'r1', observedAt: '2026-07-29T08:29:42.000Z' } },
+      freshness: { statusAgeSeconds: 18, status: 'CURRENT' }, action: 'NO_ACTION', reasonCode: 'NORMAL_OPERATION',
+      summary: '正常', reason: '事实满足无需行动规则', recommendedNextStep: '保持排产', unknowns: [],
+      trace: [
+        ['production.work_order.get.v1', 'GearJob', 'r1'], ['production.work_order.equipment.resolve.v1', 'GearJob', 'r1'],
+        ['equipment.runtime_status.get.v1', 'Hive', 'r1'], ['equipment.alarm_segments.list.v1', 'Hive', 'r1'],
+        ['production.work_order_equipment_brief.v1', 'geneway', 'synthetic-rubric-v1'],
+      ].map(([operationId, source, revision], index) => ({ operationId, source, revision, status: 'completed', observedAt: index === 4 ? '2026-07-29T08:30:00.000Z' : '2026-07-29T08:29:42.000Z' })),
+    };
+    const fetchMock = stubJson(response);
+    await expect(api.runProductionWorkOrderEquipmentBrief()).resolves.toMatchObject({ action: 'NO_ACTION' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/production/work-order-equipment-brief', expect.objectContaining({ method: 'POST' }));
+    const requestBody = fetchMock.mock.calls[0]?.[1]?.body;
+    if (typeof requestBody !== 'string') throw new Error('expected JSON request body');
+    expect(JSON.parse(requestBody)).toEqual({
+      capabilityId: 'production.work_order_equipment_brief.v1', scenarioRef: 'SCN-NORMAL',
+      evaluationAsOf: '2026-07-29T08:30:00.000Z',
+    });
+  });
+});
+
 function stubJson(value: unknown) {
   const fetchMock = vi.fn<typeof fetch>(() => Promise.resolve(new Response(JSON.stringify(value), {
     status: 200,

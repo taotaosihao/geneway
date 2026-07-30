@@ -1164,3 +1164,4 @@ export * from './gate-a3-authority.js';
 export * from './gate-a3-acceptance-authority.js';
 export * from './gate-a3-preflight.js';
 export * from './gate-a3-runtime-authority.js';
+export * from './production-work-order-equipment-brief.js';

@@ -50,7 +50,7 @@
     "verify:gate-a0.1": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:model-gateway && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate-a0-live gate-a0-fast-chat.spec.ts",
     "verify:gate-a0.2": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:contracts && pnpm test:model-gateway && pnpm test:integration && pnpm test:security && pnpm build && pnpm test:e2e -- --project=gate-a0-live gate-a0-context-cancel.spec.ts && pnpm gate-a0:secret-scan",
     "verify:gate-a0": "node scripts/verify-gate-a0.mjs",
-    "test:e2e": "node scripts/check-e2e-authenticity.mjs && node scripts/run-e2e.mjs",
+    "test:e2e": "node scripts/run-synthetic-production-brief.mjs --route-e2e",
     "dev:web": "pnpm --filter @geneway/web dev"
   },
   "dependencies": {

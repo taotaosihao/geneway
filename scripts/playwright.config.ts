@@ -1,16 +1,20 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { chromium, defineConfig, devices } from '@playwright/test';
 
 const runId = process.env.GENEWAY_RUN_ID ?? 'gate-0.1-local';
+const syntheticProductionBrief = process.env.GENEWAY_SYNTHETIC_PRODUCTION_BRIEF === '1'
+  || process.argv.some((argument) => argument === '--project=synthetic-production-brief'
+    || argument === 'synthetic-production-brief');
 if (!/^[a-zA-Z0-9._-]+$/.test(runId)) throw new Error('GENEWAY_RUN_ID contains unsafe path characters');
 const webPort = Number(process.env.GENEWAY_WEB_PORT ?? 3200);
 const controlPlanePort = Number(process.env.GENEWAY_CONTROL_PLANE_PORT ?? 3100);
 const controlPlaneSupervisorPort = Number(process.env.GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT ?? 3400);
 const workerHealthPort = Number(process.env.GENEWAY_WORKER_HEALTH_PORT ?? 3300);
 const workerSocketPath = process.env.GENEWAY_WORKER_SOCKET_PATH;
-const workerTokenFile = process.env.GENEWAY_WORKER_TOKEN_FILE;
+const workerTokenFile = process.env.GENEWAY_WORKER_TOKEN_FILE ?? '';
 const workerInstanceId = process.env.GENEWAY_WORKER_INSTANCE_ID;
 const gateA0Live = process.env.GENEWAY_GATE_A0_LIVE === '1';
 const gateALive = process.env.GENEWAY_GATE_A_LIVE === '1';
@@ -49,10 +53,10 @@ if (!Number.isInteger(webPort) || !Number.isInteger(controlPlanePort) || !Number
   || !Number.isInteger(gateA3ReleasePort)) {
   throw new Error('GENEWAY ports must be integers');
 }
-if (workerSocketPath === undefined || workerTokenFile === undefined || workerInstanceId === undefined) throw new Error('E2E Worker authority is required');
-if (!/^\/tmp\/gw-uds-[a-zA-Z0-9]+\/worker\.sock$/u.test(workerSocketPath)
+if (!syntheticProductionBrief && (workerSocketPath === undefined || workerTokenFile === undefined || workerInstanceId === undefined)) throw new Error('E2E Worker authority is required');
+if (!syntheticProductionBrief && (!/^\/tmp\/gw-uds-[a-zA-Z0-9]+\/worker\.sock$/u.test(workerSocketPath ?? '')
   || !/^\/tmp\/gw-uds-[a-zA-Z0-9]+\/token$/u.test(workerTokenFile)
-  || !/^e2e-worker-[a-zA-Z0-9._-]+$/u.test(workerInstanceId)) {
+  || !/^e2e-worker-[a-zA-Z0-9._-]+$/u.test(workerInstanceId ?? ''))) {
   throw new Error('E2E Worker authority contains unsafe values');
 }
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
@@ -115,16 +119,67 @@ const workerGatewayEnvironment = gateA0Live
       : '')
   : '';
 const outputRoot = `/tmp/geneway-runs/${runId}`;
-const gate02bGuarded = process.env.GENEWAY_GATE02B_EGRESS_GUARD === 'required';
-const gate02bGuardLibrary = process.env.GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY;
+const syntheticHomeRoot = `${outputRoot}/home`;
+const browserHome = `${syntheticHomeRoot}/browser`;
+const stackHome = `${syntheticHomeRoot}/stack`;
+if (syntheticProductionBrief) {
+  for (const directory of [outputRoot, syntheticHomeRoot, browserHome, stackHome, `${outputRoot}/process-boundaries`]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    chmodSync(directory, 0o700);
+  }
+}
+const gate02bGuarded = syntheticProductionBrief || process.env.GENEWAY_GATE02B_EGRESS_GUARD === 'required';
+const gate02bGuardLibrary = syntheticProductionBrief
+  ? `${outputRoot}/synthetic-browser-egress-guard.so`
+  : process.env.GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY;
 if (gate02bGuarded && (gate02bGuardLibrary === undefined || !gate02bGuardLibrary.startsWith('/'))) {
   throw new Error('Guarded browser launch requires an absolute egress guard library path');
 }
 const browserEgressReceipt = `${outputRoot}/process-boundaries/browser-egress.raw`;
+if (syntheticProductionBrief && gate02bGuardLibrary !== undefined && !existsSync(gate02bGuardLibrary)) {
+  const compiled = spawnSync('cc', [
+    '-std=gnu17', '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror', '-ldl',
+    '-o', gate02bGuardLibrary, 'scripts/backup-restore/gate02b-egress-guard.c',
+  ], { cwd: process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (compiled.error !== undefined) throw compiled.error;
+  if (compiled.status !== 0) throw new Error(`Synthetic browser egress guard compilation failed: ${compiled.stderr}`);
+  chmodSync(gate02bGuardLibrary, 0o555);
+}
+if (gate02bGuarded && gate02bGuardLibrary !== undefined) {
+  const currentUid = process.getuid?.();
+  if (currentUid === undefined) throw new Error('Guarded browser launch requires a Linux process identity');
+  const libraryStat = lstatSync(gate02bGuardLibrary);
+  if (!libraryStat.isFile() || libraryStat.isSymbolicLink() || libraryStat.uid !== currentUid
+    || (libraryStat.mode & 0o022) !== 0 || realpathSync(gate02bGuardLibrary) !== gate02bGuardLibrary) {
+    throw new Error('Guarded browser egress library is unsafe');
+  }
+  if (!existsSync(browserEgressReceipt)) writeFileSync(browserEgressReceipt, '', { flag: 'wx', mode: 0o600 });
+  const receiptStat = lstatSync(browserEgressReceipt);
+  if (!receiptStat.isFile() || receiptStat.isSymbolicLink() || receiptStat.uid !== currentUid
+    || (receiptStat.mode & 0o777) !== 0o600 || receiptStat.nlink !== 1) {
+    throw new Error('Guarded browser egress receipt is unsafe');
+  }
+}
 const browserGuardLibrarySha256 = gate02bGuarded
   ? createHash('sha256').update(readFileSync(gate02bGuardLibrary ?? '')).digest('hex')
   : null;
-const browserExecutable = chromium.executablePath();
+const configuredSyntheticBrowserExecutable = process.env.GENEWAY_SYNTHETIC_CHROMIUM_EXECUTABLE;
+if (syntheticProductionBrief && (configuredSyntheticBrowserExecutable === undefined
+  || !configuredSyntheticBrowserExecutable.startsWith('/'))) {
+  throw new Error('Synthetic browser launch requires an explicitly bound absolute Chromium executable');
+}
+const browserExecutable = syntheticProductionBrief
+  ? configuredSyntheticBrowserExecutable ?? ''
+  : chromium.executablePath();
+if (syntheticProductionBrief) {
+  const currentUid = process.getuid?.();
+  const executableStat = lstatSync(browserExecutable);
+  if (currentUid === undefined || !executableStat.isFile() || executableStat.isSymbolicLink()
+    || executableStat.uid !== currentUid || (executableStat.mode & 0o111) === 0
+    || realpathSync(browserExecutable) !== browserExecutable) {
+    throw new Error('Synthetic Chromium executable is not a safe current-user-owned regular executable');
+  }
+}
 const browserExecutables = [browserExecutable, join(dirname(browserExecutable), 'chrome_crashpad_handler')].map((executable) => {
   const stat = statSync(executable);
   return { executable, device: stat.dev, inode: stat.ino, sha256: createHash('sha256').update(readFileSync(executable)).digest('hex') };
@@ -136,7 +191,7 @@ const browserPolicyHash = gate02bGuarded
   : null;
 const browserEnvironment = {
   PATH: process.env.PATH ?? '/usr/bin:/bin',
-  HOME: process.env.HOME ?? '/tmp',
+  HOME: syntheticProductionBrief ? browserHome : process.env.HOME ?? '/tmp',
   TMPDIR: process.env.TMPDIR ?? '/tmp',
   LANG: process.env.LANG ?? 'C.UTF-8',
   ...(gate02bGuarded ? {
@@ -153,7 +208,7 @@ if (browserEnvironmentNames.some((name) => name.startsWith('GENEWAY_S3_') || nam
 }
 mkdirSync(`${outputRoot}/process-boundaries`, { recursive: true });
 writeFileSync(`${outputRoot}/process-boundaries/browser.json`, `${JSON.stringify({
-  role: 'browser', checked: true, forbiddenNamesPresent: [],
+  role: 'browser', checked: true, home: browserEnvironment.HOME, forbiddenNamesPresent: [],
   egressGuard: {
     required: gate02bGuarded,
     allowedPorts: gate02bGuarded ? [webPort] : [],
@@ -174,13 +229,15 @@ export default defineConfig({
   outputDir: `${outputRoot}/playwright-artifacts`,
   reporter: [['list'], ['json', { outputFile: `${outputRoot}/playwright-report.json` }]],
   use: {
-    baseURL: `http://localhost:${String(webPort)}`,
+    baseURL: `http://${syntheticProductionBrief ? '127.0.0.1' : 'localhost'}:${String(webPort)}`,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
     launchOptions: { env: browserEnvironment, ...(gate02bGuarded ? { executablePath: browserExecutable } : {}) },
   },
   projects: [
+    { name: 'synthetic-production-brief', testMatch: /synthetic-production-brief\.spec\.ts/u,
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, trace: 'on', video: 'off' } },
     { name: 'gate0.1', testMatch: /gate-0\.1\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate0.2a-success', testMatch: /gate-0\.2a-(?:storage-thin|evidence|recovery)\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
     { name: 'gate0.2a-negative', testMatch: /gate-0\.2a-negative\.spec\.ts/u, use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
@@ -214,7 +271,15 @@ export default defineConfig({
       trace: { mode: 'on', sources: false },
     } },
   ],
-  webServer: [
+  webServer: syntheticProductionBrief ? [{
+    command: `cd .. && exec env -i PATH="$PATH" HOME=${shellQuote(stackHome)} TMPDIR="${process.env.TMPDIR ?? '/tmp'}" LANG="${process.env.LANG ?? 'C.UTF-8'}" COREPACK_ENABLE_NETWORK=0 npm_config_offline=true PNPM_CONFIG_OFFLINE=true bash scripts/with-postgres.sh node scripts/run-synthetic-production-brief.mjs`,
+    url: 'http://127.0.0.1:3200/work-orders/mock',
+    timeout: 90_000,
+    gracefulShutdown: { signal: 'SIGTERM' as const, timeout: 15_000 },
+    reuseExistingServer: false,
+    stdout: 'pipe' as const,
+    stderr: 'pipe' as const,
+  }] : [
     {
       command: `cd .. && exec env -u GENEWAY_CODEX_SUBSCRIPTION_AUTH_FILE -u GENEWAY_MODEL_GATEWAY_CONFORMANCE_FILE -u GENEWAY_GATE_A_PARSER_BUILD_JSON -u GENEWAY_GATE02B_EGRESS_GUARD -u GENEWAY_GATE02B_EGRESS_GUARD_LIBRARY -u GENEWAY_GEARJOB_SERVICE_CREDENTIAL_FILE -u GENEWAY_CONNECTOR_GATEWAY_SUPERVISOR_TOKEN_FILE GENEWAY_STORAGE_TARGET_ROLE=control-plane GENEWAY_START_STORAGE_RECONCILER=1 PORT=${String(controlPlanePort)} GENEWAY_WEB_PORT=${String(webPort)} bash scripts/with-storage.sh env GENEWAY_CONTROL_PLANE_SUPERVISOR_PORT=${String(controlPlaneSupervisorPort)} GENEWAY_WORKER_SOCKET_PATH=${workerSocketPath} GENEWAY_WORKER_TOKEN_FILE=${workerTokenFile} GENEWAY_WORKER_LEASE_MS=1000 GENEWAY_E2E_HOOK_URL=http://127.0.0.1:${String(workerHealthPort)} GENEWAY_E2E_HOOK_TOKEN_FILE=${workerTokenFile}${controlPlaneGatewayEnvironment} ./node_modules/.bin/tsx scripts/e2e/start-e2e-control-plane.ts`,
       url: `http://127.0.0.1:${String(controlPlaneSupervisorPort)}/health`,

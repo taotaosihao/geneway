@@ -7,7 +7,7 @@ import {
   WorkflowDetailPage,
   WorkflowListPage,
 } from './product-routes.js';
-import { ProductionBriefMockPage } from './production-brief-mock-routes.js';
+import { ProductionBriefPage } from './production-brief-routes.js';
 import { WorkOrderPage } from './work-order-routes.js';
 
 function decodePathSegment(value: string): string | undefined {
@@ -60,7 +60,7 @@ export function App() {
   }
 
   if (segments.length === 2 && segments[0] === 'work-orders') {
-    if (segments[1] === 'mock') return <ProductionBriefMockPage />;
+    if (segments[1] === 'mock') return <ProductionBriefPage />;
     if (segments[1] === 'new') return <WorkOrderPage />;
     const taskId = decodePathSegment(segments[1] ?? '');
     return taskId === undefined ? <NotFoundPage /> : <WorkOrderPage taskId={taskId} />;

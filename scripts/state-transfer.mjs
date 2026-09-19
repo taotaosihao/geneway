@@ -12,6 +12,7 @@ const args = parseArgs(process.argv.slice(3))
 const MANIFEST_VERSION = 2
 const STATE_PATH = 'state.json'
 const SESSION_PATH = /^dsh\/sessions\/[^/]+\/([^/]+)\/session\.v[1-9]\d*\.jsonl(?:\.(?:gz|zstd))?$/
+const ACTIVE_STATUS = new Set(['accepted', 'running', 'cancel_requested'])
 
 if (command === 'backup') await backup(args.output)
 else if (command === 'restore') await restore(args.input, args.dataRoot)
@@ -30,10 +31,14 @@ async function backup(outputArg) {
   try {
     const stateFile = await openRegular(statePath)
     opened.push(stateFile)
-    const stateBuffer = await readFileFromStart(stateFile.handle)
-    const state = parseState(stateBuffer)
+    const sourceStateBuffer = await readFileFromStart(stateFile.handle)
+    const sourceState = parseState(sourceStateBuffer)
+    const createdAt = new Date().toISOString()
+    const state = interruptActiveForBackup(sourceState, createdAt)
+    migrateState(structuredClone(state))
+    const stateBuffer = state === sourceState ? sourceStateBuffer : Buffer.from(JSON.stringify(state, null, 2) + '\n')
     const sessionRefs = collectSessionRefs(state)
-    const files = [{ path: STATE_PATH, file: stateFile, bytes: stateBuffer.length, sha256: digest(stateBuffer) }]
+    const files = [{ path: STATE_PATH, buffer: stateBuffer, bytes: stateBuffer.length, sha256: digest(stateBuffer) }]
     const sessionsRoot = join(dshHome, 'sessions')
     if (await pathExists(dshHome)) await requireDirectory(dshHome, 'DSH 根目录')
     if (await pathExists(sessionsRoot)) {
@@ -54,7 +59,7 @@ async function backup(outputArg) {
     const manifest = {
       format: 'geneway-state-transfer',
       version: MANIFEST_VERSION,
-      createdAt: new Date().toISOString(),
+      createdAt,
       candidate: candidate(),
       schema: schemaSummary(state, sessionRefs),
       entries: files.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 })),
@@ -141,6 +146,21 @@ function parseState(buffer) {
   migrateState(structuredClone(state))
   assertNoSecretKeys(state)
   return state
+}
+
+function interruptActiveForBackup(state, interruptedAt) {
+  let changed = false
+  const works = state.works.map(work => {
+    const executions = work.executions.map(execution => {
+      if (!ACTIVE_STATUS.has(execution.status)) return execution
+      changed = true
+      return { ...execution, status: 'interrupted', interruptedAt, error: { code: 'BACKUP_INTERRUPTED', message: '备份时执行未完成' } }
+    })
+    if (!ACTIVE_STATUS.has(work.status) && executions.every((execution, index) => execution === work.executions[index])) return work
+    changed = true
+    return { ...work, status: 'interrupted', executions }
+  })
+  return changed ? { ...state, works } : state
 }
 
 function parseManifest(buffer) {
@@ -294,7 +314,8 @@ async function buildAndPublish(targetPath, target, build) {
 
 async function copyOpenFile(file, destination) {
   await secureMkdir(dirname(destination))
-  await pipeline(
+  if (file.buffer) await writeFile(destination, file.buffer, { flag: 'wx', mode: 0o600 })
+  else await pipeline(
     file.file.handle.createReadStream({ start: 0, autoClose: false }),
     createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
   )

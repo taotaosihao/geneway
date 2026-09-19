@@ -65,7 +65,7 @@ try {
     connections: 2,
     skills: 2,
     confirmations: 2,
-    works: 2,
+    works: 5,
     sessionRefs: ['session-a', 'session-b', 'session-cycle'],
   })
   assert.equal(manifest.entries.length, 4)
@@ -80,6 +80,23 @@ try {
     assert.equal(entry.bytes, bytes.length)
     assert.equal(entry.sha256, digest(bytes))
   }
+  const sourceState = JSON.parse(await readFile(statePath, 'utf8'))
+  assert.deepEqual(sourceState, state)
+  assert.deepEqual(sourceState.works.slice(2).map(item => item.status), ['accepted', 'running', 'cancel_requested'])
+  const backupStateBytes = await readFile(join(backup, 'state.json'))
+  const backupState = JSON.parse(backupStateBytes)
+  assert.deepEqual(backupState.works.slice(0, 2), state.works.slice(0, 2))
+  assert.deepEqual(backupState.works.slice(2).map(item => item.status), ['interrupted', 'interrupted', 'interrupted'])
+  for (const [index, work] of backupState.works.slice(2).entries()) {
+    const execution = work.executions[0]
+    assert.equal(execution.status, 'interrupted')
+    assert.equal(execution.interruptedAt, manifest.createdAt)
+    assert.deepEqual(execution.error, { code: 'BACKUP_INTERRUPTED', message: '备份时执行未完成' })
+    assert.equal(execution.id, `execution-active-${index}`)
+  }
+  const stateEntry = manifest.entries.find(item => item.path === 'state.json')
+  assert.equal(stateEntry.bytes, backupStateBytes.length)
+  assert.equal(stateEntry.sha256, digest(backupStateBytes))
   assert.equal(await exists(join(backup, 'dsh', 'sessions', 'project', 'session-unrelated')), false)
   assert.equal(await exists(join(backup, 'private')), false)
   for (const marker of ['AUTH_VERIFIER_MARKER', 'HMAC_SECRET_MARKER', 'GEARJOB_SECRET_MARKER', 'ZENMUX_SECRET_MARKER', 'EXECUTION_GRANT_MARKER', 'CLAUDE_SETTINGS_MARKER', 'BROWSER_COOKIE_MARKER', 'LARK_TOKEN_MARKER']) {
@@ -92,8 +109,8 @@ try {
   await chmod(restored, 0o777)
   const restoreRun = await run(['restore', '--input', backup, '--data-root', restored])
   assert.equal(JSON.parse(restoreRun.stdout).sessionRefs, 3)
-  assert.deepEqual(JSON.parse(await readFile(join(restored, 'state.json'), 'utf8')), state)
-  assert.equal(Buffer.compare(await readFile(join(restored, 'state.json')), stateBytes), 0)
+  assert.deepEqual(JSON.parse(await readFile(join(restored, 'state.json'), 'utf8')), backupState)
+  assert.equal(Buffer.compare(await readFile(join(restored, 'state.json')), backupStateBytes), 0)
   for (const entry of manifest.entries.filter(item => item.path !== 'state.json')) {
     assert.equal(Buffer.compare(await readFile(join(restored, ...entry.path.split('/'))), await readFile(join(backup, ...entry.path.split('/')))), 0)
   }
@@ -112,8 +129,17 @@ try {
   ])
   assert.equal(restoredState.works[0].results[1].continuedFromDshSessionRef, 'session-a')
   assert.equal(restoredState.works[0].executions[1].status, 'interrupted')
+  assert.deepEqual(restoredState.works.slice(2), backupState.works.slice(2))
   assert.equal(await exists(replayMarker), false)
   await assertModes(restored)
+
+  const stableState = { ...state, works: state.works.slice(0, 2) }
+  const stableBytes = Buffer.from(JSON.stringify(stableState) + '\n')
+  const stableStatePath = join(root, 'stable-state.json')
+  const stableBackup = join(root, 'stable-backup')
+  await writeFile(stableStatePath, stableBytes)
+  await run(['backup', '--output', stableBackup], { GENEWAY_STATE: stableStatePath, GENEWAY_DSH_HOME: dshHome })
+  assert.equal(Buffer.compare(await readFile(join(stableBackup, 'state.json')), stableBytes), 0)
 
   await rejectNonEmptyTarget(backup, statePath, dshHome, root)
   await rejectMaliciousManifests(backup, manifestPath, manifest, originalManifestText, root)
@@ -335,6 +361,11 @@ function fixtureState() {
         id: 'work-cycle', ownerMemberId: 'member-admin', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', status: 'completed',
         results: [cycle], executions: [{ id: 'execution-cycle', status: 'completed', dshSessionRef: 'session-cycle', resultId: 'result-cycle' }],
       },
+      ...['accepted', 'running', 'cancel_requested'].map((status, index) => ({
+        id: `work-active-${index}`, ownerMemberId: 'member-user', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate',
+        status, input: { availableSeconds: 3600, quantity: 60 }, results: [],
+        executions: [{ id: `execution-active-${index}`, operation: 'create', clientRequestId: `active-${index}`, status, acceptedAt: '2026-09-19T04:00:00.000Z' }],
+      })),
     ],
     reservations: {},
   }

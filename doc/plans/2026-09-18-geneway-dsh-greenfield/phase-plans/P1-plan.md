@@ -95,7 +95,7 @@ DSH 拥有 Profile、Bundle、插件、Agent/Session、模型调用、工具调�
 - 工单标识、来源系统/实例、稳定记录引用；
 - 原始状态和仅在语义明确时的规范化状态；
 - 计划量、完成量、单位；
-- `sourceObservedAt`（只来自来源，可为空）与 `queriedAt`（服务端读取完成时间）；
+- `sourceTime`（只来自来源，可为空）与 `queriedAt`（服务端读取完成时间）；
 - 可计算时的比例，否则保存 `no_plan`、`zero_plan`、`missing_completed`、`missing_unit`、`unit_mismatch` 或 `invalid_quantity` 等原因；
 - 最小解释版本标识和 DSH Session/执行/结果引用。
 
@@ -310,22 +310,22 @@ P1 的连续性权威对象是 Geneway work：同一进程内可复用当前 DSH
 | 检查 | 结果 |
 |---|---|
 | `pnpm install --frozen-lockfile --ignore-scripts` | 通过，依赖与 lockfile 一致。 |
-| `pnpm test:unit && pnpm test:service && pnpm test:controlled` | 通过；覆盖稳定数量原因码、持久观察、并发相同请求一次受理、模型失败、来源超时、同进程追问、successor lineage、直接来源旁路拒绝、零/多/空/错 ID 工具结果、follow-up/第二次工具调用在网络 I/O 前由一次性 grant 拒绝、连接非 ready 与对象范围拒绝、精确取消及启动中断。 |
+| `pnpm test:unit && pnpm test:service && pnpm test:controlled` | 通过；覆盖稳定数量原因码、持久观察、并发相同请求一次受理、模型失败、来源超时、同进程追问、successor lineage、直接来源旁路拒绝、零/多/空/错 ID 工具结果、follow-up/第二次工具调用在网络 I/O 前由一次性 grant 拒绝、连接非 ready 与对象范围拒绝、精确取消、启动中断及先停止接入再结束运行中 execution 的停机顺序。 |
 | `GENEWAY_P1_PROBE_MODEL=true pnpm run probe:p1-runtime` | 通过；实际 `zenmux / deepseek/deepseek-v4-pro / openai-completions`，DSH 事件 12 条，非业务模型响应成功；`request/header` 只有 `geneway_gearjob_read_work_order`，goal/plan/skill/todo/workspace/runtime-context 禁止标记命中 0。 |
-| `pnpm run accept:p1 -- --record artifacts/p1-acceptance/p1-2ee5019-final.mp4` | 对冻结候选 `2ee5019` 通过；仓库内脚本管理 GearJob 0→4、Geneway 启停、Chrome CDP、深链、重启和 ffmpeg 录制。首次 `Draft / 10 / 0 / Nos / 0%`；同 Session 追问且观察数不增加；刷新得到 40%，旧 0% 观察保留。 |
-| 重启连续性 | 同一 work `work-7c79…` 保留；旧 Session `session-b1d0…` 只作历史，新 Session `session-b9c1…` 记录 `continuedFromDshSessionRef`、当前 `contextObservationId` 和 `continuity=successor`，没有 hydrate 或重放旧 JSONL。 |
+| `pnpm run accept:p1 -- --record artifacts/p1-acceptance/p1-2df5d15-final.mp4` | 对冻结产品候选 `2df5d15` 通过；仓库内脚本管理 GearJob 0→4、Geneway 启停、Chrome CDP、深链、重启和 ffmpeg 录制。首次 `Draft / 10 / 0 / Nos / 0%`；同 Session 追问且观察数不增加；刷新得到 40%，旧 0% 观察保留。验收同时回读 1 个 Skill、员工和连接各 1 个 Skill 绑定、每次 execution 的 DSH event 数与 observation/follow-up 结果引用。 |
+| 重启连续性 | 同一 work `work-03d82607-42be-4070-87ae-10285e6763bc` 保留；旧 Session `session-df3b34e9f40d41b583c03d1e271fc23d` 只作历史，新 Session `session-8d2ae2a8911549ada081030481b0ab89` 记录 `continuedFromDshSessionRef`、当前 `contextObservationId` 和 `continuity=successor`，没有 hydrate 或重放旧 JSONL。 |
 | 390×844 | `innerWidth=390`、`scrollWidth=390`、桌面侧栏隐藏；当前 40%、来源、观察历史和操作仍可见。 |
 | GearJob 权限边界 | 同一专用 credential 对允许/拒绝/不存在对象分别返回 `200/403/404`。 |
-| 秘密 canary | 扫描工作区、冻结候选产品状态、DSH home、备份和恢复根共 136 个文件，实际 ZenMux token、GearJob API key/secret 命中数为 0。 |
-| 停机备份/恢复 | 冻结候选停机后备份 3 项、25748 字节；manifest 中每项 SHA-256 在独立恢复根全部复核通过；恢复回读同一 work、2 条 observation、2 条 follow-up、最新 0.4 和 `continuity=successor`。 |
+| 秘密 canary | 扫描工作区、冻结候选产品状态、DSH home、备份和恢复根共 149 个文件，实际 ZenMux token、GearJob API key/secret 命中数为 0。 |
+| 停机备份/恢复 | 冻结候选停机后备份 3 项、27711 字节；manifest 中每项 SHA-256 在独立恢复根全部复核通过；恢复回读 1 个 Skill、同一 work、2 条 observation、2 条 follow-up、最新 0.4、`continuity=successor`，且全部已完成 execution 均保留结果引用。 |
 
 内置 Browser 通道因当前 Node kernel 与 browser-client 的 `Cannot redefine property: process` 冲突不可用；这不是产品失败。验收改用本机 Google Chrome DevTools Protocol，实际浏览器 console warning/error 与 Runtime exception 均为 0。此工具切换不改变页面、来源或模型候选。
 
 ### 12.3 界面材料与飞书回执
 
-- 冻结产品/验收候选：`2ee5019`；完整实录 `artifacts/p1-acceptance/p1-2ee5019-final.mp4`，时长 39.96 秒，SHA-256 `a81d924ce3e690942ff6b88882f4423b0319dcabe9f709cceb3e17b885d13a98`；封面 SHA-256 `d965c03cd1ba399340cc52fe6989e88d5622fe30213366c979d7502b0836de42`。
-- 离线操作手册：`artifacts/p1-acceptance/index.html`，以相对路径引用冻结候选视频和实际抽帧，SHA-256 `13e95b8411d331caeede7775a9e301c8e34b2d734a22972de79d35fc6f8925b`，不包含凭据。
-- `lark-cli` bot 发送返回 `ok=true`：最终说明 message id `om_x100b65d55d2344a4b39d6158cfa4ea1`（2026-09-19 12:36:15）；最终视频 message id `om_x100b65d55ae84ca8b1022f91823f969`（12:36:18）。幂等 key 分别绑定 `geneway-p1-2ee5019-note` 与 `geneway-p1-2ee5019-video`。
+- 冻结产品/验收候选：`2df5d15`；完整实录 `artifacts/p1-acceptance/p1-2df5d15-final.mp4`，时长 43.92 秒，SHA-256 `174c0987791a8c2f614ff60098577c663de38a483b0aa81964a1f3f115e42bc7`；封面 SHA-256 `e32d5bf4c8a3d68f30bf1bba4960939222f22dc98e4a18a7f1f8d13e041186ae`。
+- 离线操作手册：`artifacts/p1-acceptance/index.html`，以相对路径引用冻结候选视频和实际抽帧，SHA-256 `61af2f52bc942989416b74b3f45ed0a912d036afa76d471baf0b242cb1781c27`，不包含凭据。
+- `lark-cli` bot 发送返回 `ok=true`：最终说明 message id `om_x100b65d52d77e0a0b2a7654a3266fa4`（2026-09-19 12:57:31）；最终视频 message id `om_x100b65d52d3e7934b396ce42b820a86`（12:57:35）。幂等 key 分别绑定 `geneway-p1-2df5d15-note` 与 `geneway-p1-2df5d15-video`。
 
 ### 12.4 P1 结论边界
 

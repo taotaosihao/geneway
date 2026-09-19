@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { shutdownServer } from '../src/server.mjs'
@@ -26,6 +26,8 @@ await heldShutdown
 await assert.rejects(() => fetch(heldUrl))
 
 const root = await mkdtemp(join(tmpdir(), 'geneway-shutdown-'))
+const connectionCatalog = join(root, 'connections.json')
+await writeFile(connectionCatalog, JSON.stringify({ version: 1, targets: [] }), { mode: 0o600 })
 const port = 3499
 const remote = spawn(process.execPath, ['src/server.mjs'], {
   cwd: process.cwd(),
@@ -57,6 +59,7 @@ const child = spawn(process.execPath, ['src/server.mjs'], {
     GENEWAY_STATE: join(root, 'state.json'),
     GENEWAY_AUTH_FILE: join(root, 'auth.json'),
     GENEWAY_DSH_HOME: join(root, 'dsh'),
+    GENEWAY_CONNECTION_CATALOG: connectionCatalog,
     GENEWAY_GEARJOB_BASE_URL: '',
     GENEWAY_GEARJOB_CREDENTIAL_FILE: '',
     GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: '',

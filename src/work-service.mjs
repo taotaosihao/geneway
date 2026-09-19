@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { getCapability, listCapabilities, validateCapabilityInput } from './capabilities.mjs'
 import { createObservation } from './domain/work-order.mjs'
+import { assertTrustedConnection, CONNECTION_TARGET_FIELDS } from './connection-catalog.mjs'
 
 export const ERROR_STATUS = {
   INVALID_REQUEST: 400, INVALID_INPUT: 400, UNDECLARED_INPUT: 400, MISSING_INPUT: 400,
@@ -14,11 +15,12 @@ export const ERROR_STATUS = {
 
 const ACTIVE_EXECUTION = new Set(['accepted', 'running', 'cancel_requested'])
 const TERMINAL_EXECUTION = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
+const CONTINUABLE_WORK = new Set(['waiting_input', 'failed', 'interrupted', 'cancelled'])
 const CONFIG_KINDS = new Set(['employees', 'connections', 'skills', 'modelRoutes'])
 const ZENMUX_PROVIDER = 'zenmux'
 const ZENMUX_MODEL = 'deepseek/deepseek-v4-pro'
 
-export function createWorkService({ store, runner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null } = {}) {
+export function createWorkService({ store, runner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [] } = {}) {
   if (!store) throw new Error('store is required')
   const active = new Map()
   let recovered = false
@@ -53,7 +55,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
           reservation = { deduplicated: true, ...state.reservations[key] }
           return state
         }
-        const binding = authorizedBinding(state, member, body)
+        const binding = authorizedBinding(state, member, body, connectionCatalog)
         if (!binding.ok) {
           reservation = { error: binding }
           return state
@@ -112,12 +114,16 @@ export function createWorkService({ store, runner = null, clock = () => new Date
           reservation = { workId: id, executionId: currentExecution.id, deduplicated: true, active: true }
           return state
         }
+        if (!CONTINUABLE_WORK.has(work.status)) {
+          reservation = { error: failure('BUSY', '当前工作状态不可继续') }
+          return state
+        }
         const key = reservationKey(member.id, id, 'continue', requestId)
         if (state.reservations[key]) {
           reservation = { deduplicated: true, ...state.reservations[key] }
           return state
         }
-        const binding = authorizedBinding(state, member, work)
+        const binding = authorizedBinding(state, member, work, connectionCatalog)
         if (!binding.ok) {
           reservation = { error: binding }
           return state
@@ -304,7 +310,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
       let created
       await store.update(state => {
         requireAdmin(state, actor)
-        created = configEntity(state, kind, body, undefined, clock())
+        created = configEntity(state, kind, body, undefined, clock(), connectionCatalog)
         if (state[kind].some(item => item.id === created.id)) throw serviceError('INVALID_REQUEST', '配置 ID 已存在')
         return { ...state, [kind]: [...state[kind], created] }
       })
@@ -317,7 +323,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
         requireAdmin(state, actor)
         const current = state[kind]?.find(item => item.id === id)
         if (!current) throw serviceError('NOT_FOUND', '配置不存在')
-        updated = configEntity(state, kind, body, current, clock())
+        updated = configEntity(state, kind, body, current, clock(), connectionCatalog)
         return { ...state, [kind]: replaceById(state[kind], updated) }
       })
       return kind === 'connections' ? adminConnection(updated) : updated
@@ -329,13 +335,15 @@ export function createWorkService({ store, runner = null, clock = () => new Date
       const connection = state.connections.find(item => item.id === id)
       if (!connection) throw serviceError('NOT_FOUND', '连接不存在')
       if (connection.enabled !== true) throw serviceError('FORBIDDEN', '连接已停用')
+      try { assertTrustedConnection(connectionCatalog, connection) } catch { throw serviceError('FORBIDDEN', '连接目标未在主机可信目录登记') }
       if (typeof connectionTester !== 'function') throw serviceError('SOURCE_NOT_CONFIGURED', '连接测试器未配置')
       const testedAt = clock()
       let detail
       try {
         detail = await connectionTester(connection)
       } catch (error) {
-        const lastTest = { ok: false, testedAt, code: error?.code ?? 'UPSTREAM_ERROR', message: error?.message ?? '连接测试失败' }
+        const detail = safeError(error, 'UPSTREAM_ERROR')
+        const lastTest = { ok: false, testedAt, ...detail }
         await store.update(current => ({ ...current, connections: current.connections.map(item => item.id === id && item.revision === connection.revision ? { ...item, status: 'error', lastTest } : item) }))
         throw serviceError(lastTest.code, lastTest.message)
       }
@@ -352,6 +360,20 @@ export function createWorkService({ store, runner = null, clock = () => new Date
 
     async close() {
       const tasks = [...active.values()]
+      const taskIds = new Set(tasks.map(item => item.executionId))
+      await store.update(state => {
+        let changed = false
+        const works = state.works.map(work => {
+          let interrupted = false
+          const executions = work.executions.map(execution => {
+            if (!taskIds.has(execution.id) || !['accepted', 'running'].includes(execution.status)) return execution
+            changed = interrupted = true
+            return { ...execution, status: 'interrupted', interruptedAt: clock(), error: { code: 'PROCESS_SHUTDOWN', message: '进程关闭时未完成' } }
+          })
+          return interrupted ? { ...work, status: 'interrupted', executions } : work
+        })
+        return changed ? { ...state, works } : state
+      })
       for (const item of tasks) item.controller.abort()
       await Promise.all(tasks.map(item => runner?.cancel?.(item.executionId)))
       await Promise.all(tasks.map(item => item.promise.catch(() => undefined)))
@@ -371,7 +393,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
       if (state.reservations[key]) { reservation = { deduplicated: true, ...state.reservations[key] }; return state }
       if (activeExecution(work)) { reservation = { error: failure('BUSY', '当前工作已有执行正在进行') }; return state }
       if (options.requireResult && !businessResults(work).length) { reservation = { error: failure('BUSY', '尚无可用的结构化结果') }; return state }
-      const binding = authorizedBinding(state, member, work)
+      const binding = authorizedBinding(state, member, work, connectionCatalog)
       if (!binding.ok) { reservation = { error: binding }; return state }
       const parsed = parseInput(work.capabilityId, work.input, false)
       if (!parsed.ok) { reservation = { error: parsed }; return state }
@@ -447,7 +469,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
       const execution = work?.executions.find(item => item.id === executionId)
       if (!work || !execution || execution.status !== 'running') throw serviceError('CANCELLED', '本次执行已停止')
       const member = requireMember(state, { id: work.ownerMemberId })
-      const binding = authorizedBinding(state, member, work)
+      const binding = authorizedBinding(state, member, work, connectionCatalog)
       if (!binding.ok) throw serviceError(binding.error.code, binding.error.message)
       const parsed = validateCapabilityInput(work.capabilityId, work.input)
       if (!parsed.ok) throw serviceError(parsed.error.code, parsed.error.message)
@@ -521,7 +543,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
       if (!work || !execution || TERMINAL_EXECUTION.has(execution.status)) return state
       const cancelled = execution.status === 'cancel_requested' || error?.code === 'CANCELLED' || error?.name === 'AbortError'
       const status = cancelled ? 'cancelled' : 'failed'
-      const nextExecution = { ...execution, status, completedAt: clock(), error: safeError(error) }
+      const nextExecution = { ...execution, status, completedAt: clock(), error: cancelled ? { code: 'CANCELLED', message: '本次执行已停止' } : safeError(error) }
       return { ...state, works: replaceById(state.works, { ...work, status, executions: replaceById(work.executions, nextExecution) }) }
     })
   }
@@ -572,7 +594,7 @@ function businessEnvelope(model, work, now) {
   return result
 }
 
-function authorizedBinding(state, member, request) {
+function authorizedBinding(state, member, request, connectionCatalog) {
   const employee = state.employees.find(item => item.id === clean(request.employeeId) && item.enabled === true && member.employeeIds.includes(item.id))
   if (!employee) return failure('FORBIDDEN', '成员未获准使用该员工')
   const requestedSkillId = clean(request.skillId)
@@ -587,6 +609,7 @@ function authorizedBinding(state, member, request) {
   if (capability.requiresConnection) {
     connection = state.connections.find(item => item.id === clean(request.connectionId) && item.enabled === true && item.status === 'ready')
     if (!connection || connection.kind !== capability.connectionKind || !employee.connectionIds?.includes(connection.id) || !connection.skillIds?.includes(skill.id)) return failure('FORBIDDEN', '连接未获准或不可用')
+    try { assertTrustedConnection(connectionCatalog, connection) } catch { return failure('FORBIDDEN', '连接目标未在主机可信目录登记') }
   } else if (request.connectionId !== undefined && request.connectionId !== null && request.connectionId !== '') return failure('INVALID_REQUEST', '该能力不使用连接')
   return { ok: true, member, employee, skill, capability, route, connection }
 }
@@ -623,12 +646,12 @@ function latestSessionResult(work) { return [...work.results].reverse().find(ite
 function currentConfirmations(state, ownerMemberId, employeeId) { return state.confirmations.filter(item => item.ownerMemberId === ownerMemberId && item.employeeId === employeeId && item.status === 'active').sort((a, b) => a.id.localeCompare(b.id) || a.revision - b.revision) }
 function confirmationFingerprint(confirmations) { return createHash('sha256').update(JSON.stringify(confirmations.map(item => [item.id, item.revision]))).digest('hex') }
 
-function configEntity(state, kind, body, current, now) {
+function configEntity(state, kind, body, current, now, connectionCatalog) {
   if (!CONFIG_KINDS.has(kind)) throw serviceError('NOT_FOUND', '配置类型不存在')
   if (kind === 'modelRoutes') return modelRoute(body, current)
   if (kind === 'skills') return skillConfig(body, current)
   if (kind === 'employees') return employeeConfig(state, body, current)
-  return connectionConfig(state, body, current, now)
+  return connectionConfig(state, body, current, now, connectionCatalog)
 }
 function modelRoute(body, current) {
   const id = current?.id ?? clean(body.id), provider = body.provider ?? current?.provider, model = body.model ?? current?.model
@@ -652,7 +675,7 @@ function employeeConfig(state, body, current) {
   if (result.connectionIds.some(id => !state.connections.some(item => item.id === id)) || result.skillIds.some(id => !state.skills.some(item => item.id === id))) throw serviceError('INVALID_REQUEST', '员工绑定引用不存在')
   return result
 }
-function connectionConfig(state, body, current, now) {
+function connectionConfig(state, body, current, now, connectionCatalog) {
   const result = { id: current?.id ?? clean(body.id), name: clean(body.name ?? current?.name), kind: body.kind ?? current?.kind,
     targetIdentity: clean(body.targetIdentity ?? current?.targetIdentity), baseUrl: clean(body.baseUrl ?? current?.baseUrl),
     ...(body.hostHeader !== undefined || current?.hostHeader !== undefined ? { hostHeader: clean(body.hostHeader ?? current?.hostHeader) } : {}),
@@ -662,11 +685,12 @@ function connectionConfig(state, body, current, now) {
     evidenceMode: clean(body.evidenceMode ?? current?.evidenceMode), enabled: body.enabled ?? current?.enabled ?? true,
     status: 'unknown', skillIds: body.skillIds ?? current?.skillIds ?? [], revision: current ? current.revision + 1 : 1,
     updatedAt: now }
-  if (current && body.targetIdentity !== undefined && clean(body.targetIdentity) !== current.targetIdentity) throw serviceError('INVALID_REQUEST', '连接目标 identity 不可原地更换')
+  if (current && CONNECTION_TARGET_FIELDS.some(key => result[key] !== current[key])) throw serviceError('INVALID_REQUEST', '连接目标/来源 identity 不可原地更换')
   if (!result.id || !result.name || result.kind !== 'gearjob-rest' || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef) || !stringIds(result.allowedObjectIds) || !stringIds(result.skillIds) || typeof result.enabled !== 'boolean') throw serviceError('INVALID_REQUEST', '连接配置无效')
   if (result.skillIds.some(id => !state.skills.some(item => item.id === id && getCapability(item.capabilityId)?.connectionKind === result.kind))) throw serviceError('INVALID_REQUEST', '连接 Skill 绑定无效')
   for (const key of ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']) if (!result[key]) throw serviceError('INVALID_REQUEST', `连接缺少 ${key}`)
   try { const url = new URL(result.baseUrl); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error() } catch { throw serviceError('INVALID_REQUEST', '连接地址无效') }
+  try { Object.assign(result, assertTrustedConnection(connectionCatalog, result)) } catch { throw serviceError('FORBIDDEN', '连接目标未在主机可信目录登记') }
   return result
 }
 
@@ -697,6 +721,9 @@ function sameStrings(left = [], right = []) { const a = [...left].sort(), b = [.
 function compact(value) { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) }
 function pick(value, keys) { return Object.fromEntries(keys.filter(key => value?.[key] !== undefined).map(key => [key, value[key]])) }
 function serviceError(code, message) { return Object.assign(new Error(message), { code }) }
-function safeError(error) { return { code: error?.code ?? 'INTERNAL_ERROR', message: error?.message ?? '执行失败' } }
+function safeError(error, fallbackCode = 'INTERNAL_ERROR') {
+  const code = error?.code ?? fallbackCode
+  return { code, message: (ERROR_STATUS[code] ?? 500) >= 500 ? '服务暂时无法完成请求' : error?.message ?? '执行失败' }
+}
 function failure(code, message, extra = {}) { return { ok: false, error: { code, message, status: ERROR_STATUS[code] ?? 500, ...extra } } }
 export function serviceFailure(error) { return failure(error?.code ?? 'INTERNAL_ERROR', error?.message ?? '服务暂时无法完成请求') }

@@ -1,13 +1,20 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { createServer as createNodeServer } from 'node:http'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
+import { readConnectionCatalog } from '../src/connection-catalog.mjs'
 import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 
 const root = await mkdtemp(join(tmpdir(), 'geneway-p2-service-'))
 const stateFile = join(root, 'state.json')
 const store = createFileStore(stateFile)
+const catalogFile = join(root, 'private', 'connections.json')
+await mkdir(join(root, 'private'), { mode: 0o700 })
+await writeFile(catalogFile, JSON.stringify({ version: 1, targets: catalogTargets() }), { mode: 0o600 })
+const connectionCatalog = await readConnectionCatalog(catalogFile, process.cwd())
 const calls = []
 const gates = new Map()
 let nextGate
@@ -54,7 +61,7 @@ const runner = {
 
 try {
   await store.update(seedState)
-  const service = createWorkService({ store, runner, policyPaths: { stateFile, dataRoot: root, secretRoot: join(root, 'secrets') }, connectionTester: async connection => connection.targetIdentity })
+  const service = createWorkService({ store, runner, connectionCatalog, policyPaths: { stateFile, dataRoot: root, secretRoot: join(root, 'secrets') }, connectionTester: async connection => connection.targetIdentity })
   const alice = { id: 'member-alice' }
   const bob = { id: 'member-bob' }
   const admin = { id: 'member-admin' }
@@ -141,13 +148,27 @@ try {
   assert.equal(activeContinue.value.input.quantity, 10)
   busyGate.release()
   await waitFor(service, alice, busyWaiting.value.id, work => work.status === 'completed')
+  const completedContinue = await service.continueWork(alice, busyWaiting.value.id, { input: { quantity: 10 }, clientRequestId: 'completed-continue' })
+  assert.equal(completedContinue.error.status, 409)
 
   await assert.rejects(service.listMembers(alice), error => error.code === 'FORBIDDEN')
   await assert.rejects(service.listConfig(alice, 'employees'), error => error.code === 'FORBIDDEN')
   assert.equal((await service.listConfig(admin, 'modelRoutes'))[0].model, 'deepseek/deepseek-v4-pro')
   const renamed = await service.updateConfig(admin, 'employees', 'employee-admin', { description: '管理员配置员工' })
   assert.equal(renamed.description, '管理员配置员工')
-  await assert.rejects(service.updateConfig(admin, 'connections', 'connection-a', { targetIdentity: 'other' }), /不可原地更换/)
+  for (const [field, value] of Object.entries({
+    targetIdentity: 'other', baseUrl: 'http://127.0.0.1/other', hostHeader: 'other.localhost',
+    sourceSystem: 'Other', sourceInstance: 'Other', sourceEnvironment: 'production',
+    dataMode: 'live', evidenceMode: 'controlled',
+  })) await assert.rejects(service.updateConfig(admin, 'connections', 'connection-a', { [field]: value }), /不可原地更换/)
+  const mutableConnection = await service.updateConfig(admin, 'connections', 'connection-a', {
+    name: 'connection-a-renamed', allowedObjectIds: ['WO-1', 'WO-2'], enabled: false, skillIds: [],
+  })
+  assert.equal(mutableConnection.name, 'connection-a-renamed')
+  assert.deepEqual(mutableConnection.allowedObjectIds, ['WO-1', 'WO-2'])
+  assert.equal(mutableConnection.enabled, false)
+  assert.deepEqual(mutableConnection.skillIds, [])
+  await service.updateConfig(admin, 'connections', 'connection-a', { name: 'connection-a', allowedObjectIds: ['WO-1'], enabled: true, skillIds: ['skill-gearjob-work-order-read'] })
   const skillOff = await service.updateConfig(admin, 'skills', 'skill-cycle-time-calculate', { enabled: false })
   assert.equal(skillOff.enabled, false)
   await service.updateConfig(admin, 'skills', 'skill-cycle-time-calculate', { enabled: true })
@@ -171,7 +192,7 @@ try {
 
   const testStarted = deferred()
   const testRelease = deferred()
-  const raceService = createWorkService({ store, runner, connectionTester: async () => { testStarted.release(); await testRelease.promise; return 'stale' } })
+  const raceService = createWorkService({ store, runner, connectionCatalog, connectionTester: async () => { testStarted.release(); await testRelease.promise; return 'stale' } })
   const staleTest = raceService.testConnection(admin, 'connection-a')
   await testStarted.promise
   await service.updateConfig(admin, 'connections', 'connection-a', { name: 'connection-a-updated' })
@@ -179,6 +200,7 @@ try {
   await assert.rejects(staleTest, error => error.code === 'BUSY')
   assert.equal((await service.listConfig(admin, 'connections')).find(item => item.id === 'connection-a').status, 'unknown')
   await service.testConnection(admin, 'connection-a')
+  await checkCredentialTargetCannotBeRedirected(admin)
 
   const boot = await service.bootstrap(alice)
   assert.ok(boot.works.every(work => work.ownerMemberId === alice.id))
@@ -187,6 +209,8 @@ try {
   assert.equal(boot.connections.some(connection => 'credentialRef' in connection || 'baseUrl' in connection || 'hostHeader' in connection), false)
 
   await service.close()
+  await checkCloseSettlement(false)
+  await checkCloseSettlement(true)
   for (const [label, mutate] of [
     ['member', state => { state.members.find(item => item.id === 'member-alice').enabled = false }],
     ['employee', state => { state.employees.find(item => item.id === 'employee-a').enabled = false }],
@@ -223,7 +247,7 @@ async function checkRevokedBeforeDispatch(label, mutate) {
     async read() { if (blockRead) await gate.promise; return base.read() },
   }
   let runs = 0
-  const service = createWorkService({ store: gatedStore, runner: { configured: true, async run() { runs += 1; throw new Error('must not dispatch') }, async close() {} } })
+  const service = createWorkService({ store: gatedStore, runner: { configured: true, async run() { runs += 1; throw new Error('must not dispatch') }, async close() {} }, connectionCatalog })
   const actor = { id: 'member-alice' }
   const accepted = await service.createWork(actor, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: { workOrderId: 'WO-1' }, clientRequestId: `revoke-${label}` })
   await base.update(state => { mutate(state); return state })
@@ -238,6 +262,30 @@ async function checkRevokedBeforeDispatch(label, mutate) {
   assert.equal(work.status, 'failed', `${label} revocation must fail locally`)
   assert.equal(runs, 0, `${label} revocation must stop before model`)
   await service.close()
+}
+
+async function checkCloseSettlement(cancelRequested) {
+  const base = createFileStore(join(root, `close-${cancelRequested ? 'cancel' : 'active'}.json`))
+  await base.update(seedState)
+  const gate = deferred()
+  let executionId
+  const localRunner = {
+    configured: true,
+    async run(args) { executionId = args.executionId; await gate.promise; throw Object.assign(new Error('aborted'), { name: 'AbortError' }) },
+    async cancel() { gate.release() },
+    async close() {},
+  }
+  const localService = createWorkService({ store: base, runner: localRunner })
+  const actor = { id: 'member-alice' }
+  const created = await localService.createWork(actor, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 60, quantity: 1 }, clientRequestId: `close-${cancelRequested}` })
+  await waitFor(localService, actor, created.value.id, work => work.status === 'running')
+  if (cancelRequested) await localService.cancel(actor, created.value.id)
+  await localService.close()
+  const work = (await base.read()).works.find(item => item.id === created.value.id)
+  const execution = work.executions.find(item => item.id === executionId)
+  assert.equal(work.status, cancelRequested ? 'cancelled' : 'interrupted')
+  assert.equal(execution.status, cancelRequested ? 'cancelled' : 'interrupted')
+  assert.equal(execution.error.code, cancelRequested ? 'CANCELLED' : 'PROCESS_SHUTDOWN')
 }
 
 function seedState(state) {
@@ -258,5 +306,55 @@ function seedState(state) {
       { id: 'employee-a', name: '员工 A', enabled: true, modelRouteId: 'model-zenmux', connectionIds: ['connection-a'], skillIds: ['skill-gearjob-work-order-read', 'skill-cycle-time-calculate'] },
       { id: 'employee-b', name: '员工 B', enabled: true, modelRouteId: 'model-zenmux', connectionIds: ['connection-b'], skillIds: ['skill-cycle-time-calculate'] },
     ],
+  }
+}
+
+function catalogTargets() {
+  return [
+    target('connection-a', 'A'),
+    target('connection-b', 'B'),
+    { ...target('browser-ready', 'browser-ready'), baseUrl: 'http://127.0.0.1', credentialRef: 'browser-ready.json', sourceEnvironment: 'test', evidenceMode: 'controlled' },
+  ]
+}
+
+function target(id, instance) {
+  return { kind: 'gearjob-rest', targetIdentity: instance, baseUrl: `http://127.0.0.1/${id}`, credentialRef: `${id}.json`, sourceSystem: 'GearJob', sourceInstance: instance, sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest' }
+}
+
+async function checkCredentialTargetCannotBeRedirected(admin) {
+  const received = []
+  const capture = createNodeServer((request, response) => {
+    received.push({ url: request.url, authorization: request.headers.authorization })
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ data: { name: 'WO-1' } }))
+  })
+  await new Promise(resolve => capture.listen(0, '127.0.0.1', resolve))
+  try {
+    const captureRoot = join(root, 'capture')
+    const captureStore = createFileStore(join(captureRoot, 'state.json'))
+    const malicious = { ...seedState({ connections: [] }).connections[0], id: 'connection-evil', name: 'evil', targetIdentity: 'attacker', baseUrl: `http://127.0.0.1:${capture.address().port}`, hostHeader: 'attacker.invalid' }
+    await captureStore.update(state => {
+      const seeded = seedState(state)
+      seeded.connections[0] = { ...malicious, id: 'connection-a', name: 'connection-a' }
+      return seeded
+    })
+    const secretRoot = join(captureRoot, 'secrets')
+    await mkdir(secretRoot, { recursive: true, mode: 0o700 })
+    await writeFile(join(secretRoot, 'connection-a.json'), JSON.stringify({ authorization: 'token must-not-leak' }), { mode: 0o600 })
+    let runs = 0
+    const captureService = createWorkService({
+      store: captureStore,
+      connectionCatalog,
+      runner: { configured: true, async run() { runs += 1; throw new Error('must not dispatch') }, async close() {} },
+      connectionTester: connection => readGearJobWorkOrder({ workOrderId: 'WO-1', connection, secretRoot }),
+    })
+    await assert.rejects(captureService.createConfig(admin, 'connections', malicious), error => error.code === 'FORBIDDEN')
+    await assert.rejects(captureService.testConnection(admin, 'connection-a'), error => error.code === 'FORBIDDEN')
+    const work = await captureService.createWork({ id: 'member-alice' }, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: { workOrderId: 'WO-1' } })
+    assert.equal(work.error.status, 403)
+    assert.equal(runs, 0)
+    assert.deepEqual(received, [])
+  } finally {
+    await new Promise(resolve => capture.close(resolve))
   }
 }

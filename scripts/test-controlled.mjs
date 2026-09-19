@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { CONNECTION_TARGET_FIELDS } from '../src/connection-catalog.mjs'
 import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 
@@ -24,7 +25,8 @@ const runner = {
 
 try {
   await store.update(seed)
-  const service = createWorkService({ store, runner, policyPaths: { stateFile, dataRoot: root, secretRoot: join(root, 'secrets') } })
+  const connectionCatalog = (await store.read()).connections.map(connection => Object.fromEntries(CONNECTION_TARGET_FIELDS.map(key => [key, connection[key]])))
+  const service = createWorkService({ store, runner, connectionCatalog, policyPaths: { stateFile, dataRoot: root, secretRoot: join(root, 'secrets') } })
   const actor = { id: 'member-user' }
   const first = await service.createWork(actor, request('W1', 'w1'))
   const second = await service.createWork(actor, request('W2', 'w2'))

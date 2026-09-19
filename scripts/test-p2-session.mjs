@@ -19,7 +19,13 @@ try {
   await store.update(seedState)
   await initializeAuthFile(authPath, { 'member-admin': 'admin password', 'member-user': 'member password' }, { mode: 'create', allowedMemberIds: ['member-admin', 'member-user'] })
   const auth = createAuthRuntime({ filePath: authPath })
-  service = createWorkService({ store, runner: { configured: true, async run() { throw new Error('waiting work must not dispatch') }, async close() {} } })
+  service = createWorkService({ store, runner: {
+    configured: true,
+    async run(args) {
+      return { result: { kind: 'manufacturing.takt', payload: { ...args.input, secondsPerUnit: args.input.availableSeconds / args.input.quantity, unit: 'seconds/unit' }, toolName: 'geneway_calculate_cycle_time', pluginId: 'geneway-cycle-time', pluginVersion: '2' }, explanation: '节拍换算', dshSessionRef: `session-${args.executionId}`, continuity: 'new', contextConfirmationRefs: [], eventCount: 1 }
+    },
+    async close() {},
+  } })
   const port = await freePort()
   const origin = `http://127.0.0.1:${port}`
   server = createGenewayServer({ service, store, auth, index: '<!doctype html>', trustedOrigin: origin })
@@ -37,6 +43,13 @@ try {
   assert.equal(memberLogin.status, 200)
   assert.match(adminLogin.cookie, /HttpOnly/)
   assert.match(adminLogin.cookie, /SameSite=Strict/)
+  const firstTab = await request(origin, '/api/session', { cookie: memberLogin.cookie })
+  const secondTab = await request(origin, '/api/session', { cookie: memberLogin.cookie })
+  assert.equal(firstTab.cookie, null)
+  assert.equal(secondTab.cookie, null)
+  assert.equal(firstTab.body.csrfToken, memberLogin.body.csrfToken)
+  assert.equal(secondTab.body.csrfToken, memberLogin.body.csrfToken)
+  assert.equal(firstTab.body.expiresAt, memberLogin.body.expiresAt)
 
   assert.equal((await request(origin, '/api/works', { method: 'POST', origin, cookie: memberLogin.cookie, json: {}, csrf: '' })).status, 403)
   assert.equal((await request(origin, '/api/works', { method: 'POST', origin: 'http://evil.invalid', cookie: memberLogin.cookie, csrf: memberLogin.body.csrfToken, json: {} })).status, 403)
@@ -51,12 +64,25 @@ try {
   assert.equal(waiting.body.executions.length, 0)
   assert.equal((await request(origin, `/api/works/${waiting.body.id}`, { cookie: memberLogin.cookie })).status, 200)
   assert.equal((await request(origin, `/api/works/${waiting.body.id}`, { cookie: adminLogin.cookie })).status, 404)
+  const continued = await request(origin, `/api/works/${waiting.body.id}/continue`, { method: 'POST', origin, cookie: memberLogin.cookie, csrf: memberLogin.body.csrfToken, json: { input: { quantity: 60 }, clientRequestId: 'continue-http' } })
+  assert.equal(continued.status, 200)
+  await waitForWork(origin, waiting.body.id, memberLogin.cookie, work => work.status === 'completed')
+  const completedContinue = await request(origin, `/api/works/${waiting.body.id}/continue`, { method: 'POST', origin, cookie: memberLogin.cookie, csrf: firstTab.body.csrfToken, json: { input: { quantity: 60 }, clientRequestId: 'completed-http' } })
+  assert.equal(completedContinue.status, 409)
   assert.equal((await request(origin, '/api/admin/members', { cookie: memberLogin.cookie })).status, 403)
   const confirmation = await request(origin, '/api/confirmations', { method: 'POST', origin, cookie: memberLogin.cookie, csrf: memberLogin.body.csrfToken, json: { employeeId: 'employee-user', label: '班次', value: '白班' } })
   assert.equal(confirmation.status, 200)
   assert.equal((await request(origin, `/api/confirmations/${confirmation.body.id}`, { method: 'PATCH', origin, cookie: adminLogin.cookie, csrf: adminLogin.body.csrfToken, json: { value: '越权' } })).status, 404)
   assert.equal((await request(origin, `/api/confirmations/${confirmation.body.id}`, { method: 'DELETE', origin, cookie: memberLogin.cookie, csrf: memberLogin.body.csrfToken, json: {} })).status, 200)
   assert.equal((await request(origin, `/api/confirmations/${confirmation.body.id}`, { method: 'PATCH', origin, cookie: memberLogin.cookie, csrf: memberLogin.body.csrfToken, json: { value: '不可复活' } })).status, 400)
+
+  const originalListConfig = service.listConfig
+  service.listConfig = async () => { throw Object.assign(new Error('ENOENT /private/secrets/connection-a.json'), { code: 'SOURCE_NOT_CONFIGURED' }) }
+  const hidden500 = await request(origin, '/api/admin/employees', { cookie: adminLogin.cookie })
+  service.listConfig = originalListConfig
+  assert.equal(hidden500.status, 503)
+  assert.equal(hidden500.body.error.message, '服务暂时无法完成请求')
+  assert.equal(JSON.stringify(hidden500.body).includes('/private/'), false)
 
   const lastAdmin = await request(origin, '/api/admin/members/member-admin', { method: 'PATCH', origin, cookie: adminLogin.cookie, csrf: adminLogin.body.csrfToken, json: { enabled: false } })
   assert.equal(lastAdmin.status, 400)
@@ -102,6 +128,15 @@ async function freePort() {
   const port = probe.address().port
   await new Promise(resolve => probe.close(resolve))
   return port
+}
+
+async function waitForWork(origin, id, cookie, predicate) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const result = await request(origin, `/api/works/${id}`, { cookie })
+    if (result.status === 200 && predicate(result.body)) return result.body
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error('timed out waiting for HTTP work')
 }
 
 function seedState(state) {

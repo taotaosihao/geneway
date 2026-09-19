@@ -7,11 +7,13 @@ import { createFileStore } from './store/file-store.mjs'
 import { createWorkService, ERROR_STATUS, serviceFailure } from './work-service.mjs'
 import { createDshRunner } from './dsh-runner.mjs'
 import { readRuntimeConfig } from './runtime-config.mjs'
+import { assertTrustedConnections, readConnectionCatalog } from './connection-catalog.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
 const JSON_TYPE = 'application/json'
+const PUBLIC_5XX_MESSAGE = '服务暂时无法完成请求'
 
 export async function start() {
   const port = positivePort(process.env.GENEWAY_PORT ?? 3471)
@@ -29,10 +31,13 @@ export async function start() {
 
   const runtimeConfig = readRuntimeConfig({ ...process.env, GENEWAY_STATE: statePath }, root)
   const store = createFileStore(statePath)
+  const connectionCatalog = await readConnectionCatalog(runtimeConfig.connectionCatalogFile, root)
+  assertTrustedConnections(connectionCatalog, (await store.read()).connections)
   const runner = createDshRunner({ root, config: runtimeConfig })
   const service = createWorkService({
     store,
     runner,
+    connectionCatalog,
     policyPaths: { stateFile: runtimeConfig.stateFile, dataRoot: runtimeConfig.dataRoot, secretRoot: runtimeConfig.secretRoot },
     connectionTester: async connection => {
       const workOrderId = connection.allowedObjectIds?.[0]
@@ -81,8 +86,7 @@ export function createGenewayServer({ service, store, auth, index = '', trustedO
         }
         const context = await authenticated(request, store, auth)
         if (request.method === 'GET') {
-          const session = await auth.issueSession(context.member)
-          return sendJson(response, 200, { member: safeMember(context.member), csrfToken: session.csrfToken, expiresAt: session.expiresAt }, { 'set-cookie': sessionCookie(session.token, session.expiresAt) })
+          return sendJson(response, 200, { member: safeMember(context.member), csrfToken: context.csrfToken, expiresAt: context.session.expiresAt })
         }
         if (request.method === 'DELETE') {
           await protectedWrite(request, context.token, auth, trustedOrigin, [])
@@ -160,9 +164,7 @@ export function createGenewayServer({ service, store, auth, index = '', trustedO
       return notFound(response)
     } catch (error) {
       const result = serviceFailure(error)
-      const status = result.error.status
-      const message = status >= 500 && error?.code === undefined ? '服务暂时无法完成请求' : result.error.message
-      return sendJson(response, status, { error: { ...result.error, message } })
+      return sendJson(response, result.error.status, { error: clientError(result.error) })
     }
   })
 }
@@ -175,11 +177,12 @@ export async function shutdownServer(server, service) {
 
 async function authenticated(request, store, auth) {
   const token = cookieValue(request.headers.cookie, COOKIE)
-  const session = token && await auth.verifySession(token)
+  const view = token && await auth.sessionView(token)
+  const session = view?.session
   const state = await store.read()
   const member = state.members.find(item => item.id === session?.memberId)
   if (!isSessionCurrent(session, member)) throw httpError('UNAUTHORIZED', '会话无效或已过期')
-  return { token, session, member }
+  return { token, session, member, csrfToken: view.csrfToken }
 }
 
 async function protectedWrite(request, token, auth, trustedOrigin, allowed) {
@@ -215,7 +218,8 @@ function configFields(kind, create, collectionPatch = false) {
   return [...id, 'provider', 'model', 'displayName', 'enabled', 'credentialRef']
 }
 
-function resultResponse(response, result) { return result.ok ? sendJson(response, 200, result.value) : sendJson(response, result.error.status, { error: result.error }) }
+function resultResponse(response, result) { return result.ok ? sendJson(response, 200, result.value) : sendJson(response, result.error.status, { error: clientError(result.error) }) }
+function clientError(error) { return error.status >= 500 ? { code: error.code, message: PUBLIC_5XX_MESSAGE, status: error.status } : error }
 function notFound(response) { return sendJson(response, 404, { error: { code: 'NOT_FOUND', message: '接口不存在', status: 404 } }) }
 function sendJson(response, status, value, headers = {}) { return send(response, status, JSON.stringify(value), 'application/json; charset=utf-8', headers) }
 function send(response, status, body, contentType, headers = {}) { response.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers }); response.end(body) }

@@ -38,6 +38,12 @@ export function createAuthRuntime({ filePath, clock = Date.now, sessionTtlMs = D
       return verifySessionToken(token, auth.sessionSecret, Number(clock()))
     },
 
+    async sessionView(token) {
+      const auth = await readAuthFile(filePath)
+      const session = verifySessionToken(token, auth.sessionSecret, Number(clock()))
+      return session ? { session, csrfToken: csrf(token, auth.sessionSecret), expiresAt: session.expiresAt } : undefined
+    },
+
     async verifyCsrf(token, candidate) {
       if (typeof token !== 'string' || typeof candidate !== 'string') return false
       const auth = await readAuthFile(filePath)

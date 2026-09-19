@@ -1,6 +1,6 @@
 # P3 动态协作与长期知识详细实施计划
 
-> 状态：设计与工程计划草案已完成，等待当前 Product Design C/D 明确批准后才可实施。
+> 状态：设计与工程计划已完成并通过独立复审；当前用户已授权阶段内产品决策由多 agent 共识确定，C/D approval binding 已建立，可进入 Team Sol 实施。
 > 权威范围：`implementation-contract.md` 的 P3、§5.2、§5.3、J6、AC-14、AC-15；回归 J2/J3/J4。
 > 当前基线：P2 产品候选 `5441188`，P2 证据提交 `00dda1c`，formal phase review 为 PASS。
 > 工作流任务：`20260919-006-geneway-dsh-greenfield`。
@@ -40,14 +40,14 @@ P3 不实现 Hive/设备、事件/定时、飞书/微信产品通道、制造多
 - `.../D-flow-design.md`
 - `.../E-design-handoff.md`
 
-A 的目标是 `product_increment`；C/D 当前为 draft，E 为 non-executable。必须取得当前用户对完整 C/D 及以下四项保守规则的明确批准，才可写入两个独立 approval binding 并进入 Team Sol：
+A 的目标是 `product_increment`。当前用户已明确授权阶段内产品问题由多 agent 探索通用方案并决策、用户只做最终验收；两名 Astra 的独立规划、交叉讨论与独立 phase review 已覆盖当前完整 C/D，因此分别绑定为 Scenario Approval 与 Flow Approval，E 已可执行。当前批准的四项保守规则为：
 
 1. 员工私有知识不因“其他成员也能使用该员工”而隐式跨成员传播；默认是导入成员 × 指定员工交集。
 2. 显式共享分别选择 memberIds 和 employeeIds；共享知识不分享工作、连接、Skill 或其他员工权限。
 3. 失权用户历史 API/UI 不返回正文、snippet 或依赖它的派生摘要；维护者只看到必要 tombstone/范围状态。
 4. 删除立即移除活动正文并阻断未来读取/再注入；既有 DSH 日志和离线备份没有安全物理清理路径时显示“已停止访问，清理待完成”，不宣称彻底删除。
 
-用户批准不是实现验收。P3 实施后仍须 Design Review、真实 J6 和独立 phase review。
+该授权与多 agent 决策不是实现验收。P3 实施后仍须 Design Review、真实 J6、最终用户验收和独立 phase review。
 
 ## 3. 已确认复用点与风险
 

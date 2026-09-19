@@ -17,7 +17,7 @@ const root = await mkdtemp(join(tmpdir(), 'geneway-controlled-'))
 let service
 try {
   const store = createFileStore(join(root, 'state.json'))
-  await store.update(state => ({ ...state, employees: [{ id: 'e', enabled: true, connectionIds: ['c'] }], connections: [{ id: 'c', enabled: true, status: 'ready' }] }))
+  await store.update(state => testBinding(state, 'e', 'c'))
   let reads = 0
   const source = { configured: true, read() { throw new Error('direct source bypass') } }
   const runner = {
@@ -155,7 +155,15 @@ async function testFollowUpGrantBlocksBeforeSource() {
     await writeFile(grant, JSON.stringify({ operation: 'refresh', workOrderId: 'W1', allowRead: true }), { mode: 0o600 })
     await assertExecutionGrant('W1', grant)
     await assert.rejects(() => assertExecutionGrant('W1', grant), error => error.code === 'FORBIDDEN' && /授权不可用/.test(error.message))
+    await writeFile(grant, JSON.stringify({ operation: 'refresh', workOrderId: 'W1', allowRead: true }), { mode: 0o600 })
+    await assert.rejects(() => assertExecutionGrant('', grant), error => error.code === 'INVALID_REQUEST')
+    await assert.rejects(() => assertExecutionGrant('W1', grant), error => error.code === 'FORBIDDEN' && /授权不可用/.test(error.message))
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+}
+
+function testBinding(state, employeeId, connectionId) {
+  const skillId = 'skill-gearjob-work-order-read'
+  return { ...state, skills: [{ id: skillId, name: 'read', action: 'gearjob.work-order.read', toolName: GEARJOB_TOOL, enabled: true }], employees: [{ id: employeeId, enabled: true, connectionIds: [connectionId], skillIds: [skillId] }], connections: [{ id: connectionId, enabled: true, status: 'ready', skillIds: [skillId] }] }
 }

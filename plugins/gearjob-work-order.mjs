@@ -55,7 +55,6 @@ export function apply(ctx) {
 }
 
 export async function assertExecutionGrant(workOrderId, filePath = process.env.GENEWAY_DSH_GRANT_FILE) {
-  const id = exactId(workOrderId)
   if (!filePath) throw sourceError('FORBIDDEN', '本次执行没有 GearJob 读取授权')
   const consumedPath = `${filePath}.consumed`
   let grant
@@ -67,6 +66,7 @@ export async function assertExecutionGrant(workOrderId, filePath = process.env.G
   } finally {
     await unlink(consumedPath).catch(() => undefined)
   }
+  const id = exactId(workOrderId)
   if (grant?.allowRead !== true || grant?.workOrderId !== id || !['create', 'refresh'].includes(grant?.operation)) {
     throw sourceError('FORBIDDEN', '本次执行不允许查询 GearJob')
   }

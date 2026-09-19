@@ -14,6 +14,9 @@ export const ERROR_STATUS = {
 }
 
 const ACTIVE_EXECUTION = new Set(['accepted', 'running', 'cancel_requested'])
+const P1_SKILL_ID = 'skill-gearjob-work-order-read'
+const P1_SKILL_ACTION = 'gearjob.work-order.read'
+const P1_SKILL_TOOL = 'geneway_gearjob_read_work_order'
 
 export function createWorkService({ store, source = null, runner = null, clock = () => new Date().toISOString() }) {
   const active = new Map()
@@ -28,6 +31,7 @@ export function createWorkService({ store, source = null, runner = null, clock =
         operator: state.operator,
         employees: state.employees,
         connections: state.connections.map(connection => ({ ...connection, enabled: connection.enabled !== false })),
+        skills: state.skills,
         works: state.works.map(publicWork),
         capability: {
           source: sourceReady() ? 'configured' : 'not-configured',
@@ -234,7 +238,12 @@ export function createWorkService({ store, source = null, runner = null, clock =
     await store.update(state => {
       if (state.employees.length || state.connections.length) return state
       const connectionId = 'connection-gearjob'
-      return { ...state, employees: [{ id: 'employee-gearjob', name: 'GearJob 只读员工', description: '读取受限的 GearJob 工单并说明依据', enabled: true, connectionIds: [connectionId] }], connections: [{ id: connectionId, name: 'GearJob 外部测试只读连接', kind: 'gearjob-rest', status: 'ready', enabled: true }] }
+      return {
+        ...state,
+        skills: [{ id: P1_SKILL_ID, name: 'GearJob 工单只读查询', action: P1_SKILL_ACTION, toolName: P1_SKILL_TOOL, enabled: true }],
+        employees: [{ id: 'employee-gearjob', name: 'GearJob 只读员工', description: '读取受限的 GearJob 工单并说明依据', enabled: true, connectionIds: [connectionId], skillIds: [P1_SKILL_ID] }],
+        connections: [{ id: connectionId, name: 'GearJob 外部测试只读连接', kind: 'gearjob-rest', status: 'ready', enabled: true, skillIds: [P1_SKILL_ID] }],
+      }
     })
   }
 
@@ -272,7 +281,7 @@ export function createWorkService({ store, source = null, runner = null, clock =
         contextObservationId: model.contextObservationId,
         continuity: model.continuity,
       })
-      await finishObservation(workId, executionId, observation)
+      await finishObservation(workId, executionId, observation, model)
     } catch (error) {
       await finishError(workId, executionId, error)
     } finally {
@@ -299,7 +308,7 @@ export function createWorkService({ store, source = null, runner = null, clock =
     return runner.run({ executionId, sessionId, workOrderId, operation, observation, question })
   }
 
-  async function finishObservation(workId, executionId, observation) {
+  async function finishObservation(workId, executionId, observation, model) {
     await store.update(state => {
       const work = state.works.find(item => item.id === workId)
       const execution = work?.executions?.find(item => item.id === executionId)
@@ -309,11 +318,12 @@ export function createWorkService({ store, source = null, runner = null, clock =
         return { ...state, works: state.works.map(item => item.id === workId ? { ...item, status: 'cancelled', executions: item.executions.map(entry => entry.id === executionId ? { ...entry, status: 'cancelled', completedAt: now, error: { code: 'CANCELLED', message: '本次执行已停止' } } : entry) } : item) }
       }
       const now = clock()
-      return { ...state, works: state.works.map(item => item.id === workId ? { ...item, status: 'completed', observations: [...(item.observations ?? []), observation], executions: item.executions.map(entry => entry.id === executionId ? { ...entry, status: 'completed', completedAt: now, dshSessionRef: observation.dshSessionRef, continuedFromDshSessionRef: observation.continuedFromDshSessionRef, contextObservationId: observation.contextObservationId, continuity: observation.continuity } : entry) } : item) }
+      return { ...state, works: state.works.map(item => item.id === workId ? { ...item, status: 'completed', observations: [...(item.observations ?? []), observation], executions: item.executions.map(entry => entry.id === executionId ? { ...entry, status: 'completed', completedAt: now, dshSessionRef: observation.dshSessionRef, continuedFromDshSessionRef: observation.continuedFromDshSessionRef, contextObservationId: observation.contextObservationId, continuity: observation.continuity, dshEventCount: eventCount(model), resultObservationId: observation.observationId } : entry) } : item) }
     })
   }
 
   async function finishFollowUp(workId, executionId, question, model) {
+    const followUpId = `follow-${randomUUID()}`
     await store.update(state => {
       const work = state.works.find(item => item.id === workId)
       const execution = work?.executions?.find(item => item.id === executionId)
@@ -323,7 +333,7 @@ export function createWorkService({ store, source = null, runner = null, clock =
         return { ...state, works: state.works.map(item => item.id === workId ? { ...item, status: 'cancelled', executions: item.executions.map(entry => entry.id === executionId ? { ...entry, status: 'cancelled', completedAt: now, error: { code: 'CANCELLED', message: '本次执行已停止' } } : entry) } : item) }
       }
       const now = clock()
-      return { ...state, works: state.works.map(item => item.id === workId ? { ...item, status: 'completed', followUps: [...(item.followUps ?? []), { id: `follow-${randomUUID()}`, text: question, explanation: model.explanation, at: now, dshSessionRef: model.dshSessionRef, continuedFromDshSessionRef: model.continuedFromDshSessionRef, contextObservationId: model.contextObservationId, continuity: model.continuity }], executions: item.executions.map(entry => entry.id === executionId ? { ...entry, status: 'completed', completedAt: now, dshSessionRef: model.dshSessionRef, continuedFromDshSessionRef: model.continuedFromDshSessionRef, contextObservationId: model.contextObservationId, continuity: model.continuity } : entry) } : item) }
+      return { ...state, works: state.works.map(item => item.id === workId ? { ...item, status: 'completed', followUps: [...(item.followUps ?? []), { id: followUpId, text: question, explanation: model.explanation, at: now, dshSessionRef: model.dshSessionRef, continuedFromDshSessionRef: model.continuedFromDshSessionRef, contextObservationId: model.contextObservationId, continuity: model.continuity }], executions: item.executions.map(entry => entry.id === executionId ? { ...entry, status: 'completed', completedAt: now, dshSessionRef: model.dshSessionRef, continuedFromDshSessionRef: model.continuedFromDshSessionRef, contextObservationId: model.contextObservationId, continuity: model.continuity, dshEventCount: eventCount(model), resultFollowUpId: followUpId } : entry) } : item) }
     })
   }
 
@@ -358,10 +368,15 @@ export function createWorkService({ store, source = null, runner = null, clock =
   }
 }
 
+function eventCount(model) {
+  return Number.isInteger(model?.eventCount) && model.eventCount >= 0 ? model.eventCount : undefined
+}
+
 function authorizedBinding(state, employeeId, connectionId) {
   const employee = state.employees.find(item => item.id === employeeId && item.enabled !== false)
   const connection = state.connections.find(item => item.id === connectionId && item.enabled !== false && item.status === 'ready')
-  return employee && connection && employee.connectionIds?.includes(connection.id) ? { employee, connection } : undefined
+  const skill = state.skills?.find(item => item.id === P1_SKILL_ID && item.enabled !== false && item.action === P1_SKILL_ACTION && item.toolName === P1_SKILL_TOOL)
+  return employee && connection && skill && employee.connectionIds?.includes(connection.id) && employee.skillIds?.includes(skill.id) && connection.skillIds?.includes(skill.id) ? { employee, connection, skill } : undefined
 }
 
 function reservationKey(operatorId, ...parts) {

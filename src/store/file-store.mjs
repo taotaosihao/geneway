@@ -2,10 +2,11 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 const EMPTY_STATE = {
-  version: 2,
+  version: 3,
   operator: { id: 'local-operator', displayName: '本机操作者' },
   employees: [],
   connections: [],
+  skills: [],
   works: [],
   reservations: {},
 }
@@ -44,10 +45,11 @@ function normalizeState(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('产品状态不是对象')
   return {
     ...value,
-    version: Number(value.version) >= 2 ? value.version : 2,
+    version: Number(value.version) >= 3 ? value.version : 3,
     operator: value.operator && typeof value.operator === 'object' ? value.operator : structuredClone(EMPTY_STATE.operator),
     employees: Array.isArray(value.employees) ? value.employees : [],
     connections: Array.isArray(value.connections) ? value.connections : [],
+    skills: Array.isArray(value.skills) ? value.skills : [],
     works: Array.isArray(value.works) ? value.works : [],
     reservations: value.reservations && typeof value.reservations === 'object' && !Array.isArray(value.reservations) ? value.reservations : {},
   }

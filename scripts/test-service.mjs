@@ -9,11 +9,7 @@ const root = await mkdtemp(join(tmpdir(), 'geneway-service-'))
 let service
 try {
   const store = createFileStore(join(root, 'state.json'))
-  await store.update(state => ({
-    ...state,
-    employees: [{ id: 'employee-1', name: '测试员工', enabled: true, connectionIds: ['connection-1'] }],
-    connections: [{ id: 'connection-1', name: '测试只读连接', kind: 'controlled', status: 'ready', enabled: true }],
-  }))
+  await store.update(state => withTestBinding(state, 'employee-1', 'connection-1'))
   let directReads = 0
   const calls = []
   service = createWorkService({
@@ -24,8 +20,8 @@ try {
       sourceConfigured: true,
       async run(args) {
         calls.push(args)
-        if (args.operation === 'follow-up') return { explanation: '追问说明', dshSessionRef: args.sessionId, continuity: 'same-session', contextObservationId: args.observation.observationId }
-        return { observation: { workOrderId: 'WO-1', status: 'running', plannedQuantity: 10, completedQuantity: calls.filter(item => item.operation !== 'follow-up').length, unit: '件', sourceRecordId: 'source-' + calls.length, sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic' }, explanation: '基于工具事实的测试说明', dshSessionRef: args.sessionId ?? 'session-test', continuity: args.sessionId ? 'same-session' : 'new' }
+        if (args.operation === 'follow-up') return { explanation: '追问说明', dshSessionRef: args.sessionId, continuity: 'same-session', contextObservationId: args.observation.observationId, eventCount: 2 }
+        return { observation: { workOrderId: 'WO-1', status: 'running', plannedQuantity: 10, completedQuantity: calls.filter(item => item.operation !== 'follow-up').length, unit: '件', sourceRecordId: 'source-' + calls.length, sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic' }, explanation: '基于工具事实的测试说明', dshSessionRef: args.sessionId ?? 'session-test', continuity: args.sessionId ? 'same-session' : 'new', eventCount: 3 }
       },
       async cancel() {},
     },
@@ -49,6 +45,10 @@ try {
   const persisted = await service.getWork(first.value.id)
   assert.equal(persisted.value.observations[0].sourceRecordId, 'source-1')
   assert.equal(persisted.value.followUps[0].text, '补充现场信息')
+  assert.equal(persisted.value.executions[0].resultObservationId, persisted.value.observations[0].observationId)
+  assert.equal(persisted.value.executions[0].dshEventCount, 3)
+  assert.equal(persisted.value.executions.at(-1).resultFollowUpId, persisted.value.followUps[0].id)
+  assert.equal(persisted.value.executions.at(-1).dshEventCount, 2)
   assert.equal(calls.at(-1).operation, 'follow-up')
   assert.equal(calls.at(-1).sessionId, 'session-test')
 
@@ -56,9 +56,13 @@ try {
   const blocked = await service.refreshWork(first.value.id, { clientRequestId: 'refresh-offline' })
   assert.equal(blocked.error.code, 'FORBIDDEN')
   await store.update(state => ({ ...state, connections: state.connections.map(item => ({ ...item, status: 'ready' })) }))
+  await store.update(state => ({ ...state, skills: state.skills.map(item => ({ ...item, enabled: false })) }))
+  const skillBlocked = await service.refreshWork(first.value.id, { clientRequestId: 'refresh-skill-disabled' })
+  assert.equal(skillBlocked.error.code, 'FORBIDDEN')
+  await store.update(state => ({ ...state, skills: state.skills.map(item => ({ ...item, enabled: true })) }))
 
   const scopedStore = createFileStore(join(root, 'scoped-state.json'))
-  await scopedStore.update(state => ({ ...state, employees: [{ id: 'e', enabled: true, connectionIds: ['c'] }], connections: [{ id: 'c', enabled: true, status: 'ready' }] }))
+  await scopedStore.update(state => withTestBinding(state, 'e', 'c'))
   let scopedRuns = 0
   const scoped = createWorkService({ store: scopedStore, source: { configured: true, allows: id => id === 'ALLOWED' }, runner: { configured: true, sourceConfigured: true, async run() { scopedRuns += 1; throw new Error('must not run') } } })
   const denied = await scoped.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'DENIED', clientRequestId: 'denied' })
@@ -67,7 +71,7 @@ try {
   await scoped.close()
 
   const concurrentStore = createFileStore(join(root, 'concurrent-state.json'))
-  await concurrentStore.update(state => ({ ...state, employees: [{ id: 'e', enabled: true, connectionIds: ['c'] }], connections: [{ id: 'c', enabled: true, status: 'ready' }] }))
+  await concurrentStore.update(state => withTestBinding(state, 'e', 'c'))
   let concurrentRuns = 0
   const concurrent = createWorkService({
     store: concurrentStore,
@@ -92,7 +96,7 @@ try {
   await concurrent.close()
 
   const failureStore = createFileStore(join(root, 'failure-state.json'))
-  await failureStore.update(state => ({ ...state, employees: [{ id: 'e', enabled: true, connectionIds: ['c'] }], connections: [{ id: 'c', enabled: true, status: 'ready' }] }))
+  await failureStore.update(state => withTestBinding(state, 'e', 'c'))
   const failureService = createWorkService({ store: failureStore, source: { configured: true, allows: () => true }, runner: { configured: true, sourceConfigured: true, async run() { throw Object.assign(new Error('模型调用失败'), { code: 'MODEL_FAILURE' }) } } })
   const failed = await failureService.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'W', clientRequestId: 'model-failure' })
   const failedWork = await waitFor(failureService, failed.value.id, work => work.status === 'failed')
@@ -114,7 +118,7 @@ try {
       return cancelBase.update(...args)
     },
   }
-  await cancelBase.update(state => ({ ...state, employees: [{ id: 'e', enabled: true, connectionIds: ['c'] }], connections: [{ id: 'c', enabled: true, status: 'ready' }] }))
+  await cancelBase.update(state => withTestBinding(state, 'e', 'c'))
   let followRuns = 0
   const cancelService = createWorkService({
     store: cancelStore,
@@ -150,7 +154,7 @@ try {
       sourceConfigured: true,
       async run(args) {
         successorCalls.push(args)
-        return { explanation: 'successor 说明', dshSessionRef: 'session-successor', continuedFromDshSessionRef: args.sessionId, contextObservationId: args.observation.observationId, continuity: 'successor' }
+        return { explanation: 'successor 说明', dshSessionRef: 'session-successor', continuedFromDshSessionRef: args.sessionId, contextObservationId: args.observation.observationId, continuity: 'successor', eventCount: 4 }
       },
     },
   })
@@ -160,6 +164,8 @@ try {
   assert.equal(successorCalls[0].sessionId, 'session-test')
   assert.equal(recovered.followUps.at(-1).continuity, 'successor')
   assert.equal(recovered.followUps.at(-1).continuedFromDshSessionRef, 'session-test')
+  assert.equal(recovered.executions.at(-1).resultFollowUpId, recovered.followUps.at(-1).id)
+  assert.equal(recovered.executions.at(-1).dshEventCount, 4)
   await successor.close()
   console.log('service checks passed')
 } finally {
@@ -174,4 +180,9 @@ async function waitFor(service, id, predicate) {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   throw new Error('timed out waiting for work')
+}
+
+function withTestBinding(state, employeeId, connectionId) {
+  const skillId = 'skill-gearjob-work-order-read'
+  return { ...state, skills: [{ id: skillId, name: 'read', action: 'gearjob.work-order.read', toolName: 'geneway_gearjob_read_work_order', enabled: true }], employees: [{ id: employeeId, name: '测试员工', enabled: true, connectionIds: [connectionId], skillIds: [skillId] }], connections: [{ id: connectionId, name: '测试只读连接', kind: 'controlled', status: 'ready', enabled: true, skillIds: [skillId] }] }
 }

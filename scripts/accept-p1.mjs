@@ -32,6 +32,8 @@ try {
 
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
   await waitFor(`document.querySelector('#employee option[value]:not([value=""])')`)
+  const binding = await evaluate(`({skills:state.bootstrap.skills?.length,employeeSkills:state.bootstrap.employees[0]?.skillIds?.length,connectionSkills:state.bootstrap.connections[0]?.skillIds?.length})`)
+  if (binding.skills !== 1 || binding.employeeSkills !== 1 || binding.connectionSkills !== 1) throw new Error('employee/connection/skill binding contract failed')
   await evaluate(`(() => {
     const employee=document.querySelector('#employee');employee.value=employee.querySelector('option[value]:not([value=""])').value;
     const connection=document.querySelector('#connection');connection.value=connection.querySelector('option[value]:not([value=""])').value;
@@ -39,19 +41,19 @@ try {
     document.querySelector('#work-form').requestSubmit();
   })()`)
   await waitFor(`state.currentWork?.status === 'completed' && state.currentWork?.observations?.length === 1`)
-  const initial = await evaluate(`({id:state.currentWork.id,ratio:state.currentWork.observations[0].completion?.ratio,session:state.currentWork.observations[0].dshSessionRef})`)
-  if (initial.ratio !== 0) throw new Error(`expected initial ratio 0, got ${initial.ratio}`)
+  const initial = await evaluate(`({id:state.currentWork.id,ratio:state.currentWork.observations[0].completion?.ratio,session:state.currentWork.observations[0].dshSessionRef,observationId:state.currentWork.observations[0].observationId,resultObservationId:state.currentWork.executions[0].resultObservationId,dshEventCount:state.currentWork.executions[0].dshEventCount})`)
+  if (initial.ratio !== 0 || initial.resultObservationId !== initial.observationId || !(initial.dshEventCount > 0)) throw new Error('initial result reference contract failed')
 
   await evaluate(`document.querySelector('#follow-text').value='这条结论依据哪个来源记录？';document.querySelector('#follow-form').requestSubmit()`)
   await waitFor(`state.currentWork?.status === 'completed' && state.currentWork?.followUps?.length === 1`)
-  const followed = await evaluate(`({observations:state.currentWork.observations.length,session:state.currentWork.followUps[0].dshSessionRef,continuity:state.currentWork.followUps[0].continuity})`)
-  if (followed.observations !== 1 || followed.session !== initial.session || followed.continuity !== 'same-session') throw new Error('same-session follow-up contract failed')
+  const followed = await evaluate(`({observations:state.currentWork.observations.length,session:state.currentWork.followUps[0].dshSessionRef,continuity:state.currentWork.followUps[0].continuity,followUpId:state.currentWork.followUps[0].id,resultFollowUpId:state.currentWork.executions.at(-1).resultFollowUpId,dshEventCount:state.currentWork.executions.at(-1).dshEventCount})`)
+  if (followed.observations !== 1 || followed.session !== initial.session || followed.continuity !== 'same-session' || followed.resultFollowUpId !== followed.followUpId || !(followed.dshEventCount > 0)) throw new Error('same-session follow-up contract failed')
 
   await setProduced(4)
   await evaluate(`document.querySelector('#refresh-work').click()`)
   await waitFor(`state.currentWork?.status === 'completed' && state.currentWork?.observations?.length === 2`)
-  const refreshed = await evaluate(`({ratios:state.currentWork.observations.map(item=>item.completion?.ratio),url:location.href})`)
-  if (refreshed.ratios[0] !== 0 || refreshed.ratios[1] !== 0.4) throw new Error(`expected ratios 0 then 0.4, got ${refreshed.ratios}`)
+  const refreshed = await evaluate(`({ratios:state.currentWork.observations.map(item=>item.completion?.ratio),latestObservationId:state.currentWork.observations.at(-1).observationId,resultObservationId:state.currentWork.executions.at(-1).resultObservationId,dshEventCount:state.currentWork.executions.at(-1).dshEventCount,url:location.href})`)
+  if (refreshed.ratios[0] !== 0 || refreshed.ratios[1] !== 0.4 || refreshed.resultObservationId !== refreshed.latestObservationId || !(refreshed.dshEventCount > 0)) throw new Error(`refresh result reference contract failed: ${JSON.stringify(refreshed)}`)
 
   await send('Page.reload', { ignoreCache: true })
   await waitFor(`state.currentWork?.id === ${JSON.stringify(initial.id)} && state.currentWork?.observations?.length === 2`)
@@ -61,8 +63,8 @@ try {
   await waitFor(`state.currentWork?.id === ${JSON.stringify(initial.id)} && state.currentWork?.status === 'completed'`)
   await evaluate(`document.querySelector('#follow-text').value='服务重启后，当前有依据的完成比例是多少？';document.querySelector('#follow-form').requestSubmit()`)
   await waitFor(`state.currentWork?.status === 'completed' && state.currentWork?.followUps?.length === 2`)
-  const successor = await evaluate(`({observations:state.currentWork.observations.length,session:state.currentWork.followUps.at(-1).dshSessionRef,continuedFrom:state.currentWork.followUps.at(-1).continuedFromDshSessionRef,continuity:state.currentWork.followUps.at(-1).continuity})`)
-  if (successor.observations !== 2 || successor.session === initial.session || successor.continuedFrom !== initial.session || successor.continuity !== 'successor') throw new Error('successor session contract failed')
+  const successor = await evaluate(`({observations:state.currentWork.observations.length,session:state.currentWork.followUps.at(-1).dshSessionRef,continuedFrom:state.currentWork.followUps.at(-1).continuedFromDshSessionRef,continuity:state.currentWork.followUps.at(-1).continuity,followUpId:state.currentWork.followUps.at(-1).id,resultFollowUpId:state.currentWork.executions.at(-1).resultFollowUpId,dshEventCount:state.currentWork.executions.at(-1).dshEventCount})`)
+  if (successor.observations !== 2 || successor.session === initial.session || successor.continuedFrom !== initial.session || successor.continuity !== 'successor' || successor.resultFollowUpId !== successor.followUpId || !(successor.dshEventCount > 0)) throw new Error('successor session contract failed')
 
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
   await new Promise(resolve => setTimeout(resolve, 300))
@@ -75,7 +77,7 @@ try {
     const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
     await writeFile(recordPath.replace(/\.mp4$/i, '') + '.png', Buffer.from(shot.data, 'base64'))
   }
-  console.log(JSON.stringify({ candidate: await gitHead(), initial, followed, refreshed, successor, mobile, browserErrors: browserErrors.length, recordPath }))
+  console.log(JSON.stringify({ candidate: await gitHead(), binding, initial, followed, refreshed, successor, mobile, browserErrors: browserErrors.length, recordPath }))
 } finally {
   socket?.close()
   if (server) await stopServer(server)

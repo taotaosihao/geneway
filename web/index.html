@@ -121,7 +121,8 @@
     }
     function renderEmployees() {
       const employees = state.bootstrap?.employees ?? []
-      el('employee-list').innerHTML = employees.length ? employees.map(item => '<article class="card employee"><span class="employee-icon">' + html(item.name?.slice(0, 1)) + '</span><div><h3>' + html(item.name) + '</h3><div class="meta">' + html(item.description || '未提供职责说明') + '</div></div><span class="badge">' + (item.enabled ? '已启用' : '已停用') + '</span></article>').join('') : '<div class="empty">尚未配置数字员工。管理员完成绑定后，这里才会出现可选择的员工。</div>'
+      const skills = state.bootstrap?.skills ?? []
+      el('employee-list').innerHTML = employees.length ? employees.map(item => { const names = skills.filter(skill => item.skillIds?.includes(skill.id) && skill.enabled !== false).map(skill => skill.name); return '<article class="card employee"><span class="employee-icon">' + html(item.name?.slice(0, 1)) + '</span><div><h3>' + html(item.name) + '</h3><div class="meta">' + html(item.description || '未提供职责说明') + (names.length ? '<br>能力：' + html(names.join('、')) : '') + '</div></div><span class="badge">' + (item.enabled ? '已启用' : '已停用') + '</span></article>' }).join('') : '<div class="empty">尚未配置数字员工。管理员完成绑定后，这里才会出现可选择的员工。</div>'
     }
     async function openWork(id) {
       stopPolling()

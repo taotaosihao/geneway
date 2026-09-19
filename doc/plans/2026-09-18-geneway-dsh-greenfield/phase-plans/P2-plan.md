@@ -553,3 +553,23 @@ admin/member 均登录；admin 通过成员管理入口授权员工并禁用/重
 - 修改 GearJob 产品源码、生产站点或客户数据来制造验收。
 
 Ponytail 取舍：复用现有标准库、单事实源、DSH runner、原生插件、单文件 UI、备份与 CDP 旅程；只新增合同当前要求的 actor、capability、connection snapshot、waiting/confirmation 和第二工具边界。
+
+## 19. 实施记录
+
+### 19.1 计划门禁
+
+- 两名 Team Sol planner 完成初始独立规划和交换轮；独立阶段计划审查在第三轮以 `spec_compliance=pass`、`task_quality=pass`、零 issue 通过。
+- 唯一 P2 计划提交为 `3041b5c`；此前 P1 冻结产品候选仍为 `2df5d15`，P1 证据提交为 `63d18af`。
+
+### 19.2 P2-T0 已完成项
+
+- 提交 `6c66b35` 增加停机竞态回归和同 Host 生命周期探针。
+- 停机测试把 `service.close()` 挂起，在事件循环仍存活、shutdown 尚未结算时确认新 HTTP intake 已拒绝；释放 gate 后正常退出，并保留进程退出后拒绝检查。`pnpm test:service` 通过。
+- `scripts/probe-p2-lifecycle.mjs` 使用实际 `@deepseek-ai/cordis@4.0.2` Context/Fiber 和 DSH ToolRuntime：同一 Host mount 后唯一工具返回 42；dispose 后工具表为空、资源计时器停止、执行返回 `UNKNOWN_TOOL`；不创建新 Context 即 remount，工具仍唯一并再次返回 42。生命周期探针通过，AC-09 可继续实施，不需要自建协议。
+- T0 后完整 `test:unit`、`test:service`、`test:controlled` 和 `git diff --check` 通过。
+
+### 19.3 第二连接分支裁决
+
+- 实际尝试在现有隔离 Frappe bench 创建 `geneway-p2-b.localhost`；数据库/site 创建进入 Frappe 安装阶段后，被 GearJob `read_only_cache` 对当前 redis client `Pipeline` 的兼容错误阻断：`AttributeError: 'Pipeline' object has no attribute '_single_connection_client'`。
+- 失败发生于新 site 安装，不是 P1 GearJob A 的业务读取；未修改 GearJob 产品源码或现有 `dev.localhost`。团队核对 partial site 后使用 bench 精确 drop 新建目标，数据库和用户已删除，目录由 Frappe 可恢复地移到 `/workspace/development/frappe-bench/archived/sites/geneway-p2-b.localhost`。
+- 依据 §2、§6.3 和 §17 的已批准有限分支，P2 选定“真实 GearJob 外部测试 A + Frappe-compatible 受控 B”。B 只证明一份插件的多连接、同编号、禁用和不串目标；所有结构化 metadata、UI、视频、手册和 Lark 说明持续标明受控性质，不计为第二真实业务来源。

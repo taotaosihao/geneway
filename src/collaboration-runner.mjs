@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { runProfile } from '@deepseek-ai/dsh/profile-boot'
 import { CYCLE_TIME_TOOL, GEARJOB_TOOL, getCapability } from './capabilities.mjs'
 import { parseRunResult } from './dsh-runner.mjs'
+import { createObservation } from './domain/work-order.mjs'
 import { connectionSnapshot } from './execution-grant.mjs'
 import { readRuntimeConfig, readSettings } from './runtime-config.mjs'
 import { createCycleTimeTool } from '../plugins/cycle-time.mjs'
@@ -52,6 +53,9 @@ export function createCollaborationRunner({
   const knowledgeService = createKnowledgeService({ store, clock })
 
   return {
+    isKnowledgeEnabled() { return knowledgeEnabled },
+    getKnowledgeService() { return knowledgeService },
+
     async run(rootWorkId) {
       const state = await store.read()
       const rootWork = state.works.find(work => work.id === rootWorkId && work.collaboration)
@@ -602,9 +606,12 @@ export function createCollaborationRunner({
 
 function collaborationResult(id, work, parsed, sessionId, usage, now, generation, knowledgeDependencyRefs, contextConfirmationRefs) {
   const base = parsed.result
+  const payload = base.kind === 'gearjob.work-order.observation'
+    ? { ...createObservation({ source: base.payload, queriedAt: now }), observationId: id, evidenceMode: base.payload.evidenceMode, explanation: parsed.explanation, dshSessionRef: sessionId }
+    : base.payload
   return {
     id, kind: base.kind, capabilityId: work.capabilityId, skillId: work.skillId, schemaVersion: 1,
-    input: structuredClone(work.input), payload: base.payload, explanation: parsed.explanation, source: base.source,
+    input: structuredClone(work.input), payload, explanation: parsed.explanation, source: base.source,
     createdAt: now, toolName: base.toolName, pluginId: base.pluginId, pluginVersion: base.pluginVersion,
     dshSessionRef: sessionId, contextConfirmationRefs, employeeId: work.employeeId, handoffRefs: [], usage,
     knowledgeDependencyRefs, generation,

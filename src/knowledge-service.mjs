@@ -14,6 +14,20 @@ export function createKnowledgeService({ store, clock = () => new Date().toISOSt
   if (!store) throw new Error('store is required')
 
   return {
+    async listShareTargets(actor) {
+      const state = await store.read()
+      requireMember(state, actor)
+      const employees = new Map(state.employees.filter(item => item.enabled === true).map(item => [item.id, { id: item.id, name: item.name }]))
+      return {
+        members: state.members.filter(item => item.enabled === true).map(item => ({
+          id: item.id,
+          displayName: item.displayName,
+          employeeIds: item.employeeIds.filter(id => employees.has(id)),
+        })),
+        employees: [...employees.values()],
+      }
+    },
+
     async listMaterials(actor, { employeeId } = {}) {
       const state = await store.read()
       const member = requireMember(state, actor)

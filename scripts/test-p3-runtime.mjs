@@ -178,6 +178,19 @@ try {
   assert.equal(capture.sequence('root-summary') > Math.max(capture.sequence('item-a'), capture.sequence('item-b')), true)
   assert.deepEqual(capture.tools('root-summary'), ['geneway_collaboration_submit_summary'])
   assert.deepEqual(completed.results.at(-1).payload.resultRefs, childrenResultRefs(children))
+
+  const gearCompleted = await create(service, actor, 'gear-complete', [{
+    id: 'item-gear-complete', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id,
+    goal: '完成并持久化工单观察', input: { workOrderId: 'WO-CANCEL' },
+  }])
+  await waitFor(service, actor, gearCompleted.value.id, work => work.status === 'completed')
+  const gearChild = (await store.read()).works.find(work => work.rootWorkId === gearCompleted.value.id)
+  const gearResult = gearChild.results.at(-1)
+  assert.equal(gearResult.kind, 'gearjob.work-order.observation')
+  assert.equal(gearResult.payload.observationId, gearResult.id)
+  assert.equal(gearResult.payload.queriedAt, gearResult.createdAt)
+  assert.equal(gearResult.payload.dshSessionRef, gearResult.dshSessionRef)
+  assert.deepEqual(gearResult.source, Object.fromEntries(['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'sourceRecordId', 'sourceRevision', 'sourceTime'].filter(key => gearResult.payload[key] !== undefined).map(key => [key, gearResult.payload[key]])))
   assert.match(completed.results.at(-1).explanation, /后置事实汇总/)
   assert.equal(capture.maxActiveChildren <= 2, true)
   assertClosedGraphRejects(persisted, completed.id)

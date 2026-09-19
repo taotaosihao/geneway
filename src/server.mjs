@@ -6,6 +6,7 @@ import { createAuthRuntime, isSessionCurrent } from './auth.mjs'
 import { createFileStore } from './store/file-store.mjs'
 import { createWorkService, ERROR_STATUS, safeServiceError, serviceFailure } from './work-service.mjs'
 import { createDshRunner } from './dsh-runner.mjs'
+import { createCollaborationRunner } from './collaboration-runner.mjs'
 import { readRuntimeConfig } from './runtime-config.mjs'
 import { readConnectionCatalog } from './connection-catalog.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
@@ -13,6 +14,10 @@ import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
 const JSON_TYPE = 'application/json'
+const WORK_FIELDS = ['employeeId', 'skillId', 'capabilityId', 'connectionId', 'goal', 'input', 'workOrderId', 'availableSeconds', 'quantity', 'clientRequestId']
+const COLLABORATION_ROOT_FIELDS = ['workType', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'goal', 'clientRequestId', 'items']
+const COLLABORATION_ITEM_FIELDS = ['id', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'goal', 'input', 'workOrderId', 'availableSeconds', 'quantity', 'knowledgeQuery', 'dependsOn']
+const BUSINESS_INPUT_FIELDS = ['workOrderId', 'availableSeconds', 'quantity']
 
 export async function start() {
   const port = positivePort(process.env.GENEWAY_PORT ?? 3471)
@@ -32,9 +37,10 @@ export async function start() {
   const store = createFileStore(statePath)
   const connectionCatalog = await readConnectionCatalog(runtimeConfig.connectionCatalogFile, root)
   const runner = createDshRunner({ root, config: runtimeConfig })
+  const collaborationRunner = createCollaborationRunner({ store, root, dshHome: runtimeConfig.dshHome, secretRoot: runtimeConfig.secretRoot })
+  const knowledge = collaborationRunner.getKnowledgeService()
   const service = createWorkService({
-    store,
-    runner,
+    store, runner, collaborationRunner,
     connectionCatalog,
     policyPaths: { stateFile: runtimeConfig.stateFile, dataRoot: runtimeConfig.dataRoot, secretRoot: runtimeConfig.secretRoot },
     connectionTester: async connection => {
@@ -46,7 +52,7 @@ export async function start() {
   })
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
-  const server = createGenewayServer({ service, store, auth, index, trustedOrigin })
+  const server = createGenewayServer({ service, knowledge, collaborationRunner, store, auth, index, trustedOrigin })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
   let shuttingDown = false
@@ -61,7 +67,7 @@ export async function start() {
   return server
 }
 
-export function createGenewayServer({ service, store, auth, index = '', trustedOrigin }) {
+export function createGenewayServer({ service, knowledge, collaborationRunner, store, auth, index = '', trustedOrigin }) {
   if (!service || !store || !auth || !trustedOrigin) throw new Error('server dependencies are required')
   return createServer(async (request, response) => {
     try {
@@ -96,7 +102,7 @@ export function createGenewayServer({ service, store, auth, index = '', trustedO
 
       const context = await authenticated(request, store, auth)
       const actor = context.member
-      if (request.method === 'GET' && url.pathname === '/api/bootstrap') return sendJson(response, 200, await service.bootstrap(actor))
+      if (request.method === 'GET' && url.pathname === '/api/bootstrap') { exactQuery(url); return sendJson(response, 200, await service.bootstrap(actor)) }
       if (request.method === 'GET' && url.pathname === '/api/confirmations') return sendJson(response, 200, await service.listConfirmations(actor))
       if (request.method === 'POST' && url.pathname === '/api/confirmations') {
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'label', 'value'])
@@ -113,21 +119,104 @@ export function createGenewayServer({ service, store, auth, index = '', trustedO
       }
 
       if (request.method === 'POST' && url.pathname === '/api/works') {
-        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'skillId', 'capabilityId', 'connectionId', 'goal', 'input', 'workOrderId', 'availableSeconds', 'quantity', 'clientRequestId'])
-        return resultResponse(response, await service.createWork(actor, body))
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, [...WORK_FIELDS, 'workType', 'items'])
+        if (body.workType === undefined) { exactObject(body, WORK_FIELDS); if (body.input !== undefined) exactObject(body.input, BUSINESS_INPUT_FIELDS); return resultResponse(response, await service.createWork(actor, body)) }
+        if (body.workType !== 'collaboration') throw httpError('INVALID_REQUEST', '工作类型无效')
+        exactObject(body, COLLABORATION_ROOT_FIELDS)
+        if (!Array.isArray(body.items)) throw httpError('INVALID_REQUEST', '协作计划必须是数组')
+        for (const item of body.items) {
+          exactObject(item, COLLABORATION_ITEM_FIELDS)
+          if (item.input !== undefined) {
+            exactObject(item.input, BUSINESS_INPUT_FIELDS)
+            if (BUSINESS_INPUT_FIELDS.some(key => item[key] !== undefined)) throw httpError('INVALID_REQUEST', '协作计划项不能同时使用 input 与直接输入字段')
+          }
+        }
+        const { workType: _workType, ...input } = body
+        return resultResponse(response, await service.createCollaboration(actor, input))
       }
-      const workMatch = url.pathname.match(/^\/api\/works\/([^/]+)(?:\/(continue|refresh|follow-up|cancel))?$/)
-      if (workMatch && request.method === 'GET' && !workMatch[2]) return resultResponse(response, await service.getWork(actor, decode(workMatch[1])))
-      if (workMatch && request.method === 'POST' && workMatch[2]) {
+      const workMatch = url.pathname.match(/^\/api\/works\/([^/]+)(?:\/(plan|continue|refresh|follow-up|recheck|cancel))?$/)
+      if (workMatch && request.method === 'GET' && !workMatch[2]) { exactQuery(url); return resultResponse(response, await service.getWork(actor, decode(workMatch[1]))) }
+      if (workMatch && request.method === 'PATCH' && workMatch[2] === 'plan') {
+        exactQuery(url)
+        const current = await service.getWork(actor, decode(workMatch[1]))
+        if (!current.ok) return resultResponse(response, current)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'items'])
+        if (current.value.workType !== 'collaboration') throw httpError('INVALID_REQUEST', '仅协作工作可修改计划')
+        if (!Array.isArray(body.items)) throw httpError('INVALID_REQUEST', '计划修改必须是数组')
+        for (const item of body.items) exactObject(item, ['id', 'goal', 'employeeId'])
+        return resultResponse(response, await service.updateCollaborationPlan(actor, decode(workMatch[1]), body))
+      }
+      if (workMatch && request.method === 'POST' && ['continue', 'refresh', 'follow-up', 'recheck', 'cancel'].includes(workMatch[2])) {
+        exactQuery(url)
         const id = decode(workMatch[1])
         const action = workMatch[2]
-        const allowed = action === 'continue' ? ['input', 'workOrderId', 'availableSeconds', 'quantity', 'clientRequestId'] : action === 'follow-up' ? ['text', 'clientRequestId'] : action === 'refresh' ? ['clientRequestId'] : []
+        const current = await service.getWork(actor, id)
+        if (!current.ok) return resultResponse(response, current)
+        if (current.value.workType === 'collaboration-child') throw httpError('INVALID_REQUEST', '请从所属协作工作执行此操作')
+        const collaboration = current.value.workType === 'collaboration'
+        const allowed = action === 'continue' ? collaboration ? ['clientRequestId', 'inputs'] : ['input', 'workOrderId', 'availableSeconds', 'quantity', 'clientRequestId']
+          : action === 'recheck' && collaboration ? ['clientRequestId', 'inputs']
+            : action === 'follow-up' && !collaboration ? ['text', 'clientRequestId']
+              : action === 'refresh' && !collaboration ? ['clientRequestId'] : []
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, allowed)
-        const result = action === 'continue' ? await service.continueWork(actor, id, body)
+        if ((action === 'recheck' && !collaboration) || (collaboration && ['refresh', 'follow-up'].includes(action))) throw httpError('INVALID_REQUEST', '工作类型不支持此操作')
+        if (body.input !== undefined) exactObject(body.input, BUSINESS_INPUT_FIELDS)
+        if (body.inputs !== undefined) {
+          exactObject(body.inputs, current.value.workType === 'collaboration' ? current.value.plan.items.map(item => item.id) : [])
+          for (const value of Object.values(body.inputs)) exactObject(value, BUSINESS_INPUT_FIELDS)
+        }
+        const result = action === 'continue' ? current.value.workType === 'collaboration'
+          ? await service.continueCollaboration(actor, id, body)
+          : await service.continueWork(actor, id, body)
+          : action === 'recheck' ? current.value.workType === 'collaboration'
+            ? await service.recheckCollaboration(actor, id, body)
+            : (() => { throw httpError('INVALID_REQUEST', '仅协作工作可重新核对') })()
           : action === 'refresh' ? await service.refreshWork(actor, id, body)
             : action === 'follow-up' ? await service.followUp(actor, id, body.text, body)
-              : await service.cancel(actor, id)
+              : action === 'cancel' ? await service.cancel(actor, id)
+                : (() => { throw httpError('NOT_FOUND', '接口不存在') })()
         return resultResponse(response, result)
+      }
+
+      if (url.pathname === '/api/knowledge/share-targets' && request.method === 'GET') {
+        exactQuery(url)
+        return sendJson(response, 200, await requireKnowledge(knowledge).listShareTargets(actor))
+      }
+      if (url.pathname === '/api/knowledge') {
+        if (request.method === 'GET') { exactQuery(url, ['employeeId']); return sendJson(response, 200, await requireKnowledge(knowledge).listMaterials(actor, queryObject(url, ['employeeId']))) }
+        if (request.method === 'POST') {
+          exactQuery(url)
+          const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeIds', 'sharedMemberIds', 'sharedEmployeeIds', 'title', 'body', 'format', 'sourceLabel', 'authorizationBasis'])
+          requireKnowledgeEnabled(knowledge, collaborationRunner)
+          return sendJson(response, 200, await knowledge.createMaterial(actor, body))
+        }
+      }
+      if (url.pathname === '/api/knowledge/search' && request.method === 'POST') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'query'])
+        requireKnowledgeEnabled(knowledge, collaborationRunner)
+        return sendJson(response, 200, await knowledge.search(actor, body))
+      }
+      const knowledgeMatch = url.pathname.match(/^\/api\/knowledge\/([^/]+)(?:\/(sharing))?$/)
+      if (knowledgeMatch && request.method === 'GET' && !knowledgeMatch[2]) {
+        exactQuery(url, ['employeeId'])
+        return sendJson(response, 200, await requireKnowledge(knowledge).getMaterial(actor, decode(knowledgeMatch[1]), queryObject(url, ['employeeId'])))
+      }
+      if (knowledgeMatch && request.method === 'PATCH' && !knowledgeMatch[2]) {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'employeeIds', 'title', 'body', 'format', 'sourceLabel', 'authorizationBasis'])
+        return sendJson(response, 200, await requireKnowledge(knowledge).updateMaterial(actor, decode(knowledgeMatch[1]), body))
+      }
+      if (knowledgeMatch && request.method === 'PATCH' && knowledgeMatch[2] === 'sharing') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'memberIds', 'employeeIds'])
+        return sendJson(response, 200, await requireKnowledge(knowledge).updateSharing(actor, decode(knowledgeMatch[1]), body))
+      }
+      if (knowledgeMatch && request.method === 'DELETE' && !knowledgeMatch[2]) {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision'])
+        return sendJson(response, 200, await requireKnowledge(knowledge).deleteMaterial(actor, decode(knowledgeMatch[1]), body))
       }
 
       if (request.method === 'GET' && url.pathname === '/api/admin/members') return sendJson(response, 200, await service.listMembers(actor))
@@ -225,6 +314,22 @@ function sessionCookie(token, expiresAt) { return `${COOKIE}=${encodeURIComponen
 function clearSessionCookie() { return `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0` }
 function cookieValue(header, name) { for (const part of String(header ?? '').split(';')) { const [key, ...rest] = part.trim().split('='); if (key === name) { try { return decodeURIComponent(rest.join('=')) } catch { return undefined } } } return undefined }
 function safeMember(member) { return Object.fromEntries(['id', 'loginName', 'displayName', 'role', 'enabled', 'sessionVersion', 'employeeIds'].map(key => [key, structuredClone(member[key])])) }
+function exactObject(value, allowed) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw httpError('INVALID_REQUEST', '请求 JSON 必须是对象')
+  const unexpected = Object.keys(value).find(key => !allowed.includes(key))
+  if (unexpected) throw httpError('INVALID_REQUEST', `请求包含未声明字段 ${unexpected}`)
+}
+function exactQuery(url, allowed = []) {
+  for (const key of new Set(url.searchParams.keys())) {
+    if (!allowed.includes(key) || url.searchParams.getAll(key).length !== 1) throw httpError('INVALID_REQUEST', `查询参数 ${key} 无效`)
+  }
+}
+function queryObject(url, allowed) { return Object.fromEntries(allowed.filter(key => url.searchParams.has(key)).map(key => [key, url.searchParams.get(key)])) }
+function requireKnowledge(knowledge) { if (!knowledge) throw httpError('KNOWLEDGE_PLUGIN_DISABLED', '知识能力已停用'); return knowledge }
+function requireKnowledgeEnabled(knowledge, runner) {
+  requireKnowledge(knowledge)
+  if (runner?.isKnowledgeEnabled?.() === false) throw httpError('KNOWLEDGE_PLUGIN_DISABLED', '知识能力已停用')
+}
 function decode(value) { try { return decodeURIComponent(value) } catch { throw httpError('INVALID_REQUEST', '路径参数无效') } }
 function positivePort(value) { const port = Number(value); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('GENEWAY_PORT 无效'); return port }
 function httpError(code, message) { return Object.assign(new Error(message), { code, status: ERROR_STATUS[code] ?? 500 }) }

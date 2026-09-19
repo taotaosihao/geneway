@@ -247,17 +247,20 @@ export function createWorkService({ store, source = null, runner = null, clock =
 
   async function execute(workId, executionId, operation, question, controller) {
     try {
-      if (!await markRunning(workId, executionId)) return
+      if (!await markRunning(workId, executionId)) {
+        if (controller.signal.aborted) await finishError(workId, executionId, serviceError('CANCELLED', '本次执行已停止'))
+        return
+      }
       const work = await findWork(workId)
       if (!work) return
       if (!await reauthorized(work)) throw serviceError('FORBIDDEN', '当前员工或连接已不再获准执行')
+      if (controller.signal.aborted) throw serviceError('CANCELLED', '本次执行已停止')
       if (operation === 'follow-up') {
         const latest = work.observations.at(-1)
         const model = await explain({ executionId, sessionId: latest?.dshSessionRef, workOrderId: work.workOrderId, operation, observation: latest, question })
         await finishFollowUp(workId, executionId, question, model)
         return
       }
-      if (controller.signal.aborted) throw serviceError('CANCELLED', '本次执行已停止')
       const previous = work.observations.at(-1)
       const model = await explain({ executionId, sessionId: previous?.dshSessionRef, workOrderId: work.workOrderId, operation, observation: previous })
       if (!model.observation) throw serviceError('TOOL_CHAIN_INVALID', 'DSH 未返回规范化工单观察')

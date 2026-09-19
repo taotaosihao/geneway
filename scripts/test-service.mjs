@@ -99,6 +99,47 @@ try {
   assert.equal(failedWork.executions.at(-1).error.code, 'MODEL_FAILURE')
   await failureService.close()
 
+  const cancelBase = createFileStore(join(root, 'follow-cancel-state.json'))
+  let gateCountdown = -1
+  let gateConsumed = false
+  let releaseGate
+  const gate = new Promise(resolve => { releaseGate = resolve })
+  const cancelStore = {
+    read: (...args) => cancelBase.read(...args),
+    async update(...args) {
+      if (gateCountdown === 0 && !gateConsumed) {
+        gateConsumed = true
+        await gate
+      } else if (gateCountdown > 0) gateCountdown -= 1
+      return cancelBase.update(...args)
+    },
+  }
+  await cancelBase.update(state => ({ ...state, employees: [{ id: 'e', enabled: true, connectionIds: ['c'] }], connections: [{ id: 'c', enabled: true, status: 'ready' }] }))
+  let followRuns = 0
+  const cancelService = createWorkService({
+    store: cancelStore,
+    source: { configured: true, allows: () => true },
+    runner: {
+      configured: true,
+      sourceConfigured: true,
+      async run({ operation, workOrderId, sessionId, observation }) {
+        if (operation === 'follow-up') { followRuns += 1; return { explanation: 'must not run', dshSessionRef: sessionId, continuity: 'same-session', contextObservationId: observation.observationId } }
+        return { observation: { workOrderId, status: 'Draft', plannedQuantity: 1, completedQuantity: 0, unit: 'Nos', sourceRecordId: `Work Order:${workOrderId}`, sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic' }, explanation: 'ok', dshSessionRef: 'cancel-session', continuity: 'new' }
+      },
+      async cancel() { return false },
+    },
+  })
+  const cancelSeed = await cancelService.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'W', clientRequestId: 'seed' })
+  await waitFor(cancelService, cancelSeed.value.id, work => work.status === 'completed')
+  gateCountdown = 1
+  const pendingFollow = await cancelService.followUp(cancelSeed.value.id, 'cancel before dispatch', { clientRequestId: 'cancel-follow' })
+  await cancelService.cancel(cancelSeed.value.id)
+  releaseGate()
+  const cancelledFollow = await waitFor(cancelService, pendingFollow.value.id, work => work.status === 'cancelled')
+  assert.equal(cancelledFollow.followUps.length, 0)
+  assert.equal(followRuns, 0)
+  await cancelService.close()
+
   await service.close()
   const successorCalls = []
   const successor = createWorkService({

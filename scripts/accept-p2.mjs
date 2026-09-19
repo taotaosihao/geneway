@@ -312,7 +312,10 @@ function expectedNetworkFailure(item, privateWorkId) {
 
 async function ensureBrowser() {
   try { if ((await fetch(`${endpoint}/json/version`)).ok) return undefined } catch {}
-  if (endpoint !== 'http://127.0.0.1:9223') throw new Error(`Chrome CDP is unavailable at ${endpoint}`)
+  const endpointUrl = new URL(endpoint)
+  if (endpointUrl.protocol !== 'http:' || endpointUrl.hostname !== '127.0.0.1' || endpointUrl.pathname !== '/' || endpointUrl.search || endpointUrl.hash) throw new Error(`Chrome CDP endpoint must be loopback HTTP: ${endpoint}`)
+  const debuggingPort = Number(endpointUrl.port || 80)
+  if (!Number.isInteger(debuggingPort) || debuggingPort < 1 || debuggingPort > 65535) throw new Error(`Chrome CDP port is invalid: ${endpoint}`)
   let xvfb
   if (!(await pathExists(`/tmp/.X11-unix/X${display.replace(/^:/, '')}`))) {
     xvfb = spawn('Xvfb', [display, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' })
@@ -321,7 +324,8 @@ async function ensureBrowser() {
   }
   const chrome = spawn('google-chrome', [
     '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
-    '--window-size=1440,900', '--window-position=0,0', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=9223',
+    '--disable-save-password-bubble', '--password-store=basic', '--disable-features=PasswordManagerOnboarding,PasswordLeakDetection',
+    '--window-size=1440,900', '--window-position=0,0', '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${debuggingPort}`,
     `--user-data-dir=${join(scratch, 'chrome')}`, 'about:blank',
   ], { env: { ...process.env, DISPLAY: display }, stdio: 'ignore' })
   for (let attempt = 0; attempt < 100; attempt += 1) {

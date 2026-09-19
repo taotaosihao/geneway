@@ -11,6 +11,8 @@ import { readRuntimeConfig, readSettings } from './runtime-config.mjs'
 import { createCycleTimeTool } from '../plugins/cycle-time.mjs'
 import { createGearJobWorkOrderTool } from '../plugins/gearjob-work-order.mjs'
 import { COLLABORATION_TOOLS, createCollaborationTools } from '../plugins/collaboration.mjs'
+import { KNOWLEDGE_TOOLS, createKnowledgePlugin } from '../plugins/knowledge.mjs'
+import { createKnowledgeService, currentKnowledgeReference, knowledgeRefKey, stableKnowledgeRefs } from './knowledge-service.mjs'
 
 const requireFromDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
 const { createUserMessage } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/dsh-llm')).href)
@@ -30,16 +32,24 @@ export function createCollaborationRunner({
   secretRoot = readRuntimeConfig(process.env, workspaceRoot).secretRoot,
   clock = () => new Date().toISOString(),
   onError = () => undefined,
+  testHooks = {},
 } = {}) {
   if (!store) throw new Error('store is required')
   if (!Number.isSafeInteger(agentOptions.maxTokens) || agentOptions.maxTokens < 1 || agentOptions.maxTokens > 4096) throw new Error('collaboration maxTokens must be between 1 and 4096')
   let runtime
   let booting
+  let knowledgeFiber
+  let knowledgeMounting
+  let knowledgeLifecycle = Promise.resolve()
+  let knowledgeEnabled = true
   const bindings = new WeakMap()
+  const knowledgeSelections = new WeakMap()
+  const summaryContexts = new WeakMap()
   const summarySubmissions = new WeakMap()
   const requestFailures = new WeakMap()
   const gates = new Map()
   const activeRoots = new Map()
+  const knowledgeService = createKnowledgeService({ store, clock })
 
   return {
     async run(rootWorkId) {
@@ -92,6 +102,27 @@ export function createCollaborationRunner({
       return accepted
     },
 
+    async enableKnowledge() {
+      const operation = knowledgeLifecycle.then(async () => {
+        knowledgeEnabled = true
+        await mountKnowledge(await context())
+      })
+      knowledgeLifecycle = operation.catch(() => undefined)
+      return operation
+    },
+
+    async disableKnowledge() {
+      const operation = knowledgeLifecycle.then(async () => {
+        knowledgeEnabled = false
+        await knowledgeMounting
+        await knowledgeFiber?.dispose()
+        knowledgeFiber = undefined
+        testHooks.onKnowledgeSchemas?.(runtime?.ctx.tools.schemas().map(schema => schema.name))
+      })
+      knowledgeLifecycle = operation.catch(() => undefined)
+      return operation
+    },
+
     async close() {
       const ids = [...activeRoots.keys()]
       await Promise.all(ids.map(async id => {
@@ -102,6 +133,9 @@ export function createCollaborationRunner({
       }))
       await Promise.all([...activeRoots.values()].map(entry => entry.promise.catch(() => undefined)))
       activeRoots.clear()
+      await knowledgeLifecycle
+      await knowledgeFiber?.dispose()
+      knowledgeFiber = undefined
       if (runtime) await runtime.shutdown.shutdown(0)
       runtime = undefined
       booting = undefined
@@ -126,11 +160,11 @@ export function createCollaborationRunner({
     }
     delete values.GENEWAY_DSH_GRANT_FILE
     const started = await runProfileImpl({ environment: launchEnvironment(values), profile: 'sdk', patchFiles: [patchPath], args: [], resolutionMode: 'runtime' })
-    install(started.ctx)
+    await install(started.ctx)
     return started
   }
 
-  function install(ctx) {
+  async function install(ctx) {
     ctx.on('agent/created', ({ agent }) => {
       if (agent.session.header.origin !== 'subagent') return
       const gate = deferred()
@@ -139,7 +173,11 @@ export function createCollaborationRunner({
         const decision = await untilAbort(gate.promise, signal)
         if (!decision.ok) throw decision.error
         const binding = bindings.get(current)
-        try { await authorize(binding, { reserveRequest: true }) }
+        try {
+          await testHooks.beforeAgentRequest?.({ binding, agent: current })
+          await authorize(binding, { reserveRequest: true })
+          await validateRequestContext(binding, current)
+        }
         catch (error) { requestFailures.set(current, error); throw error }
         return next()
       })
@@ -149,13 +187,27 @@ export function createCollaborationRunner({
     ctx.tools.register(createGearJobWorkOrderTool({ authorize: toolAuthorize }))
     ctx.tools.register(createCycleTimeTool({ authorize: toolAuthorize }))
     for (const tool of createCollaborationTools({ invoke: invokeCollaboration })) ctx.tools.register(tool)
+    if (knowledgeEnabled) await mountKnowledge(ctx)
     ctx.tools.guard(execution => {
-      if (![GEARJOB_TOOL, CYCLE_TIME_TOOL, ...Object.values(COLLABORATION_TOOLS)].includes(execution.name)) return undefined
+      if (![GEARJOB_TOOL, CYCLE_TIME_TOOL, ...Object.values(COLLABORATION_TOOLS), ...Object.values(KNOWLEDGE_TOOLS)].includes(execution.name)) return undefined
       const binding = execution.agent && bindings.get(execution.agent)
       if (!binding) return 'Agent identity is not bound to a collaboration execution'
       if (!binding.allowedTools.includes(execution.name)) return 'Tool is outside the employee collaboration scope'
       return undefined
     })
+  }
+
+  async function mountKnowledge(ctx) {
+    if (knowledgeFiber) return knowledgeFiber
+    if (!knowledgeMounting) knowledgeMounting = (async () => {
+      const fiber = ctx.plugin(createKnowledgePlugin(invokeKnowledge))
+      await fiber
+      if (knowledgeEnabled) knowledgeFiber = fiber
+      else await fiber.dispose()
+      testHooks.onKnowledgeSchemas?.(ctx.tools.schemas().map(schema => schema.name))
+      return knowledgeFiber
+    })().finally(() => { knowledgeMounting = undefined })
+    return knowledgeMounting
   }
 
   async function executeRoot(rootWorkId, generation, entry) {
@@ -169,7 +221,11 @@ export function createCollaborationRunner({
     bindings.set(rootHandle.agent, rootBinding)
     rootHandle.agent.ctx.on('agent/request', async ({ agent, signal }, next) => {
       if (bindings.get(agent) !== rootBinding || signal.aborted) throw runtimeError('CANCELLED', '协作根执行已停止')
-      try { await authorize(rootBinding, { reserveRequest: true }) }
+      try {
+        await testHooks.beforeAgentRequest?.({ binding: rootBinding, agent })
+        await authorize(rootBinding, { reserveRequest: true })
+        await validateRequestContext(rootBinding, agent)
+      }
       catch (error) { requestFailures.set(agent, error); throw error }
       return next()
     })
@@ -190,7 +246,9 @@ export function createCollaborationRunner({
       }
     }
     if (waiting) return waitRoot(rootBinding)
+    await testHooks.beforeSummaryProjection?.(rootBinding)
     const projection = await summaryProjection(rootBinding)
+    summaryContexts.set(rootHandle.agent, structuredClone(projection))
     rootHandle.agent.ctx.tools.restrict({ allow: [COLLABORATION_TOOLS.summarize] })
     rootHandle.agent.followup(createUserMessage({
       content: [{ type: 'text', text: `SCENARIO:root-summary Review only this persisted child result and handoff projection, call ${COLLABORATION_TOOLS.summarize} once with the exact resultRefs, then provide a concise factual summary: ${JSON.stringify(projection)}` }],
@@ -203,7 +261,7 @@ export function createCollaborationRunner({
     if (!isDeepStrictEqual(submittedRefs, projection.resultRefs)) throw runtimeError('TOOL_CHAIN_INVALID', '负责人未提交当前持久结果引用')
     const explanation = lastAssistantText(rootHandle.agent.session.snapshotEvents())
     if (!explanation) throw runtimeError('TOOL_CHAIN_INVALID', '负责人未生成后置事实汇总')
-    return finishRoot(rootBinding, rootHandle.agent.id, explanation, rootHandle.agent.session.snapshotEvents(), submittedRefs)
+    return finishRoot(rootBinding, rootHandle.agent.id, explanation, rootHandle.agent.session.snapshotEvents(), submittedRefs, projection.confirmationRefs)
   }
 
   async function executeChild(ctx, rootSnapshot, item, generation, entry, rootSignal) {
@@ -217,19 +275,22 @@ export function createCollaborationRunner({
       throw runtimeError('BUSY', '子工作不可运行')
     }
     const capability = getCapability(child.capabilityId)
+    const knowledgeDependent = Boolean(child.knowledgeQuery)
+    if (knowledgeDependent && !knowledgeEnabled) throw runtimeError('KNOWLEDGE_PLUGIN_DISABLED', '知识能力已停用')
+    const confirmations = state.confirmations.filter(item => item.ownerMemberId === rootSnapshot.ownerMemberId && item.employeeId === child.employeeId && item.status === 'active').sort((left, right) => left.id.localeCompare(right.id))
     const signal = AbortSignal.any([rootSignal, AbortSignal.timeout(rootSnapshot.collaboration.childTimeoutMs)])
     let run
     try {
       run = await ctx.subagents.start('spawn', {
         label: item.id,
-        prompt: [{ type: 'text', text: childPrompt(child, capability.toolName) }],
+        prompt: [{ type: 'text', text: childPrompt(child, capability.toolName, confirmations) }],
         parent: [...entry.handles][0].agent,
         signal,
         agentOptions,
         outputSchema: { type: 'object', additionalProperties: false, properties: { status: { type: 'string', const: 'done' }, explanation: { type: 'string' } }, required: ['status', 'explanation'] },
         maxDepth: 1,
-        toolFilter: { allow: [capability.toolName] },
-        persona: `You are ${child.employeeId}. Complete only the registered child work and use the only visible business tool once.`,
+        toolFilter: { allow: [capability.toolName, ...(knowledgeDependent ? Object.values(KNOWLEDGE_TOOLS) : [])] },
+        persona: `You are ${child.employeeId}. Complete only the registered child work and use only the visible tools required by the prompt.`,
       })
       entry.runs.add(run)
       const connection = child.connectionId ? state.connections.find(candidate => candidate.id === child.connectionId) : null
@@ -237,13 +298,16 @@ export function createCollaborationRunner({
         kind: 'child', rootWorkId: rootSnapshot.id, workId: child.id, executionId: execution.id,
         employeeId: child.employeeId, generation, planRevision: currentRoot.plan.revision,
         cancelGeneration: rootSnapshot.collaboration.cancelGeneration,
-        allowedTools: Object.freeze([capability.toolName]), capabilityId: child.capabilityId,
+        allowedTools: Object.freeze([capability.toolName, ...(knowledgeDependent ? Object.values(KNOWLEDGE_TOOLS) : [])]), capabilityId: child.capabilityId,
         toolName: capability.toolName, input: structuredClone(child.input), connectionId: child.connectionId ?? null,
         connection: connection ? Object.freeze(connectionSnapshot(connection)) : null,
+        knowledgeQuery: child.knowledgeQuery,
+        confirmationRefs: Object.freeze(confirmations.map(item => Object.freeze({ id: item.id, revision: item.revision }))),
       })
       const gate = gates.get(run.id)
       if (!gate || gate.agent !== run.localAgent || !ctx.agents.isOwnedBy(run.id, [...entry.handles][0].agent)) throw runtimeError('FORBIDDEN', '原生子 Agent 身份无法绑定')
       bindings.set(run.localAgent, binding)
+      if (knowledgeDependent) knowledgeSelections.set(run.localAgent, { allowlist: new Map(), selected: [] })
       await bindSession(binding, run.id, 'running')
       gate.gate.resolve({ ok: true })
       const result = await run.result
@@ -255,7 +319,7 @@ export function createCollaborationRunner({
       if (failure) throw runtimeError(failure.code, failure.message)
       if (result.stopReason !== 'completed') throw runtimeError('UPSTREAM_ERROR', '子工作模型执行未完成')
       const parsed = parseRunResult({ ...result, finalResponse: result.structured?.explanation, events: businessEvents(events), sessionId: run.id }, { capabilityId: child.capabilityId, input: child.input })
-      await finishChild(binding, parsed, events)
+      await finishChild(binding, parsed, events, knowledgeSelections.get(run.localAgent)?.selected ?? [])
       return true
     } catch (error) {
       const gate = run && gates.get(run.id)
@@ -276,6 +340,30 @@ export function createCollaborationRunner({
     const context = await authorize(binding)
     if (grant && grant.executionId !== binding.executionId) throw runtimeError('FORBIDDEN', '工具授权已失效')
     return Object.freeze({ executionId: binding.executionId, connection: context.connection ? connectionSnapshot(context.connection) : null, secretRoot })
+  }
+
+  async function invokeKnowledge({ name, args, invocation }) {
+    if (!knowledgeEnabled) throw runtimeError('KNOWLEDGE_PLUGIN_DISABLED', '知识能力已停用')
+    const agent = invocation.agent
+    const binding = agent && bindings.get(agent)
+    const selection = agent && knowledgeSelections.get(agent)
+    if (!binding || binding.kind !== 'child' || !binding.knowledgeQuery || !selection || !binding.allowedTools.includes(name)) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '知识引用无效')
+    const context = await authorize(binding)
+    if (name === KNOWLEDGE_TOOLS.search) {
+      if (args.query !== binding.knowledgeQuery) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '知识检索参数无效')
+      await testHooks.beforeKnowledgeSearch?.(binding)
+      const results = await knowledgeService.search({ id: context.rootWork.ownerMemberId }, { employeeId: binding.employeeId, query: args.query })
+      for (const result of results) selection.allowlist.set(knowledgeRefKey(result), { knowledgeId: result.knowledgeId, revision: result.revision, segmentId: result.segmentId })
+      return { ok: true, results }
+    }
+    if (name !== KNOWLEDGE_TOOLS.submitReferences || !Array.isArray(args.references) || !args.references.length) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '知识引用不能为空')
+    const refs = stableKnowledgeRefs(args.references)
+    if (refs.length !== args.references.length || refs.some(ref => !selection.allowlist.has(knowledgeRefKey(ref)))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '知识引用不属于当前检索')
+    const state = await store.read()
+    if (refs.some(ref => !currentKnowledgeReference(state, ref, context.rootWork.ownerMemberId, binding.employeeId)
+      || !currentKnowledgeReference(state, ref, context.rootWork.ownerMemberId, context.rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '知识引用已失效')
+    selection.selected = refs
+    return { ok: true, references: refs }
   }
 
   async function invokeCollaboration({ name, args, invocation }) {
@@ -324,6 +412,24 @@ export function createCollaborationRunner({
     return context
   }
 
+  async function validateRequestContext(binding, agent) {
+    const state = await store.read()
+    const rootWork = state.works.find(work => work.id === binding.rootWorkId)
+    if (!rootWork) throw runtimeError('FORBIDDEN', '当前执行授权已失效')
+    if (binding.kind === 'child') {
+      if (binding.confirmationRefs.some(ref => !activeConfirmation(state, ref, rootWork.ownerMemberId, binding.employeeId))) throw runtimeError('FORBIDDEN', '确认信息授权已失效')
+      const refs = [...(knowledgeSelections.get(agent)?.allowlist.values() ?? [])]
+      if (refs.some(ref => !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, binding.employeeId)
+        || !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '知识引用已失效')
+      return
+    }
+    const expected = summaryContexts.get(agent)
+    if (!expected) return
+    if (expected.confirmationRefs.some(ref => !activeConfirmation(state, ref, rootWork.ownerMemberId, rootWork.employeeId))) throw runtimeError('FORBIDDEN', '确认信息授权已失效')
+    const current = await summaryProjection(binding)
+    if (!isDeepStrictEqual(current, expected)) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '汇总上下文已失效')
+  }
+
   async function startRoot(rootWorkId, generation) {
     let snapshot
     await store.update(state => {
@@ -354,15 +460,21 @@ export function createCollaborationRunner({
     })
   }
 
-  async function finishChild(binding, parsed, events) {
+  async function finishChild(binding, parsed, events, selectedRefs) {
     const now = clock()
+    await testHooks.beforeFinishChild?.(binding)
     await store.update(state => {
       const rootWork = state.works.find(work => work.id === binding.rootWorkId)
       const child = state.works.find(work => work.id === binding.workId)
       const execution = child?.executions.find(candidate => candidate.id === binding.executionId)
       if (!rootWork || rootWork.collaboration.generation !== binding.generation || rootWork.collaboration.cancelGeneration !== binding.cancelGeneration || rootWork.collaboration.status !== 'running' || !execution || execution.status !== 'running') return state
+      const refs = stableKnowledgeRefs(selectedRefs)
+      if (binding.knowledgeQuery && !refs.length) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '知识依赖工作缺少有效引用')
+      if (refs.some(ref => !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, child.employeeId)
+        || !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '知识引用已失效')
       const resultId = `result-${randomUUID()}`
-      const result = collaborationResult(resultId, child, parsed, execution.dshSessionRef, usageFromEvents(events), now, binding.generation)
+      if (binding.confirmationRefs.some(ref => !state.confirmations.some(item => item.id === ref.id && item.revision === ref.revision && item.ownerMemberId === rootWork.ownerMemberId && item.employeeId === child.employeeId && item.status === 'active'))) throw runtimeError('FORBIDDEN', '确认信息授权已失效')
+      const result = collaborationResult(resultId, child, parsed, execution.dshSessionRef, usageFromEvents(events), now, binding.generation, refs, binding.confirmationRefs)
       const handoff = { id: `handoff-${randomUUID()}`, childWorkId: child.id, fromEmployeeId: child.employeeId, toEmployeeId: rootWork.employeeId, resultRefs: [resultId], knowledgeRefs: result.knowledgeDependencyRefs ?? [], revision: 1, generation: binding.generation, status: 'current', createdAt: now }
       result.handoffRefs = [handoff.id]
       const nextChild = { ...child, status: 'completed', results: [...child.results, result], executions: child.executions.map(candidate => candidate.id === execution.id ? { ...candidate, status: 'completed', completedAt: now, resultId, usage: result.usage } : candidate) }
@@ -372,7 +484,7 @@ export function createCollaborationRunner({
     })
   }
 
-  async function finishRoot(binding, sessionId, explanation, events, submittedRefs) {
+  async function finishRoot(binding, sessionId, explanation, events, submittedRefs, confirmationRefs) {
     let result
     await store.update(state => {
       const rootWork = state.works.find(work => work.id === binding.rootWorkId)
@@ -382,7 +494,14 @@ export function createCollaborationRunner({
       if (currentHandoffs.some(item => !item)) throw runtimeError('TOOL_CHAIN_INVALID', '协作汇总缺少当前交接')
       const refs = currentHandoffs.flatMap(handoff => handoff.resultRefs)
       if (!isDeepStrictEqual(refs, submittedRefs) || refs.some(ref => !state.works.some(work => work.results.some(item => item.id === ref && item.generation <= binding.generation)))) throw runtimeError('TOOL_CHAIN_INVALID', '协作汇总只能引用当前持久化子结果')
-      result = { id: `summary-${randomUUID()}`, kind: 'assistant.collaboration-summary', capabilityId: rootWork.capabilityId, skillId: rootWork.skillId, schemaVersion: 1, input: {}, payload: { resultRefs: refs }, explanation, createdAt: clock(), dshSessionRef: sessionId, contextConfirmationRefs: [], employeeId: rootWork.employeeId, handoffRefs: currentHandoffs.map(item => item.id), usage: usageFromEvents(events), generation: binding.generation }
+      const knowledgeDependencyRefs = stableKnowledgeRefs(currentHandoffs.flatMap(handoff => handoff.knowledgeRefs))
+      for (const handoff of currentHandoffs) {
+        const child = state.works.find(work => work.id === handoff.childWorkId)
+        if (handoff.knowledgeRefs.some(ref => !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, child.employeeId)
+          || !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '汇总知识引用已失效')
+      }
+      if (confirmationRefs.some(ref => !state.confirmations.some(item => item.id === ref.id && item.revision === ref.revision && item.ownerMemberId === rootWork.ownerMemberId && item.employeeId === rootWork.employeeId && item.status === 'active'))) throw runtimeError('FORBIDDEN', '确认信息授权已失效')
+      result = { id: `summary-${randomUUID()}`, kind: 'assistant.collaboration-summary', capabilityId: rootWork.capabilityId, skillId: rootWork.skillId, schemaVersion: 1, input: {}, payload: { resultRefs: refs }, explanation, createdAt: clock(), dshSessionRef: sessionId, contextConfirmationRefs: confirmationRefs, employeeId: rootWork.employeeId, handoffRefs: currentHandoffs.map(item => item.id), usage: usageFromEvents(events), knowledgeDependencyRefs, generation: binding.generation }
       const nextExecution = { ...execution, status: 'completed', completedAt: clock(), resultId: result.id, dshSessionRef: sessionId, usage: result.usage }
       const nextRoot = { ...rootWork, status: 'completed', results: [...rootWork.results, result], executions: rootWork.executions.map(candidate => candidate.id === execution.id ? nextExecution : candidate), collaboration: { ...rootWork.collaboration, status: 'completed', summaryResultRefs: refs } }
       return { ...state, works: state.works.map(work => work.id === rootWork.id ? nextRoot : work) }
@@ -452,9 +571,12 @@ export function createCollaborationRunner({
       const child = state.works.find(work => work.id === item.childWorkId)
       const result = handoff && child.results.find(candidate => candidate.id === handoff.resultRefs[0])
       if (!handoff || !result) throw runtimeError('TOOL_CHAIN_INVALID', '后置汇总投影缺少当前持久结果')
-      return { itemId: item.id, employeeId: child.employeeId, resultId: result.id, handoffId: handoff.id, kind: result.kind, payload: result.payload, source: result.source }
+      if (handoff.knowledgeRefs.some(ref => !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, child.employeeId)
+        || !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '汇总知识引用已失效')
+      return { itemId: item.id, employeeId: child.employeeId, resultId: result.id, handoffId: handoff.id, kind: result.kind, payload: result.payload, source: result.source, explanation: result.explanation, knowledgeRefs: handoff.knowledgeRefs }
     })
-    return { rootWorkId: rootWork.id, generation: binding.generation, resultRefs: entries.map(item => item.resultId), entries }
+    const confirmations = state.confirmations.filter(item => item.ownerMemberId === rootWork.ownerMemberId && item.employeeId === rootWork.employeeId && item.status === 'active').sort((left, right) => left.id.localeCompare(right.id))
+    return { rootWorkId: rootWork.id, generation: binding.generation, resultRefs: entries.map(item => item.resultId), entries, confirmations: confirmations.map(item => ({ id: item.id, revision: item.revision, value: item.value })), confirmationRefs: confirmations.map(item => ({ id: item.id, revision: item.revision })) }
   }
 
   async function interrupt(rootWorkId) {
@@ -478,19 +600,23 @@ export function createCollaborationRunner({
   }
 }
 
-function collaborationResult(id, work, parsed, sessionId, usage, now, generation) {
+function collaborationResult(id, work, parsed, sessionId, usage, now, generation, knowledgeDependencyRefs, contextConfirmationRefs) {
   const base = parsed.result
   return {
     id, kind: base.kind, capabilityId: work.capabilityId, skillId: work.skillId, schemaVersion: 1,
     input: structuredClone(work.input), payload: base.payload, explanation: parsed.explanation, source: base.source,
     createdAt: now, toolName: base.toolName, pluginId: base.pluginId, pluginVersion: base.pluginVersion,
-    dshSessionRef: sessionId, contextConfirmationRefs: [], employeeId: work.employeeId, handoffRefs: [], usage,
-    knowledgeDependencyRefs: [], generation,
+    dshSessionRef: sessionId, contextConfirmationRefs, employeeId: work.employeeId, handoffRefs: [], usage,
+    knowledgeDependencyRefs, generation,
   }
 }
 
-function childPrompt(work, toolName) {
-  return `SCENARIO:${work.planItemId} Complete this registered work: ${work.goal}. Call ${toolName} exactly once with ${JSON.stringify(work.input)}. Then call structured_output with {"status":"done","explanation":"your concise factual explanation"}.`
+function childPrompt(work, toolName, confirmations) {
+  const knowledge = work.knowledgeQuery
+    ? ` Call ${KNOWLEDGE_TOOLS.search} with {"query":${JSON.stringify(work.knowledgeQuery)}}, use only returned segments, then call ${KNOWLEDGE_TOOLS.submitReferences} with at least one exact returned reference.`
+    : ''
+  const confirmed = confirmations.length ? ` Current confirmed facts: ${JSON.stringify(confirmations.map(item => ({ id: item.id, revision: item.revision, value: item.value })))}.` : ''
+  return `SCENARIO:${work.planItemId} Complete this registered work: ${work.goal}.${confirmed} Call ${toolName} exactly once with ${JSON.stringify(work.input)}.${knowledge} Then call structured_output with {"status":"done","explanation":"your concise factual explanation"}.`
 }
 
 function usageFromEvents(events) {
@@ -503,8 +629,8 @@ function usageFromEvents(events) {
   return Object.fromEntries(USAGE_KEYS.map(key => [key, seen.has(key) && total[key] !== 0 ? total[key] : null]))
 }
 function businessEvents(events) {
-  const structuredCalls = new Set(events.filter(event => event.type === 'tool/call' && event.data?.name === 'structured_output').map(event => event.data.callId))
-  return events.filter(event => !(event.type === 'tool/call' && structuredCalls.has(event.data?.callId)) && !(event.type === 'tool/result' && structuredCalls.has(event.data?.message?.source?.callId)))
+  const omittedCalls = new Set(events.filter(event => event.type === 'tool/call' && ['structured_output', ...Object.values(KNOWLEDGE_TOOLS)].includes(event.data?.name)).map(event => event.data.callId))
+  return events.filter(event => !(event.type === 'tool/call' && omittedCalls.has(event.data?.callId)) && !(event.type === 'tool/result' && omittedCalls.has(event.data?.message?.source?.callId)))
 }
 function toolFailure(events) {
   for (const event of events) {
@@ -512,12 +638,15 @@ function toolFailure(events) {
     const block = event.data?.message?.content?.find(item => item.type === 'tool-result')?.content?.find(item => item.type === 'text')
     try {
       const value = JSON.parse(block?.text)
-      if (value?.ok === false && ['BUDGET_EXHAUSTED', 'FORBIDDEN', 'CANCELLED', 'UPSTREAM_TIMEOUT', 'UPSTREAM_ERROR'].includes(value.error?.code)) return value.error
+      if (value?.ok === false && ['BUDGET_EXHAUSTED', 'FORBIDDEN', 'CANCELLED', 'UPSTREAM_TIMEOUT', 'UPSTREAM_ERROR', 'KNOWLEDGE_PLUGIN_DISABLED', 'KNOWLEDGE_REFERENCE_INVALID'].includes(value.error?.code)) return value.error
     } catch {}
   }
   return undefined
 }
 function unknownUsage() { return Object.fromEntries(USAGE_KEYS.map(key => [key, null])) }
+function activeConfirmation(state, ref, ownerMemberId, employeeId) {
+  return state.confirmations.some(item => item.id === ref.id && item.revision === ref.revision && item.ownerMemberId === ownerMemberId && item.employeeId === employeeId && item.status === 'active')
+}
 function lastAssistantText(events) {
   for (const event of [...events].reverse()) if (event.type === 'assistant/message') {
     const text = event.data.message?.content?.filter(item => item.type === 'text').map(item => item.text).join('\n').trim()
@@ -548,6 +677,8 @@ function runtimeError(code, message) { return Object.assign(new Error(message), 
 function safeRuntimeCause(error) {
   if (error?.code === 'BUDGET_EXHAUSTED') return { code: 'BUDGET_EXHAUSTED', message: '协作模型请求预算已耗尽' }
   if (error?.code === 'FORBIDDEN') return { code: 'FORBIDDEN', message: '当前执行授权已失效' }
+  if (error?.code === 'KNOWLEDGE_PLUGIN_DISABLED') return { code: 'KNOWLEDGE_PLUGIN_DISABLED', message: '知识能力已停用' }
+  if (error?.code === 'KNOWLEDGE_REFERENCE_INVALID') return { code: 'KNOWLEDGE_REFERENCE_INVALID', message: '知识引用无效或已失效' }
   if (error?.code === 'CANCELLED' || error?.name === 'AbortError') return { code: 'CANCELLED', message: '本次执行已停止' }
   if (error?.code === 'UPSTREAM_TIMEOUT' || error?.name === 'TimeoutError') return { code: 'UPSTREAM_TIMEOUT', message: '协作执行超时' }
   return { code: 'UPSTREAM_ERROR', message: '协作执行失败' }

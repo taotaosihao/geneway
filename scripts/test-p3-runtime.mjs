@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCollaborationRunner } from '../src/collaboration-runner.mjs'
 import { createFileStore, migrateState } from '../src/store/file-store.mjs'
+import { createKnowledgeService } from '../src/knowledge-service.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 
 const temp = await mkdtemp(join(tmpdir(), 'geneway-p3-runtime-'))
@@ -19,6 +20,8 @@ try {
   await store.update(state => seed(state, gearConnection))
   await mkdir(join(temp, 'secrets'), { recursive: true, mode: 0o700 })
   await writeFile(join(temp, 'secrets', gearConnection.credentialRef), 'local-test-only', { mode: 0o600 })
+  const schemaSnapshots = []
+  const runtimeHooks = { onKnowledgeSchemas: names => schemaSnapshots.push(names) }
   const runner = createCollaborationRunner({
     store,
     root: process.cwd(),
@@ -27,9 +30,128 @@ try {
     agentOptions: { provider: 'geneway-p3-capture', model: 'p3-runtime-test', maxTokens: 4096 },
     secretRoot: join(temp, 'secrets'),
     onError: error => { runtimeFailure = error },
+    testHooks: runtimeHooks,
   })
   const service = createWorkService({ store, collaborationRunner: runner, connectionCatalog: [gearConnection] })
   const actor = { id: 'member-owner' }
+  const knowledgeIds = ['runtime', 'disposable', 'sibling']
+  const knowledge = createKnowledgeService({ store, idFactory: () => knowledgeIds.shift() })
+  const material = await knowledge.createMaterial(actor, {
+    employeeIds: ['employee-lead', 'employee-b'], title: '节拍依据', body: 'KNOWLEDGE-CANARY 每件需按剩余时间复核。',
+    format: 'text', sourceLabel: '测试知识', authorizationBasis: '成员明确导入',
+  })
+  const knowledgeWork = await create(service, actor, 'knowledge', [{ ...item('item-knowledge', 'employee-b', 3600, 6), knowledgeQuery: 'KNOWLEDGE-CANARY' }])
+  const knowledgeDone = await waitFor(service, actor, knowledgeWork.value.id, work => work.status === 'completed')
+  const knowledgeState = await store.read()
+  const knowledgeChild = knowledgeState.works.find(work => work.rootWorkId === knowledgeDone.id)
+  assert.deepEqual(capture.tools('item-knowledge').filter(name => name !== 'structured_output').sort(), ['geneway_calculate_cycle_time', 'geneway_knowledge_search', 'geneway_knowledge_submit_references'].sort())
+  assert.deepEqual(knowledgeChild.results[0].knowledgeDependencyRefs, [{ knowledgeId: material.id, revision: 1, segmentId: 'p1-c1' }])
+  assert.deepEqual(knowledgeDone.handoffs[0].knowledgeRefs, knowledgeChild.results[0].knowledgeDependencyRefs)
+  assert.deepEqual(knowledgeDone.results.at(-1).knowledgeDependencyRefs, knowledgeChild.results[0].knowledgeDependencyRefs)
+  const invalidCompleted = structuredClone(knowledgeState)
+  invalidCompleted.knowledgeMaterials.find(entry => entry.id === material.id).revision += 1
+  assert.throws(() => migrateState(invalidCompleted), /completed 知识依赖无效/)
+  await knowledge.updateMaterial(actor, material.id, { expectedRevision: 1, body: '替换后的当前依据。' })
+  const redacted = (await service.getWork(actor, knowledgeDone.id)).value
+  assert.equal(redacted.collaboration.status, 'stale')
+  assert.deepEqual(redacted.collaboration.staleItemIds, ['item-knowledge'])
+  assert.equal(JSON.stringify(redacted).includes('KNOWLEDGE-CANARY'), false)
+  assert.equal(JSON.stringify(await service.bootstrap(actor)).includes('KNOWLEDGE-CANARY'), false)
+
+  const forgedKnowledge = await create(service, actor, 'knowledge-forged', [{ ...item('item-knowledge-forged', 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
+  const forgedReadback = await waitFor(service, actor, forgedKnowledge.value.id, work => work.status === 'failed')
+  assert.equal(forgedReadback.executions.at(-1).error.code, 'KNOWLEDGE_REFERENCE_INVALID')
+
+  const disposable = await knowledge.createMaterial(actor, { employeeIds: ['employee-b'], title: '停用维护', body: '可删除', format: 'text', sourceLabel: '测试', authorizationBasis: '成员导入' })
+  await runner.disableKnowledge()
+  assert.equal(schemaSnapshots.at(-1).some(name => name.startsWith('geneway_knowledge_')), false)
+  assert.equal((await knowledge.deleteMaterial(actor, disposable.id, { expectedRevision: 1 })).status, 'deleted')
+  const disabledKnowledge = await create(service, actor, 'knowledge-disabled', [{ ...item('item-knowledge-disabled', 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
+  const disabledReadback = await waitFor(service, actor, disabledKnowledge.value.id, work => work.status === 'failed')
+  assert.equal(disabledReadback.executions.at(-1).error.code, 'KNOWLEDGE_PLUGIN_DISABLED')
+  assert.equal((await waitFor(service, actor, (await create(service, actor, 'without-knowledge', [item('item-without-knowledge', 'employee-a', 60, 1)])).value.id, work => work.status === 'completed')).status, 'completed')
+  await Promise.all([runner.enableKnowledge(), runner.enableKnowledge()])
+  assert.deepEqual(schemaSnapshots.at(-1).filter(name => name.startsWith('geneway_knowledge_')).sort(), ['geneway_knowledge_search', 'geneway_knowledge_submit_references'])
+  const remountedKnowledge = await create(service, actor, 'knowledge-remount', [{ ...item('item-knowledge-remount', 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
+  assert.equal((await waitFor(service, actor, remountedKnowledge.value.id, work => work.status === 'completed')).status, 'completed')
+  await knowledge.updateMaterial(actor, material.id, { expectedRevision: 2, employeeIds: ['employee-lead', 'employee-a', 'employee-b'] })
+  const sharedRefWork = await create(service, actor, 'knowledge-shared', [
+    { ...item('item-knowledge-shared-a', 'employee-a', 60, 1), knowledgeQuery: '替换后的当前依据' },
+    { ...item('item-knowledge-shared-b', 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' },
+  ])
+  await waitFor(service, actor, sharedRefWork.value.id, work => work.status === 'completed')
+  const adminForShared = { id: 'member-admin' }
+  await service.updateMember(adminForShared, actor.id, { employeeIds: ['employee-lead', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
+  const sharedStale = (await service.getWork(actor, sharedRefWork.value.id)).value
+  assert.deepEqual(sharedStale.collaboration.staleItemIds, ['item-knowledge-shared-a'])
+  assert.deepEqual(sharedStale.collaboration.staleKnowledgeRefs, [`${material.id}@3#p1-c1`])
+  await service.updateMember(adminForShared, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
+
+  for (const scenario of ['knowledge-negative-unsearched', 'knowledge-negative-bad-revision', 'knowledge-negative-bad-segment']) {
+    const negative = await create(service, actor, scenario, [{ ...item(`item-${scenario}`, 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
+    assert.equal((await waitFor(service, actor, negative.value.id, work => work.status === 'failed')).executions.at(-1).error.code, 'KNOWLEDGE_REFERENCE_INVALID')
+  }
+  const siblingMaterial = await knowledge.createMaterial(actor, { employeeIds: ['employee-lead', 'employee-a', 'employee-b'], title: 'Sibling', body: 'SIBLING-ONLY', format: 'text', sourceLabel: '测试', authorizationBasis: '成员导入' })
+  const siblingNegative = await create(service, actor, 'knowledge-negative-sibling', [
+    { ...item('item-knowledge-negative-sibling-a', 'employee-a', 60, 1), knowledgeQuery: '替换后的当前依据' },
+    { ...item('item-knowledge-negative-sibling-b', 'employee-b', 60, 1), knowledgeQuery: 'SIBLING-ONLY' },
+  ])
+  assert.equal((await waitFor(service, actor, siblingNegative.value.id, work => work.status === 'failed')).executions.at(-1).error.code, 'KNOWLEDGE_REFERENCE_INVALID')
+  assert.equal(siblingMaterial.id, 'knowledge-sibling')
+
+  const revokeB = () => service.updateMember(adminForShared, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-revoked', 'employee-incompatible'] })
+  const restoreB = () => service.updateMember(adminForShared, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
+  let knowledgeIo = 0, childRequests = 0, armed = true
+  runtimeHooks.beforeKnowledgeSearch = () => { knowledgeIo += 1 }
+  runtimeHooks.beforeAgentRequest = async ({ binding }) => { if (armed && binding.kind === 'child') { armed = false; await revokeB() } }
+  const preSearch = await create(service, actor, 'knowledge-gate-pre-search', [{ ...item('item-knowledge-gate-pre-search', 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
+  await waitFor(service, actor, preSearch.value.id, work => work.status === 'failed')
+  assert.equal(knowledgeIo, 0)
+  await restoreB()
+
+  armed = true; childRequests = 0
+  runtimeHooks.beforeAgentRequest = async ({ binding }) => {
+    if (binding.kind === 'child' && ++childRequests === 3 && armed) { armed = false; await revokeB() }
+  }
+  const requestsBeforeSearchGate = capture.requests
+  const postSearch = await create(service, actor, 'knowledge-gate-post-search', [{ ...item('item-knowledge-gate-post-search', 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
+  await waitFor(service, actor, postSearch.value.id, work => work.status === 'failed')
+  assert.equal(capture.requests - requestsBeforeSearchGate, 2)
+  const postSearchProjection = (await service.bootstrap(actor)).works.filter(work => work.id === postSearch.value.id || work.rootWorkId === postSearch.value.id)
+  assert.equal(JSON.stringify(postSearchProjection).includes('KNOWLEDGE-CANARY'), false)
+  await restoreB()
+
+  delete runtimeHooks.beforeAgentRequest
+  runtimeHooks.beforeFinishChild = async () => { if (armed) { armed = false; await revokeB() } }
+  armed = true
+  const finishGate = await create(service, actor, 'knowledge-gate-finish', [{ ...item('item-knowledge-gate-finish', 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
+  await waitFor(service, actor, finishGate.value.id, work => work.status === 'failed')
+  const finishGateState = await store.read()
+  assert.equal(finishGateState.works.find(work => work.rootWorkId === finishGate.value.id).results.length, 0)
+  assert.equal(finishGateState.works.find(work => work.id === finishGate.value.id).handoffs.length, 0)
+  await restoreB()
+
+  delete runtimeHooks.beforeFinishChild
+  runtimeHooks.beforeSummaryProjection = async () => { if (armed) { armed = false; await revokeB() } }
+  armed = true
+  const rootRequestsBefore = capture.scenarioCount('root-summary')
+  const summaryGate = await create(service, actor, 'knowledge-gate-summary', [{ ...item('item-knowledge-gate-summary', 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
+  await waitFor(service, actor, summaryGate.value.id, work => work.status === 'failed')
+  assert.equal(capture.scenarioCount('root-summary'), rootRequestsBefore)
+  const summaryGateState = await store.read()
+  assert.equal(summaryGateState.works.find(work => work.rootWorkId === summaryGate.value.id).results.length, 1)
+  assert.equal(summaryGateState.works.find(work => work.id === summaryGate.value.id).results.length, 0)
+  await restoreB()
+  delete runtimeHooks.beforeSummaryProjection
+  delete runtimeHooks.beforeKnowledgeSearch
+  await new Promise(resolve => setTimeout(resolve, 200))
+
+  const oldGeneration = await create(service, actor, 'knowledge-old-generation', [{ ...item('item-knowledge-old-generation', 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
+  await waitFor(service, actor, oldGeneration.value.id, work => work.status === 'completed')
+  await knowledge.updateMaterial(actor, material.id, { expectedRevision: 3, body: '替换后的当前依据，revision 4。' })
+  assert.equal((await service.recheckCollaboration(actor, oldGeneration.value.id, { clientRequestId: 'knowledge-old-generation-r2' })).ok, true)
+  assert.equal((await waitFor(service, actor, oldGeneration.value.id, work => work.status === 'failed')).executions.at(-1).error.code, 'KNOWLEDGE_REFERENCE_INVALID')
+
   const created = await service.createCollaboration(actor, {
     employeeId: 'employee-lead', skillId: 'skill-cycle-time-calculate', goal: '复核工单剩余节拍', clientRequestId: 'p3-root',
     items: [
@@ -138,9 +260,21 @@ try {
   await capture.waitForToolAbort()
   assert.equal((await service.getWork(actor, toolCancelling.value.id)).value.status, 'cancelled')
 
-  await store.update(state => ({ ...state, works: state.works.map(work => work.id === independent.value.id
-    ? { ...work, status: 'completed', collaboration: { ...work.collaboration, status: 'stale', summaryResultRefs: [], staleKnowledgeRefs: ['knowledge-r1'], staleItemIds: ['item-independent'] } }
-    : work) }))
+  const staleRef = { knowledgeId: 'knowledge-r1', revision: 1, segmentId: 'p1-c1' }
+  await store.update(state => ({
+    ...state,
+    knowledgeMaterials: [...state.knowledgeMaterials, { id: 'knowledge-r1', ownerMemberId: actor.id, revision: 2, status: 'deleted', createdAt: '2026-09-19T00:00:00.000Z', updatedAt: '2026-09-19T00:00:01.000Z', deletedAt: '2026-09-19T00:00:01.000Z' }],
+    works: state.works.map(work => {
+      if (work.id === independent.value.id) return {
+        ...work, status: 'completed',
+        results: work.results.map(result => result.kind === 'assistant.collaboration-summary' ? { ...result, knowledgeDependencyRefs: [staleRef] } : result),
+        handoffs: work.handoffs.map(handoff => ({ ...handoff, knowledgeRefs: [staleRef] })),
+        collaboration: { ...work.collaboration, status: 'stale', staleKnowledgeRefs: ['knowledge-r1@1#p1-c1'], staleItemIds: ['item-independent'] },
+      }
+      if (work.rootWorkId === independent.value.id) return { ...work, results: work.results.map(result => ({ ...result, knowledgeDependencyRefs: [staleRef] })) }
+      return work
+    }),
+  }))
   const oldRecheckSession = (await store.read()).works.find(work => work.rootWorkId === independent.value.id).executions.at(-1).dshSessionRef
   const arbitrary = await service.recheckCollaboration(actor, independent.value.id, { itemIds: ['item-tool-independent'], clientRequestId: 'arbitrary-recheck' })
   assert.equal(arbitrary.error.code, 'INVALID_REQUEST')
@@ -163,7 +297,7 @@ try {
     { ...item('item-revoke', 'employee-a', 300, 5), dependsOn: ['item-revoke-safe'] },
   ])
   await capture.waitFor('item-revoke')
-  await store.update(state => ({ ...state, employees: state.employees.map(employee => employee.id === 'employee-a' ? { ...employee, enabled: false } : employee) }))
+  await service.updateConfig(adminForShared, 'employees', 'employee-a', { enabled: false })
   capture.release('item-revoke')
   const revokedDone = await waitFor(service, actor, revoked.value.id, work => work.status === 'failed')
   assert.equal(revokedDone.executions.at(-1).error.code, 'FORBIDDEN', runtimeFailure?.stack)
@@ -171,7 +305,7 @@ try {
   assert.equal(revokedChildren.find(work => work.planItemId === 'item-revoke-safe').status, 'completed')
   assert.equal(revokedChildren.find(work => work.planItemId === 'item-revoke-safe').results.length, 1)
   assert.equal(revokedChildren.find(work => work.planItemId === 'item-revoke').executions.at(-1).error.code, 'FORBIDDEN')
-  await store.update(state => ({ ...state, employees: state.employees.map(employee => employee.id === 'employee-a' ? { ...employee, enabled: true } : employee) }))
+  await service.updateConfig(adminForShared, 'employees', 'employee-a', { enabled: true })
   assert.equal((await service.continueCollaboration(actor, revoked.value.id, { clientRequestId: 'revoke-recovery' })).ok, true)
   await waitFor(service, actor, revoked.value.id, work => work.status === 'completed')
   const recoveredChildren = (await store.read()).works.filter(work => work.rootWorkId === revoked.value.id)
@@ -207,6 +341,14 @@ try {
   assert.equal(timeoutFailed.executions.at(-1).error.code, 'UPSTREAM_TIMEOUT')
   capture.release('item-timeout')
 
+  const admin = { id: 'member-admin' }
+  await service.updateMember(admin, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-revoked', 'employee-incompatible'] })
+  assert.equal((await service.getWork(actor, remountedKnowledge.value.id)).value.collaboration.status, 'stale')
+  await service.updateMember(admin, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
+  await service.updateConfig(admin, 'employees', 'employee-b', { enabled: false })
+  assert.equal((await service.getWork(actor, remountedKnowledge.value.id)).value.collaboration.status, 'stale')
+  await service.updateConfig(admin, 'employees', 'employee-b', { enabled: true })
+
   capture.hold('item-restart')
   const restarting = await create(service, actor, 'restart', [item('item-restart', 'employee-b', 100, 2)])
   await capture.waitFor('item-restart')
@@ -233,7 +375,10 @@ function seed(state, gearConnection) {
   const employeeIds = ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible']
   return {
     ...state,
-    members: [{ id: 'member-owner', loginName: 'owner', displayName: 'Owner', role: 'member', enabled: true, authRef: 'owner', sessionVersion: 1, employeeIds, createdAt: now, updatedAt: now }],
+    members: [
+      { id: 'member-admin', loginName: 'admin', displayName: 'Admin', role: 'admin', enabled: true, authRef: 'admin', sessionVersion: 1, employeeIds, createdAt: now, updatedAt: now },
+      { id: 'member-owner', loginName: 'owner', displayName: 'Owner', role: 'member', enabled: true, authRef: 'owner', sessionVersion: 1, employeeIds, createdAt: now, updatedAt: now },
+    ],
     modelRoutes: [{ id: 'model-zenmux', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     skills: [
       { id: 'skill-cycle-time-calculate', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true },
@@ -309,17 +454,30 @@ async function startCapture() {
     requests += 1
     const serialized = JSON.stringify(body)
     const scenario = /SCENARIO:([a-z0-9-]+)/i.exec(serialized)?.[1] ?? 'unknown'
-    const hasToolResult = body.messages?.some(message => message.role === 'tool')
+    const toolResultCount = body.messages?.filter(message => message.role === 'tool').length ?? 0
+    const hasToolResult = toolResultCount > 0
     if (scenario !== 'root-summary' && !hasToolResult) { activeChildren += 1; maxActiveChildren = Math.max(maxActiveChildren, activeChildren) }
     const visibleTools = (body.tools ?? []).map(entry => entry.function?.name ?? entry.name)
     scenarioTools.set(scenario, visibleTools)
     const businessTool = visibleTools.find(name => ['geneway_calculate_cycle_time', 'geneway_gearjob_read_work_order'].includes(name))
     const summaryRefs = [...new Set(serialized.match(/result-[a-f0-9-]+/g) ?? [])]
-    const tool = scenario === 'root-summary' ? (hasToolResult ? undefined : 'geneway_collaboration_submit_summary') : hasToolResult ? 'structured_output' : businessTool
+    const knowledgeScenario = scenario.includes('knowledge') && visibleTools.includes('geneway_knowledge_search')
+    const skipSearch = scenario.includes('negative-unsearched')
+    const tool = scenario === 'root-summary' ? (hasToolResult ? undefined : 'geneway_collaboration_submit_summary')
+      : knowledgeScenario && toolResultCount === 1 && !skipSearch ? 'geneway_knowledge_search'
+        : knowledgeScenario && toolResultCount === 1 && skipSearch ? 'geneway_knowledge_submit_references'
+        : knowledgeScenario && toolResultCount === 2 && !skipSearch ? 'geneway_knowledge_submit_references'
+          : hasToolResult ? 'structured_output' : businessTool
     const inputMatch = serialized.match(/\\?"availableSeconds\\?":(\d+),\\?"quantity\\?":(\d+)/)
     const complete = () => sendCompletion(response, body.model, tool, tool === 'structured_output'
-      ? { status: 'done', explanation: `${scenario} 已完成` }
+      ? { status: 'done', explanation: knowledgeScenario ? `${scenario} KNOWLEDGE-CANARY 已完成` : `${scenario} 已完成` }
       : tool === 'geneway_collaboration_submit_summary' ? { resultRefs: summaryRefs }
+      : tool === 'geneway_knowledge_search' ? { query: scenario === 'item-knowledge' ? 'KNOWLEDGE-CANARY' : scenario.includes('sibling-b') ? 'SIBLING-ONLY' : '替换后的当前依据' }
+      : tool === 'geneway_knowledge_submit_references' ? { references: [{
+        knowledgeId: scenario.includes('forged') ? 'knowledge-forged' : scenario.includes('sibling') ? 'knowledge-sibling' : 'knowledge-runtime',
+        revision: scenario === 'item-knowledge' ? 1 : scenario.includes('sibling') ? 1 : scenario.includes('bad-revision') ? 2 : (scenario.includes('shared') || scenario.includes('gate') || scenario.includes('negative') || scenario.includes('old-generation')) ? 3 : 2,
+        segmentId: scenario.includes('bad-segment') ? 'p9-c9' : 'p1-c1',
+      }] }
       : tool === 'geneway_gearjob_read_work_order' ? { workOrderId: 'WO-CANCEL' }
         : { availableSeconds: Number(inputMatch?.[1] ?? 3600), quantity: Number(inputMatch?.[2] ?? 6) })
     seen.add(scenario)

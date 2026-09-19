@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 
 export const STATE_VERSION = 5
 export const KNOWLEDGE_LIMITS = Object.freeze({
@@ -348,15 +349,16 @@ function normalizeV5(value) {
       const material = materialById.get(ref.knowledgeId)
       if (!material) throw new Error(`结果 ${result.id} 引用不存在的知识：${ref.knowledgeId}`)
       if (ref.revision > material.revision) throw new Error(`结果 ${result.id} 知识引用 revision 超前`)
+      if (material.status === 'active' && ref.revision === material.revision && !segmentKnowledgeBody(material.body).some(segment => segment.segmentId === ref.segmentId)) throw new Error(`结果 ${result.id} 知识 segment 不存在`)
     }
   }
 
-  normalizeCollaborations(common.works, memberIds)
+  normalizeCollaborations(common.works, memberIds, { ...common, knowledgeMaterials })
 
   return { ...common, version: STATE_VERSION, knowledgeMaterials }
 }
 
-function normalizeCollaborations(works, memberIds) {
+function normalizeCollaborations(works, memberIds, state) {
   const byId = new Map(works.map(work => [work.id, work]))
   const claimedChildren = new Map()
   for (const work of works) {
@@ -368,6 +370,12 @@ function normalizeCollaborations(works, memberIds) {
       if (parentWorkId !== rootWorkId || !rootWork?.collaboration || work.ownerMemberId !== rootWork.ownerMemberId) throw new Error(`子工作 ${work.id} 根工作或 owner 引用无效`)
       if (!Number.isSafeInteger(work.collaborationGeneration) || work.collaborationGeneration < 1) throw new Error(`子工作 ${work.id} generation 无效`)
       requiredText(work.planItemId, `子工作 ${work.id} planItemId 无效`)
+      if (work.knowledgeQuery !== undefined) {
+        const query = requiredRawText(work.knowledgeQuery, `子工作 ${work.id} knowledgeQuery 无效`).trim()
+        if (!query || !query.isWellFormed() || Array.from(query).length > 256 || query.split(/\s+/u).length > 16) throw new Error(`子工作 ${work.id} knowledgeQuery 无效`)
+      }
+    } else if (work.knowledgeQuery !== undefined) {
+      throw new Error(`工作 ${work.id} 不得包含 knowledgeQuery`)
     }
     if (!work.collaboration) continue
     if (work.workType !== 'collaboration') throw new Error(`协作工作 ${work.id} workType 无效`)
@@ -394,7 +402,7 @@ function normalizeCollaborations(works, memberIds) {
     }
     const childResultIds = new Set(childWorkIds.flatMap(id => byId.get(id)?.results.map(result => result.id) ?? []))
     for (const id of uniqueTextArray(collaboration.summaryResultRefs, `协作工作 ${work.id} summaryResultRefs`)) if (!childResultIds.has(id)) throw new Error(`协作工作 ${work.id} 汇总引用不存在`)
-    uniqueTextArray(collaboration.staleKnowledgeRefs, `协作工作 ${work.id} staleKnowledgeRefs`)
+    const staleKnowledgeRefs = uniqueTextArray(collaboration.staleKnowledgeRefs, `协作工作 ${work.id} staleKnowledgeRefs`)
     const staleItemIds = uniqueTextArray(collaboration.staleItemIds, `协作工作 ${work.id} staleItemIds`)
     if (!record(work.plan) || !Number.isSafeInteger(work.plan.revision) || work.plan.revision < 1 || !Array.isArray(work.plan.items)) throw new Error(`协作工作 ${work.id} plan 无效`)
     if (work.plan.items.length !== childWorkIds.length) throw new Error(`协作工作 ${work.id} plan 与子工作不一致`)
@@ -431,6 +439,9 @@ function normalizeCollaborations(works, memberIds) {
       if (resultRefs.length !== 1) throw new Error(`协作工作 ${work.id} handoff 必须引用一个结果`)
       for (const resultId of resultRefs) if (!ownedResults.has(resultId) || byId.get(handoff.childWorkId).results.find(result => result.id === resultId)?.generation !== handoff.generation) throw new Error(`协作工作 ${work.id} handoff 结果引用不存在或 generation 不一致`)
       if (!Array.isArray(handoff.knowledgeRefs)) throw new Error(`协作工作 ${work.id} handoff knowledgeRefs 无效`)
+      const handoffKnowledge = normalizeKnowledgeRefs(handoff.knowledgeRefs, `协作工作 ${work.id} handoff knowledgeRefs`)
+      const resultKnowledge = byId.get(handoff.childWorkId).results.find(result => result.id === resultRefs[0])?.knowledgeDependencyRefs ?? []
+      if (!sameKnowledgeRefs(handoffKnowledge, resultKnowledge)) throw new Error(`协作工作 ${work.id} handoff knowledgeRefs 与结果不一致`)
       if (handoff.status === 'current') {
         if (currentHandoffs.has(handoff.childWorkId)) throw new Error(`协作工作 ${work.id} 子工作存在多个当前 handoff`)
         currentHandoffs.set(handoff.childWorkId, handoff)
@@ -466,13 +477,30 @@ function normalizeCollaborations(works, memberIds) {
       if (!Number.isSafeInteger(summary.generation) || summary.generation < 1 || summary.generation > collaboration.generation || summary.employeeId !== work.employeeId) throw new Error(`协作工作 ${work.id} summary 身份或 generation 无效`)
       const refs = uniqueTextArray(summary.payload.resultRefs, `协作工作 ${work.id} summary resultRefs`)
       if (refs.some(id => !childResultIds.has(id)) || summary.handoffRefs?.some(id => !work.handoffs.some(handoff => handoff.id === id))) throw new Error(`协作工作 ${work.id} summary 引用无效`)
+      const summaryHandoffs = summary.handoffRefs.map(id => work.handoffs.find(handoff => handoff.id === id))
+      const expectedKnowledge = stableKnowledgeRefs(summaryHandoffs.flatMap(handoff => handoff.knowledgeRefs))
+      if (!sameKnowledgeRefs(summary.knowledgeDependencyRefs ?? [], expectedKnowledge)) throw new Error(`协作工作 ${work.id} summary 知识依赖不闭合`)
     }
+    const invalidItems = work.plan.items.filter(item => {
+      const handoff = currentHandoffs.get(item.childWorkId)
+      const child = byId.get(item.childWorkId)
+      return handoff?.knowledgeRefs.some(ref => !validCurrentKnowledgeRef(state, ref, work.ownerMemberId, child.employeeId)
+        || !validCurrentKnowledgeRef(state, ref, work.ownerMemberId, work.employeeId))
+    }).map(item => item.id).sort()
+    if (collaboration.status === 'completed' && (invalidItems.length || staleItemIds.length || staleKnowledgeRefs.length)) throw new Error(`协作工作 ${work.id} completed 知识依赖无效`)
+    if (collaboration.status === 'stale' && !sameTextArray(staleItemIds, invalidItems)) throw new Error(`协作工作 ${work.id} stale item 与当前依赖不一致`)
+    const expectedStaleRefs = stableKnowledgeRefs(work.plan.items.filter(item => invalidItems.includes(item.id)).flatMap(item => {
+      const child = byId.get(item.childWorkId)
+      return (currentHandoffs.get(item.childWorkId)?.knowledgeRefs ?? []).filter(ref => !validCurrentKnowledgeRef(state, ref, work.ownerMemberId, child.employeeId)
+        || !validCurrentKnowledgeRef(state, ref, work.ownerMemberId, work.employeeId))
+    })).map(knowledgeKey)
+    if (collaboration.status === 'stale' && !sameTextArray(staleKnowledgeRefs, expectedStaleRefs)) throw new Error(`协作工作 ${work.id} stale knowledge refs 与当前依赖不一致`)
     if (work.status !== collaboration.status && !(work.status === 'completed' && collaboration.status === 'stale')) throw new Error(`协作工作 ${work.id} 根状态不一致`)
     if (['accepted', 'running'].includes(collaboration.status)) {
       const currentRootExecutions = work.executions.filter(execution => execution.generation === collaboration.generation && execution.cancelGeneration === collaboration.cancelGeneration && ['accepted', 'running'].includes(execution.status))
       if (currentRootExecutions.length !== 1) throw new Error(`协作工作 ${work.id} 根 current execution 不闭合`)
     }
-    if (collaboration.status === 'completed') {
+    if (['completed', 'stale'].includes(collaboration.status)) {
       if (work.plan.items.some(item => item.status !== 'completed') || currentHandoffs.size !== work.plan.items.length) throw new Error(`协作工作 ${work.id} 完成状态不闭合`)
       const expectedRefs = work.plan.items.flatMap(item => currentHandoffs.get(item.childWorkId).resultRefs)
       const latestSummary = rootSummaries.at(-1)
@@ -646,6 +674,44 @@ function hasPlanCycle(items) {
 
 function sameTextArray(left, right) {
   return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => value === right[index])
+}
+
+function normalizeKnowledgeRefs(refs, label) {
+  if (!Array.isArray(refs)) throw new Error(`${label} 无效`)
+  const normalized = refs.map(ref => {
+    if (!record(ref)) throw new Error(`${label} 无效`)
+    exactKeys(ref, ['knowledgeId', 'revision', 'segmentId'], label)
+    return {
+      knowledgeId: requiredText(ref.knowledgeId, `${label} knowledgeId 无效`),
+      revision: Number.isSafeInteger(ref.revision) && ref.revision > 0 ? ref.revision : (() => { throw new Error(`${label} revision 无效`) })(),
+      segmentId: requiredText(ref.segmentId, `${label} segmentId 无效`),
+    }
+  })
+  if (new Set(normalized.map(knowledgeKey)).size !== normalized.length) throw new Error(`${label} 重复`)
+  return normalized
+}
+
+function stableKnowledgeRefs(refs) {
+  if (!Array.isArray(refs)) throw new Error('知识引用 无效')
+  return [...new Map(refs.map(ref => normalizeKnowledgeRefs([ref], '知识引用')[0]).map(ref => [knowledgeKey(ref), ref])).entries()]
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([, ref]) => ref)
+}
+
+function sameKnowledgeRefs(left, right) {
+  const a = stableKnowledgeRefs(left).map(knowledgeKey), b = stableKnowledgeRefs(right).map(knowledgeKey)
+  return a.length === b.length && a.every((value, index) => value === b[index])
+}
+
+function knowledgeKey(ref) { return `${ref.knowledgeId}@${ref.revision}#${ref.segmentId}` }
+
+function validCurrentKnowledgeRef(state, ref, memberId, employeeId) {
+  const member = state.members.find(item => item.id === memberId && item.enabled === true)
+  const employee = state.employees.find(item => item.id === employeeId && item.enabled === true)
+  const material = state.knowledgeMaterials.find(item => item.id === ref.knowledgeId && item.status === 'active' && item.revision === ref.revision)
+  if (!member || !employee || !member.employeeIds.includes(employee.id) || !material) return false
+  const allowed = (material.ownerMemberId === member.id && material.employeeIds.includes(employee.id))
+    || (material.sharedMemberIds.includes(member.id) && material.sharedEmployeeIds.includes(employee.id))
+  return allowed && segmentKnowledgeBody(material.body).some(segment => segment.segmentId === ref.segmentId)
 }
 
 function migrateReservations(value, oldOperatorId) {

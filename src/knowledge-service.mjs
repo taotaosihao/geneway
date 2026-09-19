@@ -101,7 +101,7 @@ export function createKnowledgeService({ store, clock = () => new Date().toISOSt
         }
         updated = { ...material, ...fields, revision: material.revision + 1, updatedAt: clock() }
         assertCapacity(state.knowledgeMaterials, updated, material.id)
-        return { ...state, knowledgeMaterials: replaceById(state.knowledgeMaterials, updated) }
+        return sweepKnowledgeDependencies({ ...state, knowledgeMaterials: replaceById(state.knowledgeMaterials, updated) })
       })
       return manageDto(updated, true)
     },
@@ -122,7 +122,7 @@ export function createKnowledgeService({ store, clock = () => new Date().toISOSt
           updatedAt: clock(),
         }
         assertCapacity(state.knowledgeMaterials, updated, material.id)
-        return { ...state, knowledgeMaterials: replaceById(state.knowledgeMaterials, updated) }
+        return sweepKnowledgeDependencies({ ...state, knowledgeMaterials: replaceById(state.knowledgeMaterials, updated) })
       })
       return manageDto(updated, true)
     },
@@ -146,7 +146,7 @@ export function createKnowledgeService({ store, clock = () => new Date().toISOSt
           updatedAt: now,
           deletedAt: now,
         }
-        return { ...state, knowledgeMaterials: replaceById(state.knowledgeMaterials, deleted) }
+        return sweepKnowledgeDependencies({ ...state, knowledgeMaterials: replaceById(state.knowledgeMaterials, deleted) })
       })
       return tombstoneDto(deleted)
     },
@@ -195,6 +195,57 @@ export function projectKnowledgeMaterial(state, material, { memberId, employeeId
   if (access === 'manage') return manageDto(material, includeBody)
   return useDto(material, includeBody)
 }
+
+export function currentKnowledgeReference(state, ref, memberId, employeeId) {
+  if (!ref || typeof ref !== 'object' || Array.isArray(ref)) return undefined
+  const material = state.knowledgeMaterials.find(item => item.id === ref.knowledgeId)
+  if (!material || material.revision !== ref.revision || currentKnowledgeAccess(state, material, { memberId, employeeId }) !== 'use') return undefined
+  const segment = segmentKnowledgeBody(material.body).find(item => item.segmentId === ref.segmentId)
+  return segment ? { knowledgeId: material.id, revision: material.revision, segmentId: segment.segmentId } : undefined
+}
+
+export function stableKnowledgeRefs(refs = []) {
+  const keyed = new Map()
+  for (const ref of refs) {
+    const normalized = ref && { knowledgeId: ref.knowledgeId, revision: ref.revision, segmentId: ref.segmentId }
+    if (typeof normalized?.knowledgeId !== 'string' || !Number.isSafeInteger(normalized.revision) || typeof normalized.segmentId !== 'string') continue
+    keyed.set(knowledgeRefKey(normalized), normalized)
+  }
+  return [...keyed.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0).map(([, ref]) => ref)
+}
+
+export function sweepKnowledgeDependencies(state) {
+  const works = state.works.map(work => {
+    if (!work.collaboration || !['completed', 'stale'].includes(work.collaboration.status)) return work
+    const invalidItems = [], invalidRefs = []
+    for (const item of work.plan.items) {
+      const handoff = work.handoffs.find(value => value.childWorkId === item.childWorkId && value.status === 'current')
+      const child = state.works.find(value => value.id === item.childWorkId)
+      const refs = handoff?.knowledgeRefs ?? []
+      const invalid = refs.filter(ref => !currentKnowledgeReference(state, ref, work.ownerMemberId, child?.employeeId)
+        || !currentKnowledgeReference(state, ref, work.ownerMemberId, work.employeeId))
+      if (invalid.length) {
+        invalidItems.push(item.id)
+        invalidRefs.push(...invalid)
+      }
+    }
+    if (!invalidItems.length) return work.collaboration.status === 'stale'
+      ? { ...work, collaboration: { ...work.collaboration, status: 'completed', staleItemIds: [], staleKnowledgeRefs: [] } }
+      : work
+    return {
+      ...work,
+      collaboration: {
+        ...work.collaboration,
+        status: 'stale',
+        staleItemIds: [...new Set(invalidItems)].sort(),
+        staleKnowledgeRefs: stableKnowledgeRefs(invalidRefs).map(knowledgeRefKey),
+      },
+    }
+  })
+  return { ...state, works }
+}
+
+export function knowledgeRefKey(ref) { return `${ref.knowledgeId}@${ref.revision}#${ref.segmentId}` }
 
 function materialFields(state, member, input) {
   const sharing = validateSharing(state, input.sharedMemberIds ?? [], input.sharedEmployeeIds ?? [])

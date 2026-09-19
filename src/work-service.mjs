@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { getCapability, listCapabilities, validateCapabilityInput } from './capabilities.mjs'
 import { createObservation } from './domain/work-order.mjs'
 import { assertTrustedConnection, CONNECTION_IDENTITY_FIELDS } from './connection-catalog.mjs'
+import { currentKnowledgeReference, sweepKnowledgeDependencies } from './knowledge-service.mjs'
 
 export const ERROR_STATUS = {
   INVALID_REQUEST: 400, INVALID_INPUT: 400, UNDECLARED_INPUT: 400, MISSING_INPUT: 400,
@@ -11,7 +12,7 @@ export const ERROR_STATUS = {
   NON_FINITE_RESULT: 400, CAPABILITY_NOT_FOUND: 400, UNAUTHORIZED: 401, FORBIDDEN: 403,
   NOT_FOUND: 404, BUSY: 409, SOURCE_NOT_CONFIGURED: 503, MODEL_NOT_CONFIGURED: 503,
   UPSTREAM_TIMEOUT: 504, UPSTREAM_ERROR: 502, INVALID_SOURCE: 502,
-  BUDGET_EXHAUSTED: 409,
+  BUDGET_EXHAUSTED: 409, KNOWLEDGE_PLUGIN_DISABLED: 503, KNOWLEDGE_REFERENCE_INVALID: 409,
 }
 
 const ACTIVE_EXECUTION = new Set(['accepted', 'running', 'cancel_requested'])
@@ -31,6 +32,8 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   BACKUP_INTERRUPTED: '备份操作被中断',
   TOOL_CHAIN_INVALID: '模型工具结果无效',
   BUDGET_EXHAUSTED: '协作模型请求预算已耗尽',
+  KNOWLEDGE_PLUGIN_DISABLED: '知识能力已停用',
+  KNOWLEDGE_REFERENCE_INVALID: '知识引用无效或已失效',
   CANCELLED: '本次执行已停止',
   FORBIDDEN: '执行授权已失效',
   NOT_FOUND: '业务对象不存在',
@@ -58,7 +61,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         connections: state.connections.filter(item => connectionIds.has(item.id)).map(item => publicConnection(item, connectionCatalog)),
         skills: state.skills.filter(item => skillIds.has(item.id)),
         capabilities: listCapabilities().filter(item => state.skills.some(skill => skillIds.has(skill.id) && skill.enabled === true && skill.capabilityId === item.id)).map(publicCapability),
-        works: state.works.filter(item => item.ownerMemberId === member.id).map(publicWork),
+        works: state.works.filter(item => item.ownerMemberId === member.id).map(item => publicWork(state, member, item)),
       }
     },
 
@@ -107,7 +110,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const work = reservation.work ?? await ownedWork(actor, reservation.workId)
       if (!work) return failure('NOT_FOUND', '工作不存在')
       if (!reservation.deduplicated && reservation.executionId) schedule(work.id, reservation.executionId, 'create')
-      return success(work, reservation)
+      return success(await projectOwned(actor, work), reservation)
     },
 
     async createCollaboration(actor, body = {}) {
@@ -137,6 +140,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           if (!inputAllowed(binding, parsed.input)) { reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }; return state }
           const childWorkId = `work-${randomUUID()}`, executionId = `exec-${randomUUID()}`
           const itemGoal = clean(raw.goal) ?? binding.capability.action
+          const knowledgeQuery = raw.knowledgeQuery === undefined ? undefined : validKnowledgeQuery(raw.knowledgeQuery)
           const waiting = parsed.missing.length > 0
           childWorks.push({
             id: childWorkId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
@@ -144,6 +148,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
             goal: itemGoal, input: parsed.input, requiredInputs: parsed.missing, status: waiting ? 'waiting_input' : 'accepted', acceptedAt: now, results: [],
             executions: waiting ? [] : [{ ...newExecution(executionId, 'collaboration-child', requestId, parsed.input, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: binding.employee.id }],
             workType: 'collaboration-child', parentWorkId: rootWorkId, rootWorkId, collaborationGeneration: generation, planItemId: itemId,
+            ...(knowledgeQuery ? { knowledgeQuery } : {}),
           })
           planItems.push({ id: itemId, childWorkId, goal: itemGoal, employeeId: binding.employee.id, status: waiting ? 'waiting_input' : 'not_started', dependsOn: raw.dependsOn ?? [] })
         }
@@ -163,7 +168,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       if (reservation?.error) return reservation.error
       if (!reservation.deduplicated) void collaborationRunner.run(reservation.workId).catch(() => undefined)
       const work = reservation.work ?? await ownedWork(actor, reservation.workId)
-      return success(work, reservation)
+      return success(await projectOwned(actor, work), reservation)
     },
 
     async updateCollaborationPlan(actor, id, body = {}) {
@@ -204,7 +209,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           return change ? { ...item, ...change, executions: item.executions.map(execution => execution.status === 'accepted' ? { ...execution, employeeId: change.employeeId, planRevision: nextRevision } : execution) } : item
         }) }
       })
-      return { ok: true, value: publicWork(updated) }
+      return { ok: true, value: await projectOwned(actor, updated) }
     },
 
     async continueCollaboration(actor, id, body = {}) { return successorCollaboration(actor, id, body, false) },
@@ -213,7 +218,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     async getWork(actor, id) {
       await recover()
       const work = await ownedWork(actor, id)
-      return work ? { ok: true, value: publicWork(work) } : failure('NOT_FOUND', '工作不存在')
+      return work ? { ok: true, value: await projectOwned(actor, work) } : failure('NOT_FOUND', '工作不存在')
     },
 
     async continueWork(actor, id, body = {}) {
@@ -275,7 +280,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const work = reservation.work ?? await ownedWork(actor, reservation.workId)
       if (!work) return failure('NOT_FOUND', '工作不存在')
       if (!reservation.deduplicated && reservation.executionId) schedule(id, reservation.executionId, 'continue')
-      return success(work, reservation)
+      return success(await projectOwned(actor, work), reservation)
     },
 
     async refreshWork(actor, id, body = {}) { return reserveExisting(actor, id, 'refresh', body, { requireResult: true }) },
@@ -292,7 +297,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       if (candidate?.collaboration) {
         const accepted = await collaborationRunner?.cancel(id, 'user')
         const value = await ownedWork(actor, id)
-        return { ok: true, value: publicWork(value), accepted: Boolean(accepted) }
+        return { ok: true, value: await projectOwned(actor, value), accepted: Boolean(accepted) }
       }
       let executionId
       let current
@@ -319,7 +324,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         active.get(executionId)?.controller.abort()
         await runner?.cancel?.(executionId)
       }
-      return { ok: true, value: publicWork(current.value), accepted: current.accepted }
+      return { ok: true, value: await projectOwned(actor, current.value), accepted: current.accepted }
     },
 
     async listConfirmations(actor) {
@@ -408,7 +413,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         }
         const authorityChanged = next.role !== member.role || next.enabled !== member.enabled || !sameStrings(next.employeeIds, member.employeeIds)
         updated = { ...next, sessionVersion: member.sessionVersion + (authorityChanged ? 1 : 0), updatedAt: clock() }
-        return { ...state, members: replaceById(state.members, updated) }
+        return sweepKnowledgeDependencies({ ...state, members: replaceById(state.members, updated) })
       })
       return publicMember(updated)
     },
@@ -448,7 +453,8 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         const current = state[kind]?.find(item => item.id === id)
         if (!current) throw serviceError('NOT_FOUND', '配置不存在')
         updated = configEntity(state, kind, body, current, clock(), connectionCatalog)
-        return { ...state, [kind]: replaceById(state[kind], updated) }
+        const next = { ...state, [kind]: replaceById(state[kind], updated) }
+        return kind === 'employees' ? sweepKnowledgeDependencies(next) : next
       })
       return kind === 'connections' ? adminConnection(updated, connectionCatalog) : updated
     },
@@ -531,7 +537,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     const work = reservation.work ?? await ownedWork(actor, reservation.workId)
     if (!work) return failure('NOT_FOUND', '工作不存在')
     if (!reservation.deduplicated) schedule(id, reservation.executionId, operation, reservation.question)
-    return success(work, reservation)
+    return success(await projectOwned(actor, work), reservation)
   }
 
   async function successorCollaboration(actor, id, body, recheck) {
@@ -577,7 +583,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     if (reservation?.error) return reservation.error
     if (!reservation.deduplicated) void collaborationRunner?.run(id).catch(() => undefined)
     const work = await ownedWork(actor, id)
-    return success(work, reservation)
+    return success(await projectOwned(actor, work), reservation)
   }
 
   function schedule(workId, executionId, operation, question) {
@@ -742,6 +748,14 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     const member = requireMember(state, actor)
     return findOwned(state, member, id)
   }
+
+  async function projectOwned(actor, work) {
+    if (!work.results.some(result => result.knowledgeDependencyRefs?.length) && !work.handoffs?.some(handoff => handoff.knowledgeRefs?.length)) return publicWork({ works: [work] }, { id: actor?.id }, work)
+    const state = await store.read()
+    const member = requireMember(state, actor)
+    const current = findOwned(state, member, work.id)
+    return publicWork(state, member, current ?? work)
+  }
   async function findWork(id) { return (await store.read()).works.find(item => item.id === id) }
 }
 
@@ -867,14 +881,40 @@ function connectionConfig(state, body, current, now, connectionCatalog) {
   return result
 }
 
-function publicWork(work) {
-  const observations = work.results.filter(item => item.kind === 'gearjob.work-order.observation').map(item => item.payload)
-  const followUps = work.results.filter(item => item.kind === 'assistant.follow-up').map(item => compact({ id: item.id, text: item.payload.text,
+function publicWork(state, member, work) {
+  const root = work.rootWorkId ? state.works.find(item => item.id === work.rootWorkId) : work
+  const results = work.results.map(result => projectResult(state, member, root, work, result))
+  const observations = results.filter(item => item.kind === 'gearjob.work-order.observation').map(item => item.payload)
+  const followUps = results.filter(item => item.kind === 'assistant.follow-up').map(item => compact({ id: item.id, text: item.payload.text,
     explanation: item.explanation, at: item.createdAt, dshSessionRef: item.dshSessionRef, continuedFromDshSessionRef: item.continuedFromDshSessionRef,
     contextObservationId: item.contextObservationId, continuity: item.continuity, contextConfirmationRefs: item.contextConfirmationRefs }))
   const value = structuredClone(work)
+  value.results = results
+  if (results.some(result => result.knowledgeUnavailable)) delete value.knowledgeQuery
+  if (value.handoffs) value.handoffs = value.handoffs.map(handoff => {
+    const child = state.works.find(item => item.id === handoff.childWorkId)
+    const refs = handoff.knowledgeRefs.filter(ref => currentKnowledgeReference(state, ref, member.id, child?.employeeId)
+      && currentKnowledgeReference(state, ref, member.id, root.employeeId))
+    return refs.length === handoff.knowledgeRefs.length ? handoff : { ...handoff, knowledgeRefs: [], knowledgeUnavailable: true }
+  })
   value.executions = value.executions.map(execution => execution.error ? { ...execution, error: safeError(execution.error) } : execution)
   return { ...value, observations, followUps }
+}
+function projectResult(state, member, root, work, result) {
+  const value = structuredClone(result)
+  const refs = value.knowledgeDependencyRefs ?? []
+  if (!refs.length) return value
+  const employees = result.kind === 'assistant.collaboration-summary' ? [root.employeeId] : [work.employeeId, root.employeeId]
+  const available = refs.every(ref => employees.every(employeeId => currentKnowledgeReference(state, ref, member.id, employeeId)))
+  if (available) return value
+  delete value.explanation
+  if (value.payload && typeof value.payload === 'object') {
+    delete value.payload.explanation
+    delete value.payload.text
+  }
+  value.knowledgeDependencyRefs = []
+  value.knowledgeUnavailable = true
+  return value
 }
 function publicMember(member) { return Object.fromEntries(['id', 'loginName', 'displayName', 'role', 'enabled', 'sessionVersion', 'employeeIds', 'createdAt', 'updatedAt'].filter(key => member[key] !== undefined).map(key => [key, structuredClone(member[key])])) }
 function simpleRef(value) { return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value) && value !== '.' && value !== '..' }
@@ -888,13 +928,18 @@ function visibleConnection(connection, catalog) {
   try { assertTrustedConnection(catalog, connection); return value } catch { return { ...value, status: 'unavailable' } }
 }
 function publicCapability(capability) { return { id: capability.id, skillId: capability.skillId, action: capability.action, requiredInputs: [...capability.requiredInputs], requiresConnection: capability.requiresConnection, resultKind: capability.resultKind } }
-function success(work, reservation) { return { ok: true, value: publicWork(work), deduplicated: Boolean(reservation.deduplicated), accepted: Boolean(reservation.executionId && !reservation.deduplicated), active: Boolean(reservation.active) } }
+function success(work, reservation) { return { ok: true, value: work, deduplicated: Boolean(reservation.deduplicated), accepted: Boolean(reservation.executionId && !reservation.deduplicated), active: Boolean(reservation.active) } }
 function newExecution(id, operation, clientRequestId, input, acceptedAt) { return { id, operation, clientRequestId, input: structuredClone(input), status: 'accepted', acceptedAt } }
 function activeExecution(work) { return [...work.executions].reverse().find(item => ACTIVE_EXECUTION.has(item.status)) }
 function replaceById(items, value) { return items.map(item => item.id === value.id ? value : item) }
 function reservationKey(ownerMemberId, ...parts) { return [ownerMemberId, ...parts].map(value => String(value ?? '')).join('|') }
 function eventCount(model) { return Number.isInteger(model?.eventCount) && model.eventCount >= 0 ? model.eventCount : undefined }
 function clean(value) { return typeof value === 'string' && value.trim() ? value.trim() : undefined }
+function validKnowledgeQuery(value) {
+  const query = clean(value)
+  if (!query || !query.isWellFormed() || Array.from(query).length > 256 || query.split(/\s+/u).length > 16) throw serviceError('INVALID_REQUEST', '知识检索内容无效')
+  return query
+}
 function plainObject(value) { return Boolean(value && typeof value === 'object' && !Array.isArray(value)) }
 function stringIds(value) { return Array.isArray(value) && value.every(item => clean(item) === item) && new Set(value).size === value.length }
 function sameStrings(left = [], right = []) { const a = [...left].sort(), b = [...right].sort(); return a.length === b.length && a.every((value, index) => value === b[index]) }

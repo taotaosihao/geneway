@@ -1,11 +1,17 @@
 import { createHash } from 'node:crypto'
-import { copyFile, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { dirname, join, normalize, relative, resolve, sep } from 'node:path'
+import { constants, createWriteStream } from 'node:fs'
+import { chmod, lstat, mkdir, mkdtemp, open, readdir, rename, rm, rmdir, writeFile } from 'node:fs/promises'
+import { basename, dirname, join, posix, relative, resolve, sep } from 'node:path'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
+import { migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const command = process.argv[2]
 const args = parseArgs(process.argv.slice(3))
+const MANIFEST_VERSION = 2
+const STATE_PATH = 'state.json'
+const SESSION_PATH = /^dsh\/sessions\/[^/]+\/([^/]+)\/session\.v[1-9]\d*\.jsonl(?:\.(?:gz|zstd))?$/
 
 if (command === 'backup') await backup(args.output)
 else if (command === 'restore') await restore(args.input, args.dataRoot)
@@ -17,49 +23,104 @@ else {
 async function backup(outputArg) {
   if (!outputArg) throw new Error('backup 需要 --output')
   const output = resolve(outputArg)
-  await assertEmptyTarget(output)
-  await mkdir(output, { recursive: true, mode: 0o700 })
-  const statePath = resolve(process.env.GENEWAY_STATE ?? join(root, 'var', 'state.json'))
+  const statePath = resolve(process.env.GENEWAY_STATE ?? join(root, 'var', STATE_PATH))
   const dshHome = resolve(process.env.GENEWAY_DSH_HOME ?? join(root, 'var', 'dsh'))
-  const files = []
-  if (await exists(statePath)) files.push({ source: statePath, path: 'state.json' })
-  const sessionsRoot = join(dshHome, 'sessions')
-  for (const source of await filesUnder(sessionsRoot)) {
-    if (!/\.jsonl(?:\.(?:gz|zstd))?$/i.test(source)) continue
-    files.push({ source, path: join('dsh', 'sessions', relative(sessionsRoot, source)) })
+  const target = await emptyTarget(output)
+  const opened = []
+  try {
+    const stateFile = await openRegular(statePath)
+    opened.push(stateFile)
+    const stateBuffer = await readFileFromStart(stateFile.handle)
+    const state = parseState(stateBuffer)
+    const sessionRefs = collectSessionRefs(state)
+    const files = [{ path: STATE_PATH, file: stateFile, bytes: stateBuffer.length, sha256: digest(stateBuffer) }]
+    const sessionsRoot = join(dshHome, 'sessions')
+    if (await pathExists(dshHome)) await requireDirectory(dshHome, 'DSH 根目录')
+    if (await pathExists(sessionsRoot)) {
+      await requireDirectory(sessionsRoot, 'DSH Session 根目录')
+      for (const source of await filesUnder(sessionsRoot)) {
+        const path = `dsh/sessions/${relative(sessionsRoot, source).split(sep).join('/')}`
+        const match = SESSION_PATH.exec(path)
+        if (!match || !sessionRefs.includes(match[1])) continue
+        const file = await openRegular(source)
+        opened.push(file)
+        files.push({ path, file, bytes: file.stat.size, sha256: await sha256(file.handle) })
+      }
+    }
+    files.sort((left, right) => left.path.localeCompare(right.path))
+    const includedSessionRefs = [...new Set(files.flatMap(item => SESSION_PATH.exec(item.path)?.[1] ?? []))].sort()
+    const missing = sessionRefs.filter(id => !includedSessionRefs.includes(id))
+    if (missing.length) throw new Error(`缺少关联 DSH Session：${missing.join(', ')}`)
+    const manifest = {
+      format: 'geneway-state-transfer',
+      version: MANIFEST_VERSION,
+      createdAt: new Date().toISOString(),
+      candidate: candidate(),
+      schema: schemaSummary(state, sessionRefs),
+      entries: files.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 })),
+    }
+    await buildAndPublish(output, target, async stage => {
+      for (const file of files) await copyOpenFile(file, join(stage, ...file.path.split('/')))
+      const manifestPath = join(stage, 'manifest.json')
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+      await chmod(manifestPath, 0o600)
+      await verifyBuilt(stage, manifest.entries)
+    })
+    console.log(JSON.stringify({ command: 'backup', output, entries: files.length, bytes: files.reduce((total, item) => total + item.bytes, 0), sessionRefs: includedSessionRefs.length }))
+  } finally {
+    await Promise.allSettled(opened.map(item => item.handle.close()))
   }
-  const entries = []
-  for (const file of files) {
-    const destination = join(output, file.path)
-    await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
-    await copyFile(file.source, destination)
-    const bytes = (await stat(destination)).size
-    entries.push({ path: file.path.split(sep).join('/'), bytes, sha256: await sha256(destination) })
-  }
-  const manifest = { version: 1, createdAt: new Date().toISOString(), entries }
-  await writeFile(join(output, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600 })
-  console.log(JSON.stringify({ command: 'backup', output, entries: entries.length, bytes: entries.reduce((total, item) => total + item.bytes, 0) }))
 }
 
 async function restore(inputArg, dataRootArg) {
   if (!inputArg || !dataRootArg) throw new Error('restore 需要 --input 和 --data-root')
   const input = resolve(inputArg)
   const dataRoot = resolve(dataRootArg)
-  await assertEmptyTarget(dataRoot)
-  const manifest = JSON.parse(await readFile(join(input, 'manifest.json'), 'utf8'))
-  if (!manifest || manifest.version !== 1 || !Array.isArray(manifest.entries)) throw new Error('备份 manifest 无效')
-  await mkdir(dataRoot, { recursive: true, mode: 0o700 })
-  for (const entry of manifest.entries) {
-    const path = safeRelative(entry.path)
-    const source = join(input, path)
-    const destination = join(dataRoot, path)
-    const sourceStat = await stat(source)
-    if (!sourceStat.isFile() || sourceStat.size !== entry.bytes || await sha256(source) !== entry.sha256) throw new Error(`备份校验失败：${entry.path}`)
-    await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
-    await copyFile(source, destination)
-    await writeFile(destination, await readFile(destination), { mode: 0o600 })
+  if (overlaps(input, dataRoot)) throw new Error('备份目录与恢复目录不得重叠')
+  await requireDirectory(input, '备份根目录')
+  const target = await emptyTarget(dataRoot)
+  const opened = []
+  try {
+    const manifestFile = await openRegularPath(input, 'manifest.json')
+    opened.push(manifestFile)
+    const manifest = parseManifest(await readFileFromStart(manifestFile.handle))
+    const seen = new Set()
+    const files = []
+    for (const entry of manifest.entries) {
+      validateEntry(entry)
+      const path = safeRelative(entry.path)
+      if (seen.has(path)) throw new Error(`备份 entry 重复：${path}`)
+      seen.add(path)
+      if (path !== STATE_PATH && !SESSION_PATH.test(path)) throw new Error(`备份路径不在允许范围：${path}`)
+      const file = await openRegularPath(input, path)
+      opened.push(file)
+      const actualHash = await sha256(file.handle)
+      if (file.stat.size !== entry.bytes || actualHash !== entry.sha256) throw new Error(`备份校验失败：${entry.path}`)
+      files.push({ ...entry, path, file })
+    }
+    if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
+    const stateFile = files.find(item => item.path === STATE_PATH)
+    const state = parseState(await readFileFromStart(stateFile.file.handle))
+    const sessionRefs = collectSessionRefs(state)
+    const expectedSchema = schemaSummary(state, sessionRefs)
+    if (JSON.stringify(manifest.schema) !== JSON.stringify(expectedSchema)) throw new Error('备份 schema 摘要不匹配')
+    for (const file of files) {
+      const match = SESSION_PATH.exec(file.path)
+      if (match && !sessionRefs.includes(match[1])) throw new Error(`备份包含未关联 DSH Session：${match[1]}`)
+    }
+    const includedSessionRefs = [...new Set(files.flatMap(item => SESSION_PATH.exec(item.path)?.[1] ?? []))].sort()
+    const missing = sessionRefs.filter(id => !includedSessionRefs.includes(id))
+    if (missing.length) throw new Error(`备份缺少关联 DSH Session：${missing.join(', ')}`)
+
+    // All manifest, path, type, byte and hash checks finish before the first target byte is written.
+    await buildAndPublish(dataRoot, target, async stage => {
+      for (const file of files) await copyOpenFile(file, join(stage, ...file.path.split('/')))
+      await verifyBuilt(stage, manifest.entries)
+    })
+    console.log(JSON.stringify({ command: 'restore', input, dataRoot, entries: files.length, sessionRefs: includedSessionRefs.length }))
+  } finally {
+    await Promise.allSettled(opened.map(item => item.handle.close()))
   }
-  console.log(JSON.stringify({ command: 'restore', input, dataRoot, entries: manifest.entries.length }))
 }
 
 function parseArgs(argv) {
@@ -73,44 +134,215 @@ function parseArgs(argv) {
   return { output: result.output, input: result.input, dataRoot: result.dataroot }
 }
 
-async function assertEmptyTarget(path) {
-  try {
-    const entries = await readdir(path)
-    if (entries.length) throw new Error(`目标目录必须为空：${path}`)
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error
+function parseState(buffer) {
+  let state
+  try { state = JSON.parse(buffer.toString('utf8')) } catch { throw new Error('产品状态 JSON 无效') }
+  if (!record(state) || state.version !== STATE_VERSION) throw new Error(`产品状态必须是 v${STATE_VERSION}`)
+  migrateState(structuredClone(state))
+  assertNoSecretKeys(state)
+  return state
+}
+
+function parseManifest(buffer) {
+  let value
+  try { value = JSON.parse(buffer.toString('utf8')) } catch { throw new Error('备份 manifest JSON 无效') }
+  if (!record(value) || Object.keys(value).sort().join(',') !== 'candidate,createdAt,entries,format,schema,version' || value.format !== 'geneway-state-transfer' || value.version !== MANIFEST_VERSION || !Array.isArray(value.entries) || !record(value.schema) || typeof value.createdAt !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value.createdAt)) throw new Error('备份 manifest 无效')
+  if (value.candidate !== null && (typeof value.candidate !== 'string' || !/^[A-Za-z0-9._/-]{1,128}$/.test(value.candidate))) throw new Error('备份 candidate 无效')
+  return value
+}
+
+function validateEntry(entry) {
+  if (!record(entry) || Object.keys(entry).sort().join(',') !== 'bytes,path,sha256') throw new Error('备份 entry 无效')
+  if (!Number.isSafeInteger(entry.bytes) || entry.bytes < 0 || typeof entry.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(entry.sha256)) throw new Error(`备份 entry 元数据无效：${entry.path ?? ''}`)
+}
+
+function safeRelative(value) {
+  if (typeof value !== 'string' || !value || value.includes('\0') || value.includes('\\') || posix.isAbsolute(value) || posix.normalize(value) !== value || value === '..' || value.startsWith('../')) throw new Error('备份路径越界')
+  return value
+}
+
+function collectSessionRefs(state) {
+  const refs = new Set()
+  visit(state.works ?? [], (key, value) => {
+    if ((key === 'dshSessionRef' || key === 'continuedFromDshSessionRef') && typeof value === 'string' && value.trim()) refs.add(value)
+  })
+  return [...refs].sort()
+}
+
+function visit(value, inspect, key = '') {
+  inspect(key, value)
+  if (Array.isArray(value)) for (const item of value) visit(item, inspect)
+  else if (record(value)) for (const [childKey, child] of Object.entries(value)) visit(child, inspect, childKey)
+}
+
+function assertNoSecretKeys(state) {
+  visit(state, key => {
+    const compact = key.toLowerCase().replaceAll(/[^a-z0-9]/g, '')
+    if (!compact || compact.endsWith('ref')) return
+    if (/password|verifier|secret|token$|cookie|grant|apikey|apisecret|hmac|claude|credential|^auth/.test(compact)) throw new Error(`产品状态包含秘密字段：${key}`)
+  })
+}
+
+function schemaSummary(state, sessionRefs) {
+  const count = key => Array.isArray(state[key]) ? state[key].length : 0
+  return {
+    stateVersion: state.version,
+    members: count('members'),
+    modelRoutes: count('modelRoutes'),
+    employees: count('employees'),
+    connections: count('connections'),
+    skills: count('skills'),
+    confirmations: count('confirmations'),
+    works: count('works'),
+    sessionRefs,
   }
 }
 
-async function filesUnder(path) {
+function candidate() {
+  const value = process.env.GENEWAY_CANDIDATE?.trim()
+  if (!value) return null
+  if (!/^[A-Za-z0-9._/-]{1,128}$/.test(value)) throw new Error('GENEWAY_CANDIDATE 无效')
+  return value
+}
+
+async function emptyTarget(path) {
   try {
-    const entries = await readdir(path, { withFileTypes: true })
-    const files = []
-    for (const entry of entries) {
-      const child = join(path, entry.name)
-      if (entry.isDirectory()) files.push(...await filesUnder(child))
-      else if (entry.isFile()) files.push(child)
-    }
-    return files
+    const info = await lstat(path)
+    if (info.isSymbolicLink()) throw new Error(`目标根目录不得是符号链接：${path}`)
+    if (!info.isDirectory()) throw new Error(`目标必须是目录：${path}`)
+    if ((await readdir(path)).length) throw new Error(`目标目录必须为空：${path}`)
+    return { exists: true, mode: info.mode & 0o777 }
   } catch (error) {
-    if (error?.code === 'ENOENT') return []
+    if (error?.code === 'ENOENT') return { exists: false }
     throw error
   }
 }
 
-async function exists(path) {
-  try { await stat(path); return true } catch (error) { if (error?.code === 'ENOENT') return false; throw error }
+async function requireDirectory(path, label) {
+  let info
+  try { info = await lstat(path) } catch (error) { if (error?.code === 'ENOENT') throw new Error(`${label}不存在：${path}`); throw error }
+  if (info.isSymbolicLink()) throw new Error(`${label}不得是符号链接：${path}`)
+  if (!info.isDirectory()) throw new Error(`${label}不是目录：${path}`)
 }
 
-async function sha256(path) {
+async function openRegular(path) {
+  const before = await lstat(path)
+  if (before.isSymbolicLink()) throw new Error(`备份源不得是符号链接：${path}`)
+  if (!before.isFile()) throw new Error(`备份源不是普通文件：${path}`)
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const stat = await handle.stat()
+    if (!stat.isFile() || stat.dev !== before.dev || stat.ino !== before.ino) throw new Error(`备份源在校验期间变化：${path}`)
+    return { handle, stat }
+  } catch (error) {
+    await handle.close()
+    throw error
+  }
+}
+
+async function openRegularPath(rootPath, relativePath) {
+  const path = safeRelative(relativePath)
+  let cursor = rootPath
+  const parts = path.split('/')
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    cursor = join(cursor, parts[index])
+    await requireDirectory(cursor, '备份路径目录')
+  }
+  return openRegular(join(rootPath, ...parts))
+}
+
+async function filesUnder(path) {
+  const files = []
+  for (const entry of await readdir(path)) {
+    const child = join(path, entry)
+    const info = await lstat(child)
+    if (info.isSymbolicLink()) throw new Error(`DSH Session 路径不得是符号链接：${child}`)
+    if (info.isDirectory()) files.push(...await filesUnder(child))
+    else if (info.isFile()) files.push(child)
+    else throw new Error(`DSH Session 路径必须是普通文件或目录：${child}`)
+  }
+  return files
+}
+
+async function buildAndPublish(targetPath, target, build) {
+  const parent = dirname(targetPath)
+  await mkdir(parent, { recursive: true })
+  const stage = await mkdtemp(join(parent, `.${basename(targetPath)}.transfer-`))
+  await chmod(stage, 0o700)
+  let published = false
+  let removedTarget = false
+  try {
+    await build(stage)
+    if (target.exists) {
+      await rmdir(targetPath)
+      removedTarget = true
+    }
+    try {
+      await rename(stage, targetPath)
+      published = true
+    } catch (error) {
+      if (removedTarget) {
+        await mkdir(targetPath, { mode: target.mode })
+        await chmod(targetPath, target.mode)
+      }
+      throw error
+    }
+  } finally {
+    if (!published) await rm(stage, { recursive: true, force: true })
+  }
+}
+
+async function copyOpenFile(file, destination) {
+  await secureMkdir(dirname(destination))
+  await pipeline(
+    file.file.handle.createReadStream({ start: 0, autoClose: false }),
+    createWriteStream(destination, { flags: 'wx', mode: 0o600 }),
+  )
+  await chmod(destination, 0o600)
+}
+
+async function secureMkdir(path) {
+  await mkdir(path, { recursive: true, mode: 0o700 })
+  await chmod(path, 0o700)
+}
+
+async function verifyBuilt(stage, entries) {
+  for (const entry of entries) {
+    const file = await openRegularPath(stage, entry.path)
+    try {
+      if ((file.stat.mode & 0o777) !== 0o600 || file.stat.size !== entry.bytes || await sha256(file.handle) !== entry.sha256) throw new Error(`写入后校验失败：${entry.path}`)
+    } finally {
+      await file.handle.close()
+    }
+  }
+}
+
+async function readFileFromStart(handle) {
+  const chunks = []
+  for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) chunks.push(chunk)
+  return Buffer.concat(chunks)
+}
+
+async function sha256(handle) {
   const hash = createHash('sha256')
-  hash.update(await readFile(path))
+  for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) hash.update(chunk)
   return hash.digest('hex')
 }
 
-function safeRelative(value) {
-  if (typeof value !== 'string' || !value || value.includes('\0')) throw new Error('备份路径无效')
-  const path = normalize(value)
-  if (path.startsWith('/') || path === '..' || path.startsWith(`..${sep}`)) throw new Error('备份路径越界')
-  return path
+function digest(buffer) {
+  return createHash('sha256').update(buffer).digest('hex')
+}
+
+async function pathExists(path) {
+  try { await lstat(path); return true } catch (error) { if (error?.code === 'ENOENT') return false; throw error }
+}
+
+function overlaps(left, right) {
+  const relation = relative(left, right)
+  const reverse = relative(right, left)
+  return relation === '' || (!relation.startsWith(`..${sep}`) && relation !== '..') || (!reverse.startsWith(`..${sep}`) && reverse !== '..')
+}
+
+function record(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }

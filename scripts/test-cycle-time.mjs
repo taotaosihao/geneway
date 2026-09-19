@@ -23,6 +23,7 @@ const reasonCases = [
   [{ availableSeconds: -1, quantity: 60 }, 'NEGATIVE_AVAILABLE_SECONDS'],
   [{ availableSeconds: 3600, quantity: 0 }, 'NON_POSITIVE_QUANTITY'],
   [{ availableSeconds: 3600, quantity: -1 }, 'NON_POSITIVE_QUANTITY'],
+  [{ availableSeconds: Number.MAX_VALUE, quantity: Number.MIN_VALUE }, 'NON_FINITE_RESULT'],
 ]
 
 try {
@@ -48,24 +49,18 @@ try {
     arguments: arguments_,
     signal: new AbortController().signal,
   })
-  const valid = await execute({ availableSeconds: 3600, quantity: 60 }, 'cycle-valid')
-  assert.equal(valid.isError, false)
-  assert.equal(valid.value.secondsPerUnit, 60)
-  assert.equal(valid.value.unit, 'seconds/unit')
-  const runtimeReasonCases = reasonCases.filter(([input]) => Object.values(input).every(value => typeof value !== 'number' || Number.isFinite(value)))
-  for (const [index, [input, code]] of runtimeReasonCases.entries()) {
-    const invalid = await execute(input, `cycle-invalid-${index}`)
-    assert.equal(invalid.isError, false)
-    assert.equal(invalid.value.ok, false)
-    assert.equal(invalid.value.error.code, code)
-  }
+  const unauthorized = await execute({ availableSeconds: 3600, quantity: 60 }, 'cycle-without-grant')
+  assert.equal(unauthorized.isError, false)
+  assert.equal(unauthorized.value.ok, false)
+  assert.equal(unauthorized.value.error.code, 'FORBIDDEN')
   for (const [index, input] of [{ availableSeconds: Number.NaN, quantity: 60 }, { availableSeconds: 3600, quantity: Number.POSITIVE_INFINITY }].entries()) {
     const nonJsonNumber = await execute(input, `cycle-non-json-number-${index}`)
     assert.equal(nonJsonNumber.isError, true)
     assert.equal(nonJsonNumber.error.message, 'tool execution arguments must be losslessly JSON-serializable')
   }
-  const rendered = host.tools.get(toolName).output.render({}, valid.value)
-  assert.deepEqual(rendered, [{ type: 'text', text: '60 秒/件（3600 秒 ÷ 60 件）' }])
+  const valid = calculateCycleTime({ availableSeconds: 3600, quantity: 60 })
+  const rendered = host.tools.get(toolName).output.render({}, valid)
+  assert.deepEqual(rendered, [{ type: 'text', text: JSON.stringify(valid) }])
 
   await fiber.dispose()
   fiber = undefined

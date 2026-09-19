@@ -35,8 +35,9 @@ try {
     const forbiddenMarkers = ['create_goal', 'exit_plan_mode', 'get_goal', 'todo_write', 'update_goal', 'Available skills', 'workspace-write', root]
     const serializedEvents = JSON.stringify(result?.events ?? [])
     const forbiddenMarkerCount = result ? forbiddenMarkers.filter(marker => serializedEvents.includes(marker)).length : 0
-    if (result && (!requestHeader || toolNames.length !== 1 || toolNames[0] !== 'geneway_gearjob_read_work_order' || forbiddenMarkerCount !== 0)) {
-      throw new Error('P1 model request surface is broader than the single GearJob read-only tool')
+    const expectedTools = ['geneway_calculate_cycle_time', 'geneway_gearjob_read_work_order']
+    if (result && (!requestHeader || JSON.stringify([...toolNames].sort()) !== JSON.stringify(expectedTools) || forbiddenMarkerCount !== 0)) {
+      throw new Error('P2 model request surface does not match the two trusted native tools')
     }
     console.log(JSON.stringify({
       profile: 'sdk',

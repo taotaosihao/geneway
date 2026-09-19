@@ -1,17 +1,18 @@
-import { readFile, rename, stat, unlink } from 'node:fs/promises'
 import { constants } from 'node:fs'
+import { open } from 'node:fs/promises'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { readRuntimeConfig } from '../src/runtime-config.mjs'
+import { GEARJOB_TOOL } from '../src/capabilities.mjs'
+import { authorizeExecutionGrant, consumeExecutionGrant, resolveCredentialFile } from '../src/execution-grant.mjs'
 
 export const name = 'geneway-gearjob-work-order'
 export const inject = ['tools']
 
 export function apply(ctx) {
   ctx.tools.register(defineTool({
-    name: 'geneway_gearjob_read_work_order',
-    description: 'Read one explicitly allowed GearJob Work Order through the standard read-only REST endpoint.',
+    name: GEARJOB_TOOL,
+    description: 'Read one explicitly authorized GearJob-compatible Work Order through its standard read-only REST endpoint.',
     parameters: {
-      workOrderId: { type: 'string', description: 'The exact allowed work order identifier.' },
+      workOrderId: { type: 'string', description: 'The exact authorized work order identifier.' },
     },
     output: {
       schema: {
@@ -39,14 +40,26 @@ export function apply(ctx) {
           sourceInstance: { type: 'string' },
           sourceEnvironment: { type: 'string' },
           dataMode: { type: 'string' },
+          evidenceMode: { type: 'string' },
         },
       },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(args, invocation = {}) {
       try {
-        await assertExecutionGrant(args?.workOrderId)
-        return { ok: true, ...await readGearJobWorkOrder({ workOrderId: args?.workOrderId, signal: invocation.signal }) }
+        const grant = await consumeExecutionGrant({ toolName: GEARJOB_TOOL, input: args })
+        if (invocation.signal?.aborted) throw sourceError('CANCELLED', '本次执行已停止')
+        await authorizeExecutionGrant(grant)
+        return {
+          ok: true,
+          ...await readGearJobWorkOrder({
+            workOrderId: args?.workOrderId,
+            connection: grant.connection,
+            secretRoot: grant.secretRoot,
+            signal: invocation.signal,
+            authorize: () => authorizeExecutionGrant(grant),
+          }),
+        }
       } catch (error) {
         return { ok: false, error: { code: safeCode(error?.code), message: error?.message || 'GearJob 查询失败' } }
       }
@@ -55,43 +68,36 @@ export function apply(ctx) {
 }
 
 export async function assertExecutionGrant(workOrderId, filePath = process.env.GENEWAY_DSH_GRANT_FILE) {
-  if (!filePath) throw sourceError('FORBIDDEN', '本次执行没有 GearJob 读取授权')
-  const consumedPath = `${filePath}.consumed`
-  let grant
-  try {
-    await rename(filePath, consumedPath)
-    grant = JSON.parse(await readFile(consumedPath, 'utf8'))
-  } catch {
-    throw sourceError('FORBIDDEN', '本次执行的 GearJob 读取授权不可用')
-  } finally {
-    await unlink(consumedPath).catch(() => undefined)
-  }
-  const id = exactId(workOrderId)
-  if (grant?.allowRead !== true || grant?.workOrderId !== id || !['create', 'refresh'].includes(grant?.operation)) {
-    throw sourceError('FORBIDDEN', '本次执行不允许查询 GearJob')
-  }
+  return consumeExecutionGrant({ filePath, toolName: GEARJOB_TOOL, input: { workOrderId } })
 }
 
-export async function readGearJobWorkOrder({ workOrderId, config = readRuntimeConfig(), signal } = {}) {
-  if (!config.source.configured) throw sourceError('SOURCE_NOT_CONFIGURED', config.source.error ?? 'GearJob source is not configured')
+export async function readGearJobWorkOrder({ workOrderId, connection, secretRoot, config, signal, timeoutMs = 15_000, fetchImpl = fetch, authorize = async () => undefined } = {}) {
+  const source = connection ?? legacyConnection(config?.source)
+  const root = secretRoot ?? config?.source?.secretRoot
+  if (!source || !root) throw sourceError('SOURCE_NOT_CONFIGURED', 'GearJob source is not configured')
   const id = exactId(workOrderId)
-  if (!config.source.allowedWorkOrders.includes(id)) throw sourceError('FORBIDDEN', '工单不在当前连接的允许范围内')
-  const authorization = await readAuthorization(config.source.credentialFile)
-  const url = resourceUrl(config.source.baseUrl, id)
+  if (!source.allowedObjectIds?.includes(id)) throw sourceError('FORBIDDEN', '工单不在当前连接的允许范围内')
+  const credentialFile = await resolveCredentialFile(root, source.credentialRef)
+  const authorization = await readAuthorization(credentialFile)
+  if (signal?.aborted) throw sourceError('CANCELLED', '本次执行已停止')
+  await authorize()
+  const url = resourceUrl(source.baseUrl, id)
+  const timeout = AbortSignal.timeout(timeoutMs)
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
   let response
   try {
-    response = await fetch(url, {
+    response = await fetchImpl(url, {
       method: 'GET',
+      redirect: 'error',
       headers: {
         accept: 'application/json',
         authorization,
-        ...(config.source.hostHeader ? { host: config.source.hostHeader } : {}),
+        ...(source.hostHeader ? { host: source.hostHeader } : {}),
       },
-      signal: signal ?? AbortSignal.timeout(15_000),
+      signal: requestSignal,
     })
   } catch (error) {
-    if (error?.name === 'AbortError' || error?.name === 'TimeoutError') throw sourceError('UPSTREAM_TIMEOUT', 'GearJob 查询超时')
-    throw sourceError('UPSTREAM_ERROR', 'GearJob 查询连接失败')
+    throw requestError(error, signal, timeout)
   }
   if (response.status === 404) throw sourceError('NOT_FOUND', 'GearJob 中不存在该工单')
   if (response.status === 401 || response.status === 403) throw sourceError('FORBIDDEN', 'GearJob 拒绝了只读查询')
@@ -99,38 +105,43 @@ export async function readGearJobWorkOrder({ workOrderId, config = readRuntimeCo
   let body
   try {
     body = await response.json()
-  } catch {
+  } catch (error) {
+    if (requestSignal.aborted) throw requestError(error, signal, timeout)
     throw sourceError('INVALID_SOURCE', 'GearJob 返回的内容不是 JSON')
   }
-  return normalizeGearJobRecord(body?.data ?? body, { id, baseUrl: config.source.baseUrl })
+  return normalizeGearJobRecord(body?.data ?? body, { id, source })
 }
 
-export function normalizeGearJobRecord(record, { id, baseUrl } = {}) {
+export function normalizeGearJobRecord(record, { id, source, baseUrl } = {}) {
+  const trusted = source ?? legacyConnection({ baseUrl })
   if (!record || typeof record !== 'object' || Array.isArray(record)) throw sourceError('INVALID_SOURCE', 'GearJob 工单记录格式无效')
+  if (!trusted) throw sourceError('SOURCE_NOT_CONFIGURED', 'GearJob source metadata is not configured')
   const workOrderId = text(record.name ?? record.work_order_id ?? record.workOrderId ?? record.id ?? id)
   if (!workOrderId) throw sourceError('INVALID_SOURCE', 'GearJob 工单缺少稳定标识')
-  const sourceRecordId = `Work Order:${workOrderId}`
-  return {
+  return compact({
     workOrderId,
     status: text(record.status ?? record.workflow_state ?? 'unknown') ?? 'unknown',
     plannedQuantity: number(record.qty ?? record.planned_qty ?? record.plannedQuantity ?? record.planned_quantity),
     completedQuantity: number(record.produced_qty ?? record.completed_qty ?? record.completedQuantity ?? record.completed_quantity),
     unit: text(record.stock_uom ?? record.uom ?? record.unit),
     sourceTime: text(record.source_time ?? record.sourceTime ?? record.modified ?? record.observed_at),
-    sourceRecordId,
+    sourceRecordId: `Work Order:${workOrderId}`,
     sourceRevision: text(record.modified ?? record.revision ?? record.version),
-    sourceSystem: 'GearJob',
-    sourceInstance: safeInstance(baseUrl),
-    sourceEnvironment: 'external-test',
-    dataMode: 'synthetic',
-  }
+    sourceSystem: requiredMetadata(trusted.sourceSystem, 'sourceSystem'),
+    sourceInstance: requiredMetadata(trusted.sourceInstance, 'sourceInstance'),
+    sourceEnvironment: requiredMetadata(trusted.sourceEnvironment, 'sourceEnvironment'),
+    dataMode: requiredMetadata(trusted.dataMode, 'dataMode'),
+    evidenceMode: requiredMetadata(trusted.evidenceMode, 'evidenceMode'),
+  })
 }
 
 async function readAuthorization(filePath) {
+  let handle
   try {
-    const metadata = await stat(filePath)
-    if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) throw sourceError('SOURCE_NOT_CONFIGURED', 'GearJob credential file permissions must be 0600')
-    const raw = (await readFile(filePath, 'utf8')).trim()
+    handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    const metadata = await handle.stat()
+    if (!metadata.isFile() || (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0)) throw sourceError('SOURCE_NOT_CONFIGURED', 'GearJob credential file permissions must be 0600')
+    const raw = (await handle.readFile('utf8')).trim()
     if (!raw) throw sourceError('SOURCE_NOT_CONFIGURED', 'GearJob credential file is empty')
     let value = raw
     try {
@@ -144,8 +155,10 @@ async function readAuthorization(filePath) {
     const token = value.trim()
     return /^(?:token|bearer)\s+/i.test(token) ? token : `token ${token}`
   } catch (error) {
-    if (error?.code && ['SOURCE_NOT_CONFIGURED', 'FORBIDDEN'].includes(error.code)) throw error
+    if (error?.code === 'SOURCE_NOT_CONFIGURED') throw error
     throw sourceError('SOURCE_NOT_CONFIGURED', 'GearJob credential file is unavailable')
+  } finally {
+    await handle?.close().catch(() => undefined)
   }
 }
 
@@ -158,19 +171,45 @@ function resourceUrl(baseUrl, id) {
   return base
 }
 
-function safeInstance(baseUrl) {
-  try {
-    const url = new URL(baseUrl)
-    return url.host
-  } catch {
-    return 'configured'
+function legacyConnection(source) {
+  if (!source?.baseUrl) return undefined
+  return {
+    id: 'legacy-source',
+    revision: 1,
+    kind: 'gearjob-rest',
+    targetIdentity: safeInstance(source.baseUrl),
+    baseUrl: source.baseUrl,
+    hostHeader: source.hostHeader,
+    credentialRef: source.credentialRef,
+    allowedObjectIds: source.allowedObjectIds ?? source.allowedWorkOrders ?? [],
+    sourceSystem: source.sourceSystem ?? 'GearJob',
+    sourceInstance: source.sourceInstance ?? safeInstance(source.baseUrl),
+    sourceEnvironment: source.sourceEnvironment ?? 'external-test',
+    dataMode: source.dataMode ?? 'synthetic',
+    evidenceMode: source.evidenceMode ?? 'real-frappe-rest',
   }
+}
+
+function requestError(error, signal, timeout) {
+  if (signal?.aborted) return sourceError('CANCELLED', '本次执行已停止')
+  if (timeout.aborted || error?.name === 'TimeoutError') return sourceError('UPSTREAM_TIMEOUT', 'GearJob 查询超时')
+  return sourceError('UPSTREAM_ERROR', 'GearJob 查询连接失败')
+}
+
+function safeInstance(baseUrl) {
+  try { return new URL(baseUrl).host } catch { return 'configured' }
 }
 
 function exactId(value) {
   const id = text(value)
   if (!id || id.length > 140 || /[\u0000-\u001f\u007f]/.test(id)) throw sourceError('INVALID_REQUEST', '工单号无效')
   return id
+}
+
+function requiredMetadata(value, key) {
+  const result = text(value)
+  if (!result) throw sourceError('SOURCE_NOT_CONFIGURED', `连接快照缺少 ${key}`)
+  return result
 }
 
 function text(value) {
@@ -183,13 +222,15 @@ function number(value) {
   return undefined
 }
 
+function compact(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined))
+}
+
 function sourceError(code, message) {
-  const error = new Error(message)
-  error.code = code
-  return error
+  return Object.assign(new Error(message), { code })
 }
 
 function safeCode(code) {
-  const allowed = new Set(['INVALID_REQUEST', 'SOURCE_NOT_CONFIGURED', 'FORBIDDEN', 'NOT_FOUND', 'UPSTREAM_TIMEOUT', 'UPSTREAM_ERROR', 'INVALID_SOURCE'])
+  const allowed = new Set(['INVALID_REQUEST', 'SOURCE_NOT_CONFIGURED', 'FORBIDDEN', 'NOT_FOUND', 'CANCELLED', 'UPSTREAM_TIMEOUT', 'UPSTREAM_ERROR', 'INVALID_SOURCE'])
   return allowed.has(code) ? code : 'UPSTREAM_ERROR'
 }

@@ -1,7 +1,6 @@
-import { access, stat } from 'node:fs/promises'
-import { constants } from 'node:fs'
 import { readFileSync } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { resolveCredentialFile } from './execution-grant.mjs'
 
 const ZENMUX_PROVIDER = 'zenmux'
 const ZENMUX_MODEL = 'deepseek/deepseek-v4-pro'
@@ -12,11 +11,18 @@ export function readRuntimeConfig(env = process.env, root = process.cwd()) {
   const settingsEnv = settings?.env && typeof settings.env === 'object' ? settings.env : {}
   const baseUrl = nonEmpty(env.GENEWAY_GEARJOB_BASE_URL)
   const credentialFile = nonEmpty(env.GENEWAY_GEARJOB_CREDENTIAL_FILE)
+  const explicitSecretRoot = nonEmpty(env.GENEWAY_SECRET_ROOT)
+  const secretRoot = resolve(explicitSecretRoot ?? (credentialFile ? dirname(credentialFile) : join(root, 'var', 'secrets')))
+  const credentialRef = nonEmpty(env.GENEWAY_GEARJOB_CREDENTIAL_REF) ?? (credentialFile ? basename(credentialFile) : undefined)
   const allowedWorkOrders = splitList(env.GENEWAY_GEARJOB_ALLOWED_WORK_ORDER)
   const dshHome = resolve(root, nonEmpty(env.GENEWAY_DSH_HOME) ?? 'var/dsh')
+  const stateFile = resolve(nonEmpty(env.GENEWAY_STATE) ?? join(root, 'var', 'state.json'))
+  const dataRoot = dirname(stateFile)
   const model = ZENMUX_MODEL
   const zenmuxBaseUrl = ZENMUX_BASE_URL
   const provider = ZENMUX_PROVIDER
+  const hostHeader = nonEmpty(env.GENEWAY_GEARJOB_HOST_HEADER)
+  const targetIdentity = nonEmpty(env.GENEWAY_GEARJOB_TARGET_IDENTITY) ?? safeHost(baseUrl)
 
   let sourceError
   if (baseUrl) {
@@ -30,6 +36,7 @@ export function readRuntimeConfig(env = process.env, root = process.cwd()) {
     }
   }
   if (credentialFile && !isAbsolute(credentialFile)) sourceError ??= 'GENEWAY_GEARJOB_CREDENTIAL_FILE 必须是绝对路径'
+  if (credentialFile && explicitSecretRoot && !within(secretRoot, resolve(credentialFile))) sourceError ??= 'GENEWAY_GEARJOB_CREDENTIAL_FILE 必须位于 GENEWAY_SECRET_ROOT 内'
   if (baseUrl && !credentialFile) sourceError ??= '已配置 GearJob 地址但缺少 GENEWAY_GEARJOB_CREDENTIAL_FILE'
   if (baseUrl && allowedWorkOrders.length === 0) sourceError ??= '已配置 GearJob 地址但缺少 GENEWAY_GEARJOB_ALLOWED_WORK_ORDER'
 
@@ -38,8 +45,19 @@ export function readRuntimeConfig(env = process.env, root = process.cwd()) {
     source: {
       baseUrl,
       credentialFile,
+      credentialRef,
+      secretRoot,
       allowedWorkOrders,
-      hostHeader: nonEmpty(env.GENEWAY_GEARJOB_HOST_HEADER),
+      allowedObjectIds: allowedWorkOrders,
+      hostHeader,
+      targetIdentity,
+      kind: 'gearjob-rest',
+      revision: 1,
+      sourceSystem: 'GearJob',
+      sourceInstance: targetIdentity,
+      sourceEnvironment: 'external-test',
+      dataMode: 'synthetic',
+      evidenceMode: 'real-frappe-rest',
       configured: Boolean(baseUrl && credentialFile && allowedWorkOrders.length && !sourceError),
       error: sourceError,
     },
@@ -51,6 +69,9 @@ export function readRuntimeConfig(env = process.env, root = process.cwd()) {
       configured: Boolean(nonEmpty(settingsEnv.ANTHROPIC_AUTH_TOKEN)),
     },
     dshHome,
+    stateFile,
+    dataRoot,
+    secretRoot,
   }
 }
 
@@ -65,11 +86,7 @@ export function readSettings(env = process.env) {
 
 export async function validateRuntimeConfig(config) {
   if (!config?.source?.configured) return config
-  await access(config.source.credentialFile, constants.R_OK)
-  const metadata = await stat(config.source.credentialFile)
-  if (process.platform !== 'win32' && (metadata.mode & 0o077) !== 0) {
-    throw new Error('GearJob credential file permissions must be 0600')
-  }
+  await resolveCredentialFile(config.source.secretRoot, config.source.credentialRef)
   return config
 }
 
@@ -79,4 +96,13 @@ export function splitList(value) {
 
 function nonEmpty(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function within(root, candidate) {
+  const path = relative(root, candidate)
+  return path === '' || (!path.startsWith('..') && !isAbsolute(path))
+}
+
+function safeHost(value) {
+  try { return new URL(value).host } catch { return undefined }
 }

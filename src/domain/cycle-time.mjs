@@ -8,11 +8,13 @@ export function calculateCycleTime(input) {
   if (!Number.isFinite(input.quantity)) return failure('NON_FINITE_QUANTITY', '产量必须是有限数字')
   if (input.availableSeconds < 0) return failure('NEGATIVE_AVAILABLE_SECONDS', '可用时间不能为负数')
   if (input.quantity <= 0) return failure('NON_POSITIVE_QUANTITY', '产量必须大于零')
+  const secondsPerUnit = input.availableSeconds / input.quantity
+  if (!Number.isFinite(secondsPerUnit)) return failure('NON_FINITE_RESULT', '节拍结果必须是有限数字')
   return {
     ok: true,
     availableSeconds: input.availableSeconds,
     quantity: input.quantity,
-    secondsPerUnit: input.availableSeconds / input.quantity,
+    secondsPerUnit,
     unit: 'seconds/unit',
   }
 }

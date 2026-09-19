@@ -1,5 +1,5 @@
-# P1 product runtime: keep the DSH Agent/Session/JSONL kernel and one read-only
-# GearJob tool. The profile deliberately has no shell, filesystem, web, MCP,
+# P1-compatible P2 product runtime: keep the DSH Agent/Session/JSONL kernel and
+# the two contracted native tools. The profile deliberately has no shell, filesystem, web, MCP,
 # subagent, telemetry, DeepSeek-default route, or session-log side channel.
 - id: session-log-deepseek
   disabled: true
@@ -94,10 +94,12 @@
     mode: native
 - id: system-prompt
   config:
-    personaPrefix: You are Geneway's read-only work-order explanation agent.
+    personaPrefix: You are Geneway's constrained manufacturing fact explanation agent.
     personaSuffix: ''
     includeHarnessIdentity: false
     includeRuntimeContext: false
 - insert:
     - id: gearjob-work-order
       name: ../plugins/gearjob-work-order.mjs
+    - id: cycle-time
+      name: ../plugins/cycle-time.mjs

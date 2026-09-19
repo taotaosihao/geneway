@@ -5,184 +5,258 @@ import { join } from 'node:path'
 import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 
-const root = await mkdtemp(join(tmpdir(), 'geneway-service-'))
-let service
+const root = await mkdtemp(join(tmpdir(), 'geneway-p2-service-'))
+const stateFile = join(root, 'state.json')
+const store = createFileStore(stateFile)
+const calls = []
+const gates = new Map()
+let nextGate
+const runner = {
+  configured: true,
+  async run(args) {
+    calls.push(structuredClone(args))
+    if (nextGate) {
+      gates.set(args.executionId, nextGate)
+      nextGate = undefined
+    }
+    if (gates.has(args.executionId)) await gates.get(args.executionId).promise
+    const common = {
+      explanation: `说明 ${args.capabilityId}`,
+      dshSessionRef: args.sessionId ?? `session-${calls.length}`,
+      continuedFromDshSessionRef: args.sessionId && args.forceSuccessor ? args.sessionId : undefined,
+      contextResultId: args.contextResultId,
+      continuity: args.sessionId ? 'same-session' : 'new',
+      contextConfirmationRefs: args.sessionMetadata.confirmationRefs,
+      eventCount: 3,
+    }
+    if (args.operation === 'follow-up') return common
+    if (args.capabilityId === 'cycle-time-calculate') return {
+      ...common,
+      result: {
+        kind: 'manufacturing.takt',
+        payload: { ...args.input, secondsPerUnit: args.input.availableSeconds / args.input.quantity, unit: 'seconds/unit' },
+        toolName: 'geneway_calculate_cycle_time', pluginId: 'geneway-cycle-time', pluginVersion: '2',
+      },
+    }
+    return {
+      ...common,
+      result: {
+        kind: 'gearjob.work-order.observation',
+        payload: { workOrderId: args.input.workOrderId, status: 'In Process', plannedQuantity: 10, completedQuantity: 4, unit: 'Nos', sourceRecordId: `Work Order:${args.input.workOrderId}`, sourceRevision: 'r1', sourceSystem: 'GearJob', sourceInstance: 'A', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest' },
+        source: { sourceRecordId: `Work Order:${args.input.workOrderId}`, sourceRevision: 'r1', sourceSystem: 'GearJob', sourceInstance: 'A', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest' },
+        toolName: 'geneway_gearjob_read_work_order', pluginId: 'geneway-gearjob-work-order', pluginVersion: '2',
+      },
+    }
+  },
+  async cancel(executionId) { gates.get(executionId)?.release() },
+  async close() {},
+}
+
 try {
-  const store = createFileStore(join(root, 'state.json'))
-  await store.update(state => withTestBinding(state, 'employee-1', 'connection-1'))
-  let directReads = 0
-  const calls = []
-  service = createWorkService({
-    store,
-    source: { configured: true, read() { directReads += 1; throw new Error('direct source bypass') } },
-    runner: {
-      configured: true,
-      sourceConfigured: true,
-      async run(args) {
-        calls.push(args)
-        if (args.operation === 'follow-up') return { explanation: '追问说明', dshSessionRef: args.sessionId, continuity: 'same-session', contextObservationId: args.observation.observationId, eventCount: 2 }
-        return { observation: { workOrderId: 'WO-1', status: 'running', plannedQuantity: 10, completedQuantity: calls.filter(item => item.operation !== 'follow-up').length, unit: '件', sourceRecordId: 'source-' + calls.length, sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic' }, explanation: '基于工具事实的测试说明', dshSessionRef: args.sessionId ?? 'session-test', continuity: args.sessionId ? 'same-session' : 'new', eventCount: 3 }
-      },
-      async cancel() {},
-    },
-  })
-  const first = await service.createWork({ employeeId: 'employee-1', connectionId: 'connection-1', workOrderId: 'WO-1', clientRequestId: 'request-1' })
-  assert.equal(first.ok, true)
-  const duplicate = await service.createWork({ employeeId: 'employee-1', connectionId: 'connection-1', workOrderId: 'WO-1', clientRequestId: 'request-1' })
-  assert.equal(duplicate.deduplicated, true)
-  await waitFor(service, first.value.id, work => work.status === 'completed')
-  assert.equal(directReads, 0)
-  assert.equal(calls[0].operation, 'create')
-  const refreshed = await service.refreshWork(first.value.id, { clientRequestId: 'refresh-1' })
-  assert.equal(refreshed.ok, true)
-  await waitFor(service, first.value.id, work => work.observations.length === 2)
-  assert.equal(directReads, 0)
-  assert.equal(calls[1].operation, 'refresh')
-  assert.equal(calls[1].sessionId, 'session-test')
-  const followed = await service.followUp(first.value.id, '补充现场信息', { clientRequestId: 'follow-1' })
-  assert.equal(followed.ok, true)
-  await waitFor(service, first.value.id, work => work.followUps.length === 1)
-  const persisted = await service.getWork(first.value.id)
-  assert.equal(persisted.value.observations[0].sourceRecordId, 'source-1')
-  assert.equal(persisted.value.followUps[0].text, '补充现场信息')
-  assert.equal(persisted.value.executions[0].resultObservationId, persisted.value.observations[0].observationId)
-  assert.equal(persisted.value.executions[0].dshEventCount, 3)
-  assert.equal(persisted.value.executions.at(-1).resultFollowUpId, persisted.value.followUps[0].id)
-  assert.equal(persisted.value.executions.at(-1).dshEventCount, 2)
-  assert.equal(calls.at(-1).operation, 'follow-up')
-  assert.equal(calls.at(-1).sessionId, 'session-test')
+  await store.update(seedState)
+  const service = createWorkService({ store, runner, policyPaths: { stateFile, dataRoot: root, secretRoot: join(root, 'secrets') }, connectionTester: async connection => connection.targetIdentity })
+  const alice = { id: 'member-alice' }
+  const bob = { id: 'member-bob' }
+  const admin = { id: 'member-admin' }
 
-  await store.update(state => ({ ...state, connections: state.connections.map(item => ({ ...item, status: 'offline' })) }))
-  const blocked = await service.refreshWork(first.value.id, { clientRequestId: 'refresh-offline' })
-  assert.equal(blocked.error.code, 'FORBIDDEN')
-  await store.update(state => ({ ...state, connections: state.connections.map(item => ({ ...item, status: 'ready' })) }))
-  await store.update(state => ({ ...state, skills: state.skills.map(item => ({ ...item, enabled: false })) }))
-  const skillBlocked = await service.refreshWork(first.value.id, { clientRequestId: 'refresh-skill-disabled' })
-  assert.equal(skillBlocked.error.code, 'FORBIDDEN')
-  await store.update(state => ({ ...state, skills: state.skills.map(item => ({ ...item, enabled: true })) }))
+  const waiting = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', input: { availableSeconds: 3600 }, clientRequestId: 'waiting' })
+  assert.equal(waiting.ok, true)
+  assert.equal(waiting.value.status, 'waiting_input')
+  assert.deepEqual(waiting.value.requiredInputs, ['quantity'])
+  assert.equal(waiting.value.executions.length, 0)
+  assert.equal(calls.length, 0)
+  const invalid = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: -1 }, clientRequestId: 'invalid' })
+  assert.equal(invalid.error.status, 400)
+  assert.equal(calls.length, 0)
 
-  const scopedStore = createFileStore(join(root, 'scoped-state.json'))
-  await scopedStore.update(state => withTestBinding(state, 'e', 'c'))
-  let scopedRuns = 0
-  const scoped = createWorkService({ store: scopedStore, source: { configured: true, allows: id => id === 'ALLOWED' }, runner: { configured: true, sourceConfigured: true, async run() { scopedRuns += 1; throw new Error('must not run') } } })
-  const denied = await scoped.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'DENIED', clientRequestId: 'denied' })
-  assert.equal(denied.error.code, 'FORBIDDEN')
-  assert.equal(scopedRuns, 0)
-  await scoped.close()
+  const continued = await service.continueWork(alice, waiting.value.id, { input: { quantity: 60 }, clientRequestId: 'continue' })
+  assert.equal(continued.ok, true)
+  const completedCycle = await waitFor(service, alice, waiting.value.id, work => work.status === 'completed')
+  assert.equal(completedCycle.results[0].kind, 'manufacturing.takt')
+  assert.equal(completedCycle.results[0].payload.secondsPerUnit, 60)
+  assert.equal(completedCycle.executions[0].resultId, completedCycle.results[0].id)
+  assert.equal(completedCycle.observations.length, 0)
 
-  const concurrentStore = createFileStore(join(root, 'concurrent-state.json'))
-  await concurrentStore.update(state => withTestBinding(state, 'e', 'c'))
-  let concurrentRuns = 0
-  const concurrent = createWorkService({
-    store: concurrentStore,
-    source: { configured: true, allows: () => true },
-    runner: {
-      configured: true,
-      sourceConfigured: true,
-      async run({ workOrderId }) {
-        concurrentRuns += 1
-        await new Promise(resolve => setTimeout(resolve, 20))
-        return { observation: { workOrderId, status: 'Draft', plannedQuantity: 1, completedQuantity: 0, unit: 'Nos', sourceRecordId: `Work Order:${workOrderId}`, sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic' }, explanation: 'ok', dshSessionRef: 's', continuity: 'new' }
-      },
-    },
-  })
-  const [concurrentA, concurrentB] = await Promise.all([
-    concurrent.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'W', clientRequestId: 'same-concurrent' }),
-    concurrent.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'W', clientRequestId: 'same-concurrent' }),
-  ])
-  assert.equal(concurrentA.value.id, concurrentB.value.id)
-  await waitFor(concurrent, concurrentA.value.id, work => work.status === 'completed')
-  assert.equal(concurrentRuns, 1)
-  await concurrent.close()
+  const waitingGear = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: {}, clientRequestId: 'waiting-gear' })
+  assert.equal(waitingGear.value.status, 'waiting_input')
+  assert.deepEqual(waitingGear.value.requiredInputs, ['workOrderId'])
+  assert.equal(waitingGear.value.executions.length, 0)
 
-  const failureStore = createFileStore(join(root, 'failure-state.json'))
-  await failureStore.update(state => withTestBinding(state, 'e', 'c'))
-  const failureService = createWorkService({ store: failureStore, source: { configured: true, allows: () => true }, runner: { configured: true, sourceConfigured: true, async run() { throw Object.assign(new Error('模型调用失败'), { code: 'MODEL_FAILURE' }) } } })
-  const failed = await failureService.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'W', clientRequestId: 'model-failure' })
-  const failedWork = await waitFor(failureService, failed.value.id, work => work.status === 'failed')
-  assert.equal(failedWork.executions.at(-1).error.code, 'MODEL_FAILURE')
-  await failureService.close()
+  const gear = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-a', input: { workOrderId: 'WO-1' }, clientRequestId: 'gear' })
+  const completedGear = await waitFor(service, alice, gear.value.id, work => work.status === 'completed')
+  assert.equal(completedGear.results.length, 1)
+  assert.equal(completedGear.results[0].kind, 'gearjob.work-order.observation')
+  assert.equal(completedGear.observations[0].completion.ratio, 0.4)
+  assert.equal(completedGear.observations[0].evidenceMode, 'real-frappe-rest')
+  assert.equal(completedGear.executions[0].resultObservationId, completedGear.results[0].id)
+  const persisted = (await store.read()).works.find(item => item.id === gear.value.id)
+  assert.equal('observations' in persisted, false)
+  assert.equal('followUps' in persisted, false)
+  assert.equal(calls.at(-1).grant.connection.id, 'connection-a')
+  assert.equal(calls.at(-1).grant.policyFile, stateFile)
+  assert.equal(calls.at(-1).sessionMetadata.ownerMemberId, 'member-alice')
 
-  const cancelBase = createFileStore(join(root, 'follow-cancel-state.json'))
-  let gateCountdown = -1
-  let gateConsumed = false
-  let releaseGate
-  const gate = new Promise(resolve => { releaseGate = resolve })
-  const cancelStore = {
-    read: (...args) => cancelBase.read(...args),
-    async update(...args) {
-      if (gateCountdown === 0 && !gateConsumed) {
-        gateConsumed = true
-        await gate
-      } else if (gateCountdown > 0) gateCountdown -= 1
-      return cancelBase.update(...args)
-    },
-  }
-  await cancelBase.update(state => withTestBinding(state, 'e', 'c'))
-  let followRuns = 0
-  const cancelService = createWorkService({
-    store: cancelStore,
-    source: { configured: true, allows: () => true },
-    runner: {
-      configured: true,
-      sourceConfigured: true,
-      async run({ operation, workOrderId, sessionId, observation }) {
-        if (operation === 'follow-up') { followRuns += 1; return { explanation: 'must not run', dshSessionRef: sessionId, continuity: 'same-session', contextObservationId: observation.observationId } }
-        return { observation: { workOrderId, status: 'Draft', plannedQuantity: 1, completedQuantity: 0, unit: 'Nos', sourceRecordId: `Work Order:${workOrderId}`, sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic' }, explanation: 'ok', dshSessionRef: 'cancel-session', continuity: 'new' }
-      },
-      async cancel() { return false },
-    },
-  })
-  const cancelSeed = await cancelService.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'W', clientRequestId: 'seed' })
-  await waitFor(cancelService, cancelSeed.value.id, work => work.status === 'completed')
-  gateCountdown = 1
-  const pendingFollow = await cancelService.followUp(cancelSeed.value.id, 'cancel before dispatch', { clientRequestId: 'cancel-follow' })
-  await cancelService.cancel(cancelSeed.value.id)
-  releaseGate()
-  const cancelledFollow = await waitFor(cancelService, pendingFollow.value.id, work => work.status === 'cancelled')
-  assert.equal(cancelledFollow.followUps.length, 0)
-  assert.equal(followRuns, 0)
-  await cancelService.close()
+  assert.equal((await service.getWork(bob, gear.value.id)).error.status, 404)
+  assert.equal((await service.getWork(admin, gear.value.id)).error.status, 404)
+  const sameBob = await service.createWork(bob, { employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 120, quantity: 2 }, clientRequestId: 'gear' })
+  assert.notEqual(sameBob.value.id, gear.value.id)
+  await waitFor(service, bob, sameBob.value.id, work => work.status === 'completed')
+
+  const confirmation1 = await service.createConfirmation(alice, { employeeId: 'employee-a', label: '班次', value: '白班' })
+  const confirmation2 = await service.updateConfirmation(alice, confirmation1.id, { value: '夜班' })
+  assert.equal(confirmation2.revision, 2)
+  const confirmedWork = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 300, quantity: 5 }, clientRequestId: 'confirmed-capability' })
+  await waitFor(service, alice, confirmedWork.value.id, work => work.status === 'completed')
+  assert.deepEqual(calls.find(item => item.sessionMetadata.workId === confirmedWork.value.id).confirmations, [{ id: confirmation1.id, revision: 2, label: '班次', value: '夜班' }])
+  const follow = await service.followUp(alice, gear.value.id, '当前依据是什么？', { clientRequestId: 'follow' })
+  assert.equal(follow.ok, true)
+  const followed = await waitFor(service, alice, gear.value.id, work => work.followUps.length === 1)
+  assert.deepEqual(followed.results.at(-1).contextConfirmationRefs, [{ id: confirmation1.id, revision: 2 }])
+  assert.deepEqual(followed.executions.at(-1).contextConfirmationRefs, [{ id: confirmation1.id, revision: 2 }])
+  assert.match(followed.executions.at(-1).confirmationFingerprint, /^[a-f0-9]{64}$/)
+  assert.equal(followed.executions.at(-1).resultFollowUpId, followed.results.at(-1).id)
+  const followCall = calls.find(item => item.operation === 'follow-up')
+  assert.deepEqual(followCall.followUp.confirmations, [{ id: confirmation1.id, revision: 2, label: '班次', value: '夜班' }])
+  assert.equal(JSON.stringify(followCall.followUp.facts).includes('说明 gearjob'), false)
+  await service.deleteConfirmation(alice, confirmation1.id)
+  assert.equal((await service.listConfirmations(alice))[0].status, 'revoked')
+  await assert.rejects(
+    () => service.updateConfirmation(alice, confirmation1.id, { value: '不可复活' }),
+    error => error.code === 'INVALID_REQUEST',
+  )
+  const refresh = await service.refreshWork(alice, gear.value.id, { clientRequestId: 'after-revoke' })
+  assert.equal(refresh.ok, true)
+  await waitFor(service, alice, gear.value.id, work => work.results.length === 3)
+  assert.deepEqual(calls.at(-1).sessionMetadata.confirmationRefs, [])
+
+  const busyGate = deferred()
+  const busyWaiting = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 600 }, clientRequestId: 'busy-waiting' })
+  nextGate = busyGate
+  const firstContinue = await service.continueWork(alice, busyWaiting.value.id, { input: { quantity: 10 }, clientRequestId: 'busy-continue' })
+  const executionId = firstContinue.value.executions.at(-1).id
+  await waitFor(service, alice, busyWaiting.value.id, work => work.status === 'running')
+  const activeContinue = await service.continueWork(alice, busyWaiting.value.id, { input: { quantity: 99 }, clientRequestId: 'other' })
+  assert.equal(activeContinue.active, true)
+  assert.equal(activeContinue.value.executions.at(-1).id, executionId)
+  assert.equal(activeContinue.value.input.quantity, 10)
+  busyGate.release()
+  await waitFor(service, alice, busyWaiting.value.id, work => work.status === 'completed')
+
+  await assert.rejects(service.listMembers(alice), error => error.code === 'FORBIDDEN')
+  await assert.rejects(service.listConfig(alice, 'employees'), error => error.code === 'FORBIDDEN')
+  assert.equal((await service.listConfig(admin, 'modelRoutes'))[0].model, 'deepseek/deepseek-v4-pro')
+  const renamed = await service.updateConfig(admin, 'employees', 'employee-admin', { description: '管理员配置员工' })
+  assert.equal(renamed.description, '管理员配置员工')
+  await assert.rejects(service.updateConfig(admin, 'connections', 'connection-a', { targetIdentity: 'other' }), /不可原地更换/)
+  const skillOff = await service.updateConfig(admin, 'skills', 'skill-cycle-time-calculate', { enabled: false })
+  assert.equal(skillOff.enabled, false)
+  await service.updateConfig(admin, 'skills', 'skill-cycle-time-calculate', { enabled: true })
+  await assert.rejects(service.updateMember(admin, 'member-admin', { enabled: false }), /最后一个/)
+  const oldVersion = (await service.listMembers(admin)).find(item => item.id === 'member-bob').sessionVersion
+  const disabled = await service.updateMember(admin, 'member-bob', { enabled: false })
+  assert.equal(disabled.sessionVersion, oldVersion + 1)
+  await assert.rejects(service.bootstrap(bob), error => error.code === 'UNAUTHORIZED')
+  const tested = await service.testConnection(admin, 'connection-a')
+  assert.equal(tested.ok, true)
+  await assert.rejects(
+    service.createConfig(admin, 'connections', { id: 'bad-secret', name: 'bad', kind: 'gearjob-rest', targetIdentity: 'bad', baseUrl: 'http://127.0.0.1', credentialRef: '../secret', allowedObjectIds: [], sourceSystem: 'GearJob', sourceInstance: 'bad', sourceEnvironment: 'test', dataMode: 'synthetic', evidenceMode: 'controlled', enabled: true, skillIds: ['skill-gearjob-work-order-read'] }),
+    error => error.code === 'INVALID_REQUEST',
+  )
+  await assert.rejects(
+    service.createConfig(admin, 'connections', { id: 'long-secret', name: 'long', kind: 'gearjob-rest', targetIdentity: 'long', baseUrl: 'http://127.0.0.1', credentialRef: `a${'.'.repeat(128)}`, allowedObjectIds: [], sourceSystem: 'GearJob', sourceInstance: 'long', sourceEnvironment: 'test', dataMode: 'synthetic', evidenceMode: 'controlled', enabled: true, skillIds: ['skill-gearjob-work-order-read'] }),
+    error => error.code === 'INVALID_REQUEST',
+  )
+  const browserReady = await service.createConfig(admin, 'connections', { id: 'browser-ready', name: 'browser-ready', kind: 'gearjob-rest', targetIdentity: 'browser-ready', baseUrl: 'http://127.0.0.1', credentialRef: 'browser-ready.json', allowedObjectIds: [], sourceSystem: 'GearJob', sourceInstance: 'browser-ready', sourceEnvironment: 'test', dataMode: 'synthetic', evidenceMode: 'controlled', enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'] })
+  assert.equal(browserReady.status, 'unknown')
+
+  const testStarted = deferred()
+  const testRelease = deferred()
+  const raceService = createWorkService({ store, runner, connectionTester: async () => { testStarted.release(); await testRelease.promise; return 'stale' } })
+  const staleTest = raceService.testConnection(admin, 'connection-a')
+  await testStarted.promise
+  await service.updateConfig(admin, 'connections', 'connection-a', { name: 'connection-a-updated' })
+  testRelease.release()
+  await assert.rejects(staleTest, error => error.code === 'BUSY')
+  assert.equal((await service.listConfig(admin, 'connections')).find(item => item.id === 'connection-a').status, 'unknown')
+  await service.testConnection(admin, 'connection-a')
+
+  const boot = await service.bootstrap(alice)
+  assert.ok(boot.works.every(work => work.ownerMemberId === alice.id))
+  assert.ok(boot.employees.every(employee => ['employee-a'].includes(employee.id)))
+  assert.equal(boot.connections.some(connection => connection.id === 'connection-b'), false)
+  assert.equal(boot.connections.some(connection => 'credentialRef' in connection || 'baseUrl' in connection || 'hostHeader' in connection), false)
 
   await service.close()
-  const successorCalls = []
-  const successor = createWorkService({
-    store,
-    source: { configured: true },
-    runner: {
-      configured: true,
-      sourceConfigured: true,
-      async run(args) {
-        successorCalls.push(args)
-        return { explanation: 'successor 说明', dshSessionRef: 'session-successor', continuedFromDshSessionRef: args.sessionId, contextObservationId: args.observation.observationId, continuity: 'successor', eventCount: 4 }
-      },
-    },
-  })
-  const successorFollow = await successor.followUp(first.value.id, '恢复后的追问', { clientRequestId: 'follow-successor' })
-  assert.equal(successorFollow.ok, true)
-  const recovered = await waitFor(successor, first.value.id, work => work.followUps.length === 2)
-  assert.equal(successorCalls[0].sessionId, 'session-test')
-  assert.equal(recovered.followUps.at(-1).continuity, 'successor')
-  assert.equal(recovered.followUps.at(-1).continuedFromDshSessionRef, 'session-test')
-  assert.equal(recovered.executions.at(-1).resultFollowUpId, recovered.followUps.at(-1).id)
-  assert.equal(recovered.executions.at(-1).dshEventCount, 4)
-  await successor.close()
+  for (const [label, mutate] of [
+    ['member', state => { state.members.find(item => item.id === 'member-alice').enabled = false }],
+    ['employee', state => { state.employees.find(item => item.id === 'employee-a').enabled = false }],
+    ['skill', state => { state.skills.find(item => item.id === 'skill-gearjob-work-order-read').enabled = false }],
+    ['connection', state => { state.connections.find(item => item.id === 'connection-a').enabled = false }],
+  ]) await checkRevokedBeforeDispatch(label, mutate)
   console.log('service checks passed')
 } finally {
-  await service?.close()
   await rm(root, { recursive: true, force: true })
 }
 
-async function waitFor(service, id, predicate) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const result = await service.getWork(id)
+async function waitFor(service, actor, id, predicate) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const result = await service.getWork(actor, id)
     if (result.ok && predicate(result.value)) return result.value
-    await new Promise(resolve => setTimeout(resolve, 10))
+    await new Promise(resolve => setTimeout(resolve, 5))
   }
   throw new Error('timed out waiting for work')
 }
 
-function withTestBinding(state, employeeId, connectionId) {
-  const skillId = 'skill-gearjob-work-order-read'
-  return { ...state, skills: [{ id: skillId, name: 'read', action: 'gearjob.work-order.read', toolName: 'geneway_gearjob_read_work_order', enabled: true }], employees: [{ id: employeeId, name: '测试员工', enabled: true, connectionIds: [connectionId], skillIds: [skillId] }], connections: [{ id: connectionId, name: '测试只读连接', kind: 'controlled', status: 'ready', enabled: true, skillIds: [skillId] }] }
+function deferred() {
+  let release
+  const promise = new Promise(resolve => { release = resolve })
+  return { promise, release }
+}
+
+async function checkRevokedBeforeDispatch(label, mutate) {
+  const base = createFileStore(join(root, `revoke-${label}.json`))
+  await base.update(seedState)
+  const gate = deferred()
+  let blockRead = true
+  const gatedStore = {
+    update: (...args) => base.update(...args),
+    async read() { if (blockRead) await gate.promise; return base.read() },
+  }
+  let runs = 0
+  const service = createWorkService({ store: gatedStore, runner: { configured: true, async run() { runs += 1; throw new Error('must not dispatch') }, async close() {} } })
+  const actor = { id: 'member-alice' }
+  const accepted = await service.createWork(actor, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: { workOrderId: 'WO-1' }, clientRequestId: `revoke-${label}` })
+  await base.update(state => { mutate(state); return state })
+  blockRead = false
+  gate.release()
+  const state = await base.read()
+  const work = state.works.find(item => item.id === accepted.value.id)
+  for (let attempt = 0; !['failed', 'cancelled'].includes(work.status) && attempt < 100; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    Object.assign(work, (await base.read()).works.find(item => item.id === work.id))
+  }
+  assert.equal(work.status, 'failed', `${label} revocation must fail locally`)
+  assert.equal(runs, 0, `${label} revocation must stop before model`)
+  await service.close()
+}
+
+function seedState(state) {
+  const now = '2026-09-19T00:00:00.000Z'
+  const member = (id, role, employeeIds) => ({ id, loginName: id, displayName: id, role, enabled: true, authRef: id, sessionVersion: 1, employeeIds, createdAt: now, updatedAt: now })
+  const connection = (id, instance) => ({ id, name: id, kind: 'gearjob-rest', targetIdentity: instance, baseUrl: `http://127.0.0.1/${id}`, credentialRef: `${id}.json`, allowedObjectIds: ['WO-1'], sourceSystem: 'GearJob', sourceInstance: instance, sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest', enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'], revision: 1 })
+  return {
+    ...state,
+    members: [member('member-admin', 'admin', ['employee-admin']), member('member-alice', 'member', ['employee-a']), member('member-bob', 'member', ['employee-b'])],
+    modelRoutes: [{ id: 'model-zenmux', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
+    skills: [
+      { id: 'skill-gearjob-work-order-read', name: '工单查询', capabilityId: 'gearjob-work-order-read', enabled: true },
+      { id: 'skill-cycle-time-calculate', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true },
+    ],
+    connections: [connection('connection-a', 'A'), connection('connection-b', 'B')],
+    employees: [
+      { id: 'employee-admin', name: '管理员员工', enabled: true, modelRouteId: 'model-zenmux', connectionIds: [], skillIds: ['skill-cycle-time-calculate'] },
+      { id: 'employee-a', name: '员工 A', enabled: true, modelRouteId: 'model-zenmux', connectionIds: ['connection-a'], skillIds: ['skill-gearjob-work-order-read', 'skill-cycle-time-calculate'] },
+      { id: 'employee-b', name: '员工 B', enabled: true, modelRouteId: 'model-zenmux', connectionIds: ['connection-b'], skillIds: ['skill-cycle-time-calculate'] },
+    ],
+  }
 }

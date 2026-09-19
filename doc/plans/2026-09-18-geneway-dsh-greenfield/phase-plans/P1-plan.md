@@ -310,23 +310,22 @@ P1 的连续性权威对象是 Geneway work：同一进程内可复用当前 DSH
 | 检查 | 结果 |
 |---|---|
 | `pnpm install --frozen-lockfile --ignore-scripts` | 通过，依赖与 lockfile 一致。 |
-| `pnpm test:unit && pnpm test:service && pnpm test:controlled` | 通过；覆盖数量规则、持久观察、原子重复受理、同进程追问、successor lineage、直接来源旁路拒绝、零/多/错工具结果、follow-up 工具调用拒绝、连接非 ready 拒绝、取消与启动中断。 |
-| `GENEWAY_P1_PROBE_MODEL=true pnpm run probe:p1-runtime` | 通过；实际 `zenmux / deepseek/deepseek-v4-pro / openai-completions`，DSH 事件 14 条，非业务模型响应成功。 |
-| 真实 J1 浏览器旅程 | Chrome CDP 实际页面完成：首次 `Draft / 10 / 0 / Nos / 0%`；同 Session 追问且观察数不增加；GearJob 模拟数据更新为 4 后刷新得到 40%，旧 0% 观察保留；深链重载可读。 |
-| 重启连续性 | 同一 work 保留；旧 Session `session-4a6e…` 只作历史，新 Session `session-4f2e…` 记录 `continuedFromDshSessionRef`、当前 `contextObservationId` 和 `continuity=successor`，没有 hydrate 或重放旧 JSONL。 |
+| `pnpm test:unit && pnpm test:service && pnpm test:controlled` | 通过；覆盖稳定数量原因码、持久观察、并发相同请求一次受理、模型失败、来源超时、同进程追问、successor lineage、直接来源旁路拒绝、零/多/空/错 ID 工具结果、follow-up/第二次工具调用在网络 I/O 前由一次性 grant 拒绝、连接非 ready 与对象范围拒绝、精确取消及启动中断。 |
+| `GENEWAY_P1_PROBE_MODEL=true pnpm run probe:p1-runtime` | 通过；实际 `zenmux / deepseek/deepseek-v4-pro / openai-completions`，DSH 事件 12 条，非业务模型响应成功；`request/header` 只有 `geneway_gearjob_read_work_order`，goal/plan/skill/todo/workspace/runtime-context 禁止标记命中 0。 |
+| `pnpm run accept:p1 -- --record artifacts/p1-acceptance/p1-2ee5019-final.mp4` | 对冻结候选 `2ee5019` 通过；仓库内脚本管理 GearJob 0→4、Geneway 启停、Chrome CDP、深链、重启和 ffmpeg 录制。首次 `Draft / 10 / 0 / Nos / 0%`；同 Session 追问且观察数不增加；刷新得到 40%，旧 0% 观察保留。 |
+| 重启连续性 | 同一 work `work-7c79…` 保留；旧 Session `session-b1d0…` 只作历史，新 Session `session-b9c1…` 记录 `continuedFromDshSessionRef`、当前 `contextObservationId` 和 `continuity=successor`，没有 hydrate 或重放旧 JSONL。 |
 | 390×844 | `innerWidth=390`、`scrollWidth=390`、桌面侧栏隐藏；当前 40%、来源、观察历史和操作仍可见。 |
 | GearJob 权限边界 | 同一专用 credential 对允许/拒绝/不存在对象分别返回 `200/403/404`。 |
-| 秘密 canary | 扫描工作区、产品状态、DSH home、备份和恢复根共 149 个文件，实际 ZenMux token、GearJob API key/secret 命中数为 0。 |
-| 停机备份/恢复 | 备份 9 项、150592 字节；manifest 中每项 SHA-256 在独立恢复根全部复核通过；恢复服务回读同一 work、2 条 observation、2 条当时 follow-up 和最新 0.4。 |
+| 秘密 canary | 扫描工作区、冻结候选产品状态、DSH home、备份和恢复根共 136 个文件，实际 ZenMux token、GearJob API key/secret 命中数为 0。 |
+| 停机备份/恢复 | 冻结候选停机后备份 3 项、25748 字节；manifest 中每项 SHA-256 在独立恢复根全部复核通过；恢复回读同一 work、2 条 observation、2 条 follow-up、最新 0.4 和 `continuity=successor`。 |
 
 内置 Browser 通道因当前 Node kernel 与 browser-client 的 `Cannot redefine property: process` 冲突不可用；这不是产品失败。验收改用本机 Google Chrome DevTools Protocol，实际浏览器 console warning/error 与 Runtime exception 均为 0。此工具切换不改变页面、来源或模型候选。
 
 ### 12.3 界面材料与飞书回执
 
-- 完整实录：`artifacts/p1-acceptance/p1-final-acceptance.mp4`，时长 121.08 秒，SHA-256 `94c5d9765d0cf7c095c84c5d0249ebbf4f6f002eb15ba5d1438637b27a27bfcc`。
-- 服务端连接状态门禁修复后的同候选补充复验：`p1-final-acceptance-v2.mp4`，时长 33.76 秒，SHA-256 `95c3eda9bf6f5c2d4a156f7bd3a158a521c27362482bc27dc3c77727fcaa154c`。
-- 离线操作手册：`artifacts/p1-acceptance/index.html`，以相对路径引用视频和截图，不包含凭据。
-- `lark-cli` bot 发送均返回 `ok=true`：完整实录 message id `om_x100b65d439fbd8a0b4b5c0697c5763b`（2026-09-19 11:54:27）；补充说明与复验视频 message id 分别为 `om_x100b65d4cb8fdcb0b32a735fbaf4178`、`om_x100b65d4cbbf30a4b277f591395518e`（11:58:12、11:58:15）。幂等 key 固定，重复命令未产生重复消息。
+- 冻结产品/验收候选：`2ee5019`；完整实录 `artifacts/p1-acceptance/p1-2ee5019-final.mp4`，时长 39.96 秒，SHA-256 `a81d924ce3e690942ff6b88882f4423b0319dcabe9f709cceb3e17b885d13a98`；封面 SHA-256 `d965c03cd1ba399340cc52fe6989e88d5622fe30213366c979d7502b0836de42`。
+- 离线操作手册：`artifacts/p1-acceptance/index.html`，以相对路径引用冻结候选视频和实际抽帧，SHA-256 `13e95b8411d331caeede7775a9e301c8e34b2d734a22972de79d35fc6f8925b`，不包含凭据。
+- `lark-cli` bot 发送返回 `ok=true`：最终说明 message id `om_x100b65d55d2344a4b39d6158cfa4ea1`（2026-09-19 12:36:15）；最终视频 message id `om_x100b65d55ae84ca8b1022f91823f969`（12:36:18）。幂等 key 分别绑定 `geneway-p1-2ee5019-note` 与 `geneway-p1-2ee5019-video`。
 
 ### 12.4 P1 结论边界
 

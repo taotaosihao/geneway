@@ -195,9 +195,18 @@ try {
   assert.equal(capture.maxActiveChildren <= 2, true)
   assertClosedGraphRejects(persisted, completed.id)
 
+  const clientQuantityItems = [
+    { id: 'item-client-gear', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取工单', input: { workOrderId: 'WO-CANCEL' } },
+    { id: 'item-client-cycle', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '不得接收客户端数量', input: { availableSeconds: 600 }, dependsOn: ['item-client-gear'] },
+  ]
+  const directQuantity = structuredClone(clientQuantityItems); directQuantity[1].quantity = 6
+  const inputQuantity = structuredClone(clientQuantityItems); inputQuantity[1].input.quantity = 6
+  assert.equal((await create(service, actor, 'client-direct-quantity', directQuantity)).error.status, 400)
+  assert.equal((await create(service, actor, 'client-input-quantity', inputQuantity)).error.status, 400)
+
   const waiting = await create(service, actor, 'waiting', [
-    item('item-wait-a', 'employee-a', 600, 2),
-    { id: 'item-wait-b', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '等待剩余数量', input: { availableSeconds: 3600 } },
+    { id: 'item-wait-a', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取当前工单事实', input: { workOrderId: 'WO-CANCEL' } },
+    { id: 'item-wait-b', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '等待可用时间', input: {}, dependsOn: ['item-wait-a'] },
   ])
   const waitingReadback = await waitFor(service, actor, waiting.value.id, work => work.status === 'waiting_input')
   assert.equal(waitingReadback.plan.items.find(entry => entry.id === 'item-wait-a').status, 'completed')
@@ -205,16 +214,60 @@ try {
   const waitingChildren = (await store.read()).works.filter(work => work.rootWorkId === waiting.value.id)
   assert.equal(waitingChildren.find(work => work.planItemId === 'item-wait-a').results.length, 1)
   assert.equal(waitingChildren.find(work => work.planItemId === 'item-wait-b').executions.length, 0)
-  const waitContinued = await service.continueCollaboration(actor, waiting.value.id, { clientRequestId: 'waiting-successor', inputs: { 'item-wait-b': { quantity: 6 } } })
+  assert.equal(waitingChildren.find(work => work.planItemId === 'item-wait-b').input.quantity, 6)
+  assert.deepEqual(waitingChildren.find(work => work.planItemId === 'item-wait-b').requiredInputs, ['availableSeconds'])
+  const waitingEdited = await service.updateCollaborationPlan(actor, waiting.value.id, { expectedRevision: 1, items: [{ id: 'item-wait-b', goal: '更新后的等待目标', employeeId: 'employee-lead' }] })
+  assert.equal(waitingEdited.value.plan.revision, 2)
+  await assert.rejects(service.updateCollaborationPlan(actor, waiting.value.id, { expectedRevision: 1, items: [{ id: 'item-wait-b', goal: '过期草稿' }] }), error => error.code === 'BUSY')
+  assert.equal((await service.continueCollaboration(actor, waiting.value.id, { clientRequestId: 'waiting-client-quantity', inputs: { 'item-wait-b': { availableSeconds: 3600, quantity: 99 } } })).error.status, 400)
+  const waitContinued = await service.continueCollaboration(actor, waiting.value.id, { clientRequestId: 'waiting-successor', inputs: { 'item-wait-b': { availableSeconds: 3600 } } })
   assert.equal(waitContinued.ok, true)
   const waitingDone = await waitFor(service, actor, waiting.value.id, work => work.status === 'completed')
   const waitingChildrenDone = (await store.read()).works.filter(work => work.rootWorkId === waiting.value.id)
   assert.equal(waitingDone.collaboration.generation, 2)
   assert.equal(waitingChildrenDone.find(work => work.planItemId === 'item-wait-a').executions.length, 1)
   assert.equal(waitingChildrenDone.find(work => work.planItemId === 'item-wait-b').executions.length, 1)
-  const waitingReplay = await service.continueCollaboration(actor, waiting.value.id, { clientRequestId: 'waiting-successor', inputs: { 'item-wait-b': { quantity: 99 } } })
+  const derivedResult = waitingChildrenDone.find(work => work.planItemId === 'item-wait-b').results.at(-1)
+  assert.equal(derivedResult.payload.quantity, 6)
+  assert.deepEqual(derivedResult.inputProvenance.quantity, { kind: 'gearjob.remaining-quantity', sourcePlanItemId: 'item-wait-a', sourceResultId: waitingChildrenDone.find(work => work.planItemId === 'item-wait-a').results.at(-1).id, plannedQuantity: 10, completedQuantity: 4 })
+  assertProvenanceRejects(await store.read(), waiting.value.id)
+  const waitingReplay = await service.continueCollaboration(actor, waiting.value.id, { clientRequestId: 'waiting-successor', inputs: { 'item-wait-b': { availableSeconds: 99 } } })
   assert.equal(waitingReplay.deduplicated, true)
   assert.equal((await store.read()).works.find(work => work.planItemId === 'item-wait-b' && work.rootWorkId === waiting.value.id).executions.length, 1)
+
+  capture.setWorkOrder(12, 5)
+  const changedFacts = await create(service, actor, 'changed-facts', [
+    { id: 'item-changed-a', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取变化后的当前工单事实', input: { workOrderId: 'WO-CANCEL' } },
+    { id: 'item-changed-b', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '按变化后的事实计算', input: { availableSeconds: 3500 }, dependsOn: ['item-changed-a'] },
+  ])
+  await waitFor(service, actor, changedFacts.value.id, work => work.status === 'completed')
+  const changedChild = (await store.read()).works.find(work => work.rootWorkId === changedFacts.value.id && work.planItemId === 'item-changed-b')
+  assert.equal(changedChild.results.at(-1).payload.quantity, 7)
+  assert.deepEqual([changedChild.results.at(-1).inputProvenance.quantity.plannedQuantity, changedChild.results.at(-1).inputProvenance.quantity.completedQuantity], [12, 5])
+  capture.setWorkOrder(4, 4)
+  const noRemaining = await create(service, actor, 'no-remaining', [
+    { id: 'item-zero-a', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取无剩余工单', input: { workOrderId: 'WO-CANCEL' } },
+    { id: 'item-zero-b', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '等待正数剩余数量', input: { availableSeconds: 600 }, dependsOn: ['item-zero-a'] },
+  ])
+  await waitFor(service, actor, noRemaining.value.id, work => work.status === 'waiting_input')
+  const noRemainingChild = (await store.read()).works.find(work => work.rootWorkId === noRemaining.value.id && work.planItemId === 'item-zero-b')
+  assert.equal(noRemainingChild.input.quantity, undefined)
+  assert.deepEqual(noRemainingChild.requiredInputs, ['quantity'])
+  assert.equal(noRemainingChild.executions.length, 0)
+  assert.equal((await service.continueCollaboration(actor, noRemaining.value.id, { clientRequestId: 'zero-client-quantity', inputs: { 'item-zero-b': { quantity: 1 } } })).error.status, 400)
+
+  const ambiguous = await create(service, actor, 'ambiguous-source', [
+    { id: 'item-ambiguous-a', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取来源 A', input: { workOrderId: 'WO-CANCEL' } },
+    { id: 'item-ambiguous-b', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取来源 B', input: { workOrderId: 'WO-CANCEL' } },
+    { id: 'item-ambiguous-cycle', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '不得猜测来源', input: { availableSeconds: 600 }, dependsOn: ['item-ambiguous-a', 'item-ambiguous-b'] },
+  ])
+  await waitFor(service, actor, ambiguous.value.id, work => work.status === 'waiting_input')
+  const ambiguousState = await store.read(), ambiguousRoot = ambiguousState.works.find(work => work.id === ambiguous.value.id), ambiguousChild = ambiguousState.works.find(work => work.rootWorkId === ambiguous.value.id && work.planItemId === 'item-ambiguous-cycle')
+  const ambiguousSource = ambiguousState.works.find(work => work.id === ambiguousRoot.plan.items[0].childWorkId).results.at(-1)
+  ambiguousChild.input.quantity = 0.5
+  ambiguousChild.inputProvenance = { quantity: { kind: 'gearjob.remaining-quantity', sourcePlanItemId: 'item-ambiguous-a', sourceResultId: ambiguousSource.id, plannedQuantity: 4, completedQuantity: 3.5 } }
+  assert.throws(() => migrateState(ambiguousState), /唯一当前 GearJob 交接/)
+  capture.setWorkOrder(10, 4)
 
   await assert.rejects(service.updateCollaborationPlan(actor, completed.id, { expectedRevision: 1, items: [{ id: 'item-a', goal: '不可改已完成' }] }), error => error.code === 'BUSY')
   assert.equal((await service.continueCollaboration(actor, completed.id, { clientRequestId: 'normal-completed' })).error.status, 409)
@@ -435,6 +488,22 @@ function assertClosedGraphRejects(state, rootWorkId) {
   })
 }
 
+function assertProvenanceRejects(state, rootWorkId) {
+  const root = state.works.find(work => work.id === rootWorkId), cycle = state.works.find(work => work.rootWorkId === rootWorkId && work.inputProvenance)
+  const source = cycle.inputProvenance.quantity, sourceItem = root.plan.items.find(item => item.id === source.sourcePlanItemId), sourceChild = state.works.find(work => work.id === sourceItem.childWorkId)
+  const damaged = mutate => { const value = structuredClone(state); mutate(value.works.find(work => work.id === rootWorkId), value); assert.throws(() => migrateState(value), /输入来源|数量来源/) }
+  damaged((_current, value) => { delete value.works.find(work => work.id === cycle.id).inputProvenance })
+  damaged((_current, value) => { delete value.works.find(work => work.id === cycle.id).results.find(result => result.kind === 'manufacturing.takt').inputProvenance })
+  damaged((_current, value) => { const target = value.works.find(work => work.id === cycle.id); delete target.inputProvenance; delete target.results.find(result => result.kind === 'manufacturing.takt').inputProvenance })
+  damaged(current => { current.handoffs = current.handoffs.filter(handoff => handoff.childWorkId !== sourceChild.id || handoff.status !== 'current') })
+  damaged(current => { current.handoffs.find(handoff => handoff.childWorkId === sourceChild.id && handoff.status === 'current').status = 'superseded' })
+  damaged((current, value) => {
+    const child = value.works.find(work => work.id === sourceChild.id), original = child.results.find(result => result.id === source.sourceResultId), replacement = { ...structuredClone(original), id: `replacement-${original.id}`, payload: { ...original.payload, observationId: `replacement-${original.id}` } }
+    child.results.push(replacement)
+    current.handoffs.find(handoff => handoff.childWorkId === sourceChild.id && handoff.status === 'current').resultRefs = [replacement.id]
+  })
+}
+
 async function waitFor(service, actor, id, predicate) {
   const deadline = Date.now() + 15_000
   while (Date.now() < deadline) {
@@ -451,7 +520,7 @@ async function startCapture() {
   let requests = 0, activeChildren = 0, maxActiveChildren = 0
   const holds = new Set(), pending = new Map(), seen = new Set(), counts = new Map(), sequences = new Map(), scenarioTools = new Map()
   let sequence = 0
-  let holdToolRequest = false, toolPending, toolAborted = false
+  let holdToolRequest = false, toolPending, toolAborted = false, plannedQuantity = 10, completedQuantity = 4
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.includes('/api/resource/Work%20Order/')) {
       if (holdToolRequest) {
@@ -460,7 +529,7 @@ async function startCapture() {
         return
       }
       response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ data: { name: 'WO-CANCEL', status: 'In Process', qty: 10, produced_qty: 4 } }))
+      response.end(JSON.stringify({ data: { name: 'WO-CANCEL', status: 'In Process', qty: plannedQuantity, produced_qty: completedQuantity } }))
       return
     }
     const body = await readJson(request)
@@ -521,6 +590,7 @@ async function startCapture() {
     scenarioCount: scenario => counts.get(scenario) ?? 0,
     sequence: scenario => sequences.get(scenario) ?? 0,
     tools: scenario => scenarioTools.get(scenario) ?? [],
+    setWorkOrder(planned, completed) { plannedQuantity = planned; completedQuantity = completed },
     holdTool() { holdToolRequest = true },
     async waitForTool() {
       const deadline = Date.now() + 5000

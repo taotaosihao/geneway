@@ -269,6 +269,7 @@ export function createCollaborationRunner({
   }
 
   async function executeChild(ctx, rootSnapshot, item, generation, entry, rootSignal) {
+    await deriveRemainingQuantity(rootSnapshot.id, item, generation)
     const state = await store.read()
     const child = state.works.find(work => work.id === item.childWorkId)
     const currentRoot = state.works.find(work => work.id === rootSnapshot.id)
@@ -336,6 +337,35 @@ export function createCollaborationRunner({
         await run.dispose().catch(() => undefined)
       }
     }
+  }
+
+  async function deriveRemainingQuantity(rootWorkId, item, generation) {
+    await store.update(state => {
+      const rootWork = state.works.find(work => work.id === rootWorkId && work.collaboration?.generation === generation)
+      const child = state.works.find(work => work.id === item.childWorkId)
+      if (!rootWork || child?.capabilityId !== 'cycle-time-calculate' || child.input.quantity !== undefined || !child.requiredInputs.includes('quantity') || child.executions.length) return state
+      const dependencies = (item.dependsOn ?? []).map(id => rootWork.plan.items.find(candidate => candidate.id === id)).filter(Boolean)
+      const sources = dependencies.flatMap(dependency => {
+        const sourceChild = state.works.find(work => work.id === dependency.childWorkId)
+        const handoff = rootWork.handoffs.find(candidate => candidate.childWorkId === sourceChild?.id && candidate.generation === generation && candidate.status === 'current')
+        const result = sourceChild?.results.find(candidate => handoff?.resultRefs.includes(candidate.id) && candidate.kind === 'gearjob.work-order.observation')
+        return result ? [{ dependency, result }] : []
+      })
+      if (sources.length !== 1) return state
+      const [{ dependency, result }] = sources
+      const plannedQuantity = result.payload.plannedQuantity, completedQuantity = result.payload.completedQuantity
+      const quantity = plannedQuantity - completedQuantity
+      if (![plannedQuantity, completedQuantity, quantity].every(Number.isFinite) || quantity <= 0) return state
+      const now = clock(), input = { ...child.input, quantity }
+      const inputProvenance = { quantity: { kind: 'gearjob.remaining-quantity', sourcePlanItemId: dependency.id, sourceResultId: result.id, plannedQuantity, completedQuantity } }
+      const requiredInputs = child.requiredInputs.filter(name => name !== 'quantity'), ready = requiredInputs.length === 0
+      const execution = { id: `exec-${randomUUID()}`, operation: 'collaboration-child', clientRequestId: `derived-${randomUUID()}`, input, status: 'accepted', acceptedAt: now, generation, cancelGeneration: rootWork.collaboration.cancelGeneration, planRevision: rootWork.plan.revision, employeeId: child.employeeId }
+      return { ...state, works: state.works.map(work => {
+        if (work.id === child.id) return { ...child, input, inputProvenance, requiredInputs, status: ready ? 'accepted' : 'waiting_input', executions: ready ? [execution] : [] }
+        if (work.id === rootWork.id) return { ...rootWork, plan: { ...rootWork.plan, items: rootWork.plan.items.map(candidate => candidate.id === item.id ? { ...candidate, status: ready ? 'not_started' : 'waiting_input' } : candidate) } }
+        return work
+      }) }
+    })
   }
 
   async function authorizeTool({ toolName, input, invocation, grant }) {
@@ -611,10 +641,10 @@ function collaborationResult(id, work, parsed, sessionId, usage, now, generation
     : base.payload
   return {
     id, kind: base.kind, capabilityId: work.capabilityId, skillId: work.skillId, schemaVersion: 1,
-    input: structuredClone(work.input), payload, explanation: parsed.explanation, source: base.source,
+    input: structuredClone(work.input), payload, explanation: work.inputProvenance ? `用户提供的计算条件下平均分摊：${parsed.explanation}` : parsed.explanation, source: base.source,
     createdAt: now, toolName: base.toolName, pluginId: base.pluginId, pluginVersion: base.pluginVersion,
     dshSessionRef: sessionId, contextConfirmationRefs, employeeId: work.employeeId, handoffRefs: [], usage,
-    knowledgeDependencyRefs, generation,
+    knowledgeDependencyRefs, generation, ...(work.inputProvenance ? { inputProvenance: structuredClone(work.inputProvenance) } : {}),
   }
 }
 

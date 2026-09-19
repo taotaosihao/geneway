@@ -448,6 +448,31 @@ function normalizeCollaborations(works, memberIds, state) {
       }
     }
     uniqueIds(work.handoffs, `协作工作 ${work.id} handoff`)
+    for (const item of work.plan.items) {
+      const child = byId.get(item.childWorkId)
+      const gearJobDependent = child.capabilityId === 'cycle-time-calculate' && item.dependsOn.some(id => {
+        const dependency = work.plan.items.find(candidate => candidate.id === id)
+        return byId.get(dependency?.childWorkId)?.capabilityId === 'gearjob-work-order-read'
+      })
+      if (gearJobDependent && child.input.quantity !== undefined) {
+        if (!child.inputProvenance) throw new Error(`子工作 ${child.id} 派生数量缺少输入来源`)
+        for (const result of child.results.filter(candidate => candidate.kind === 'manufacturing.takt' && candidate.input.quantity === child.input.quantity)) {
+          if (!result.inputProvenance || !sameQuantityProvenance(result.inputProvenance, child.inputProvenance)) throw new Error(`子工作 ${child.id} 节拍结果缺少匹配输入来源`)
+        }
+      }
+      const provenances = [[child.inputProvenance, child.input.quantity], ...child.results.map(result => [result.inputProvenance, result.input.quantity])].filter(([provenance]) => provenance)
+      for (const [provenance, quantity] of provenances) {
+        const source = validateQuantityProvenance(provenance, quantity, `子工作 ${child.id}`)
+        const eligible = item.dependsOn.flatMap(id => {
+          const dependency = work.plan.items.find(candidate => candidate.id === id), sourceChild = byId.get(dependency?.childWorkId), handoff = currentHandoffs.get(sourceChild?.id)
+          const result = sourceChild?.results.find(candidate => handoff?.resultRefs.length === 1 && handoff.resultRefs[0] === candidate.id && candidate.kind === 'gearjob.work-order.observation')
+          return result ? [{ dependency, handoff, result }] : []
+        })
+        if (eligible.length !== 1) throw new Error(`子工作 ${child.id} 数量来源必须绑定唯一当前 GearJob 交接`)
+        const [{ dependency, handoff, result }] = eligible
+        if (dependency.id !== source.sourcePlanItemId || handoff.resultRefs[0] !== source.sourceResultId || result.payload.plannedQuantity !== source.plannedQuantity || result.payload.completedQuantity !== source.completedQuantity) throw new Error(`子工作 ${child.id} 数量来源引用无效`)
+      }
+    }
     const treeResults = [work, ...childWorkIds.map(id => byId.get(id))].flatMap(item => item.results)
     uniqueIds(treeResults, `协作工作 ${work.id} tree result`)
     for (const related of [work, ...childWorkIds.map(id => byId.get(id))]) for (const execution of related.executions) {
@@ -547,7 +572,7 @@ function normalizeKnowledgeMaterial(material) {
 
 function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) {
   if (!record(result)) throw new Error('结果状态无效')
-  exactKeys(result, ['id', 'kind', 'capabilityId', 'skillId', 'schemaVersion', 'input', 'payload', 'explanation', 'source', 'createdAt', 'toolName', 'pluginId', 'pluginVersion', 'dshSessionRef', 'continuedFromDshSessionRef', 'contextObservationId', 'continuity', 'contextConfirmationRefs', 'employeeId', 'handoffRefs', 'usage', 'generation', ...(allowKnowledgeDependencyRefs ? ['knowledgeDependencyRefs'] : [])], '结果')
+  exactKeys(result, ['id', 'kind', 'capabilityId', 'skillId', 'schemaVersion', 'input', 'payload', 'explanation', 'source', 'createdAt', 'toolName', 'pluginId', 'pluginVersion', 'dshSessionRef', 'continuedFromDshSessionRef', 'contextObservationId', 'continuity', 'contextConfirmationRefs', 'employeeId', 'handoffRefs', 'usage', 'generation', 'inputProvenance', ...(allowKnowledgeDependencyRefs ? ['knowledgeDependencyRefs'] : [])], '结果')
   const id = requiredText(result.id, '结果 ID 无效')
   const kind = requiredText(result.kind, `结果 ${id} 类型无效`)
   if (!RESULT_KINDS.has(kind)) throw new Error(`结果 ${id} 类型不受支持：${kind}`)
@@ -635,6 +660,9 @@ function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) 
     if (result.capabilityId !== CYCLE_CAPABILITY_ID || result.skillId !== CYCLE_SKILL_ID || result.toolName !== CYCLE_TOOL_NAME || result.pluginId !== CYCLE_PLUGIN_ID) throw new Error(`结果 ${id} 节拍能力来源无效`)
     requiredText(result.pluginVersion, `结果 ${id} pluginVersion 无效`)
     if (result.source !== undefined) throw new Error(`结果 ${id} 节拍不得伪造来源`)
+    if (result.inputProvenance !== undefined) validateQuantityProvenance(result.inputProvenance, result.input.quantity, `结果 ${id}`)
+  } else if (result.inputProvenance !== undefined) {
+    throw new Error(`结果 ${id} 不得包含输入来源`)
   }
   if (kind === 'assistant.follow-up') {
     exactKeys(result.input, ['text'], `结果 ${id} 输入`)
@@ -646,6 +674,25 @@ function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) 
   }
   if (result.pluginVersion !== undefined) requiredText(result.pluginVersion, `结果 ${id} pluginVersion 无效`)
   return result
+}
+
+function validateQuantityProvenance(value, quantity, label) {
+  if (!record(value)) throw new Error(`${label} 输入来源无效`)
+  exactKeys(value, ['quantity'], `${label} 输入来源`)
+  const source = value.quantity
+  if (!record(source)) throw new Error(`${label} 数量来源无效`)
+  exactKeys(source, ['kind', 'sourcePlanItemId', 'sourceResultId', 'plannedQuantity', 'completedQuantity'], `${label} 数量来源`)
+  if (source.kind !== 'gearjob.remaining-quantity') throw new Error(`${label} 数量来源类型无效`)
+  requiredText(source.sourcePlanItemId, `${label} 来源计划项无效`)
+  requiredText(source.sourceResultId, `${label} 来源结果无效`)
+  if (![source.plannedQuantity, source.completedQuantity].every(Number.isFinite) || source.plannedQuantity - source.completedQuantity !== quantity || quantity <= 0) throw new Error(`${label} 派生数量无效`)
+  return source
+}
+
+function sameQuantityProvenance(left, right) {
+  const a = left?.quantity, b = right?.quantity
+  return a?.kind === b?.kind && a?.sourcePlanItemId === b?.sourcePlanItemId && a?.sourceResultId === b?.sourceResultId
+    && a?.plannedQuantity === b?.plannedQuantity && a?.completedQuantity === b?.completedQuantity
 }
 
 function normalizeUsage(value, label) {

@@ -154,6 +154,14 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           planItems.push({ id: itemId, childWorkId, goal: itemGoal, employeeId: binding.employee.id, status: waiting ? 'waiting_input' : 'not_started', dependsOn: raw.dependsOn ?? [] })
         }
         if (planItems.some(item => !stringIds(item.dependsOn) || item.dependsOn.some(id => !itemIds.has(id) || id === item.id)) || hasDependencyCycle(planItems)) { reservation = { error: failure('INVALID_REQUEST', '协作计划依赖无效') }; return state }
+        for (let index = 0; index < planItems.length; index += 1) {
+          const item = planItems[index], child = childWorks[index], raw = body.items[index]
+          if (child.capabilityId === 'cycle-time-calculate' && item.dependsOn.some(id => childWorks.find(work => work.planItemId === id)?.capabilityId === 'gearjob-work-order-read')
+            && (Object.hasOwn(raw, 'quantity') || plainObject(raw.input) && Object.hasOwn(raw.input, 'quantity'))) {
+            reservation = { error: failure('INVALID_INPUT', '剩余数量必须来自当前 GearJob 工单观察') }
+            return state
+          }
+        }
         const rootExecutionId = `exec-${randomUUID()}`
         const rootWork = {
           id: rootWorkId, ownerMemberId: member.id, employeeId: leader.employee.id, skillId: leader.skill.id,
@@ -189,15 +197,16 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         const childChanges = new Map()
         const items = work.plan.items.map(item => {
           if (!changes.has(item.id)) return item
-          if (item.status !== 'not_started') throw serviceError('BUSY', '只能修改未开始计划项')
           const change = changes.get(item.id), child = state.works.find(candidate => candidate.id === item.childWorkId)
-          if (!child || child.status !== 'accepted' || child.executions.some(execution => execution.status !== 'accepted')) throw serviceError('BUSY', '只能修改未开始计划项')
+          const editable = item.status === 'not_started'
+            ? child?.status === 'accepted' && child.executions.every(execution => execution.status === 'accepted')
+            : item.status === 'waiting_input' && child?.status === 'waiting_input' && child.executions.length === 0
+          if (!editable) throw serviceError('BUSY', '只能修改未执行计划项')
           let employeeId = item.employeeId
-          if (change.employeeId !== undefined && change.employeeId !== employeeId) {
-            const binding = authorizedBinding(state, member, { ...child, employeeId: change.employeeId }, connectionCatalog)
-            if (!binding.ok) throw serviceError(binding.error.code, binding.error.message)
-            employeeId = binding.employee.id
-          }
+          const binding = authorizedBinding(state, member, { ...child, employeeId: change.employeeId ?? employeeId }, connectionCatalog)
+          if (!binding.ok) throw serviceError(binding.error.code, binding.error.message)
+          if (!inputAllowed(binding, child.input)) throw serviceError('FORBIDDEN', '业务对象不在当前连接允许范围内')
+          employeeId = binding.employee.id
           childChanges.set(child.id, { goal: change.goal ?? item.goal, employeeId })
           return { ...item, goal: change.goal ?? item.goal, employeeId }
         })
@@ -563,6 +572,10 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         if (!binding.ok) { reservation = { error: binding }; return state }
         const supplied = body.inputs?.[item.id]
         if (supplied !== undefined && !plainObject(supplied)) { reservation = { error: failure('INVALID_INPUT', '协作补充输入必须是对象') }; return state }
+        if (child.capabilityId === 'cycle-time-calculate' && Object.hasOwn(supplied ?? {}, 'quantity') && item.dependsOn.some(id => {
+          const dependency = rootWork.plan.items.find(candidate => candidate.id === id)
+          return state.works.find(work => work.id === dependency?.childWorkId)?.capabilityId === 'gearjob-work-order-read'
+        })) { reservation = { error: failure('INVALID_INPUT', '剩余数量必须来自当前 GearJob 工单观察') }; return state }
         const parsed = parseInput(child.capabilityId, { ...child.input, ...(supplied ?? {}) }, false)
         if (!parsed.ok) { reservation = { error: parsed }; return state }
         if (!inputAllowed(binding, parsed.input)) { reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }; return state }

@@ -200,6 +200,13 @@ try {
   await pause()
 
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+  await evaluate(`document.querySelector('#logout').click()`)
+  await waitFor(`document.querySelector('#login-shell:not(.hidden)') && innerWidth===390`)
+  await pause()
+  await login(send, evaluate, waitFor, 'member', memberPassword, 'member')
+  const mobileLogin = await evaluate(`({role:state.session?.role,innerWidth,scrollWidth:document.documentElement.scrollWidth,mobileNav:!!document.querySelector('.mobile-nav .nav:not(.hidden)')})`)
+  if (JSON.stringify(mobileLogin) !== JSON.stringify({ role: 'member', innerWidth: 390, scrollWidth: 390, mobileNav: true })) throw new Error(`mobile member login failed: ${JSON.stringify(mobileLogin)}`)
+  await pause()
   const workCountBeforeInvalid = await evaluate(`state.bootstrap.works.length`)
   await evaluate(`(()=>{show('home');const employee=document.querySelector('#work-employee');employee.value='employee-b';employee.dispatchEvent(new Event('change',{bubbles:true}));const skill=document.querySelector('#work-skill');skill.value='skill-cycle-time-calculate';skill.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#available-seconds').value='3600';document.querySelector('#quantity').value='0';document.querySelector('#work-form').requestSubmit()})()`)
   await waitFor(`document.querySelector('#home-message').classList.contains('error') && document.querySelector('#home-message').textContent.length>0`)
@@ -408,7 +415,7 @@ try {
         sources: { a: { initialRatio: initialA.ratio, refreshedRatio: refreshedA.ratio, evidenceMode: initialA.evidenceMode }, b: { initialRatio: initialB.ratio, refreshedRatio: controlledB.ratio, evidenceMode: controlledB.evidenceMode }, sequence: isolation.sequence },
         confirmation: { revisions: [1, 2, revokedRevision], status: 'revoked', successor: followed.continuity === 'successor', successorContextRefs: followed.confirmations.length, sessionScan: transfer.sessionScan },
         waiting: { desktopRestartAndRelogin: true, desktopExecutionsBeforeContinue: 0, mobileExplicitContinue: cycle.secondsPerUnit === 60, retainedAfterRestore: restoredMember.hasWaiting },
-        mobile: { width: cycle.innerWidth, scrollWidth: cycle.scrollWidth, invalidInputRejected: invalidCycle.works === workCountBeforeInvalid, refreshResults: cycle.results, stopScopeVisible: cycle.stopScope, confirmation: mobileConfirmation, mobileStop },
+        mobile: { login: mobileLogin, width: cycle.innerWidth, scrollWidth: cycle.scrollWidth, invalidInputRejected: invalidCycle.works === workCountBeforeInvalid, refreshResults: cycle.results, stopScopeVisible: cycle.stopScope, confirmation: mobileConfirmation, mobileStop },
         concurrency: w1w2,
         disable: { aDispatchStatus: aRejected.status, bRemainedUsable: Boolean(bAfterADisabledId), staleMemberDispatchStatus: disabledMember.status, memberRelogin: true },
         restore: { entries: transfer.entries, sessionRefs: transfer.sessionRefs, hashes: transfer.hashVerified, permissions: transfer.modesVerified, secretMatches: transfer.secretMatches, membershipUnchanged: transfer.membershipUnchanged, noAutomaticReplay: controlledCallsAfterRestore === controlledCallsBeforeRestore, missingSecretDispatch, visibleMemberState: restoredMember, visibleAdminState: restoredAdmin },
@@ -425,7 +432,7 @@ try {
     waiting: { id: waitingId, restartAndRelogin: true, executionsBeforeContinue: 0 },
     realA: { initial: initialA, refreshed: refreshedA, visibleSourceCopy: initialSourceCopy.visible },
     controlledB: { id: controlledId, initial: { ratio: initialB.ratio, completed: initialB.completed }, refreshed: { ratio: controlledB.ratio, completed: controlledB.completed }, dataMode: controlledB.dataMode, evidenceMode: controlledB.evidenceMode, visibleSourceCopy: controlledCopy.visible },
-    isolation, followed, cycle, invalidCycle, mobileWaitingId, mobileConfirmation, mobileStop, w1w2, bAfterADisabledId, aRejected, disabledMember,
+    isolation, followed, mobileLogin, cycle, invalidCycle, mobileWaitingId, mobileConfirmation, mobileStop, w1w2, bAfterADisabledId, aRejected, disabledMember,
     memberBoundary, ownerIsolation, transfer, missingSecretDispatch, noAutomaticReplay: controlledCallsAfterRestore === controlledCallsBeforeRestore, restoredMember, restoredAdmin,
     browserErrors: browserErrors.length, networkErrors: unexpectedNetwork.length,
     recordPath: recordPath ? resolve(recordPath) : undefined, receipt: receiptFile ? basename(receiptFile) : undefined,

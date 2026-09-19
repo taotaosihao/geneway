@@ -1,5 +1,7 @@
 import { existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { mkdir, unlink, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { join, resolve } from 'node:path'
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
 import { readRuntimeConfig, readSettings } from './runtime-config.mjs'
 
@@ -8,6 +10,7 @@ export const GEARJOB_TOOL = 'geneway_gearjob_read_work_order'
 export function createDshRunner({ root = process.cwd(), config = readRuntimeConfig(process.env, root), harnessFactory = options => new DeepSeekHarness(options) } = {}) {
   const active = new Map()
   const sessions = new Map()
+  const grants = new WeakMap()
   const patch = resolve(root, 'config', 'p1-runtime.patch.yml')
 
   return {
@@ -22,6 +25,10 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       const successorFrom = !sameSession ? requestedSessionId : undefined
       const createdHarness = !harness
       if (!harness) {
+        const grantDirectory = join(config.dshHome, 'grants')
+        await mkdir(grantDirectory, { recursive: true, mode: 0o700 })
+        const grantFile = join(grantDirectory, `grant-${randomUUID()}.json`)
+        await writeGrant(grantFile, { operation: 'initializing', workOrderId, allowRead: false })
         harness = harnessFactory({
           profile: 'sdk',
           patches: [patch],
@@ -30,11 +37,14 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
           cwd: root,
           provider: config.model.provider,
           model: config.model.model,
-          env: childEnvironment(config),
+          env: childEnvironment(config, grantFile),
           initializeTimeoutMs: 15_000,
           requestTimeoutMs: 120_000,
         })
+        grants.set(harness, grantFile)
       }
+      const grantFile = grants.get(harness)
+      await writeGrant(grantFile, { operation, workOrderId, allowRead: operation !== 'follow-up' })
       active.set(id, { harness, sessionId: requestedSessionId, closed: false })
       try {
         const result = await harness.run(buildPrompt({ operation, workOrderId, observation, question }), sameSession ? { sessionId: requestedSessionId } : undefined)
@@ -51,7 +61,10 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
           eventCount: result.events?.length ?? 0,
         }
       } catch (error) {
-        if (createdHarness && !active.get(id)?.closed) await harness.close().catch(() => undefined)
+        if (createdHarness && !active.get(id)?.closed) {
+          await harness.close().catch(() => undefined)
+          await removeHarness(harness)
+        }
         throw error
       } finally {
         active.delete(id)
@@ -63,15 +76,24 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       if (!activeRun) return false
       activeRun.closed = true
       await activeRun.harness.close().catch(() => undefined)
-      if (activeRun.sessionId) sessions.delete(activeRun.sessionId)
+      await removeHarness(activeRun.harness)
       return true
     },
 
     async close() {
-      await Promise.all([...new Set([...sessions.values(), ...[...active.values()].map(item => item.harness)])].map(harness => harness.close().catch(() => undefined)))
+      const harnesses = [...new Set([...sessions.values(), ...[...active.values()].map(item => item.harness)])]
+      await Promise.all(harnesses.map(harness => harness.close().catch(() => undefined)))
+      await Promise.all(harnesses.map(removeHarness))
       active.clear()
       sessions.clear()
     },
+  }
+
+  async function removeHarness(harness) {
+    for (const [sessionId, candidate] of sessions) if (candidate === harness) sessions.delete(sessionId)
+    const grantFile = grants.get(harness)
+    grants.delete(harness)
+    if (grantFile) await unlink(grantFile).catch(() => undefined)
   }
 }
 
@@ -143,7 +165,7 @@ function buildPrompt({ operation, workOrderId, observation, question }) {
   ].filter(Boolean).join('\n')
 }
 
-function childEnvironment(config) {
+function childEnvironment(config, grantFile) {
   const settings = readSettings()
   const settingsEnv = settings?.env && typeof settings.env === 'object' ? settings.env : {}
   const keys = [
@@ -153,8 +175,13 @@ function childEnvironment(config) {
   ]
   const env = { DSH_TELEMETRY_MODE: 'DISABLED' }
   for (const key of keys) if (typeof process.env[key] === 'string') env[key] = process.env[key]
+  env.GENEWAY_DSH_GRANT_FILE = grantFile
   if (typeof settingsEnv.ANTHROPIC_AUTH_TOKEN === 'string' && settingsEnv.ANTHROPIC_AUTH_TOKEN.trim()) env.ZENMUX_API_KEY = settingsEnv.ANTHROPIC_AUTH_TOKEN
   return env
+}
+
+async function writeGrant(path, grant) {
+  await writeFile(path, JSON.stringify(grant), { mode: 0o600 })
 }
 
 function nonEmpty(value) {

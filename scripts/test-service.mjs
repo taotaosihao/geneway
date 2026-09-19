@@ -66,6 +66,39 @@ try {
   assert.equal(scopedRuns, 0)
   await scoped.close()
 
+  const concurrentStore = createFileStore(join(root, 'concurrent-state.json'))
+  await concurrentStore.update(state => ({ ...state, employees: [{ id: 'e', enabled: true, connectionIds: ['c'] }], connections: [{ id: 'c', enabled: true, status: 'ready' }] }))
+  let concurrentRuns = 0
+  const concurrent = createWorkService({
+    store: concurrentStore,
+    source: { configured: true, allows: () => true },
+    runner: {
+      configured: true,
+      sourceConfigured: true,
+      async run({ workOrderId }) {
+        concurrentRuns += 1
+        await new Promise(resolve => setTimeout(resolve, 20))
+        return { observation: { workOrderId, status: 'Draft', plannedQuantity: 1, completedQuantity: 0, unit: 'Nos', sourceRecordId: `Work Order:${workOrderId}`, sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic' }, explanation: 'ok', dshSessionRef: 's', continuity: 'new' }
+      },
+    },
+  })
+  const [concurrentA, concurrentB] = await Promise.all([
+    concurrent.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'W', clientRequestId: 'same-concurrent' }),
+    concurrent.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'W', clientRequestId: 'same-concurrent' }),
+  ])
+  assert.equal(concurrentA.value.id, concurrentB.value.id)
+  await waitFor(concurrent, concurrentA.value.id, work => work.status === 'completed')
+  assert.equal(concurrentRuns, 1)
+  await concurrent.close()
+
+  const failureStore = createFileStore(join(root, 'failure-state.json'))
+  await failureStore.update(state => ({ ...state, employees: [{ id: 'e', enabled: true, connectionIds: ['c'] }], connections: [{ id: 'c', enabled: true, status: 'ready' }] }))
+  const failureService = createWorkService({ store: failureStore, source: { configured: true, allows: () => true }, runner: { configured: true, sourceConfigured: true, async run() { throw Object.assign(new Error('模型调用失败'), { code: 'MODEL_FAILURE' }) } } })
+  const failed = await failureService.createWork({ employeeId: 'e', connectionId: 'c', workOrderId: 'W', clientRequestId: 'model-failure' })
+  const failedWork = await waitFor(failureService, failed.value.id, work => work.status === 'failed')
+  assert.equal(failedWork.executions.at(-1).error.code, 'MODEL_FAILURE')
+  await failureService.close()
+
   await service.close()
   const successorCalls = []
   const successor = createWorkService({

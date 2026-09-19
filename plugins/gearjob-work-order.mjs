@@ -1,4 +1,4 @@
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, rename, stat, unlink } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { readRuntimeConfig } from '../src/runtime-config.mjs'
@@ -45,12 +45,31 @@ export function apply(ctx) {
     },
     async execute(args, invocation = {}) {
       try {
+        await assertExecutionGrant(args?.workOrderId)
         return { ok: true, ...await readGearJobWorkOrder({ workOrderId: args?.workOrderId, signal: invocation.signal }) }
       } catch (error) {
         return { ok: false, error: { code: safeCode(error?.code), message: error?.message || 'GearJob 查询失败' } }
       }
     },
   }))
+}
+
+export async function assertExecutionGrant(workOrderId, filePath = process.env.GENEWAY_DSH_GRANT_FILE) {
+  const id = exactId(workOrderId)
+  if (!filePath) throw sourceError('FORBIDDEN', '本次执行没有 GearJob 读取授权')
+  const consumedPath = `${filePath}.consumed`
+  let grant
+  try {
+    await rename(filePath, consumedPath)
+    grant = JSON.parse(await readFile(consumedPath, 'utf8'))
+  } catch {
+    throw sourceError('FORBIDDEN', '本次执行的 GearJob 读取授权不可用')
+  } finally {
+    await unlink(consumedPath).catch(() => undefined)
+  }
+  if (grant?.allowRead !== true || grant?.workOrderId !== id || !['create', 'refresh'].includes(grant?.operation)) {
+    throw sourceError('FORBIDDEN', '本次执行不允许查询 GearJob')
+  }
 }
 
 export async function readGearJobWorkOrder({ workOrderId, config = readRuntimeConfig(), signal } = {}) {

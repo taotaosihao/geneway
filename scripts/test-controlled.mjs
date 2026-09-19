@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 import { createDshRunner, GEARJOB_TOOL, parseRunResult } from '../src/dsh-runner.mjs'
+import { assertExecutionGrant, readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 
 testToolContract()
 await testRunnerFailureClosesHarness()
 await testRunnerCancellationIsScoped()
+await testSourceAbortMapsToTimeout()
+await testFollowUpGrantBlocksBeforeSource()
 
 const root = await mkdtemp(join(tmpdir(), 'geneway-controlled-'))
 let service
@@ -63,6 +66,8 @@ function testToolContract() {
   const call = { type: 'tool/call', data: { callId: 'call-1', name: GEARJOB_TOOL, arguments: JSON.stringify({ workOrderId: 'W1' }) } }
   const result = { type: 'tool/result', data: { message: { source: { kind: 'tool', callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1', isError: false, content: [{ type: 'text', text: JSON.stringify({ ok: true, ...observation }) }] }] } } }
   assert.deepEqual(parseRunResult({ events: [call, result], finalResponse: 'ok' }, { operation: 'create', workOrderId: 'W1' }).observation, observation)
+  assert.throws(() => parseRunResult({ events: [call], finalResponse: 'ok' }, { operation: 'create', workOrderId: 'W1' }), /恰好有一次/)
+  assert.throws(() => parseRunResult({ events: [result], finalResponse: 'ok' }, { operation: 'create', workOrderId: 'W1' }), /恰好有一次/)
   assert.throws(() => parseRunResult({ events: [call, call, result], finalResponse: 'ok' }, { operation: 'create', workOrderId: 'W1' }), /恰好有一次/)
   assert.throws(() => parseRunResult({ events: [call, { ...result, data: { ...result.data, message: { ...result.data.message, content: [{ ...result.data.message.content[0], isError: true }] } } }], finalResponse: 'ok' }, { operation: 'create', workOrderId: 'W1' }), /结构/)
   const notFound = { ...result, data: { message: { ...result.data.message, content: [{ ...result.data.message.content[0], content: [{ type: 'text', text: JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'GearJob 中不存在该工单' } }) }] }] } } }
@@ -112,12 +117,52 @@ async function testRunnerCancellationIsScoped() {
   })
   const first = runner.run({ executionId: 'cancel-first', workOrderId: 'W1' })
   const second = runner.run({ executionId: 'keep-second', workOrderId: 'W2' })
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(await runner.cancel('cancel-first'), true)
+  void first.catch(() => undefined)
+  void second.catch(() => undefined)
+  await waitUntilCancelled(runner, 'cancel-first')
   assert.equal(harnesses[0].closes, 1)
   assert.equal(harnesses[1].closes, 0)
-  assert.equal(await runner.cancel('keep-second'), true)
+  await waitUntilCancelled(runner, 'keep-second')
   await Promise.allSettled([first, second])
   assert.equal(harnesses[1].closes, 1)
   await runner.close()
+}
+
+async function waitUntilCancelled(runner, executionId) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (await runner.cancel(executionId)) return
+    await new Promise(resolve => setTimeout(resolve, 2))
+  }
+  throw new Error(`runner did not activate ${executionId}`)
+}
+
+async function testSourceAbortMapsToTimeout() {
+  const root = await mkdtemp(join(tmpdir(), 'geneway-source-timeout-'))
+  try {
+    const credentialFile = join(root, 'credential.json')
+    await writeFile(credentialFile, JSON.stringify({ apiKey: 'test', apiSecret: 'test' }), { mode: 0o600 })
+    const controller = new AbortController()
+    controller.abort()
+    await assert.rejects(() => readGearJobWorkOrder({
+      workOrderId: 'W1',
+      signal: controller.signal,
+      config: { source: { configured: true, baseUrl: 'http://127.0.0.1:1', credentialFile, allowedWorkOrders: ['W1'] } },
+    }), error => error.code === 'UPSTREAM_TIMEOUT')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+async function testFollowUpGrantBlocksBeforeSource() {
+  const root = await mkdtemp(join(tmpdir(), 'geneway-follow-up-grant-'))
+  try {
+    const grant = join(root, 'grant.json')
+    await writeFile(grant, JSON.stringify({ operation: 'follow-up', workOrderId: 'W1', allowRead: false }), { mode: 0o600 })
+    await assert.rejects(() => assertExecutionGrant('W1', grant), error => error.code === 'FORBIDDEN' && /不允许查询/.test(error.message))
+    await writeFile(grant, JSON.stringify({ operation: 'refresh', workOrderId: 'W1', allowRead: true }), { mode: 0o600 })
+    await assertExecutionGrant('W1', grant)
+    await assert.rejects(() => assertExecutionGrant('W1', grant), error => error.code === 'FORBIDDEN' && /授权不可用/.test(error.message))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 }

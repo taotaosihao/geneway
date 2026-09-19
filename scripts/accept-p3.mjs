@@ -229,7 +229,7 @@ async function browserJourney() {
   for(const variable of ['collaborationRunner','knowledge','service','server'])if((visible.match(new RegExp(`\\b${variable}\\s*=`, 'g'))??[]).length<2)throw new Error(`generated restart reassignment missing: ${variable}`)
   for(const shadowed of ['const auth = createAuthRuntime','const collaborationRunner = createCollaborationRunner','let collaborationRunner = createCollaborationRunner','const knowledge = collaborationRunner.getKnowledgeService()','let knowledge = collaborationRunner.getKnowledgeService()','const index = await readFile'])if(visible.includes(shadowed))throw new Error(`generated restart binding is shadowed: ${shadowed}`)
   await writeFile(tempUiScript, visible)
-  if (harnessCheck) { await run(process.execPath, ['--check', relative(root, tempUiScript)]);await watchdogSmoke();browserAcceptanceDiagnosticSmoke();browserDiagnosticsDiagnosticSmoke();const harnessSource=await readFile(join(root,'scripts','accept-p3.mjs'),'utf8');assert.ok(harnessSource.includes('delete exported.browserResult.acceptanceSecretValues;await rm(exportPath,{force:true})'));return { generatedSyntax: 'passed',watchdogCleanup:'passed',safeBrowserDiagnostic:'passed' } }
+  if (harnessCheck) { await run(process.execPath, ['--check', relative(root, tempUiScript)]);await watchdogSmoke();browserAcceptanceDiagnosticSmoke();browserDiagnosticsDiagnosticSmoke();gearEvidenceGateSmoke();const harnessSource=await readFile(join(root,'scripts','accept-p3.mjs'),'utf8');assert.ok(harnessSource.includes('delete exported.browserResult.acceptanceSecretValues;await rm(exportPath,{force:true})'));assert.equal(/gear\??\.evidenceMode/.test(harnessSource),false);assert.ok(harnessSource.includes('evidenceMode: gear.payload.evidenceMode'));return { generatedSyntax: 'passed',watchdogCleanup:'passed',safeBrowserDiagnostic:'passed',gearEvidenceProjection:'passed' } }
   xvfb = spawn('Xvfb', [display, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' })
   await pause(800)
   if (recordPath) {
@@ -273,7 +273,7 @@ async function realEvidenceFromBrowser(exported) {
   const children = state.works.filter(work => work.rootWorkId === rootWork.id)
   const gear = children.find(work => work.capabilityId === 'gearjob-work-order-read')?.results.at(-1)
   const cycle = children.find(work => work.capabilityId === 'cycle-time-calculate')?.results.at(-1)
-  if (gear?.evidenceMode !== 'real-frappe-rest' || gear.payload.workOrderId !== workOrderId) throw new Error('formal browser GearJob evidence is not real REST data')
+  assertRealGearEvidence(gear,workOrderId)
   if (cycle?.payload?.quantity !== gear.payload.plannedQuantity - gear.payload.completedQuantity || cycle.payload.availableSeconds !== 3600) throw new Error('formal browser derived cycle evidence is inconsistent')
   const sessionIds = [rootWork, ...children].flatMap(work => work.executions.map(item => item.dshSessionRef).filter(Boolean))
   const sessions = await stageSessions(sessionIds)
@@ -282,7 +282,7 @@ async function realEvidenceFromBrowser(exported) {
   const usageValues = [rootWork, ...children].flatMap(work => work.executions.map(item => item.usage))
   const serializedState=JSON.stringify(state),canaryCatalog=lastCanaries.map(item=>({label:item.label,sha256:item.sha256,scope:item.label==='r1'?'superseded knowledge revision':'current or revoked knowledge revision',status:item.label==='r1'?'forbidden-in-successor':'classified',measuredStateHits:serializedState.split(item.value).length-1,measuredCurrentSessionHits:sessionMappings.filter(session=>session.generation===rootWork.collaboration.generation).reduce((sum,session)=>sum+(session.canaryHits?.[item.label]??0),0)}))
   return {
-    source: { workOrderId: gear.payload.workOrderId, status: gear.payload.status, plannedQuantity: gear.payload.plannedQuantity, completedQuantity: gear.payload.completedQuantity, unit: gear.payload.unit, sourceTime: gear.payload.sourceTime, sourceRevision: gear.payload.sourceRevision, sourceSystem: gear.payload.sourceSystem, sourceInstance: gear.payload.sourceInstance, sourceEnvironment: gear.payload.sourceEnvironment, dataMode: gear.payload.dataMode, evidenceMode: gear.evidenceMode, remainingQuantity: cycle.payload.quantity, provisioned: false },
+    source: { workOrderId: gear.payload.workOrderId, status: gear.payload.status, plannedQuantity: gear.payload.plannedQuantity, completedQuantity: gear.payload.completedQuantity, unit: gear.payload.unit, sourceTime: gear.payload.sourceTime, sourceRevision: gear.payload.sourceRevision, sourceSystem: gear.payload.sourceSystem, sourceInstance: gear.payload.sourceInstance, sourceEnvironment: gear.payload.sourceEnvironment, dataMode: gear.payload.dataMode, evidenceMode: gear.payload.evidenceMode, remainingQuantity: cycle.payload.quantity, provisioned: false },
     model: { provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', rootAndChildren: true, recheck: rootWork.collaboration.generation > 1, usage: usageValues.some(value => !value) ? null : usageValues.reduce((sum, value) => sum + (value.totalTokens ?? 0), 0) },
     knowledge: { revisions: exported.state.knowledgeMaterials.map(item => item.revision), statuses: exported.state.knowledgeMaterials.map(item => item.status), canaryCatalog, r1CurrentSessionHits:canaryCatalog.find(item=>item.label==='r1')?.measuredCurrentSessionHits??null },
     collaboration: { rootWorkId: rootWork.id, childWorkIds: children.map(item => item.id), generation: rootWork.collaboration.generation, planRevision: rootWork.plan.revision, handoffs: rootWork.handoffs.map(item => ({ generation: item.generation, status: item.status, resultCount: item.resultRefs.length, knowledgeRefCount: item.knowledgeRefs.length })), sessions: sessionMappings, expectedSecondsPerUnit: 3600 / cycle.payload.quantity, status: rootWork.collaboration.status },
@@ -446,6 +446,12 @@ function assertBrowserDiagnostics(measured) { const diagnostic=browserDiagnostic
 function browserDiagnosticsDiagnosticSmoke() {
   const marker='DO_NOT_ECHO_BROWSER_DIAGNOSTIC_SECRET',diagnostic=browserDiagnosticsDiagnostic({desktopOverflow:false,mobileOverflow:false,consoleErrors:[marker],failedRequests:[{url:marker}],unexpectedResponses:[{body:marker}],networkHeaderSecretHits:0,visualScans:[{raw:marker}],cookie:marker,csrf:marker,rawExport:marker})
   assert.deepEqual(Object.keys(diagnostic.actual),['desktopOverflow','mobileOverflow','consoleErrorsCount','failedRequestsCount','unexpectedResponsesCount','networkHeaderSecretHits','visualScansCount']);assert.deepEqual(diagnostic.mismatches,['consoleErrorsCount','failedRequestsCount','unexpectedResponsesCount','networkHeaderSecretHits']);const encoded=JSON.stringify(diagnostic);assert.equal(encoded.includes(marker),false);for(const forbidden of ['url','body','raw','cookie','csrf','rawExport'])assert.equal(encoded.includes(forbidden),false)
+}
+function assertRealGearEvidence(gear,expectedWorkOrderId) {
+  const diagnostic={evidenceModeMatches:gear?.payload?.evidenceMode==='real-frappe-rest',workOrderIdMatches:gear?.payload?.workOrderId===expectedWorkOrderId};if(!diagnostic.evidenceModeMatches||!diagnostic.workOrderIdMatches)throw new Error(`formal browser GearJob evidence is not real REST data: ${JSON.stringify(diagnostic)}`)
+}
+function gearEvidenceGateSmoke() {
+  const gear={evidenceMode:'incorrect-top-level',payload:{workOrderId:'WO-SMOKE',evidenceMode:'real-frappe-rest'}};assert.doesNotThrow(()=>assertRealGearEvidence(gear,'WO-SMOKE'));assert.throws(()=>assertRealGearEvidence({payload:{workOrderId:'WO-SMOKE'}},'WO-SMOKE'),/"evidenceModeMatches":false,"workOrderIdMatches":true/)
 }
 function createJourneyProgress({videoPath,clock=Date.now,readVideoBytes=async path=>(await stat(path)).size,eventStaleMs=600_000,videoStaleMs=120_000,report=message=>console.error(message)}) {
   let eventProgressAt=clock(),videoProgressAt=clock(),videoBytes=0,lastVideoReportAt=0,progressBuffer=''

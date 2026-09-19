@@ -332,12 +332,15 @@ async function ensureBrowser() {
   }), { mode: 0o600 })
   const chrome = spawn('google-chrome', [
     '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
-    '--disable-save-password-bubble', '--password-store=basic', '--disable-features=PasswordManagerOnboarding,PasswordLeakDetection',
+    '--disable-background-networking', '--disable-component-update', '--disable-infobars', '--disable-translate', '--hide-crash-restore-bubble',
+    '--disable-save-password-bubble', '--password-store=basic', '--disable-features=PasswordManagerOnboarding,PasswordLeakDetection,Translate,TranslateUI,OptimizationHints,ChromeWhatsNewUI,SidePanelPinning,SidePanelJourneys',
     '--window-size=1440,900', '--window-position=0,0', '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${debuggingPort}`,
     `--user-data-dir=${chromeProfile}`, 'about:blank',
-  ], { env: { ...process.env, DISPLAY: display }, stdio: 'ignore' })
+  ], { env: { ...process.env, DISPLAY: display }, stdio: ['ignore', 'ignore', 'pipe'] })
+  let chromeError = ''
+  chrome.stderr.on('data', chunk => { chromeError = (chromeError + chunk).slice(-4_000) })
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (chrome.exitCode !== null) throw new Error('Chrome failed to start')
+    if (chrome.exitCode !== null) throw new Error(`Chrome failed to start: ${chromeError.trim()}`)
     try { if ((await fetch(`${endpoint}/json/version`)).ok) return { chrome, xvfb } } catch {}
     await new Promise(resolveWait => setTimeout(resolveWait, 100))
   }

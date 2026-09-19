@@ -14,6 +14,7 @@ import { createWorkService } from '../src/work-service.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
+let formalDeadlineAt
 const candidate = await git(['rev-parse', 'HEAD'])
 const shortCandidate = candidate.slice(0, 7)
 const recordIndex = process.argv.indexOf('--record')
@@ -27,6 +28,7 @@ const realOnly = process.argv.includes('--real-only')
 const uiOnly = process.argv.includes('--ui-only')
 const harnessCheck = process.argv.includes('--harness-check')
 const noRecord = process.argv.includes('--no-record') || preflightOnly
+formalDeadlineAt = recordPath ? Date.now() + 45 * 60_000 : undefined
 if (recordIndex >= 0 && (!recordPath?.endsWith('.mp4') || process.argv[recordIndex + 1]?.startsWith('-'))) throw new Error('--record requires an MP4 output path')
 if (recordPath && basename(recordPath) !== `p3-${shortCandidate}-final.mp4`) throw new Error(`formal record must be named p3-${shortCandidate}-final.mp4`)
 if (!noRecord && !recordPath) throw new Error('formal P3 acceptance requires --record <path>; use --no-record only for a dry acceptance run')
@@ -188,18 +190,23 @@ async function browserJourney() {
   for(const variable of ['collaborationRunner','knowledge','service','server'])if((visible.match(new RegExp(`\\b${variable}\\s*=`, 'g'))??[]).length<2)throw new Error(`generated restart reassignment missing: ${variable}`)
   for(const shadowed of ['const auth = createAuthRuntime','const collaborationRunner = createCollaborationRunner','let collaborationRunner = createCollaborationRunner','const knowledge = collaborationRunner.getKnowledgeService()','let knowledge = collaborationRunner.getKnowledgeService()','const index = await readFile'])if(visible.includes(shadowed))throw new Error(`generated restart binding is shadowed: ${shadowed}`)
   await writeFile(tempUiScript, visible)
-  if (harnessCheck) { await run(process.execPath, ['--check', relative(root, tempUiScript)]); return { generatedSyntax: 'passed' } }
+  if (harnessCheck) { await run(process.execPath, ['--check', relative(root, tempUiScript)]);await watchdogSmoke();return { generatedSyntax: 'passed',watchdogCleanup:'passed' } }
   xvfb = spawn('Xvfb', [display, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' })
   await pause(800)
   if (recordPath) {
     await mkdir(dirname(recordPath), { recursive: true })
     recorder = spawn('ffmpeg', ['-y', '-f', 'x11grab', '-framerate', '25', '-video_size', '1440x900', '-i', display, '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', recordPath], { stdio: ['ignore', 'ignore', 'pipe'] })
+    recorder.stderr.resume()
     recordingStartedAt=Date.now()
     await pause(600)
   }
   const startedAt = Date.now()
   const exportPath = join(scratch, 'formal-ui-export.json')
-  const journeyOutput = await gate('P3 ordinary UI journey (Xvfb/CDP)', process.execPath, [relative(root, tempUiScript)], { env: { ...process.env, DISPLAY: display, GENEWAY_P3_ACCEPT_EXPORT: exportPath } })
+  const progress=createJourneyProgress({videoPath:recordPath})
+  const journeyOutput = await gate('P3 ordinary UI journey (Xvfb/CDP)', process.execPath, [relative(root, tempUiScript)], {
+    env: { ...process.env, DISPLAY: display, GENEWAY_P3_ACCEPT_EXPORT: exportPath }, killGroup:true,
+    onStdout:progress.onStdout,watchdog:progress.watchdog
+  })
   const durationSeconds = (Date.now() - startedAt) / 1000
   if (!recordPath) { await stop(recorder, 'SIGINT'); recorder = undefined; await stop(xvfb, 'SIGTERM'); xvfb = undefined }
   const exported = JSON.parse(await readFile(exportPath, 'utf8'));externalTemps.push(exported.temp);runtimeSecrets.push(...(exported.browserResult.acceptanceSecretValues??[]));delete exported.browserResult.acceptanceSecretValues;lastBrowserExport=exported
@@ -379,8 +386,44 @@ async function assertCandidate() {
     } else if (supersedes) throw new Error('--supersedes was supplied but no existing receipt exists')
   }
 }
-async function gate(label, command, args, options = {}) { const startedAt=new Date().toISOString(),started=performance.now(),output=await run(command,args,options),endedAt=new Date().toISOString();commands.push({command:label,argv:[command,...args].map(value=>/(?:password|token|secret|key)=/i.test(value)?'[redacted]':value),startedAt,endedAt,durationMs:Math.round(performance.now()-started),exitCode:0,result:'pass',logSha256:sha256(output)});return output }
-async function run(command, args, options = {}) { return new Promise((resolveRun, reject) => { const child = spawn(command, args, { cwd: root, env: options.env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'] }); let out = '', err = ''; child.stdout.on('data', chunk => { out += chunk; if (options.stream) process.stdout.write(chunk) }); child.stderr.on('data', chunk => { err = (err + chunk).slice(-12000); if (options.stream) process.stderr.write(chunk) }); child.once('exit', code => code === 0 ? resolveRun(out.trim()) : reject(new Error(`${command} exited ${code}: ${err}`))) }) }
+function createJourneyProgress({videoPath,clock=Date.now,readVideoBytes=async path=>(await stat(path)).size,eventStaleMs=600_000,videoStaleMs=120_000,report=message=>console.error(message)}) {
+  let eventProgressAt=clock(),videoProgressAt=clock(),videoBytes=0,lastVideoReportAt=0,progressBuffer=''
+  return {
+    onStdout(chunk){let parsed=0;progressBuffer=(progressBuffer+chunk).slice(-24000);for(const match of progressBuffer.matchAll(/P3_ACCEPT_EVENT:([a-z0-9-]+):(admin|owner|peer):(started|passed):(\d+)/g)){const timestamp=Number(match[4]);if(!Number.isFinite(timestamp)||timestamp<=eventProgressAt)continue;eventProgressAt=timestamp;parsed+=1;report(`[accept:p3] event ${match[1]} ${match[2]} ${match[3]}`)}return parsed},
+    async watchdog(){const now=clock();if(videoPath){const bytes=await readVideoBytes(videoPath);if(bytes>videoBytes){videoBytes=bytes;videoProgressAt=now;if(now-lastVideoReportAt>=60_000){lastVideoReportAt=now;report(`[accept:p3] video ${bytes} bytes`)}}if(now-videoProgressAt>videoStaleMs)return `formal video made no progress for ${videoStaleMs/1000} seconds`}if(now-eventProgressAt>eventStaleMs)return `formal UI emitted no acceptance event for ${eventStaleMs/1000} seconds`}
+  }
+}
+async function watchdogSmoke() {
+  let now=1_000,bytes=1
+  const progress=createJourneyProgress({videoPath:'smoke.mp4',clock:()=>now,readVideoBytes:async()=>bytes,eventStaleMs:100,videoStaleMs:50,report:()=>{}})
+  assert.equal(progress.onStdout('P3_ACCEPT_EVENT:smoke:owner:passed:1001\n'),1)
+  assert.equal(progress.onStdout(`P3_ACCEPT_EVENT:smoke:owner:passed:${'9'.repeat(400)}\n`),0)
+  now=1_102;bytes=2
+  assert.match(await progress.watchdog(),/no acceptance event/)
+  let pids,pidOutput=''
+  const leader=`const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify("process.on('SIGTERM',()=>{});setInterval(()=>{},1000)")}],{stdio:'ignore'});console.log(process.pid+':'+child.pid);setInterval(()=>{},1000)`
+  await assert.rejects(run(process.execPath,['-e',leader],{killGroup:true,watchdogIntervalMs:50,onStdout:chunk=>{pidOutput+=chunk;const match=pidOutput.match(/(\d+):(\d+)/);if(match)pids=match.slice(1).map(Number)},watchdog:async()=>pids?'harness watchdog descendant smoke':undefined}),/harness watchdog descendant smoke/)
+  assert.ok(pids?.length===2)
+  for(const pid of pids)assert.equal(processAlive(pid),false,`watchdog left process ${pid}`)
+}
+async function gate(label, command, args, options = {}) { console.error(`[accept:p3] start ${label}`);const startedAt=new Date().toISOString(),started=performance.now(),output=await run(command,args,options),endedAt=new Date().toISOString();commands.push({command:label,argv:[command,...args].map(value=>/(?:password|token|secret|key)=/i.test(value)?'[redacted]':value),startedAt,endedAt,durationMs:Math.round(performance.now()-started),exitCode:0,result:'pass',logSha256:sha256(output)});console.error(`[accept:p3] pass ${label}`);return output }
+async function run(command, args, options = {}) {
+  return new Promise((resolveRun, reject) => {
+    const child=spawn(command,args,{cwd:root,env:options.env??process.env,stdio:['ignore','pipe','pipe'],detached:Boolean(options.killGroup)})
+    let out='',err='',failure,watchBusy=false,exited=false
+    const monitors=[]
+    const clearMonitors=()=>{for(const timer of monitors){clearTimeout(timer);clearInterval(timer)}}
+    const terminate=signal=>{try{options.killGroup?process.kill(-child.pid,signal):child.kill(signal)}catch{}}
+    const groupAlive=()=>options.killGroup&&processAlive(-child.pid)
+    const waitUntil=async predicate=>{const until=Date.now()+5_000;while(predicate()&&Date.now()<until)await pause(25);return !predicate()}
+    const fail=async message=>{if(failure)return;failure=new Error(message);clearMonitors();terminate('SIGTERM');const stopped=options.killGroup?await waitUntil(groupAlive):await waitUntil(()=>!exited);if(!stopped){terminate('SIGKILL');const killed=options.killGroup?await waitUntil(groupAlive):await waitUntil(()=>!exited);if(!killed)failure=new Error(`${message}; process cleanup did not complete`)}reject(failure)}
+    child.stdout.on('data',chunk=>{out+=chunk;options.onStdout?.(chunk.toString());if(options.stream)process.stdout.write(chunk)})
+    child.stderr.on('data',chunk=>{err=(err+chunk).slice(-12000);if(options.stream)process.stderr.write(chunk)})
+    child.once('exit',code=>{exited=true;if(failure)return;clearMonitors();code===0?resolveRun(out.trim()):reject(new Error(`${command} exited ${code}: ${err}`))})
+    if(formalDeadlineAt){const remaining=formalDeadlineAt-Date.now();if(remaining<=0)void fail('formal acceptance exceeded 45 minute total limit');else monitors.push(setTimeout(()=>void fail('formal acceptance exceeded 45 minute total limit'),remaining))}
+    if(options.watchdog)monitors.push(setInterval(async()=>{if(watchBusy||failure)return;watchBusy=true;try{const message=await options.watchdog();if(message)void fail(message)}catch(error){void fail(`formal watchdog failed: ${error.message}`)}finally{watchBusy=false}},options.watchdogIntervalMs??10_000))
+  })
+}
 async function git(args) { return run('git', args) }
 async function stop(child, signal) { if (!child || child.exitCode !== null) return; child.kill(signal); await Promise.race([new Promise(resolveStop => child.once('exit', resolveStop)), pause(5000)]); if (child.exitCode === null) child.kill('SIGKILL') }
 async function executable(name) { try { await run('sh', ['-c', `command -v ${name}`]); return true } catch { return false } }
@@ -397,4 +440,5 @@ async function sensitiveKeyReview(files) {
 function strings(value) { if (typeof value === 'string') return [value]; if (Array.isArray(value)) return value.flatMap(strings); return value && typeof value === 'object' ? Object.values(value).flatMap(strings) : [] }
 function sha256(value) { return createHash('sha256').update(value).digest('hex') }
 function esc(value) { return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]) }
+function processAlive(pid) { try { process.kill(pid,0);return true } catch(error) { return error.code!=='ESRCH' } }
 function pause(ms) { return new Promise(resolvePause => setTimeout(resolvePause, ms)) }

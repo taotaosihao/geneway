@@ -328,12 +328,15 @@ async function ensureBrowser() {
   await mkdir(join(chromeProfile, 'Default'), { recursive: true, mode: 0o700 })
   await writeFile(join(chromeProfile, 'Default', 'Preferences'), JSON.stringify({
     credentials_enable_service: false,
+    intl: { accept_languages: 'zh-CN,zh,en-US,en' },
     profile: { password_manager_enabled: false },
+    translate: { enabled: false },
   }), { mode: 0o600 })
   const chrome = spawn('google-chrome', [
     '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-infobars', '--disable-translate', '--hide-crash-restore-bubble',
     '--disable-save-password-bubble', '--password-store=basic', '--disable-features=PasswordManagerOnboarding,PasswordLeakDetection,Translate,TranslateUI,OptimizationHints,ChromeWhatsNewUI,SidePanelPinning,SidePanelJourneys',
+    '--lang=zh-CN', '--accept-lang=zh-CN,zh,en-US,en',
     '--window-size=1440,900', '--window-position=0,0', '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${debuggingPort}`,
     `--user-data-dir=${chromeProfile}`, 'about:blank',
   ], { env: { ...process.env, DISPLAY: display }, stdio: ['ignore', 'ignore', 'pipe'] })

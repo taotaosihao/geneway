@@ -17,6 +17,7 @@
     "test:controlled": "node scripts/test-controlled.mjs",
     "test:p2": "node scripts/test-p2-auth-store.mjs && node scripts/test-p2-runtime.mjs && node scripts/test-cycle-time.mjs && node scripts/test-p2-state-transfer.mjs && node scripts/test-p2-controlled-gearjob.mjs && node scripts/probe-p2-lifecycle.mjs && node scripts/test-p2-session.mjs",
     "accept:p1": "node scripts/accept-p1.mjs",
+    "accept:p2": "node scripts/accept-p2.mjs",
     "backup": "node scripts/state-transfer.mjs backup",
     "restore": "node scripts/state-transfer.mjs restore",
     "start": "node src/server.mjs"

@@ -27,12 +27,13 @@ async function backup(outputArg) {
   const statePath = resolve(process.env.GENEWAY_STATE ?? join(root, 'var', STATE_PATH))
   const dshHome = resolve(process.env.GENEWAY_DSH_HOME ?? join(root, 'var', 'dsh'))
   const target = await emptyTarget(output)
+  await requireNoSymlinkComponents(output, '备份输出路径')
   const opened = []
   try {
     const stateFile = await openRegular(statePath)
     opened.push(stateFile)
     const sourceStateBuffer = await readFileFromStart(stateFile.handle)
-    const sourceState = parseState(sourceStateBuffer)
+    const sourceState = parseState(sourceStateBuffer, { versions: [STATE_VERSION] })
     const createdAt = new Date().toISOString()
     const state = interruptActiveForBackup(sourceState, createdAt)
     migrateState(structuredClone(state))
@@ -52,7 +53,7 @@ async function backup(outputArg) {
         files.push({ path, file, bytes: file.stat.size, sha256: await sha256(file.handle) })
       }
     }
-    files.sort((left, right) => left.path.localeCompare(right.path))
+    files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0)
     const includedSessionRefs = [...new Set(files.flatMap(item => SESSION_PATH.exec(item.path)?.[1] ?? []))].sort()
     const missing = sessionRefs.filter(id => !includedSessionRefs.includes(id))
     if (missing.length) throw new Error(`缺少关联 DSH Session：${missing.join(', ')}`)
@@ -84,6 +85,8 @@ async function restore(inputArg, dataRootArg) {
   if (overlaps(input, dataRoot)) throw new Error('备份目录与恢复目录不得重叠')
   await requireDirectory(input, '备份根目录')
   const target = await emptyTarget(dataRoot)
+  await requireNoSymlinkComponents(input, '备份路径')
+  await requireNoSymlinkComponents(dataRoot, '恢复路径')
   const opened = []
   try {
     const manifestFile = await openRegularPath(input, 'manifest.json')
@@ -105,9 +108,10 @@ async function restore(inputArg, dataRootArg) {
     }
     if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
     const stateFile = files.find(item => item.path === STATE_PATH)
-    const state = parseState(await readFileFromStart(stateFile.file.handle))
-    const sessionRefs = collectSessionRefs(state)
-    const expectedSchema = schemaSummary(state, sessionRefs)
+    const sourceStateBuffer = await readFileFromStart(stateFile.file.handle)
+    const sourceState = parseState(sourceStateBuffer, { versions: [4, STATE_VERSION], migrate: false })
+    const sessionRefs = collectSessionRefs(sourceState)
+    const expectedSchema = schemaSummary(sourceState, sessionRefs)
     if (JSON.stringify(manifest.schema) !== JSON.stringify(expectedSchema)) throw new Error('备份 schema 摘要不匹配')
     for (const file of files) {
       const match = SESSION_PATH.exec(file.path)
@@ -117,10 +121,19 @@ async function restore(inputArg, dataRootArg) {
     const missing = sessionRefs.filter(id => !includedSessionRefs.includes(id))
     if (missing.length) throw new Error(`备份缺少关联 DSH Session：${missing.join(', ')}`)
 
-    // All manifest, path, type, byte and hash checks finish before the first target byte is written.
+    const state = sourceState.version === STATE_VERSION ? sourceState : migrateState(structuredClone(sourceState))
+    assertNoSecretKeys(state)
+    const restoredStateBuffer = sourceState.version === STATE_VERSION
+      ? sourceStateBuffer
+      : Buffer.from(JSON.stringify(state, null, 2) + '\n')
+    const restoredEntries = files.map(file => file.path === STATE_PATH
+      ? { path: STATE_PATH, buffer: restoredStateBuffer, bytes: restoredStateBuffer.length, sha256: digest(restoredStateBuffer) }
+      : file)
+
+    // All manifest, path, type, byte, hash, source schema and migration checks finish before the first target byte is written.
     await buildAndPublish(dataRoot, target, async stage => {
-      for (const file of files) await copyOpenFile(file, join(stage, ...file.path.split('/')))
-      await verifyBuilt(stage, manifest.entries)
+      for (const file of restoredEntries) await copyOpenFile(file, join(stage, ...file.path.split('/')))
+      await verifyBuilt(stage, restoredEntries)
     })
     console.log(JSON.stringify({ command: 'restore', input, dataRoot, entries: files.length, sessionRefs: includedSessionRefs.length }))
   } finally {
@@ -139,23 +152,42 @@ function parseArgs(argv) {
   return { output: result.output, input: result.input, dataRoot: result.dataroot }
 }
 
-function parseState(buffer) {
+function parseState(buffer, { versions, migrate = true } = {}) {
   let state
   try { state = JSON.parse(buffer.toString('utf8')) } catch { throw new Error('产品状态 JSON 无效') }
-  if (!record(state) || state.version !== STATE_VERSION) throw new Error(`产品状态必须是 v${STATE_VERSION}`)
-  migrateState(structuredClone(state))
+  if (!record(state) || !versions?.includes(state.version)) throw new Error(`产品状态版本不受支持：${state?.version ?? 'unknown'}`)
+  const normalized = migrateState(structuredClone(state))
   assertNoSecretKeys(state)
-  return state
+  return migrate ? normalized : state
 }
 
 function interruptActiveForBackup(state, interruptedAt) {
   let changed = false
+  const activeTrees = new Set(state.works.filter(work => work.collaboration && (
+    ACTIVE_STATUS.has(work.status)
+    || ACTIVE_STATUS.has(work.collaboration.status)
+    || work.executions.some(execution => ACTIVE_STATUS.has(execution.status))
+    || state.works.some(child => child.rootWorkId === work.id && (ACTIVE_STATUS.has(child.status) || child.executions.some(execution => ACTIVE_STATUS.has(execution.status))))
+  )).map(work => work.id))
+  const interruptibleChildren = new Set(state.works.filter(work => activeTrees.has(work.id)).flatMap(work =>
+    work.plan.items.filter(item => ['not_started', 'running', 'waiting_input'].includes(item.status)).map(item => item.childWorkId)))
   const works = state.works.map(work => {
     const executions = work.executions.map(execution => {
       if (!ACTIVE_STATUS.has(execution.status)) return execution
       changed = true
       return { ...execution, status: 'interrupted', interruptedAt, error: { code: 'BACKUP_INTERRUPTED', message: '备份时执行未完成' } }
     })
+    if (activeTrees.has(work.id)) {
+      changed = true
+      return {
+        ...work,
+        status: 'interrupted',
+        executions,
+        collaboration: { ...work.collaboration, status: 'interrupted', summaryResultRefs: [] },
+        plan: { ...work.plan, items: work.plan.items.map(item => ['not_started', 'running', 'waiting_input'].includes(item.status) ? { ...item, status: 'interrupted' } : item) },
+      }
+    }
+    if (activeTrees.has(work.rootWorkId)) return interruptibleChildren.has(work.id) ? { ...work, status: 'interrupted', executions } : work
     if (!ACTIVE_STATUS.has(work.status) && executions.every((execution, index) => execution === work.executions[index])) return work
     changed = true
     return { ...work, status: 'interrupted', executions }
@@ -213,7 +245,7 @@ function schemaSummary(state, sessionRefs) {
     connections: count('connections'),
     skills: count('skills'),
     confirmations: count('confirmations'),
-    knowledgeMaterials: count('knowledgeMaterials'),
+    ...(state.version >= 5 ? { knowledgeMaterials: count('knowledgeMaterials') } : {}),
     works: count('works'),
     sessionRefs,
   }
@@ -244,6 +276,20 @@ async function requireDirectory(path, label) {
   try { info = await lstat(path) } catch (error) { if (error?.code === 'ENOENT') throw new Error(`${label}不存在：${path}`); throw error }
   if (info.isSymbolicLink()) throw new Error(`${label}不得是符号链接：${path}`)
   if (!info.isDirectory()) throw new Error(`${label}不是目录：${path}`)
+}
+
+async function requireNoSymlinkComponents(path, label) {
+  const parts = resolve(path).split(sep).filter(Boolean)
+  let cursor = sep
+  for (const part of parts) {
+    cursor = join(cursor, part)
+    try {
+      if ((await lstat(cursor)).isSymbolicLink()) throw new Error(`${label}不得经过符号链接：${cursor}`)
+    } catch (error) {
+      if (error?.code === 'ENOENT') return
+      throw error
+    }
+  }
 }
 
 async function openRegular(path) {

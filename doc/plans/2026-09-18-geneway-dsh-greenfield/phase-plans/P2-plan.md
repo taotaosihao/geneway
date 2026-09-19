@@ -617,3 +617,18 @@ Ponytail 取舍：复用现有标准库、单事实源、DSH runner、原生插�
 - 已提交 `e931748` 只完成节拍纯函数、原生工具和 ToolRuntime 自检；它尚未证明产品 capability dispatch、模型实际调用、typed result、授权或组合 lifecycle。
 - Astra 重规划完成后的剩余实现者必须明确使用 Team Sol；在 v4/service 单一集成门、确定性检查和 auth-aware P1 回归通过前，不启动有价值状态、不录屏、不发送 Lark。
 - 独立 Astra 阶段审查以 `spec_compliance=pass`、`task_quality=pass`、零 issue 通过 P2 v2；该结论只证明计划就绪，不证明任何待实现旅程或阶段验收。
+
+### 19.5 冻结候选与已取得证据
+
+- 产品候选冻结为 `b6ebe78`。主要提交为：`96b9596`（v4/auth/capability/runtime/service/backup 核心）、`fd7cee1`（P2 工作空间 UI）、`229b334`（同对象受控 B）、`d4ec3ac`（可信 connection catalog、session/continue/5xx/shutdown/identity 安全修复）、`13e427b`（active backup 规范化）、`4730be0`（长时间停止注意力）、`b6ebe78`（auth-aware P1、增强 P2 与实际插件组合门）。
+- Team Sol 后端独立复审关闭了重定向目标绕过、撤销 confirmation 复活、业务 request 未注入当前 confirmation、浏览器伪造 connection ready、陈旧 connection-test 回写、credential ref 路径、明文远程监听和账号时序旁路；最终 `spec_compliance=pass`、`task_quality=pass`、零 issue。Team Sol UI 独立复审关闭了 connection status 表单、`cancel_requested` 注意力误报和 waiting 卡片缺员工身份，最终同样 PASS。
+- `pnpm install --frozen-lockfile --ignore-scripts`、`pnpm test:unit`、`pnpm test:service`、`pnpm test:controlled`、`pnpm test:p2`、全部修改 JS 的 `node --check` 和 `git diff --check` 通过。`test:p2` 覆盖 v3→v4、auth/rekey、可信 connection catalog/capture-server 零请求、两 capability/grant、两个真实插件同 Host dispose/remount 后 Web/API 与历史 typed result 连续、受控 B、HTTP session/CSRF/Origin/双标签、typed results、confirmation tombstone、completed continue 拒绝、W1/W2 取消竞态和 active backup/restore。
+- `GENEWAY_P1_PROBE_MODEL=true node scripts/probe-p1-runtime.mjs` 实际通过 ZenMux 调用 `deepseek/deepseek-v4-pro`：12 个 DSH 事件、两个且仅两个产品工具、禁止能力标记命中 0；未 fallback 到其他 provider。
+- 在隔离 GearJob `dev.localhost` 通过正常 Frappe 数据层创建并授权 `WO-26-00096`，A 为计划 10、完成 3→4；受控 B 使用同一对象 ID，计划 10、完成 7。最终真实浏览器旅程证明 A/B/A/B 顺序、connection/source instance/data/evidence mode 不串源。
+- 最终浏览器旅程证明：两 connection test 均 `ready`；confirmation `r1→r2→r3 revoked`；waiting work 在 0 execution 状态跨刷新、正常重启和重登后继续；A 在 r2 形成 successor，撤销后 follow-up 再形成 confirmation refs 为空的 successor；successor Session JSONL 对 7 个旧 confirmation/follow-up/explanation/summary marker 命中 0；390×844 从 waiting 明确选择并 continue 得到 `3600/60=60 秒/件`、真实 refresh 后 2 个结果、非法 quantity 0 明确失败且 `scrollWidth=390`；W1 取消、W2 完成；禁用 A 后 B 成功且 A 模型调用数不增，恢复后 A ready；禁用 member 后旧会话新派发 401，重新启用后重登；member 管理 API 403、admin 读取 member work 404；浏览器错误 0、非预期网络错误 0。
+- 同一实际旅程停止服务后执行 backup/restore：8 entries、94,750 bytes、7 个关联 Session，bytes/hash、`0600/0700`、秘密命中 0、membership/rekey 前后一致；恢复根重登可见同一 A work、waiting work、revoked confirmation、2 员工、2 连接、2 Skill，恢复前后受控 B 调用数不变。空 secret root 时历史 A 结果仍可读，新 A 派发明确 `SOURCE_NOT_CONFIGURED`；补回 secret 后配置回读正常。
+- 正式视频为 `artifacts/p2-acceptance/p2-b6ebe78-final.mp4`，H.264、1440×900、208.36 秒、SHA-256 `f09cdf99cdcdd81ab70555ba818e25b134e97117930086d7a6f8586edf75a69c`；封面 SHA-256 `d5f8c730bf15fa685567ae4a6dc3a7f85773fb850dffef12d336d7a9a28fae63`。去敏 receipt 为 `p2-b6ebe78-final.receipt.json`，SHA-256 `b2e8f16b8795fcff983c89945c9d9923119952c45b8e2ea90a77da044612f5b0`；离线手册及 6 张实际抽帧位于同目录。人工核对抽帧无遮挡且持续显示外部测试/受控测试/非生产边界。
+- `lark-cli` 以 bot 身份发送替代材料到 P1 已确认的同一目标：说明 message id `om_x100b65d0f1bbc8b0b4ab04f55a175b2`（2026-09-19 16:46:47），视频 `om_x100b65d08ef990a0b17be8a175fec7c`（16:46:59），receipt `om_x100b65d08e80686cb2e45b5a0bbad57`（16:47:01），离线手册 `om_x100b65d08ea510a0b32bef2d3b4f3b2`（16:47:02）；幂等 key 为 `geneway-p2-b6ebe78-note/video/receipt/manual`。此前 `b7304c0` 材料明确被本组替代，不作为最终验收件。
+- 秘密扫描读取实际 ZenMux token 与 GearJob API key/secret 作为内存 canary，仅输出计数：最终扫描工作区与验收材料 168 个文件、3 个 needle、命中文件总数 0。未把任何秘密值写入状态、Session、备份、视频、封面、receipt、日志或本节。
+- 测试期间一个未使用、未授权的额外 Draft 工单 `GENEWAY-P2-SAME-001` 已通过 Frappe 删除；实际验收对象 `WO-26-00096` 和对应只读 User Permission 保留。该删除存在 Frappe 删除审计并可由数据库备份恢复。
+- P2 是否达到阶段 PASS 仍以独立 final phase review 为准；本节记录证据，不替代审查结论。

@@ -13,6 +13,7 @@ import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 
+const browserAcceptanceExpected=Object.freeze({ownerPrivateStatus:200,ownerPrivateUiResult:true,peerSharedStatus:200,peerSharedUiResult:'visible',unauthorizedEmployeeStatus:404,unauthorizedEmployeeUiResult:'option-absent',peerSearchStatus:200,peerSearchCount:0,peerRootStatus:404,peerMaterialStatus:404,revokedUiResult:'redacted',w1Status:'cancelled',w2Status:'completed',lateResultOverwrote:false})
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 let formalDeadlineAt
 const candidate = await git(['rev-parse', 'HEAD'])
@@ -220,7 +221,7 @@ async function browserJourney() {
   for(const variable of ['collaborationRunner','knowledge','service','server'])if((visible.match(new RegExp(`\\b${variable}\\s*=`, 'g'))??[]).length<2)throw new Error(`generated restart reassignment missing: ${variable}`)
   for(const shadowed of ['const auth = createAuthRuntime','const collaborationRunner = createCollaborationRunner','let collaborationRunner = createCollaborationRunner','const knowledge = collaborationRunner.getKnowledgeService()','let knowledge = collaborationRunner.getKnowledgeService()','const index = await readFile'])if(visible.includes(shadowed))throw new Error(`generated restart binding is shadowed: ${shadowed}`)
   await writeFile(tempUiScript, visible)
-  if (harnessCheck) { await run(process.execPath, ['--check', relative(root, tempUiScript)]);await watchdogSmoke();return { generatedSyntax: 'passed',watchdogCleanup:'passed' } }
+  if (harnessCheck) { await run(process.execPath, ['--check', relative(root, tempUiScript)]);await watchdogSmoke();browserAcceptanceDiagnosticSmoke();return { generatedSyntax: 'passed',watchdogCleanup:'passed',safeBrowserDiagnostic:'passed' } }
   xvfb = spawn('Xvfb', [display, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' })
   await pause(800)
   if (recordPath) {
@@ -246,7 +247,7 @@ async function browserJourney() {
   let previousEnd=0;const steps=requiredEvents.map(([name,actor],index)=>{const matches=events.filter(event=>event.name===name);if(!matches.length||matches.some(event=>event.actor!==actor)||matches.at(-1).result!=='passed')throw new Error(`required measured event missing or contradictory: ${name}`);const start=matches.find(event=>event.result==='started')?.timestampSeconds??previousEnd,end=matches.at(-1).timestampSeconds;if(end<start||start<previousEnd)throw new Error(`required measured event order invalid: ${name}`);previousEnd=end;return{id:index+1,actor,action:name,expected:'通过同一真实 GearJob/ZenMux 普通 UI 旅程完成',startSeconds:start,endSeconds:end,result:'passed',dataMode:'live GearJob REST + live ZenMux DeepSeek'}})
   lastBrowserSteps = steps
   const measured=exported.browserResult,acceptance=measured.acceptance
-  if(acceptance?.ownerPrivateStatus!==200||acceptance.ownerPrivateUiResult!==true||acceptance.peerSharedStatus!==200||acceptance.peerSharedUiResult!=='visible'||acceptance.unauthorizedEmployeeStatus!==404||acceptance.unauthorizedEmployeeUiResult!=='option-absent'||acceptance.peerSearchStatus!==200||acceptance.peerSearchCount!==0||acceptance.peerRootStatus!==404||acceptance.peerMaterialStatus!==404||acceptance.revokedUiResult!=='redacted'||acceptance.w1Status!=='cancelled'||acceptance.w2Status!=='completed'||acceptance.lateResultOverwrote)throw new Error('browser acceptance facts missing or contradictory')
+  assertBrowserAcceptanceFacts(acceptance)
   if(acceptance.restartDraftBefore?.value!=='运行后仍保留的草稿'||acceptance.restartDraftBefore.readOnly!==false||acceptance.restartDraftBefore.disabled!==false||acceptance.restartDraftBefore.activeElementId!=='plan-goal-check-cycle'||acceptance.restartDraftAfter?.value!=='运行后仍保留的草稿'||acceptance.restartDraftAfter.readOnly!==true||acceptance.restartDraftAfter.bannerVisible!==true||['BODY','HTML'].includes(acceptance.restartDraftAfter.activeTag)||acceptance.restartDraftAfter.activeDisabled!==false||(acceptance.restartDraftAfter.activeTabIndex<0&&!acceptance.restartDraftAfter.activeNativeFocusable)||acceptance.restartDraftAfter.activeHidden!==false||!Number.isInteger(acceptance.restartDraftAfter.domBackendNodeId)||acceptance.restartDraftAfter.bound!==true||acceptance.restartDraftAfter.axBackendNodeId!==acceptance.restartDraftAfter.domBackendNodeId||acceptance.restartDraftAfter.axIgnored!==false||!acceptance.restartDraftAfter.axRole||!acceptance.restartDraftAfter.axName||acceptance.restartDraftAfter.activeAccessibleName!==acceptance.restartDraftAfter.axName)throw new Error('restart draft browser facts missing or contradictory')
   if(measured.desktopOverflow||measured.mobileOverflow||measured.consoleErrors.length||measured.failedRequests.length||measured.unexpectedResponses.length||measured.networkHeaderSecretHits<1||!measured.visualScans?.length)throw new Error('browser diagnostics missing or contradictory')
   return {
@@ -417,6 +418,16 @@ async function assertCandidate() {
       if (supersedes !== existingHash) throw new Error(`existing formal receipt requires --supersedes ${existingHash}`)
     } else if (supersedes) throw new Error('--supersedes was supplied but no existing receipt exists')
   }
+}
+function browserAcceptanceDiagnostic(acceptance={}) {
+  const integer=value=>Number.isInteger(value)?value:null,bool=value=>typeof value==='boolean'?value:null,choice=(value,allowed)=>allowed.includes(value)?value:value==null?null:'unexpected'
+  const actual={ownerPrivateStatus:integer(acceptance.ownerPrivateStatus),ownerPrivateUiResult:bool(acceptance.ownerPrivateUiResult),peerSharedStatus:integer(acceptance.peerSharedStatus),peerSharedUiResult:choice(acceptance.peerSharedUiResult,['visible']),unauthorizedEmployeeStatus:integer(acceptance.unauthorizedEmployeeStatus),unauthorizedEmployeeUiResult:choice(acceptance.unauthorizedEmployeeUiResult,['option-absent']),peerSearchStatus:integer(acceptance.peerSearchStatus),peerSearchCount:integer(acceptance.peerSearchCount),peerRootStatus:integer(acceptance.peerRootStatus),peerMaterialStatus:integer(acceptance.peerMaterialStatus),revokedUiResult:choice(acceptance.revokedUiResult,['redacted']),w1Status:choice(acceptance.w1Status,['cancelled']),w2Status:choice(acceptance.w2Status,['completed']),lateResultOverwrote:bool(acceptance.lateResultOverwrote)}
+  return{actual,mismatches:Object.keys(browserAcceptanceExpected).filter(key=>actual[key]!==browserAcceptanceExpected[key])}
+}
+function assertBrowserAcceptanceFacts(acceptance) { const diagnostic=browserAcceptanceDiagnostic(acceptance);if(diagnostic.mismatches.length)throw new Error(`browser acceptance facts missing or contradictory: ${JSON.stringify(diagnostic)}`) }
+function browserAcceptanceDiagnosticSmoke() {
+  const marker='DO_NOT_ECHO_BROWSER_SECRET',diagnostic=browserAcceptanceDiagnostic({...browserAcceptanceExpected,peerSharedUiResult:marker,w1Id:marker,cookie:marker,csrf:marker,credential:marker,body:marker,rawExport:marker})
+  assert.deepEqual(Object.keys(diagnostic.actual),Object.keys(browserAcceptanceExpected));assert.deepEqual(diagnostic.mismatches,['peerSharedUiResult']);const encoded=JSON.stringify(diagnostic);assert.equal(encoded.includes(marker),false);for(const forbidden of ['w1Id','cookie','csrf','credential','body','rawExport'])assert.equal(encoded.includes(forbidden),false)
 }
 function createJourneyProgress({videoPath,clock=Date.now,readVideoBytes=async path=>(await stat(path)).size,eventStaleMs=600_000,videoStaleMs=120_000,report=message=>console.error(message)}) {
   let eventProgressAt=clock(),videoProgressAt=clock(),videoBytes=0,lastVideoReportAt=0,progressBuffer=''

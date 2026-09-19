@@ -24,29 +24,35 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       const sameSession = Boolean(harness && requestedSessionId)
       const successorFrom = !sameSession ? requestedSessionId : undefined
       const createdHarness = !harness
-      if (!harness) {
-        const grantDirectory = join(config.dshHome, 'grants')
-        await mkdir(grantDirectory, { recursive: true, mode: 0o700 })
-        const grantFile = join(grantDirectory, `grant-${randomUUID()}.json`)
-        await writeGrant(grantFile, { operation: 'initializing', workOrderId, allowRead: false })
-        harness = harnessFactory({
-          profile: 'sdk',
-          patches: [patch],
-          dshHome: config.dshHome,
-          processCwd: root,
-          cwd: root,
-          provider: config.model.provider,
-          model: config.model.model,
-          env: childEnvironment(config, grantFile),
-          initializeTimeoutMs: 15_000,
-          requestTimeoutMs: 120_000,
-        })
-        grants.set(harness, grantFile)
-      }
-      const grantFile = grants.get(harness)
-      await writeGrant(grantFile, { operation, workOrderId, allowRead: operation !== 'follow-up' })
-      active.set(id, { harness, sessionId: requestedSessionId, closed: false })
+      const runState = { harness, sessionId: requestedSessionId, closed: false, cancelled: false }
+      active.set(id, runState)
+      let grantFile = harness ? grants.get(harness) : undefined
       try {
+        if (!harness) {
+          const grantDirectory = join(config.dshHome, 'grants')
+          await mkdir(grantDirectory, { recursive: true, mode: 0o700 })
+          if (runState.cancelled) throw cancelledError()
+          grantFile = join(grantDirectory, `grant-${randomUUID()}.json`)
+          await writeGrant(grantFile, { operation: 'initializing', workOrderId, allowRead: false })
+          if (runState.cancelled) throw cancelledError()
+          harness = harnessFactory({
+            profile: 'sdk',
+            patches: [patch],
+            dshHome: config.dshHome,
+            processCwd: root,
+            cwd: root,
+            provider: config.model.provider,
+            model: config.model.model,
+            env: childEnvironment(config, grantFile),
+            initializeTimeoutMs: 15_000,
+            requestTimeoutMs: 120_000,
+          })
+          runState.harness = harness
+          grants.set(harness, grantFile)
+        }
+        if (runState.cancelled) throw cancelledError()
+        await writeGrant(grantFile, { operation, workOrderId, allowRead: operation !== 'follow-up' })
+        if (runState.cancelled) throw cancelledError()
         const result = await harness.run(buildPrompt({ operation, workOrderId, observation, question }), sameSession ? { sessionId: requestedSessionId } : undefined)
         const parsed = parseRunResult(result, { operation, workOrderId })
         const actualSessionId = result.sessionId
@@ -61,7 +67,8 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
           eventCount: result.events?.length ?? 0,
         }
       } catch (error) {
-        if (createdHarness && !active.get(id)?.closed) {
+        if (runState.cancelled && grantFile) await unlink(grantFile).catch(() => undefined)
+        if (createdHarness && harness && !runState.closed) {
           await harness.close().catch(() => undefined)
           await removeHarness(harness)
         }
@@ -74,6 +81,8 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
     async cancel(executionId) {
       const activeRun = active.get(executionId)
       if (!activeRun) return false
+      activeRun.cancelled = true
+      if (!activeRun.harness) return true
       activeRun.closed = true
       await activeRun.harness.close().catch(() => undefined)
       await removeHarness(activeRun.harness)
@@ -81,7 +90,7 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
     },
 
     async close() {
-      const harnesses = [...new Set([...sessions.values(), ...[...active.values()].map(item => item.harness)])]
+      const harnesses = [...new Set([...sessions.values(), ...[...active.values()].map(item => item.harness).filter(Boolean)])]
       await Promise.all(harnesses.map(harness => harness.close().catch(() => undefined)))
       await Promise.all(harnesses.map(removeHarness))
       active.clear()
@@ -192,4 +201,8 @@ function runnerError(code, message) {
   const error = new Error(message)
   error.code = code
   return error
+}
+
+function cancelledError() {
+  return Object.assign(new Error('本次执行已停止'), { name: 'AbortError', code: 'CANCELLED' })
 }

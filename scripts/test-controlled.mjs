@@ -119,20 +119,14 @@ async function testRunnerCancellationIsScoped() {
   const second = runner.run({ executionId: 'keep-second', workOrderId: 'W2' })
   void first.catch(() => undefined)
   void second.catch(() => undefined)
-  await waitUntilCancelled(runner, 'cancel-first')
-  assert.deepEqual(harnesses.map(item => item.closes).sort(), [0, 1])
-  await waitUntilCancelled(runner, 'keep-second')
+  assert.equal(await runner.cancel('cancel-first'), true)
+  for (let attempt = 0; harnesses.length === 0 && attempt < 100; attempt += 1) await new Promise(resolve => setTimeout(resolve, 2))
+  assert.equal(harnesses.length, 1)
+  assert.equal(harnesses[0].closes, 0)
+  assert.equal(await runner.cancel('keep-second'), true)
   await Promise.allSettled([first, second])
-  assert.deepEqual(harnesses.map(item => item.closes).sort(), [1, 1])
+  assert.equal(harnesses[0].closes, 1)
   await runner.close()
-}
-
-async function waitUntilCancelled(runner, executionId) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (await runner.cancel(executionId)) return
-    await new Promise(resolve => setTimeout(resolve, 2))
-  }
-  throw new Error(`runner did not activate ${executionId}`)
 }
 
 async function testSourceAbortMapsToTimeout() {

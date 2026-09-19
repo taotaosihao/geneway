@@ -8,7 +8,11 @@ export const name = 'geneway-gearjob-work-order'
 export const inject = ['tools']
 
 export function apply(ctx) {
-  ctx.tools.register(defineTool({
+  ctx.tools.register(createGearJobWorkOrderTool())
+}
+
+export function createGearJobWorkOrderTool({ authorize = defaultAuthorize } = {}) {
+  return defineTool({
     name: GEARJOB_TOOL,
     description: 'Read one explicitly authorized GearJob-compatible Work Order through its standard read-only REST endpoint.',
     parameters: {
@@ -47,9 +51,8 @@ export function apply(ctx) {
     },
     async execute(args, invocation = {}) {
       try {
-        const grant = await consumeExecutionGrant({ toolName: GEARJOB_TOOL, input: args })
+        const grant = await authorize({ toolName: GEARJOB_TOOL, input: args, invocation })
         if (invocation.signal?.aborted) throw sourceError('CANCELLED', '本次执行已停止')
-        await authorizeExecutionGrant(grant)
         return {
           ok: true,
           ...await readGearJobWorkOrder({
@@ -57,14 +60,20 @@ export function apply(ctx) {
             connection: grant.connection,
             secretRoot: grant.secretRoot,
             signal: invocation.signal,
-            authorize: () => authorizeExecutionGrant(grant),
+            authorize: () => authorize({ toolName: GEARJOB_TOOL, input: args, invocation, grant }),
           }),
         }
       } catch (error) {
         return { ok: false, error: { code: safeCode(error?.code), message: error?.message || 'GearJob 查询失败' } }
       }
     },
-  }))
+  })
+}
+
+async function defaultAuthorize({ toolName, input, grant }) {
+  const value = grant ?? await consumeExecutionGrant({ toolName, input })
+  await authorizeExecutionGrant(value)
+  return value
 }
 
 export async function assertExecutionGrant(workOrderId, filePath = process.env.GENEWAY_DSH_GRANT_FILE) {

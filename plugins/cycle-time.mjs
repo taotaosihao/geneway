@@ -7,7 +7,11 @@ export const name = 'geneway-cycle-time'
 export const inject = ['tools']
 
 export function apply(ctx) {
-  ctx.tools.register(defineTool({
+  ctx.tools.register(createCycleTimeTool())
+}
+
+export function createCycleTimeTool({ authorize = defaultAuthorize } = {}) {
+  return defineTool({
     name: CYCLE_TIME_TOOL,
     description: 'Deterministically calculate manufacturing cycle time in seconds per unit. Both inputs are required numbers.',
     parameters: {
@@ -50,15 +54,20 @@ export function apply(ctx) {
     },
     async execute(args, invocation = {}) {
       try {
-        const grant = await consumeExecutionGrant({ toolName: CYCLE_TIME_TOOL, input: args })
+        const grant = await authorize({ toolName: CYCLE_TIME_TOOL, input: args, invocation })
         if (invocation.signal?.aborted) return failure('CANCELLED', '本次执行已停止')
-        await authorizeExecutionGrant(grant)
         return calculateCycleTime(args)
       } catch (error) {
         return failure(['FORBIDDEN', 'CANCELLED'].includes(error?.code) ? error.code : 'FORBIDDEN', error?.message ?? '本次执行没有节拍换算授权')
       }
     },
-  }))
+  })
+}
+
+async function defaultAuthorize({ toolName, input, grant }) {
+  const value = grant ?? await consumeExecutionGrant({ toolName, input })
+  await authorizeExecutionGrant(value)
+  return value
 }
 
 function failure(code, message) {

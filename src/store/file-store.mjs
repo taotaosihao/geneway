@@ -21,7 +21,7 @@ const CYCLE_CAPABILITY_ID = 'cycle-time-calculate'
 const CYCLE_SKILL_ID = 'skill-cycle-time-calculate'
 const CYCLE_TOOL_NAME = 'geneway_calculate_cycle_time'
 const CYCLE_PLUGIN_ID = 'geneway-cycle-time'
-const RESULT_KINDS = new Set(['gearjob.work-order.observation', 'manufacturing.takt', 'assistant.follow-up'])
+const RESULT_KINDS = new Set(['gearjob.work-order.observation', 'manufacturing.takt', 'assistant.follow-up', 'assistant.collaboration-summary'])
 
 const EMPTY_STATE = {
   version: STATE_VERSION,
@@ -351,7 +351,136 @@ function normalizeV5(value) {
     }
   }
 
+  normalizeCollaborations(common.works, memberIds)
+
   return { ...common, version: STATE_VERSION, knowledgeMaterials }
+}
+
+function normalizeCollaborations(works, memberIds) {
+  const byId = new Map(works.map(work => [work.id, work]))
+  const claimedChildren = new Map()
+  for (const work of works) {
+    if (work.parentWorkId !== undefined || work.rootWorkId !== undefined) {
+      if (work.workType !== 'collaboration-child') throw new Error(`子工作 ${work.id} workType 无效`)
+      const parentWorkId = requiredText(work.parentWorkId, `子工作 ${work.id} parentWorkId 无效`)
+      const rootWorkId = requiredText(work.rootWorkId, `子工作 ${work.id} rootWorkId 无效`)
+      const rootWork = byId.get(rootWorkId)
+      if (parentWorkId !== rootWorkId || !rootWork?.collaboration || work.ownerMemberId !== rootWork.ownerMemberId) throw new Error(`子工作 ${work.id} 根工作或 owner 引用无效`)
+      if (!Number.isSafeInteger(work.collaborationGeneration) || work.collaborationGeneration < 1) throw new Error(`子工作 ${work.id} generation 无效`)
+      requiredText(work.planItemId, `子工作 ${work.id} planItemId 无效`)
+    }
+    if (!work.collaboration) continue
+    if (work.workType !== 'collaboration') throw new Error(`协作工作 ${work.id} workType 无效`)
+    if (!memberIds.has(work.ownerMemberId)) throw new Error(`协作工作 ${work.id} ownerMemberId 不存在`)
+    const collaboration = work.collaboration
+    if (!record(collaboration)) throw new Error(`协作工作 ${work.id} 状态无效`)
+    exactKeys(collaboration, ['generation', 'cancelGeneration', 'status', 'requestLimit', 'requestCount', 'childLimit', 'maxConcurrentChildren', 'rootTimeoutMs', 'childTimeoutMs', 'outputMaxTokens', 'childWorkIds', 'summaryResultRefs', 'staleKnowledgeRefs', 'staleItemIds'], `协作工作 ${work.id}`)
+    if (!Number.isSafeInteger(collaboration.generation) || collaboration.generation < 1) throw new Error(`协作工作 ${work.id} generation 无效`)
+    if (!Number.isSafeInteger(collaboration.cancelGeneration) || collaboration.cancelGeneration < 0) throw new Error(`协作工作 ${work.id} cancelGeneration 无效`)
+    if (!['accepted', 'running', 'waiting_input', 'completed', 'cancelled', 'failed', 'interrupted', 'stale'].includes(collaboration.status)) throw new Error(`协作工作 ${work.id} 状态无效`)
+    boundedInteger(collaboration.requestLimit, 1, 12, `协作工作 ${work.id} requestLimit 无效`)
+    boundedInteger(collaboration.requestCount, 0, collaboration.requestLimit, `协作工作 ${work.id} requestCount 无效`)
+    boundedInteger(collaboration.childLimit, 1, 4, `协作工作 ${work.id} childLimit 无效`)
+    boundedInteger(collaboration.maxConcurrentChildren, 1, 2, `协作工作 ${work.id} maxConcurrentChildren 无效`)
+    boundedInteger(collaboration.rootTimeoutMs, 1, 360_000, `协作工作 ${work.id} rootTimeoutMs 无效`)
+    boundedInteger(collaboration.childTimeoutMs, 1, 120_000, `协作工作 ${work.id} childTimeoutMs 无效`)
+    if (collaboration.outputMaxTokens !== 4096) throw new Error(`协作工作 ${work.id} outputMaxTokens 无效`)
+    const childWorkIds = uniqueTextArray(collaboration.childWorkIds, `协作工作 ${work.id} childWorkIds`)
+    if (!childWorkIds.length) throw new Error(`协作工作 ${work.id} 至少需要一个子工作`)
+    if (childWorkIds.length > collaboration.childLimit) throw new Error(`协作工作 ${work.id} 子工作超过上限`)
+    for (const id of childWorkIds) {
+      if (byId.get(id)?.rootWorkId !== work.id || claimedChildren.has(id)) throw new Error(`协作工作 ${work.id} 子工作引用无效或重复归属`)
+      claimedChildren.set(id, work.id)
+    }
+    const childResultIds = new Set(childWorkIds.flatMap(id => byId.get(id)?.results.map(result => result.id) ?? []))
+    for (const id of uniqueTextArray(collaboration.summaryResultRefs, `协作工作 ${work.id} summaryResultRefs`)) if (!childResultIds.has(id)) throw new Error(`协作工作 ${work.id} 汇总引用不存在`)
+    uniqueTextArray(collaboration.staleKnowledgeRefs, `协作工作 ${work.id} staleKnowledgeRefs`)
+    const staleItemIds = uniqueTextArray(collaboration.staleItemIds, `协作工作 ${work.id} staleItemIds`)
+    if (!record(work.plan) || !Number.isSafeInteger(work.plan.revision) || work.plan.revision < 1 || !Array.isArray(work.plan.items)) throw new Error(`协作工作 ${work.id} plan 无效`)
+    if (work.plan.items.length !== childWorkIds.length) throw new Error(`协作工作 ${work.id} plan 与子工作不一致`)
+    const itemIds = new Set(), plannedChildren = new Set()
+    for (const item of work.plan.items) {
+      if (!record(item)) throw new Error(`协作工作 ${work.id} plan item 无效`)
+      exactKeys(item, ['id', 'childWorkId', 'goal', 'employeeId', 'status', 'dependsOn'], `协作工作 ${work.id} plan item`)
+      const id = requiredText(item.id, `协作工作 ${work.id} plan item ID 无效`)
+      if (itemIds.has(id)) throw new Error(`协作工作 ${work.id} plan item ID 重复`)
+      itemIds.add(id)
+      const childWorkId = requiredText(item.childWorkId, `协作工作 ${work.id} plan childWorkId 无效`)
+      if (!childWorkIds.includes(childWorkId) || plannedChildren.has(childWorkId)) throw new Error(`协作工作 ${work.id} plan childWorkId 不存在或重复`)
+      plannedChildren.add(childWorkId)
+      requiredText(item.goal, `协作工作 ${work.id} plan goal 无效`)
+      requiredText(item.employeeId, `协作工作 ${work.id} plan employeeId 无效`)
+      if (byId.get(item.childWorkId)?.employeeId !== item.employeeId || byId.get(item.childWorkId)?.planItemId !== item.id) throw new Error(`协作工作 ${work.id} plan item 与子工作不一致`)
+      if (!['not_started', 'running', 'completed', 'waiting_input', 'failed', 'cancelled', 'interrupted'].includes(item.status)) throw new Error(`协作工作 ${work.id} plan item 状态无效`)
+      uniqueTextArray(item.dependsOn ?? [], `协作工作 ${work.id} plan dependsOn`)
+    }
+    for (const item of work.plan.items) if ((item.dependsOn ?? []).some(id => !itemIds.has(id) || id === item.id)) throw new Error(`协作工作 ${work.id} plan dependsOn 引用无效`)
+    if (hasPlanCycle(work.plan.items)) throw new Error(`协作工作 ${work.id} plan 依赖成环`)
+    if (staleItemIds.some(id => !itemIds.has(id)) || (collaboration.status === 'stale') !== Boolean(staleItemIds.length)) throw new Error(`协作工作 ${work.id} stale item 状态无效`)
+    if (!Array.isArray(work.handoffs)) throw new Error(`协作工作 ${work.id} handoffs 无效`)
+    const currentHandoffs = new Map()
+    for (const handoff of work.handoffs) {
+      if (!record(handoff)) throw new Error(`协作工作 ${work.id} handoff 无效`)
+      exactKeys(handoff, ['id', 'childWorkId', 'fromEmployeeId', 'toEmployeeId', 'resultRefs', 'knowledgeRefs', 'revision', 'generation', 'status', 'createdAt'], `协作工作 ${work.id} handoff`)
+      for (const key of ['id', 'childWorkId', 'fromEmployeeId', 'toEmployeeId', 'status', 'createdAt']) requiredText(handoff[key], `协作工作 ${work.id} handoff ${key} 无效`)
+      if (!Number.isSafeInteger(handoff.revision) || handoff.revision < 1) throw new Error(`协作工作 ${work.id} handoff revision 无效`)
+      if (!Number.isSafeInteger(handoff.generation) || handoff.generation < 1 || handoff.generation > collaboration.generation || !['current', 'superseded'].includes(handoff.status)) throw new Error(`协作工作 ${work.id} handoff generation 或状态无效`)
+      if (!childWorkIds.includes(handoff.childWorkId) || byId.get(handoff.childWorkId)?.employeeId !== handoff.fromEmployeeId || handoff.toEmployeeId !== work.employeeId) throw new Error(`协作工作 ${work.id} handoff 身份引用无效`)
+      const ownedResults = new Set(byId.get(handoff.childWorkId).results.map(result => result.id))
+      const resultRefs = uniqueTextArray(handoff.resultRefs, `协作工作 ${work.id} handoff resultRefs`)
+      if (resultRefs.length !== 1) throw new Error(`协作工作 ${work.id} handoff 必须引用一个结果`)
+      for (const resultId of resultRefs) if (!ownedResults.has(resultId) || byId.get(handoff.childWorkId).results.find(result => result.id === resultId)?.generation !== handoff.generation) throw new Error(`协作工作 ${work.id} handoff 结果引用不存在或 generation 不一致`)
+      if (!Array.isArray(handoff.knowledgeRefs)) throw new Error(`协作工作 ${work.id} handoff knowledgeRefs 无效`)
+      if (handoff.status === 'current') {
+        if (currentHandoffs.has(handoff.childWorkId)) throw new Error(`协作工作 ${work.id} 子工作存在多个当前 handoff`)
+        currentHandoffs.set(handoff.childWorkId, handoff)
+      }
+    }
+    uniqueIds(work.handoffs, `协作工作 ${work.id} handoff`)
+    const treeResults = [work, ...childWorkIds.map(id => byId.get(id))].flatMap(item => item.results)
+    uniqueIds(treeResults, `协作工作 ${work.id} tree result`)
+    for (const related of [work, ...childWorkIds.map(id => byId.get(id))]) for (const execution of related.executions) {
+      if (execution.generation !== undefined && (!Number.isSafeInteger(execution.generation) || execution.generation < 1 || execution.generation > collaboration.generation)) throw new Error(`协作工作 ${work.id} execution generation 无效`)
+      if (execution.cancelGeneration !== undefined && (!Number.isSafeInteger(execution.cancelGeneration) || execution.cancelGeneration < 0 || execution.cancelGeneration > collaboration.cancelGeneration)) throw new Error(`协作工作 ${work.id} execution cancelGeneration 无效`)
+      if (execution.planRevision !== undefined && (!Number.isSafeInteger(execution.planRevision) || execution.planRevision < 1 || execution.planRevision > work.plan.revision)) throw new Error(`协作工作 ${work.id} execution planRevision 无效`)
+      if (execution.employeeId !== undefined && execution.employeeId !== related.employeeId) throw new Error(`协作工作 ${work.id} execution employee 无效`)
+      if (execution.usage !== undefined) normalizeUsage(execution.usage, `协作工作 ${work.id} execution usage`)
+    }
+    for (const item of work.plan.items) {
+      const child = byId.get(item.childWorkId)
+      if (child.collaborationGeneration !== collaboration.generation) throw new Error(`协作工作 ${work.id} 子工作 current generation 无效`)
+      const expectedChildStatus = item.status === 'not_started' ? 'accepted' : item.status
+      if (child.status !== expectedChildStatus) throw new Error(`协作工作 ${work.id} plan 与子工作状态不一致`)
+      if (['not_started', 'running'].includes(item.status)) {
+        const currentExecutions = child.executions.filter(execution => execution.generation === collaboration.generation && execution.cancelGeneration === collaboration.cancelGeneration && ['accepted', 'running'].includes(execution.status))
+        if (currentExecutions.length !== 1) throw new Error(`协作工作 ${work.id} 子工作 current execution 不闭合`)
+      }
+      for (const result of child.results) {
+        if (!Number.isSafeInteger(result.generation) || result.generation < 1 || result.generation > collaboration.generation || result.employeeId !== child.employeeId || result.handoffRefs?.length !== 1) throw new Error(`协作工作 ${work.id} 子结果身份或 generation 无效`)
+        const handoff = work.handoffs.find(candidate => candidate.id === result.handoffRefs[0])
+        if (!handoff || handoff.childWorkId !== child.id || handoff.resultRefs[0] !== result.id) throw new Error(`协作工作 ${work.id} 子结果 handoff 不互指`)
+      }
+    }
+    const rootSummaries = work.results.filter(result => result.kind === 'assistant.collaboration-summary')
+    for (const summary of rootSummaries) {
+      if (!Number.isSafeInteger(summary.generation) || summary.generation < 1 || summary.generation > collaboration.generation || summary.employeeId !== work.employeeId) throw new Error(`协作工作 ${work.id} summary 身份或 generation 无效`)
+      const refs = uniqueTextArray(summary.payload.resultRefs, `协作工作 ${work.id} summary resultRefs`)
+      if (refs.some(id => !childResultIds.has(id)) || summary.handoffRefs?.some(id => !work.handoffs.some(handoff => handoff.id === id))) throw new Error(`协作工作 ${work.id} summary 引用无效`)
+    }
+    if (work.status !== collaboration.status && !(work.status === 'completed' && collaboration.status === 'stale')) throw new Error(`协作工作 ${work.id} 根状态不一致`)
+    if (['accepted', 'running'].includes(collaboration.status)) {
+      const currentRootExecutions = work.executions.filter(execution => execution.generation === collaboration.generation && execution.cancelGeneration === collaboration.cancelGeneration && ['accepted', 'running'].includes(execution.status))
+      if (currentRootExecutions.length !== 1) throw new Error(`协作工作 ${work.id} 根 current execution 不闭合`)
+    }
+    if (collaboration.status === 'completed') {
+      if (work.plan.items.some(item => item.status !== 'completed') || currentHandoffs.size !== work.plan.items.length) throw new Error(`协作工作 ${work.id} 完成状态不闭合`)
+      const expectedRefs = work.plan.items.flatMap(item => currentHandoffs.get(item.childWorkId).resultRefs)
+      const latestSummary = rootSummaries.at(-1)
+      const currentRootExecution = work.executions.find(execution => execution.generation === collaboration.generation && execution.status === 'completed')
+      if (!latestSummary || latestSummary.generation !== collaboration.generation || currentRootExecution?.resultId !== latestSummary.id || !sameTextArray(collaboration.summaryResultRefs, expectedRefs) || !sameTextArray(latestSummary.payload.resultRefs, expectedRefs) || !sameTextArray(latestSummary.handoffRefs, work.plan.items.map(item => currentHandoffs.get(item.childWorkId).id))) throw new Error(`协作工作 ${work.id} 当前 summary 不闭合`)
+    } else if (collaboration.summaryResultRefs.length) throw new Error(`协作工作 ${work.id} 非完成状态不得声明当前 summary`)
+  }
+  for (const work of works.filter(item => item.workType === 'collaboration-child')) if (!claimedChildren.has(work.id)) throw new Error(`子工作 ${work.id} 未被根工作唯一声明`)
 }
 
 function normalizeKnowledgeMaterial(material) {
@@ -390,7 +519,7 @@ function normalizeKnowledgeMaterial(material) {
 
 function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) {
   if (!record(result)) throw new Error('结果状态无效')
-  exactKeys(result, ['id', 'kind', 'capabilityId', 'skillId', 'schemaVersion', 'input', 'payload', 'explanation', 'source', 'createdAt', 'toolName', 'pluginId', 'pluginVersion', 'dshSessionRef', 'continuedFromDshSessionRef', 'contextObservationId', 'continuity', 'contextConfirmationRefs', ...(allowKnowledgeDependencyRefs ? ['knowledgeDependencyRefs'] : [])], '结果')
+  exactKeys(result, ['id', 'kind', 'capabilityId', 'skillId', 'schemaVersion', 'input', 'payload', 'explanation', 'source', 'createdAt', 'toolName', 'pluginId', 'pluginVersion', 'dshSessionRef', 'continuedFromDshSessionRef', 'contextObservationId', 'continuity', 'contextConfirmationRefs', 'employeeId', 'handoffRefs', 'usage', 'generation', ...(allowKnowledgeDependencyRefs ? ['knowledgeDependencyRefs'] : [])], '结果')
   const id = requiredText(result.id, '结果 ID 无效')
   const kind = requiredText(result.kind, `结果 ${id} 类型无效`)
   if (!RESULT_KINDS.has(kind)) throw new Error(`结果 ${id} 类型不受支持：${kind}`)
@@ -404,6 +533,10 @@ function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) 
   }
   if (!record(result.input) || !record(result.payload)) throw new Error(`结果 ${id} 输入或 payload 无效`)
   if (!Array.isArray(result.contextConfirmationRefs)) throw new Error(`结果 ${id} confirmation refs 无效`)
+  if (result.employeeId !== undefined) requiredText(result.employeeId, `结果 ${id} employeeId 无效`)
+  if (result.handoffRefs !== undefined) uniqueTextArray(result.handoffRefs, `结果 ${id} handoffRefs`)
+  if (result.usage !== undefined) normalizeUsage(result.usage, `结果 ${id} usage`)
+  if (result.generation !== undefined && (!Number.isSafeInteger(result.generation) || result.generation < 1)) throw new Error(`结果 ${id} generation 无效`)
   for (const ref of result.contextConfirmationRefs) {
     if (typeof ref === 'string') {
       requiredText(ref, `结果 ${id} confirmation ref 无效`)
@@ -485,6 +618,34 @@ function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) 
   }
   if (result.pluginVersion !== undefined) requiredText(result.pluginVersion, `结果 ${id} pluginVersion 无效`)
   return result
+}
+
+function normalizeUsage(value, label) {
+  if (!record(value)) throw new Error(`${label} 无效`)
+  exactKeys(value, ['inputTokens', 'outputTokens', 'totalTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens'], label)
+  for (const key of Object.keys(value)) if (value[key] !== null && (!Number.isSafeInteger(value[key]) || value[key] < 0)) throw new Error(`${label} ${key} 无效`)
+  return value
+}
+
+function boundedInteger(value, minimum, maximum, message) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error(message)
+  return value
+}
+
+function hasPlanCycle(items) {
+  const byId = new Map(items.map(item => [item.id, item])), visiting = new Set(), visited = new Set()
+  const visit = id => {
+    if (visiting.has(id)) return true
+    if (visited.has(id)) return false
+    visiting.add(id)
+    if ((byId.get(id)?.dependsOn ?? []).some(visit)) return true
+    visiting.delete(id); visited.add(id); return false
+  }
+  return items.some(item => visit(item.id))
+}
+
+function sameTextArray(left, right) {
+  return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => value === right[index])
 }
 
 function migrateReservations(value, oldOperatorId) {

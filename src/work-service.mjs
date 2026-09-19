@@ -11,6 +11,7 @@ export const ERROR_STATUS = {
   NON_FINITE_RESULT: 400, CAPABILITY_NOT_FOUND: 400, UNAUTHORIZED: 401, FORBIDDEN: 403,
   NOT_FOUND: 404, BUSY: 409, SOURCE_NOT_CONFIGURED: 503, MODEL_NOT_CONFIGURED: 503,
   UPSTREAM_TIMEOUT: 504, UPSTREAM_ERROR: 502, INVALID_SOURCE: 502,
+  BUDGET_EXHAUSTED: 409,
 }
 
 const ACTIVE_EXECUTION = new Set(['accepted', 'running', 'cancel_requested'])
@@ -29,6 +30,7 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   PROCESS_RESTARTED: '进程重启时未完成',
   BACKUP_INTERRUPTED: '备份操作被中断',
   TOOL_CHAIN_INVALID: '模型工具结果无效',
+  BUDGET_EXHAUSTED: '协作模型请求预算已耗尽',
   CANCELLED: '本次执行已停止',
   FORBIDDEN: '执行授权已失效',
   NOT_FOUND: '业务对象不存在',
@@ -36,7 +38,7 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
 })
 const GENERIC_ERROR = Object.freeze({ code: 'INTERNAL_ERROR', message: '服务暂时无法完成请求' })
 
-export function createWorkService({ store, runner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [] } = {}) {
+export function createWorkService({ store, runner = null, collaborationRunner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [] } = {}) {
   if (!store) throw new Error('store is required')
   const active = new Map()
   let recovered = false
@@ -107,6 +109,106 @@ export function createWorkService({ store, runner = null, clock = () => new Date
       if (!reservation.deduplicated && reservation.executionId) schedule(work.id, reservation.executionId, 'create')
       return success(work, reservation)
     },
+
+    async createCollaboration(actor, body = {}) {
+      await recover()
+      const requestId = clean(body.clientRequestId) ?? `collaboration-${randomUUID()}`
+      let reservation
+      await store.update(state => {
+        const member = requireMember(state, actor)
+        const key = reservationKey(member.id, 'collaboration', requestId)
+        if (state.reservations[key]) { reservation = { deduplicated: true, ...state.reservations[key] }; return state }
+        if (!collaborationRunner) { reservation = { error: failure('MODEL_NOT_CONFIGURED', '协作运行时未配置') }; return state }
+        if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 4) { reservation = { error: failure('INVALID_REQUEST', '协作计划需要 1 至 4 项') }; return state }
+        const leader = authorizedBinding(state, member, body, connectionCatalog)
+        if (!leader.ok) { reservation = { error: leader }; return state }
+        const goal = clean(body.goal)
+        if (!goal || goal.length > 4000) { reservation = { error: failure('INVALID_REQUEST', '协作目标无效') }; return state }
+        const now = clock(), rootWorkId = `work-${randomUUID()}`, generation = 1
+        const childWorks = [], planItems = [], itemIds = new Set()
+        for (const raw of body.items) {
+          const itemId = clean(raw?.id) ?? `item-${randomUUID()}`
+          if (itemIds.has(itemId)) { reservation = { error: failure('INVALID_REQUEST', '协作计划项 ID 重复') }; return state }
+          itemIds.add(itemId)
+          const binding = authorizedBinding(state, member, raw ?? {}, connectionCatalog)
+          if (!binding.ok) { reservation = { error: binding }; return state }
+          const parsed = parseInput(binding.capability.id, requestInput(raw, binding.capability), true)
+          if (!parsed.ok) { reservation = { error: parsed }; return state }
+          if (!inputAllowed(binding, parsed.input)) { reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }; return state }
+          const childWorkId = `work-${randomUUID()}`, executionId = `exec-${randomUUID()}`
+          const itemGoal = clean(raw.goal) ?? binding.capability.action
+          const waiting = parsed.missing.length > 0
+          childWorks.push({
+            id: childWorkId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
+            capabilityId: binding.capability.id, ...(binding.connection ? { connectionId: binding.connection.id } : {}),
+            goal: itemGoal, input: parsed.input, requiredInputs: parsed.missing, status: waiting ? 'waiting_input' : 'accepted', acceptedAt: now, results: [],
+            executions: waiting ? [] : [{ ...newExecution(executionId, 'collaboration-child', requestId, parsed.input, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: binding.employee.id }],
+            workType: 'collaboration-child', parentWorkId: rootWorkId, rootWorkId, collaborationGeneration: generation, planItemId: itemId,
+          })
+          planItems.push({ id: itemId, childWorkId, goal: itemGoal, employeeId: binding.employee.id, status: waiting ? 'waiting_input' : 'not_started', dependsOn: raw.dependsOn ?? [] })
+        }
+        if (planItems.some(item => !stringIds(item.dependsOn) || item.dependsOn.some(id => !itemIds.has(id) || id === item.id)) || hasDependencyCycle(planItems)) { reservation = { error: failure('INVALID_REQUEST', '协作计划依赖无效') }; return state }
+        const rootExecutionId = `exec-${randomUUID()}`
+        const rootWork = {
+          id: rootWorkId, ownerMemberId: member.id, employeeId: leader.employee.id, skillId: leader.skill.id,
+          capabilityId: leader.capability.id, ...(leader.connection ? { connectionId: leader.connection.id } : {}),
+          goal, input: {}, requiredInputs: [], status: 'accepted', acceptedAt: now, results: [],
+          executions: [{ ...newExecution(rootExecutionId, 'collaboration-root', requestId, {}, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: leader.employee.id }],
+          workType: 'collaboration', collaboration: { generation, cancelGeneration: 0, status: 'accepted', requestLimit: 12, requestCount: 0, childLimit: 4, maxConcurrentChildren: 2, rootTimeoutMs: 360_000, childTimeoutMs: 120_000, outputMaxTokens: 4096, childWorkIds: childWorks.map(work => work.id), summaryResultRefs: [], staleKnowledgeRefs: [], staleItemIds: [] },
+          plan: { revision: 1, items: planItems }, handoffs: [],
+        }
+        reservation = { workId: rootWorkId, executionId: rootExecutionId, work: rootWork }
+        return { ...state, works: [...state.works, rootWork, ...childWorks], reservations: { ...state.reservations, [key]: { workId: rootWorkId, executionId: rootExecutionId } } }
+      })
+      if (reservation?.error) return reservation.error
+      if (!reservation.deduplicated) void collaborationRunner.run(reservation.workId).catch(() => undefined)
+      const work = reservation.work ?? await ownedWork(actor, reservation.workId)
+      return success(work, reservation)
+    },
+
+    async updateCollaborationPlan(actor, id, body = {}) {
+      await recover()
+      let updated
+      await store.update(state => {
+        const member = requireMember(state, actor), work = findOwned(state, member, id)
+        if (!work?.collaboration) throw serviceError('NOT_FOUND', '协作工作不存在')
+        if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision !== work.plan.revision) throw serviceError('BUSY', '工作计划 revision 已变化')
+        if (!Array.isArray(body.items) || !body.items.length) throw serviceError('INVALID_REQUEST', '计划修改为空')
+        const changes = new Map()
+        for (const change of body.items) {
+          const itemId = clean(change?.id), goal = change?.goal === undefined ? undefined : clean(change.goal), employeeId = change?.employeeId === undefined ? undefined : clean(change.employeeId)
+          if (!itemId || changes.has(itemId) || (goal === undefined && employeeId === undefined) || (change?.goal !== undefined && (!goal || goal.length > 4000)) || (change?.employeeId !== undefined && !employeeId)) throw serviceError('INVALID_REQUEST', '计划修改无效')
+          changes.set(itemId, { goal, employeeId })
+        }
+        const childChanges = new Map()
+        const items = work.plan.items.map(item => {
+          if (!changes.has(item.id)) return item
+          if (item.status !== 'not_started') throw serviceError('BUSY', '只能修改未开始计划项')
+          const change = changes.get(item.id), child = state.works.find(candidate => candidate.id === item.childWorkId)
+          if (!child || child.status !== 'accepted' || child.executions.some(execution => execution.status !== 'accepted')) throw serviceError('BUSY', '只能修改未开始计划项')
+          let employeeId = item.employeeId
+          if (change.employeeId !== undefined && change.employeeId !== employeeId) {
+            const binding = authorizedBinding(state, member, { ...child, employeeId: change.employeeId }, connectionCatalog)
+            if (!binding.ok) throw serviceError(binding.error.code, binding.error.message)
+            employeeId = binding.employee.id
+          }
+          childChanges.set(child.id, { goal: change.goal ?? item.goal, employeeId })
+          return { ...item, goal: change.goal ?? item.goal, employeeId }
+        })
+        if ([...changes.keys()].some(itemId => !items.some(item => item.id === itemId))) throw serviceError('INVALID_REQUEST', '计划项不存在')
+        updated = { ...work, plan: { revision: work.plan.revision + 1, items } }
+        const nextRevision = updated.plan.revision
+        return { ...state, works: state.works.map(item => {
+          if (item.id === work.id) return updated
+          const change = childChanges.get(item.id)
+          return change ? { ...item, ...change, executions: item.executions.map(execution => execution.status === 'accepted' ? { ...execution, employeeId: change.employeeId, planRevision: nextRevision } : execution) } : item
+        }) }
+      })
+      return { ok: true, value: publicWork(updated) }
+    },
+
+    async continueCollaboration(actor, id, body = {}) { return successorCollaboration(actor, id, body, false) },
+    async recheckCollaboration(actor, id, body = {}) { return successorCollaboration(actor, id, body, true) },
 
     async getWork(actor, id) {
       await recover()
@@ -186,6 +288,12 @@ export function createWorkService({ store, runner = null, clock = () => new Date
 
     async cancel(actor, id) {
       await recover()
+      const candidate = await ownedWork(actor, id)
+      if (candidate?.collaboration) {
+        const accepted = await collaborationRunner?.cancel(id, 'user')
+        const value = await ownedWork(actor, id)
+        return { ok: true, value: publicWork(value), accepted: Boolean(accepted) }
+      }
       let executionId
       let current
       await store.update(state => {
@@ -394,6 +502,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
       await Promise.all(tasks.map(item => runner?.cancel?.(item.executionId)))
       await Promise.all(tasks.map(item => item.promise.catch(() => undefined)))
       await runner?.close?.()
+      await collaborationRunner?.close?.()
     },
   }
 
@@ -422,6 +531,52 @@ export function createWorkService({ store, runner = null, clock = () => new Date
     const work = reservation.work ?? await ownedWork(actor, reservation.workId)
     if (!work) return failure('NOT_FOUND', '工作不存在')
     if (!reservation.deduplicated) schedule(id, reservation.executionId, operation, reservation.question)
+    return success(work, reservation)
+  }
+
+  async function successorCollaboration(actor, id, body, recheck) {
+    await recover()
+    const requestId = clean(body.clientRequestId) ?? `${recheck ? 'recheck' : 'continue'}-${randomUUID()}`
+    let reservation
+    await store.update(state => {
+      const member = requireMember(state, actor), rootWork = findOwned(state, member, id)
+      if (!rootWork?.collaboration) { reservation = { error: failure('NOT_FOUND', '协作工作不存在') }; return state }
+      const key = reservationKey(member.id, id, recheck ? 'recheck' : 'continue', requestId)
+      if (state.reservations[key]) { reservation = { deduplicated: true, ...state.reservations[key] }; return state }
+      if (recheck ? rootWork.collaboration.status !== 'stale' : !['waiting_input', 'failed', 'interrupted', 'cancelled'].includes(rootWork.collaboration.status)) { reservation = { error: failure('BUSY', recheck ? '当前协作工作不需要重新核对' : '当前协作工作状态不可继续') }; return state }
+      if (recheck && body.itemIds !== undefined) { reservation = { error: failure('INVALID_REQUEST', '重新核对范围由当前失效依据决定') }; return state }
+      const selected = recheck ? rootWork.collaboration.staleItemIds : rootWork.plan.items.filter(item => item.status !== 'completed').map(item => item.id)
+      if (!Array.isArray(selected) || !selected.length || !stringIds(selected)) { reservation = { error: failure('INVALID_REQUEST', '没有可执行的协作计划项') }; return state }
+      const selectedSet = new Set(selected), generation = rootWork.collaboration.generation + 1, now = clock()
+      if ([...selectedSet].some(itemId => !rootWork.plan.items.some(item => item.id === itemId && (!recheck || item.status === 'completed')))) { reservation = { error: failure('INVALID_REQUEST', '重新执行计划项无效') }; return state }
+      const childUpdates = new Map()
+      for (const item of rootWork.plan.items.filter(item => selectedSet.has(item.id))) {
+        const child = state.works.find(work => work.id === item.childWorkId)
+        const binding = authorizedBinding(state, member, child, connectionCatalog)
+        if (!binding.ok) { reservation = { error: binding }; return state }
+        const supplied = body.inputs?.[item.id]
+        if (supplied !== undefined && !plainObject(supplied)) { reservation = { error: failure('INVALID_INPUT', '协作补充输入必须是对象') }; return state }
+        const parsed = parseInput(child.capabilityId, { ...child.input, ...(supplied ?? {}) }, false)
+        if (!parsed.ok) { reservation = { error: parsed }; return state }
+        if (!inputAllowed(binding, parsed.input)) { reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }; return state }
+        childUpdates.set(child.id, { ...child, input: parsed.input, requiredInputs: [] })
+      }
+      const rootExecutionId = `exec-${randomUUID()}`, cancelGeneration = rootWork.collaboration.cancelGeneration
+      const nextRoot = { ...rootWork, status: 'accepted', executions: [...rootWork.executions, { ...newExecution(rootExecutionId, recheck ? 'collaboration-recheck' : 'collaboration-continue', requestId, {}, now), generation, cancelGeneration, planRevision: rootWork.plan.revision, employeeId: rootWork.employeeId }], collaboration: { ...rootWork.collaboration, generation, status: 'accepted', requestCount: 0, summaryResultRefs: [], staleKnowledgeRefs: [], staleItemIds: [] }, plan: { ...rootWork.plan, items: rootWork.plan.items.map(item => selectedSet.has(item.id) ? { ...item, status: 'not_started' } : item) } }
+      const works = state.works.map(work => {
+        if (work.id === id) return nextRoot
+        const item = rootWork.plan.items.find(candidate => candidate.childWorkId === work.id)
+        if (!item) return work
+        if (!selectedSet.has(item.id)) return { ...work, collaborationGeneration: generation }
+        const updatedChild = childUpdates.get(work.id) ?? work
+        return { ...updatedChild, status: 'accepted', collaborationGeneration: generation, executions: [...updatedChild.executions, { ...newExecution(`exec-${randomUUID()}`, recheck ? 'collaboration-recheck-child' : 'collaboration-continue-child', requestId, updatedChild.input, now), generation, cancelGeneration, planRevision: rootWork.plan.revision, employeeId: updatedChild.employeeId }] }
+      })
+      reservation = { workId: id, executionId: rootExecutionId }
+      return { ...state, works, reservations: { ...state.reservations, [key]: reservation } }
+    })
+    if (reservation?.error) return reservation.error
+    if (!reservation.deduplicated) void collaborationRunner?.run(id).catch(() => undefined)
+    const work = await ownedWork(actor, id)
     return success(work, reservation)
   }
 
@@ -573,8 +728,10 @@ export function createWorkService({ store, runner = null, clock = () => new Date
         if (!ACTIVE_EXECUTION.has(work.status) && !work.executions.some(item => ACTIVE_EXECUTION.has(item.status))) return work
         changed = true
         const now = clock()
-        return { ...work, status: 'interrupted', executions: work.executions.map(execution => ACTIVE_EXECUTION.has(execution.status)
+        const interrupted = { ...work, status: 'interrupted', executions: work.executions.map(execution => ACTIVE_EXECUTION.has(execution.status)
           ? { ...execution, status: 'interrupted', interruptedAt: now, error: { code: 'PROCESS_RESTARTED', message: '进程重启时未完成' } } : execution) }
+        if (!work.collaboration) return interrupted
+        return { ...interrupted, collaboration: { ...work.collaboration, status: 'interrupted' }, plan: { ...work.plan, items: work.plan.items.map(item => ['not_started', 'running', 'waiting_input'].includes(item.status) ? { ...item, status: 'interrupted' } : item) } }
       })
       return changed ? { ...state, works } : state
     })
@@ -741,6 +898,18 @@ function clean(value) { return typeof value === 'string' && value.trim() ? value
 function plainObject(value) { return Boolean(value && typeof value === 'object' && !Array.isArray(value)) }
 function stringIds(value) { return Array.isArray(value) && value.every(item => clean(item) === item) && new Set(value).size === value.length }
 function sameStrings(left = [], right = []) { const a = [...left].sort(), b = [...right].sort(); return a.length === b.length && a.every((value, index) => value === b[index]) }
+function hasDependencyCycle(items) {
+  const byId = new Map(items.map(item => [item.id, item]))
+  const visiting = new Set(), visited = new Set()
+  const visit = id => {
+    if (visiting.has(id)) return true
+    if (visited.has(id)) return false
+    visiting.add(id)
+    if ((byId.get(id)?.dependsOn ?? []).some(visit)) return true
+    visiting.delete(id); visited.add(id); return false
+  }
+  return items.some(item => visit(item.id))
+}
 function compact(value) { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) }
 function pick(value, keys) { return Object.fromEntries(keys.filter(key => value?.[key] !== undefined).map(key => [key, value[key]])) }
 function serviceError(code, message) { return Object.assign(new Error(message), { code }) }

@@ -4,16 +4,15 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { createAuthRuntime, isSessionCurrent } from './auth.mjs'
 import { createFileStore } from './store/file-store.mjs'
-import { createWorkService, ERROR_STATUS, serviceFailure } from './work-service.mjs'
+import { createWorkService, ERROR_STATUS, safeServiceError, serviceFailure } from './work-service.mjs'
 import { createDshRunner } from './dsh-runner.mjs'
 import { readRuntimeConfig } from './runtime-config.mjs'
-import { assertTrustedConnections, readConnectionCatalog } from './connection-catalog.mjs'
+import { readConnectionCatalog } from './connection-catalog.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
 const JSON_TYPE = 'application/json'
-const PUBLIC_5XX_MESSAGE = '服务暂时无法完成请求'
 
 export async function start() {
   const port = positivePort(process.env.GENEWAY_PORT ?? 3471)
@@ -32,7 +31,6 @@ export async function start() {
   const runtimeConfig = readRuntimeConfig({ ...process.env, GENEWAY_STATE: statePath }, root)
   const store = createFileStore(statePath)
   const connectionCatalog = await readConnectionCatalog(runtimeConfig.connectionCatalogFile, root)
-  assertTrustedConnections(connectionCatalog, (await store.read()).connections)
   const runner = createDshRunner({ root, config: runtimeConfig })
   const service = createWorkService({
     store,
@@ -219,7 +217,7 @@ function configFields(kind, create, collectionPatch = false) {
 }
 
 function resultResponse(response, result) { return result.ok ? sendJson(response, 200, result.value) : sendJson(response, result.error.status, { error: clientError(result.error) }) }
-function clientError(error) { return error.status >= 500 ? { code: error.code, message: PUBLIC_5XX_MESSAGE, status: error.status } : error }
+function clientError(error) { return error.status >= 500 ? { ...safeServiceError(error), status: error.status } : error }
 function notFound(response) { return sendJson(response, 404, { error: { code: 'NOT_FOUND', message: '接口不存在', status: 404 } }) }
 function sendJson(response, status, value, headers = {}) { return send(response, status, JSON.stringify(value), 'application/json; charset=utf-8', headers) }
 function send(response, status, body, contentType, headers = {}) { response.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers }); response.end(body) }

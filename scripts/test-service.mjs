@@ -15,6 +15,9 @@ const catalogFile = join(root, 'private', 'connections.json')
 await mkdir(join(root, 'private'), { mode: 0o700 })
 await writeFile(catalogFile, JSON.stringify({ version: 1, targets: catalogTargets() }), { mode: 0o600 })
 const connectionCatalog = await readConnectionCatalog(catalogFile, process.cwd())
+const conflictingCatalogFile = join(root, 'private', 'conflicting-connections.json')
+await writeFile(conflictingCatalogFile, JSON.stringify({ version: 1, targets: [target('connection-a', 'A'), { ...target('connection-b', 'B'), credentialRef: 'connection-a.json' }] }), { mode: 0o600 })
+await assert.rejects(readConnectionCatalog(conflictingCatalogFile, process.cwd()), /同一 credentialRef/)
 const calls = []
 const gates = new Map()
 let nextGate
@@ -83,6 +86,13 @@ try {
   assert.equal(completedCycle.results[0].payload.secondsPerUnit, 60)
   assert.equal(completedCycle.executions[0].resultId, completedCycle.results[0].id)
   assert.equal(completedCycle.observations.length, 0)
+  const callsAfterContinue = calls.length
+  const continuedReplay = await service.continueWork(alice, waiting.value.id, { input: { quantity: 999 }, clientRequestId: 'continue' })
+  assert.equal(continuedReplay.deduplicated, true)
+  assert.equal(continuedReplay.value.status, 'completed')
+  assert.equal(continuedReplay.value.executions[0].id, completedCycle.executions[0].id)
+  assert.equal(calls.length, callsAfterContinue)
+  assert.equal((await service.continueWork(alice, waiting.value.id, { input: { quantity: 60 }, clientRequestId: 'continue-new-key' })).error.status, 409)
 
   const waitingGear = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: {}, clientRequestId: 'waiting-gear' })
   assert.equal(waitingGear.value.status, 'waiting_input')
@@ -161,6 +171,13 @@ try {
     sourceSystem: 'Other', sourceInstance: 'Other', sourceEnvironment: 'production',
     dataMode: 'live', evidenceMode: 'controlled',
   })) await assert.rejects(service.updateConfig(admin, 'connections', 'connection-a', { [field]: value }), /不可原地更换/)
+  const beforeRotation = (await service.listConfig(admin, 'connections')).find(item => item.id === 'connection-a')
+  const rotated = await service.updateConfig(admin, 'connections', 'connection-a', { credentialRef: 'connection-a-next.json' })
+  assert.equal(rotated.credentialRef, 'connection-a-next.json')
+  assert.equal(rotated.revision, beforeRotation.revision + 1)
+  assert.equal(rotated.status, 'unknown')
+  await assert.rejects(service.updateConfig(admin, 'connections', 'connection-a', { credentialRef: 'connection-a-next.json', baseUrl: 'http://127.0.0.1/other' }), /不可原地更换/)
+  await service.updateConfig(admin, 'connections', 'connection-a', { credentialRef: 'connection-a.json' })
   const mutableConnection = await service.updateConfig(admin, 'connections', 'connection-a', {
     name: 'connection-a-renamed', allowedObjectIds: ['WO-1', 'WO-2'], enabled: false, skillIds: [],
   })
@@ -207,6 +224,8 @@ try {
   assert.ok(boot.employees.every(employee => ['employee-a'].includes(employee.id)))
   assert.equal(boot.connections.some(connection => connection.id === 'connection-b'), false)
   assert.equal(boot.connections.some(connection => 'credentialRef' in connection || 'baseUrl' in connection || 'hostHeader' in connection), false)
+  await checkUnavailableCatalog(alice, admin)
+  await checkSafeExecutionErrors(alice)
 
   await service.close()
   await checkCloseSettlement(false)
@@ -312,9 +331,44 @@ function seedState(state) {
 function catalogTargets() {
   return [
     target('connection-a', 'A'),
+    { ...target('connection-a', 'A'), credentialRef: 'connection-a-next.json' },
     target('connection-b', 'B'),
     { ...target('browser-ready', 'browser-ready'), baseUrl: 'http://127.0.0.1', credentialRef: 'browser-ready.json', sourceEnvironment: 'test', evidenceMode: 'controlled' },
   ]
+}
+
+async function checkUnavailableCatalog(alice, admin) {
+  const unavailableStore = createFileStore(join(root, 'unavailable-catalog.json'))
+  await unavailableStore.update(seedState)
+  const unavailableService = createWorkService({ store: unavailableStore, runner, connectionCatalog: [] })
+  const bootstrap = await unavailableService.bootstrap(alice)
+  assert.equal(bootstrap.connections.find(item => item.id === 'connection-a').status, 'unavailable')
+  assert.equal((await unavailableService.listConfig(admin, 'connections')).find(item => item.id === 'connection-a').status, 'unavailable')
+  const rejected = await unavailableService.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: { workOrderId: 'WO-1' } })
+  assert.equal(rejected.error.status, 403)
+  const cycle = await unavailableService.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 120, quantity: 2 } })
+  await waitFor(unavailableService, alice, cycle.value.id, work => work.status === 'completed')
+  await unavailableService.close()
+}
+
+async function checkSafeExecutionErrors(alice) {
+  for (const [code, expected] of [
+    ['SOURCE_NOT_CONFIGURED', '连接凭据不可用或连接未配置'],
+    ['UPSTREAM_TIMEOUT', '来源读取超时'],
+    ['ENOENT', '服务暂时无法完成请求'],
+  ]) {
+    const errorStore = createFileStore(join(root, `safe-error-${code}.json`))
+    await errorStore.update(seedState)
+    const errorService = createWorkService({
+      store: errorStore,
+      runner: { configured: true, async run() { throw Object.assign(new Error(`EACCES /private/${code}`), { code }) }, async close() {} },
+    })
+    const created = await errorService.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 120, quantity: 2 } })
+    const failed = await waitFor(errorService, alice, created.value.id, work => work.status === 'failed')
+    assert.deepEqual(failed.executions.at(-1).error, { code: code === 'ENOENT' ? 'INTERNAL_ERROR' : code, message: expected })
+    assert.equal(JSON.stringify(failed).includes('/private/'), false)
+    await errorService.close()
+  }
 }
 
 function target(id, instance) {

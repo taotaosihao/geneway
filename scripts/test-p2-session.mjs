@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createServer as createNodeServer } from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createAuthRuntime, initializeAuthFile } from '../src/auth.mjs'
@@ -12,6 +12,10 @@ const root = await mkdtemp(join(tmpdir(), 'geneway-p2-http-'))
 const statePath = join(root, 'state.json')
 const authPath = join(root, 'private', 'auth.json')
 const store = createFileStore(statePath)
+const web = await readFile(new URL('../web/index.html', import.meta.url), 'utf8')
+assert.match(web, /SOURCE_NOT_CONFIGURED:'连接凭据不可用或连接未配置'/)
+assert.match(web, /executionError\(item\.error\)/)
+assert.doesNotMatch(web, /esc\(item\.error\.message\)/)
 let server
 let service
 
@@ -77,12 +81,19 @@ try {
   assert.equal((await request(origin, `/api/confirmations/${confirmation.body.id}`, { method: 'PATCH', origin, cookie: memberLogin.cookie, csrf: memberLogin.body.csrfToken, json: { value: '不可复活' } })).status, 400)
 
   const originalListConfig = service.listConfig
-  service.listConfig = async () => { throw Object.assign(new Error('ENOENT /private/secrets/connection-a.json'), { code: 'SOURCE_NOT_CONFIGURED' }) }
+  service.listConfig = async () => { throw Object.assign(new Error('ENOENT /private/secrets/connection-a.json'), { code: 'ENOENT' }) }
   const hidden500 = await request(origin, '/api/admin/employees', { cookie: adminLogin.cookie })
-  service.listConfig = originalListConfig
-  assert.equal(hidden500.status, 503)
+  assert.equal(hidden500.status, 500)
+  assert.equal(hidden500.body.error.code, 'INTERNAL_ERROR')
   assert.equal(hidden500.body.error.message, '服务暂时无法完成请求')
   assert.equal(JSON.stringify(hidden500.body).includes('/private/'), false)
+  service.listConfig = async () => { throw Object.assign(new Error('EACCES /private/secrets/connection-a.json'), { code: 'SOURCE_NOT_CONFIGURED' }) }
+  const stable500 = await request(origin, '/api/admin/employees', { cookie: adminLogin.cookie })
+  service.listConfig = originalListConfig
+  assert.equal(stable500.status, 503)
+  assert.equal(stable500.body.error.code, 'SOURCE_NOT_CONFIGURED')
+  assert.equal(stable500.body.error.message, '连接凭据不可用或连接未配置')
+  assert.equal(JSON.stringify(stable500.body).includes('/private/'), false)
 
   const lastAdmin = await request(origin, '/api/admin/members/member-admin', { method: 'PATCH', origin, cookie: adminLogin.cookie, csrf: adminLogin.body.csrfToken, json: { enabled: false } })
   assert.equal(lastAdmin.status, 400)

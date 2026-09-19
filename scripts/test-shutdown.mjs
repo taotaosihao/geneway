@@ -5,6 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { shutdownServer } from '../src/server.mjs'
+import { createFileStore } from '../src/store/file-store.mjs'
 
 let releaseServiceClose
 let serviceCloseStarted
@@ -28,6 +29,10 @@ await assert.rejects(() => fetch(heldUrl))
 const root = await mkdtemp(join(tmpdir(), 'geneway-shutdown-'))
 const connectionCatalog = join(root, 'connections.json')
 await writeFile(connectionCatalog, JSON.stringify({ version: 1, targets: [] }), { mode: 0o600 })
+const statePath = join(root, 'state.json')
+await createFileStore(statePath).update(state => ({ ...state, connections: [{
+  id: 'historical-disabled', name: '历史停用连接', kind: 'gearjob-rest', targetIdentity: 'historical', baseUrl: 'http://127.0.0.1:1', credentialRef: 'historical.json', allowedObjectIds: [], sourceSystem: 'GearJob', sourceInstance: 'historical', sourceEnvironment: 'historical', dataMode: 'synthetic', evidenceMode: 'historical', enabled: false, status: 'unavailable', skillIds: [], revision: 1,
+}] }))
 const port = 3499
 const remote = spawn(process.execPath, ['src/server.mjs'], {
   cwd: process.cwd(),
@@ -56,7 +61,7 @@ const child = spawn(process.execPath, ['src/server.mjs'], {
   env: {
     ...process.env,
     GENEWAY_PORT: String(port),
-    GENEWAY_STATE: join(root, 'state.json'),
+    GENEWAY_STATE: statePath,
     GENEWAY_AUTH_FILE: join(root, 'auth.json'),
     GENEWAY_DSH_HOME: join(root, 'dsh'),
     GENEWAY_CONNECTION_CATALOG: connectionCatalog,

@@ -2,10 +2,11 @@ import { constants } from 'node:fs'
 import { open, realpath } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 
-export const CONNECTION_TARGET_FIELDS = [
+export const CONNECTION_TARGET_FIELDS = Object.freeze([
   'kind', 'targetIdentity', 'baseUrl', 'hostHeader', 'credentialRef', 'sourceSystem',
   'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode',
-]
+])
+export const CONNECTION_IDENTITY_FIELDS = Object.freeze(CONNECTION_TARGET_FIELDS.filter(key => key !== 'credentialRef'))
 
 export async function readConnectionCatalog(filePath, repoRoot) {
   if (!filePath || !isAbsolute(filePath)) throw new Error('必须配置仓库外绝对路径 GENEWAY_CONNECTION_CATALOG')
@@ -30,10 +31,6 @@ export function assertTrustedConnection(catalog, connection) {
   return match
 }
 
-export function assertTrustedConnections(catalog, connections) {
-  for (const connection of connections ?? []) assertTrustedConnection(catalog, connection)
-}
-
 function parseCatalog(value) {
   if (value?.version !== 1 || !Array.isArray(value.targets)) throw new Error('连接目标目录格式无效')
   const targets = value.targets.map(targetTuple)
@@ -44,7 +41,7 @@ function parseCatalog(value) {
     if (existing && existing !== encoded) throw new Error('同一 credentialRef 不得绑定多个连接目标')
     credentialTargets.set(target.credentialRef, encoded)
   }
-  return targets
+  return Object.freeze(targets)
 }
 
 function targetTuple(value) {

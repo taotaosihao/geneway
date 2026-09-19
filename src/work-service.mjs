@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { getCapability, listCapabilities, validateCapabilityInput } from './capabilities.mjs'
 import { createObservation } from './domain/work-order.mjs'
-import { assertTrustedConnection, CONNECTION_TARGET_FIELDS } from './connection-catalog.mjs'
+import { assertTrustedConnection, CONNECTION_IDENTITY_FIELDS } from './connection-catalog.mjs'
 
 export const ERROR_STATUS = {
   INVALID_REQUEST: 400, INVALID_INPUT: 400, UNDECLARED_INPUT: 400, MISSING_INPUT: 400,
@@ -19,6 +19,22 @@ const CONTINUABLE_WORK = new Set(['waiting_input', 'failed', 'interrupted', 'can
 const CONFIG_KINDS = new Set(['employees', 'connections', 'skills', 'modelRoutes'])
 const ZENMUX_PROVIDER = 'zenmux'
 const ZENMUX_MODEL = 'deepseek/deepseek-v4-pro'
+const SAFE_ERROR_MESSAGES = Object.freeze({
+  SOURCE_NOT_CONFIGURED: '连接凭据不可用或连接未配置',
+  UPSTREAM_TIMEOUT: '来源读取超时',
+  MODEL_NOT_CONFIGURED: '模型路由不可用',
+  UPSTREAM_ERROR: '来源读取失败',
+  INVALID_SOURCE: '来源数据无效',
+  PROCESS_SHUTDOWN: '进程关闭时未完成',
+  PROCESS_RESTARTED: '进程重启时未完成',
+  BACKUP_INTERRUPTED: '备份操作被中断',
+  TOOL_CHAIN_INVALID: '模型工具结果无效',
+  CANCELLED: '本次执行已停止',
+  FORBIDDEN: '执行授权已失效',
+  NOT_FOUND: '业务对象不存在',
+  INVALID_REQUEST: '请求参数无效',
+})
+const GENERIC_ERROR = Object.freeze({ code: 'INTERNAL_ERROR', message: '服务暂时无法完成请求' })
 
 export function createWorkService({ store, runner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [] } = {}) {
   if (!store) throw new Error('store is required')
@@ -37,7 +53,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
       return {
         member: publicMember(member),
         employees,
-        connections: state.connections.filter(item => connectionIds.has(item.id)).map(publicConnection),
+        connections: state.connections.filter(item => connectionIds.has(item.id)).map(item => publicConnection(item, connectionCatalog)),
         skills: state.skills.filter(item => skillIds.has(item.id)),
         capabilities: listCapabilities().filter(item => state.skills.some(skill => skillIds.has(skill.id) && skill.enabled === true && skill.capabilityId === item.id)).map(publicCapability),
         works: state.works.filter(item => item.ownerMemberId === member.id).map(publicWork),
@@ -114,13 +130,13 @@ export function createWorkService({ store, runner = null, clock = () => new Date
           reservation = { workId: id, executionId: currentExecution.id, deduplicated: true, active: true }
           return state
         }
-        if (!CONTINUABLE_WORK.has(work.status)) {
-          reservation = { error: failure('BUSY', '当前工作状态不可继续') }
-          return state
-        }
         const key = reservationKey(member.id, id, 'continue', requestId)
         if (state.reservations[key]) {
           reservation = { deduplicated: true, ...state.reservations[key] }
+          return state
+        }
+        if (!CONTINUABLE_WORK.has(work.status)) {
+          reservation = { error: failure('BUSY', '当前工作状态不可继续') }
           return state
         }
         const binding = authorizedBinding(state, member, work, connectionCatalog)
@@ -303,7 +319,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
       const state = await store.read()
       requireAdmin(state, actor)
       if (!CONFIG_KINDS.has(kind)) throw serviceError('NOT_FOUND', '配置类型不存在')
-      return kind === 'connections' ? state.connections.map(adminConnection) : state[kind]
+      return kind === 'connections' ? state.connections.map(item => adminConnection(item, connectionCatalog)) : state[kind]
     },
 
     async createConfig(actor, kind, body = {}) {
@@ -314,7 +330,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
         if (state[kind].some(item => item.id === created.id)) throw serviceError('INVALID_REQUEST', '配置 ID 已存在')
         return { ...state, [kind]: [...state[kind], created] }
       })
-      return kind === 'connections' ? adminConnection(created) : created
+      return kind === 'connections' ? adminConnection(created, connectionCatalog) : created
     },
 
     async updateConfig(actor, kind, id, body = {}) {
@@ -326,7 +342,7 @@ export function createWorkService({ store, runner = null, clock = () => new Date
         updated = configEntity(state, kind, body, current, clock(), connectionCatalog)
         return { ...state, [kind]: replaceById(state[kind], updated) }
       })
-      return kind === 'connections' ? adminConnection(updated) : updated
+      return kind === 'connections' ? adminConnection(updated, connectionCatalog) : updated
     },
 
     async testConnection(actor, id) {
@@ -685,7 +701,7 @@ function connectionConfig(state, body, current, now, connectionCatalog) {
     evidenceMode: clean(body.evidenceMode ?? current?.evidenceMode), enabled: body.enabled ?? current?.enabled ?? true,
     status: 'unknown', skillIds: body.skillIds ?? current?.skillIds ?? [], revision: current ? current.revision + 1 : 1,
     updatedAt: now }
-  if (current && CONNECTION_TARGET_FIELDS.some(key => result[key] !== current[key])) throw serviceError('INVALID_REQUEST', '连接目标/来源 identity 不可原地更换')
+  if (current && CONNECTION_IDENTITY_FIELDS.some(key => result[key] !== current[key])) throw serviceError('INVALID_REQUEST', '连接目标/来源 identity 不可原地更换')
   if (!result.id || !result.name || result.kind !== 'gearjob-rest' || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef) || !stringIds(result.allowedObjectIds) || !stringIds(result.skillIds) || typeof result.enabled !== 'boolean') throw serviceError('INVALID_REQUEST', '连接配置无效')
   if (result.skillIds.some(id => !state.skills.some(item => item.id === id && getCapability(item.capabilityId)?.connectionKind === result.kind))) throw serviceError('INVALID_REQUEST', '连接 Skill 绑定无效')
   for (const key of ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']) if (!result[key]) throw serviceError('INVALID_REQUEST', `连接缺少 ${key}`)
@@ -699,14 +715,21 @@ function publicWork(work) {
   const followUps = work.results.filter(item => item.kind === 'assistant.follow-up').map(item => compact({ id: item.id, text: item.payload.text,
     explanation: item.explanation, at: item.createdAt, dshSessionRef: item.dshSessionRef, continuedFromDshSessionRef: item.continuedFromDshSessionRef,
     contextObservationId: item.contextObservationId, continuity: item.continuity, contextConfirmationRefs: item.contextConfirmationRefs }))
-  return { ...structuredClone(work), observations, followUps }
+  const value = structuredClone(work)
+  value.executions = value.executions.map(execution => execution.error ? { ...execution, error: safeError(execution.error) } : execution)
+  return { ...value, observations, followUps }
 }
 function publicMember(member) { return Object.fromEntries(['id', 'loginName', 'displayName', 'role', 'enabled', 'sessionVersion', 'employeeIds', 'createdAt', 'updatedAt'].filter(key => member[key] !== undefined).map(key => [key, structuredClone(member[key])])) }
 function simpleRef(value) { return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value) && value !== '.' && value !== '..' }
-function publicConnection(connection) {
-  return pick(connection, ['id', 'name', 'kind', 'targetIdentity', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'enabled', 'status', 'skillIds', 'revision', 'lastTest'])
+function publicConnection(connection, catalog) {
+  return pick(visibleConnection(connection, catalog), ['id', 'name', 'kind', 'targetIdentity', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'enabled', 'status', 'skillIds', 'revision', 'lastTest'])
 }
-function adminConnection(connection) { return structuredClone(connection) }
+function adminConnection(connection, catalog) { return visibleConnection(connection, catalog) }
+function visibleConnection(connection, catalog) {
+  const value = structuredClone(connection)
+  if (value.lastTest?.ok === false) value.lastTest = { ...value.lastTest, ...safeError(value.lastTest) }
+  try { assertTrustedConnection(catalog, connection); return value } catch { return { ...value, status: 'unavailable' } }
+}
 function publicCapability(capability) { return { id: capability.id, skillId: capability.skillId, action: capability.action, requiredInputs: [...capability.requiredInputs], requiresConnection: capability.requiresConnection, resultKind: capability.resultKind } }
 function success(work, reservation) { return { ok: true, value: publicWork(work), deduplicated: Boolean(reservation.deduplicated), accepted: Boolean(reservation.executionId && !reservation.deduplicated), active: Boolean(reservation.active) } }
 function newExecution(id, operation, clientRequestId, input, acceptedAt) { return { id, operation, clientRequestId, input: structuredClone(input), status: 'accepted', acceptedAt } }
@@ -723,7 +746,8 @@ function pick(value, keys) { return Object.fromEntries(keys.filter(key => value?
 function serviceError(code, message) { return Object.assign(new Error(message), { code }) }
 function safeError(error, fallbackCode = 'INTERNAL_ERROR') {
   const code = error?.code ?? fallbackCode
-  return { code, message: (ERROR_STATUS[code] ?? 500) >= 500 ? '服务暂时无法完成请求' : error?.message ?? '执行失败' }
+  return SAFE_ERROR_MESSAGES[code] ? { code, message: SAFE_ERROR_MESSAGES[code] } : { ...GENERIC_ERROR }
 }
 function failure(code, message, extra = {}) { return { ok: false, error: { code, message, status: ERROR_STATUS[code] ?? 500, ...extra } } }
 export function serviceFailure(error) { return failure(error?.code ?? 'INTERNAL_ERROR', error?.message ?? '服务暂时无法完成请求') }
+export function safeServiceError(error) { return safeError(error) }

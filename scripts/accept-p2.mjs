@@ -81,7 +81,9 @@ try {
 
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
   await waitFor(`document.querySelector('#login-shell:not(.hidden)')`)
+  await pause(2_000)
   await login(send, evaluate, waitFor, 'admin', adminPassword, 'admin')
+  await pause(2_000)
 
   const configured = await evaluate(`(async()=>{
     const route=await api('/api/admin/model-routes',{method:'POST',body:{id:'model-zenmux',provider:'zenmux',model:'deepseek/deepseek-v4-pro',displayName:'ZenMux · DeepSeek V4 Pro',enabled:true,credentialRef:'ZENMUX_API_KEY'}})
@@ -220,12 +222,24 @@ try {
   const cycle = await evaluate(`(()=>{const result=state.currentWork.results.filter(item=>item.kind==='manufacturing.takt').at(-1);return {id:state.currentWork.id,secondsPerUnit:result?.payload?.secondsPerUnit,unit:result?.payload?.unit,results:state.currentWork.results.filter(item=>item.kind==='manufacturing.takt').length,visible:document.querySelector('#work-detail').innerText.includes('60 秒/件'),stopScope:document.querySelector('#work-detail').innerText.includes('只停止当前执行'),innerWidth,scrollWidth:document.documentElement.scrollWidth,mobileNav:!!document.querySelector('.mobile-nav .nav:not(.hidden)')}})()`)
   if (cycle.secondsPerUnit !== 60 || cycle.unit !== 'seconds/unit' || cycle.results !== 2 || !cycle.visible || !cycle.stopScope || cycle.innerWidth !== 390 || cycle.scrollWidth > 390 || !cycle.mobileNav) throw new Error(`mobile cycle action failed: ${JSON.stringify(cycle)}`)
   await pause()
-  await evaluate(`show('confirmations');document.querySelector('#confirmation-list details')?.setAttribute('open','')`)
+
+  await evaluate(`show('confirmations');document.querySelector('#confirmation-employee').value='employee-b';document.querySelector('#confirmation-label').value='手机班组';document.querySelector('#confirmation-value').value='移动端 revision 1';document.querySelector('#confirmation-form').requestSubmit()`)
+  await waitFor(`state.confirmations?.some(item=>item.employeeId==='employee-b'&&item.revision===1&&item.status==='active')`)
+  const mobileConfirmationId = await evaluate(`state.confirmations.find(item=>item.employeeId==='employee-b'&&item.status==='active').id`)
+  await evaluate(`document.querySelector('[data-confirmation=${JSON.stringify(mobileConfirmationId)}]').scrollIntoView({block:'start'})`)
+  await pause()
+  await evaluate(`(()=>{const form=document.querySelector('[data-confirmation=${JSON.stringify(mobileConfirmationId)}]');form.elements.value.value='移动端 revision 2';form.requestSubmit()})()`)
+  await waitFor(`state.confirmations?.find(item=>item.id===${JSON.stringify(mobileConfirmationId)})?.revision===2`)
+  await evaluate(`document.querySelector('[data-confirmation=${JSON.stringify(mobileConfirmationId)}]').scrollIntoView({block:'start'})`)
+  await pause()
+  await evaluate(`document.querySelector('[data-revoke=${JSON.stringify(mobileConfirmationId)}]').click()`)
+  await waitFor(`state.confirmations?.find(item=>item.id===${JSON.stringify(mobileConfirmationId)})?.status==='revoked'`)
+  const mobileConfirmation = await evaluate(`(()=>{const item=state.confirmations.find(value=>value.id===${JSON.stringify(mobileConfirmationId)}),details=document.querySelector('#confirmation-list details');details?.setAttribute('open','');details?.scrollIntoView({block:'start'});return {revisions:[1,2,item.revision],status:item.status,employeeId:item.employeeId}})()`)
+  if (JSON.stringify(mobileConfirmation) !== JSON.stringify({ revisions: [1, 2, 3], status: 'revoked', employeeId: 'employee-b' })) throw new Error(`mobile confirmation journey failed: ${JSON.stringify(mobileConfirmation)}`)
   await pause()
   await evaluate(`(async()=>{await openWork(${JSON.stringify(mobileWaitingId)})})()`)
   await pause()
 
-  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
   await controlB({ delayMs: 30_000 })
   await createWork(evaluate, waitFor, { employeeId: 'employee-b', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-b', workOrderId })
   await waitFor(`['accepted','running'].includes(state.currentWork?.status)`)
@@ -234,8 +248,15 @@ try {
   const w2Id = await evaluate(`state.currentWork.id`)
   const w1BeforeCancel = await evaluate(`(async()=>await api('/api/works/'+${JSON.stringify(w1Id)}))()`)
   if (!['accepted', 'running'].includes(w1BeforeCancel.status)) throw new Error(`W1 was not cancellable while W2 was active: ${w1BeforeCancel.status}`)
-  await evaluate(`(async()=>{await openWork(${JSON.stringify(w1Id)});document.querySelector('#cancel-work').click()})()`)
+  await evaluate(`(async()=>{await openWork(${JSON.stringify(w1Id)})})()`)
+  await waitFor(`state.currentWork?.id===${JSON.stringify(w1Id)} && ['accepted','running'].includes(state.currentWork.status)`)
+  const mobileStopSurface = await evaluate(`({innerWidth,stopScope:document.querySelector('#work-detail').innerText.includes('只停止当前执行'),buttonEnabled:document.querySelector('#cancel-work')?.disabled===false})`)
+  if (mobileStopSurface.innerWidth !== 390 || !mobileStopSurface.stopScope || !mobileStopSurface.buttonEnabled) throw new Error(`mobile stop controls unavailable: ${JSON.stringify(mobileStopSurface)}`)
+  await pause()
+  await evaluate(`document.querySelector('#cancel-work').click()`)
   await waitFor(`state.currentWork?.id===${JSON.stringify(w1Id)} && state.currentWork.status==='cancelled'`, 60_000)
+  const mobileStop = await evaluate(`innerWidth===390 && state.currentWork.status==='cancelled'`)
+  if (!mobileStop) throw new Error('W1 was not stopped from the 390px UI')
   await controlB({ delayMs: 0 })
   await pause()
   await evaluate(`(async()=>{await openWork(${JSON.stringify(w2Id)})})()`)
@@ -244,6 +265,7 @@ try {
   const w1w2 = await evaluate(`(async()=>{const w1=await api('/api/works/'+${JSON.stringify(w1Id)}),w2=await api('/api/works/'+${JSON.stringify(w2Id)});show('works');return {w1:w1.status,w2:w2.status}})()`)
   if (w1w2.w1 !== 'cancelled' || w1w2.w2 !== 'completed') throw new Error(`W1/W2 isolation failed: ${JSON.stringify(w1w2)}`)
   await pause()
+  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
 
   let memberCookie = await sessionCookie(send)
   await useSessionCookie(send, adminCookie)
@@ -344,7 +366,7 @@ try {
   await createWork(evaluate, waitFor, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', workOrderId })
   await waitFor(`state.currentWork?.status==='failed'`, 180_000)
   const missingSecretDispatch = await evaluate(`({status:state.currentWork.status,code:state.currentWork.executions.at(-1)?.error?.code,historicalA:state.bootstrap.works.some(item=>item.id===${JSON.stringify(waitingId)})})`)
-  if (missingSecretDispatch.status !== 'failed' || !missingSecretDispatch.historicalA) throw new Error(`missing-secret restore boundary failed: ${JSON.stringify(missingSecretDispatch)}`)
+  if (missingSecretDispatch.status !== 'failed' || missingSecretDispatch.code !== 'SOURCE_NOT_CONFIGURED' || !missingSecretDispatch.historicalA) throw new Error(`missing-secret restore boundary failed: ${JSON.stringify(missingSecretDispatch)}`)
   await pause()
   await stopServer(server)
   server = await startServer({ state: join(restoredRoot, 'state.json'), auth: restoredAuthPath, dsh: join(restoredRoot, 'dsh'), secret: secretRoot })
@@ -386,7 +408,7 @@ try {
         sources: { a: { initialRatio: initialA.ratio, refreshedRatio: refreshedA.ratio, evidenceMode: initialA.evidenceMode }, b: { initialRatio: initialB.ratio, refreshedRatio: controlledB.ratio, evidenceMode: controlledB.evidenceMode }, sequence: isolation.sequence },
         confirmation: { revisions: [1, 2, revokedRevision], status: 'revoked', successor: followed.continuity === 'successor', successorContextRefs: followed.confirmations.length, sessionScan: transfer.sessionScan },
         waiting: { desktopRestartAndRelogin: true, desktopExecutionsBeforeContinue: 0, mobileExplicitContinue: cycle.secondsPerUnit === 60, retainedAfterRestore: restoredMember.hasWaiting },
-        mobile: { width: cycle.innerWidth, scrollWidth: cycle.scrollWidth, invalidInputRejected: invalidCycle.works === workCountBeforeInvalid, refreshResults: cycle.results, stopScopeVisible: cycle.stopScope },
+        mobile: { width: cycle.innerWidth, scrollWidth: cycle.scrollWidth, invalidInputRejected: invalidCycle.works === workCountBeforeInvalid, refreshResults: cycle.results, stopScopeVisible: cycle.stopScope, confirmation: mobileConfirmation, mobileStop },
         concurrency: w1w2,
         disable: { aDispatchStatus: aRejected.status, bRemainedUsable: Boolean(bAfterADisabledId), staleMemberDispatchStatus: disabledMember.status, memberRelogin: true },
         restore: { entries: transfer.entries, sessionRefs: transfer.sessionRefs, hashes: transfer.hashVerified, permissions: transfer.modesVerified, secretMatches: transfer.secretMatches, membershipUnchanged: transfer.membershipUnchanged, noAutomaticReplay: controlledCallsAfterRestore === controlledCallsBeforeRestore, missingSecretDispatch, visibleMemberState: restoredMember, visibleAdminState: restoredAdmin },
@@ -403,7 +425,7 @@ try {
     waiting: { id: waitingId, restartAndRelogin: true, executionsBeforeContinue: 0 },
     realA: { initial: initialA, refreshed: refreshedA, visibleSourceCopy: initialSourceCopy.visible },
     controlledB: { id: controlledId, initial: { ratio: initialB.ratio, completed: initialB.completed }, refreshed: { ratio: controlledB.ratio, completed: controlledB.completed }, dataMode: controlledB.dataMode, evidenceMode: controlledB.evidenceMode, visibleSourceCopy: controlledCopy.visible },
-    isolation, followed, cycle, invalidCycle, mobileWaitingId, w1w2, bAfterADisabledId, aRejected, disabledMember,
+    isolation, followed, cycle, invalidCycle, mobileWaitingId, mobileConfirmation, mobileStop, w1w2, bAfterADisabledId, aRejected, disabledMember,
     memberBoundary, ownerIsolation, transfer, missingSecretDispatch, noAutomaticReplay: controlledCallsAfterRestore === controlledCallsBeforeRestore, restoredMember, restoredAdmin,
     browserErrors: browserErrors.length, networkErrors: unexpectedNetwork.length,
     recordPath: recordPath ? resolve(recordPath) : undefined, receipt: receiptFile ? basename(receiptFile) : undefined,
@@ -681,7 +703,7 @@ async function ensureBrowser() {
     translate: { enabled: false },
   }), { mode: 0o600 })
   const chrome = spawn('google-chrome', [
-    '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
+    '--no-sandbox', '--test-type', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-infobars', '--disable-translate', '--hide-crash-restore-bubble',
     '--disable-save-password-bubble', '--password-store=basic', '--disable-features=PasswordManagerOnboarding,PasswordLeakDetection,Translate,TranslateUI,OptimizationHints,ChromeWhatsNewUI,SidePanelPinning,SidePanelJourneys',
     '--lang=zh-CN', '--accept-lang=zh-CN,zh,en-US,en',

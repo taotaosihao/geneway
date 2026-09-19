@@ -12,6 +12,7 @@
     "probe:dsh-plugin": "node scripts/probe-dsh-plugin.mjs",
     "probe:dsh-sdk": "node scripts/probe-dsh-sdk.mjs",
     "probe:p1-runtime": "node scripts/probe-p1-runtime.mjs",
+    "probe:p3-delegation": "node scripts/probe-p3-delegation.mjs",
     "test:unit": "node scripts/test-domain.mjs",
     "test:service": "node scripts/test-service.mjs && node scripts/test-shutdown.mjs",
     "test:controlled": "node scripts/test-controlled.mjs",

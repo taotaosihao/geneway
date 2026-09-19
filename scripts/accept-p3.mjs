@@ -229,7 +229,7 @@ async function browserJourney() {
   for(const variable of ['collaborationRunner','knowledge','service','server'])if((visible.match(new RegExp(`\\b${variable}\\s*=`, 'g'))??[]).length<2)throw new Error(`generated restart reassignment missing: ${variable}`)
   for(const shadowed of ['const auth = createAuthRuntime','const collaborationRunner = createCollaborationRunner','let collaborationRunner = createCollaborationRunner','const knowledge = collaborationRunner.getKnowledgeService()','let knowledge = collaborationRunner.getKnowledgeService()','const index = await readFile'])if(visible.includes(shadowed))throw new Error(`generated restart binding is shadowed: ${shadowed}`)
   await writeFile(tempUiScript, visible)
-  if (harnessCheck) { await run(process.execPath, ['--check', relative(root, tempUiScript)]);await watchdogSmoke();browserAcceptanceDiagnosticSmoke();browserDiagnosticsDiagnosticSmoke();gearEvidenceGateSmoke();const harnessSource=await readFile(join(root,'scripts','accept-p3.mjs'),'utf8');assert.ok(harnessSource.includes('delete exported.browserResult.acceptanceSecretValues;await rm(exportPath,{force:true})'));assert.equal(/gear\??\.evidenceMode/.test(harnessSource),false);assert.ok(harnessSource.includes('evidenceMode: gear.payload.evidenceMode'));return { generatedSyntax: 'passed',watchdogCleanup:'passed',safeBrowserDiagnostic:'passed',gearEvidenceProjection:'passed' } }
+  if (harnessCheck) { await run(process.execPath, ['--check', relative(root, tempUiScript)]);await watchdogSmoke();browserAcceptanceDiagnosticSmoke();browserDiagnosticsDiagnosticSmoke();gearEvidenceGateSmoke();workSessionRefSmoke();const harnessSource=await readFile(join(root,'scripts','accept-p3.mjs'),'utf8');assert.ok(harnessSource.includes('delete exported.browserResult.acceptanceSecretValues;await rm(exportPath,{force:true})'));assert.equal(/gear\??\.evidenceMode/.test(harnessSource),false);assert.ok(harnessSource.includes('evidenceMode: gear.payload.evidenceMode'));assert.ok(harnessSource.includes('stageSessions(collectWorkSessionRefs(state.works))'));assert.ok(harnessSource.includes('const sessionMappings = [rootWork, ...children]'));return { generatedSyntax: 'passed',watchdogCleanup:'passed',safeBrowserDiagnostic:'passed',gearEvidenceProjection:'passed',fullSessionStaging:'passed' } }
   xvfb = spawn('Xvfb', [display, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' })
   await pause(800)
   if (recordPath) {
@@ -275,8 +275,7 @@ async function realEvidenceFromBrowser(exported) {
   const cycle = children.find(work => work.capabilityId === 'cycle-time-calculate')?.results.at(-1)
   assertRealGearEvidence(gear,workOrderId)
   if (cycle?.payload?.quantity !== gear.payload.plannedQuantity - gear.payload.completedQuantity || cycle.payload.availableSeconds !== 3600) throw new Error('formal browser derived cycle evidence is inconsistent')
-  const sessionIds = [rootWork, ...children].flatMap(work => work.executions.map(item => item.dshSessionRef).filter(Boolean))
-  const sessions = await stageSessions(sessionIds)
+  const sessions = await stageSessions(collectWorkSessionRefs(state.works))
   const sessionById = new Map(sessions.map(item => [item.sessionRef, item]))
   const sessionMappings = [rootWork, ...children].flatMap(work => work.executions.filter(item => item.dshSessionRef).map(execution => { const result=work.results.find(item=>item.id===execution.resultId),session=sessionById.get(execution.dshSessionRef);return { sessionRef:execution.dshSessionRef,workId:work.id,executionId:execution.id,employeeId:execution.employeeId,resultId:execution.resultId??null,resultKind:result?.kind??null,generation:execution.generation??null,status:execution.status,usage:execution.usage??null,sessionSha256:session?.sha256,sessionBytes:session?.bytes,requestEvents:session?.requestEvents??null,tools:session?.tools??[],structured:session?.structured??null,canaryHits:session?.canaryHits??{} } }))
   const usageValues = [rootWork, ...children].flatMap(work => work.executions.map(item => item.usage))
@@ -395,6 +394,10 @@ async function scanSecrets(paths) {
   return { files: files.length, knownNeedles: unique.length, matches, perTarget, sensitiveKeyPatterns: keyReview, canarySummary:Object.fromEntries(lastCanaries.map(item=>[item.label,{sha256:item.sha256,hits:perTarget.reduce((sum,target)=>sum+(target.canaryHits[item.label]??0),0)}])) }
 }
 
+function collectWorkSessionRefs(works) {
+  const refs=new Set(),visit=(value,key='')=>{if((key==='dshSessionRef'||key==='continuedFromDshSessionRef')&&typeof value==='string'&&value.trim())refs.add(value);if(Array.isArray(value))for(const item of value)visit(item);else if(value&&typeof value==='object')for(const [childKey,child] of Object.entries(value))visit(child,childKey)};visit(works??[]);return[...refs].sort()
+}
+
 async function stageSessions(ids) {
   const sourceRoot = join(process.env.HOME ?? '/home/gewu', '.dsh', 'sessions'), sourceFiles = []
   await collectFiles(sourceRoot, sourceFiles)
@@ -452,6 +455,9 @@ function assertRealGearEvidence(gear,expectedWorkOrderId) {
 }
 function gearEvidenceGateSmoke() {
   const gear={evidenceMode:'incorrect-top-level',payload:{workOrderId:'WO-SMOKE',evidenceMode:'real-frappe-rest'}};assert.doesNotThrow(()=>assertRealGearEvidence(gear,'WO-SMOKE'));assert.throws(()=>assertRealGearEvidence({payload:{workOrderId:'WO-SMOKE'}},'WO-SMOKE'),/"evidenceModeMatches":false,"workOrderIdMatches":true/)
+}
+function workSessionRefSmoke() {
+  const selected={id:'selected',executions:[{dshSessionRef:'selected-ref'}],results:[]},unrelated={id:'unrelated',executions:[{dshSessionRef:'unrelated-ref'}],results:[{payload:{continuedFromDshSessionRef:'continued-ref'}}]},staged=collectWorkSessionRefs([selected,unrelated]),selectedMappings=selected.executions.filter(item=>item.dshSessionRef).map(item=>item.dshSessionRef);assert.deepEqual(staged,['continued-ref','selected-ref','unrelated-ref']);assert.deepEqual(selectedMappings,['selected-ref']);assert.equal(selectedMappings.includes('unrelated-ref')||selectedMappings.includes('continued-ref'),false)
 }
 function createJourneyProgress({videoPath,clock=Date.now,readVideoBytes=async path=>(await stat(path)).size,eventStaleMs=600_000,videoStaleMs=120_000,report=message=>console.error(message)}) {
   let eventProgressAt=clock(),videoProgressAt=clock(),videoBytes=0,lastVideoReportAt=0,progressBuffer=''

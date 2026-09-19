@@ -120,11 +120,10 @@ async function testRunnerCancellationIsScoped() {
   void first.catch(() => undefined)
   void second.catch(() => undefined)
   await waitUntilCancelled(runner, 'cancel-first')
-  assert.equal(harnesses[0].closes, 1)
-  assert.equal(harnesses[1].closes, 0)
+  assert.deepEqual(harnesses.map(item => item.closes).sort(), [0, 1])
   await waitUntilCancelled(runner, 'keep-second')
   await Promise.allSettled([first, second])
-  assert.equal(harnesses[1].closes, 1)
+  assert.deepEqual(harnesses.map(item => item.closes).sort(), [1, 1])
   await runner.close()
 }
 

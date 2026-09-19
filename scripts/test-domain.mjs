@@ -4,7 +4,9 @@ import { computeCompletion, normalizeWorkOrder } from '../src/domain/work-order.
 assert.deepEqual(computeCompletion({ plannedQuantity: 10, completedQuantity: 4, unit: '件' }), { ratio: 0.4, overPlan: false, reason: undefined })
 assert.equal(computeCompletion({ plannedQuantity: 10, completedQuantity: 12, unit: '件' }).overPlan, true)
 assert.equal(computeCompletion({ plannedQuantity: 0, completedQuantity: 4, unit: '件' }).ratio, undefined)
-assert.match(computeCompletion({ plannedQuantity: 10, completedQuantity: 4, unit: undefined }).reason, /单位/)
+assert.equal(computeCompletion({ plannedQuantity: 0, completedQuantity: 4, unit: '件' }).reason, 'PLANNED_QUANTITY_INVALID')
+assert.equal(computeCompletion({ plannedQuantity: 10, completedQuantity: -1, unit: '件' }).reason, 'COMPLETED_QUANTITY_INVALID')
+assert.equal(computeCompletion({ plannedQuantity: 10, completedQuantity: 4, unit: undefined }).reason, 'UNIT_MISSING')
 assert.equal(normalizeWorkOrder({
   workOrderId: 'WO-1',
   status: 'running',

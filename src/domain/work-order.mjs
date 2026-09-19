@@ -42,13 +42,13 @@ export function createObservation({ source, queriedAt = new Date().toISOString()
 
 export function computeCompletion({ plannedQuantity, completedQuantity, unit }) {
   if (!Number.isFinite(plannedQuantity) || plannedQuantity <= 0) {
-    return { ratio: undefined, reason: '计划量缺失或不是正数' }
+    return { ratio: undefined, reason: 'PLANNED_QUANTITY_INVALID' }
   }
   if (!Number.isFinite(completedQuantity) || completedQuantity < 0) {
-    return { ratio: undefined, reason: '完成量缺失或不是非负数' }
+    return { ratio: undefined, reason: 'COMPLETED_QUANTITY_INVALID' }
   }
   if (typeof unit !== 'string' || unit.trim() === '') {
-    return { ratio: undefined, reason: '单位缺失，无法比较数量' }
+    return { ratio: undefined, reason: 'UNIT_MISSING' }
   }
   return {
     ratio: completedQuantity / plannedQuantity,

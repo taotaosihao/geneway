@@ -69,6 +69,7 @@
     const state = { bootstrap: null, currentWork: null, poll: null }
     const titles = { home: '新建工作', events: '待办', work: '工作详情', employee: '员工' }
     const labels = { accepted: '已受理', running: '执行中', completed: '已完成', failed: '执行失败', cancel_requested: '正在停止', cancelled: '已停止', interrupted: '进程中断' }
+    const completionReasons = { PLANNED_QUANTITY_INVALID: '计划量缺失或不是正数', COMPLETED_QUANTITY_INVALID: '完成量缺失或不是非负数', UNIT_MISSING: '单位缺失，无法比较数量' }
     const html = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]))
     const modelCopy = value => html(value ?? '暂无模型说明').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1')
     const el = id => document.getElementById(id)
@@ -131,7 +132,7 @@
       if (!work) { el('work-detail').innerHTML = empty('请选择一项已保存的工作'); return }
       const latest = work.observations.at(-1)
       const ratio = latest?.completion?.ratio
-      const ratioText = typeof ratio === 'number' ? Math.round(ratio * 100) + '%' : (latest?.completion?.reason || '未计算')
+      const ratioText = typeof ratio === 'number' ? Math.round(ratio * 100) + '%' : (completionReasons[latest?.completion?.reason] || '未计算')
       const status = labels[work.status] || work.status
       const observations = work.observations.slice().reverse().map(item => '<div class="observation"><b>' + html(item.status) + ' · ' + html(typeof item.completion?.ratio === 'number' ? Math.round(item.completion.ratio * 100) + '%' : '比例未知') + '</b><div class="muted">记录 ' + html(item.sourceRecordId) + ' · 源时间 ' + html(item.sourceTime || '未提供') + ' · 查询于 ' + html(item.queriedAt) + '</div><div class="model-copy">' + modelCopy(item.explanation) + '</div></div>').join('')
       const executions = (work.executions ?? []).slice().reverse().map(item => '<div class="observation"><b>' + html(item.operation) + ' · ' + html(labels[item.status] || item.status) + '</b><div class="muted">执行 ' + html(item.id) + (item.error ? ' · ' + html(item.error.message) : '') + '</div></div>').join('')

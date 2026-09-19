@@ -29,6 +29,7 @@ const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? host}`)
     if (request.method === 'GET' && url.pathname === '/') return send(response, 200, index, 'text/html; charset=utf-8')
+    if (request.method === 'GET' && url.pathname === '/favicon.ico') return send(response, 204, '', 'image/x-icon')
     if (request.method === 'GET' && url.pathname === '/api/bootstrap') return sendJson(response, 200, await service.bootstrap())
     const workMatch = url.pathname.match(/^\/api\/works\/([^/]+)(?:\/(refresh|follow-up|cancel))?$/)
     if (workMatch && request.method === 'GET' && !workMatch[2]) return resultResponse(response, await service.getWork(decodeURIComponent(workMatch[1])))

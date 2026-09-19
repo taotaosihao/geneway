@@ -262,7 +262,7 @@ R1 与 R2 的无业务模型预检可并行；R3 依赖 R1/R2 的稳定契约；
 
 ### 11.2 最小观察、执行与来源字段
 
-观察除既有业务字段外仅新增：`observationId`、`sourceSystem=GearJob`、`sourceInstance`、`sourceEnvironment=external-test`、`dataMode=synthetic`、`sourceRecordId`、`sourceRevision`、`sourceObservedAt`、`queriedAt`、`dshSessionRef`、可空的 `continuedFromDshSessionRef`、可空的 `contextObservationId` 和 `continuity`。这些值由服务端连接配置、GearJob 响应和实际 DSH Session 形成，浏览器和模型不能提交；没有原生 run id 时不保存伪造的 `dshRunRef`。`completion.reason` 使用稳定原因码，中文由 UI 映射。
+观察除既有业务字段外仅新增：`observationId`、`sourceSystem=GearJob`、`sourceInstance`、`sourceEnvironment=external-test`、`dataMode=synthetic`、`sourceRecordId`、`sourceRevision`、`sourceTime`、`queriedAt`、`dshSessionRef`、可空的 `continuedFromDshSessionRef`、可空的 `contextObservationId` 和 `continuity`。这些值由服务端连接配置、GearJob 响应和实际 DSH Session 形成，浏览器和模型不能提交；没有原生 run id 时不保存伪造的 `dshRunRef`。`completion.reason` 使用稳定原因码，中文由 UI 映射。
 
 执行保存：`executionId`、operation、`clientRequestId`、状态、开始/结束时间、错误/中断原因、DSH 事件范围与结果引用。产品不双写模型 token、完整循环检查点或 GearJob 镜像。
 
@@ -331,3 +331,16 @@ P1 的连续性权威对象是 Geneway work：同一进程内可复用当前 DSH
 ### 12.4 P1 结论边界
 
 在独立阶段审查没有发现 P1 阻塞项的前提下，可记录“P1 在 GearJob 外部测试实例、团队生成模拟工单模式下完成技术验收”。这只覆盖 AC-01、AC-02、AC-10/11/12 的 P1 当前路径和 J1；不表示生产 GearJob、远程部署、正式发布、客户接受、P2–P7 或整份合同已经完成。
+
+### 12.5 后续阶段外部条件发现（P1 只读义务）
+
+本表只记录候选、已知事实和 unknown；不替代后续阶段各自的 Team Sol 详细规划，也不授权调用、写入或部署后续系统。
+
+| 阶段 | 候选与当前事实 | 当前 unknown / 条件提供者 | 下一步只读发现 | 最迟决定点 |
+|---|---|---|---|---|
+| P2 身份、配置与多员工 | 当前只有 loopback 单操作者、一个 GearJob 只读员工和一个连接；JSON 事实源已能保存显式绑定。 | 多成员认证方式、配置管理员身份和第二员工/第二连接的业务归属未知；由产品所有者与企业身份管理员提供。 | P2 planner 先核对可用企业身份源、成员角色和第二连接，不复用浏览器隐藏作为授权。 | P2 计划批准前。 |
+| P3 知识与协作 | DSH 原生插件/Session 边界已明确，但尚未选择知识来源或协作对象。 | 获准知识库、文档权限继承、员工间可共享范围未知；由知识库所有者与产品所有者提供。 | 只读盘点候选知识源、稳定文档 ID、撤权方式和最小协作场景。 | P3 计划批准前。 |
+| P4 飞书与微信渠道 | 本机 `lark-cli` bot 可发送交付视频；这只是工程交付通道，不是产品渠道。 | 产品机器人/应用、目标会话、成员映射、入站事件和重投策略未知；微信具体形态（个人微信、企业微信或微信客服不能互换）、账号资质与可用 API 也未知。条件由飞书/微信管理员、账号所有者与业务负责人提供。 | 核对飞书 bot/app 权限、测试会话、事件订阅和消息幂等接口；由用户明确微信形态后再只读核对对应官方接口与资质，不得沿用本次视频收件人推导产品映射。 | P4 计划批准和渠道接口设计前。 |
+| P5 定时与真实事件 | 当前没有定时规则或 GearJob 事件订阅；模型轮询不作为候选。 | 一种获准定时任务、一种真实事件源、时区/漏触发政策未知；由 GearJob 环境所有者与业务负责人提供。 | 只读检查 GearJob/Frappe scheduler、DocType 事件或现有 webhook 能力及事件稳定 ID。 | P5 计划批准前。 |
+| P6 第二来源与有限写动作 | 首来源是 GearJob 外部测试标准 REST 只读工单；尚无第二来源和写权限。 | 第二真实来源、联合标识、允许的单一写动作、批准人和幂等/回读能力全部未知；由业务所有者和目标系统管理员提供。 | 先选对象与业务前置条件，再只读核对 API、授权、预览、动作身份、状态查询和结果未知处理。 | P6 方案选择与写接口设计前。 |
+| P7 第二模型、容量与部署 | ZenMux `deepseek/deepseek-v4-pro` 是第一真实路由；当前只验证本机 loopback 与 P1 数据恢复。 | 第二真实模型路由、预算上限、并发目标、目标部署主机、升级回退窗口未知；由基础设施/预算所有者和产品所有者提供。 | 从 ZenMux 当前目录选择不同模型路由做无业务探针候选，并盘点部署、容量、完整备份和升级约束。 | P7 计划批准前，且早于第二路由业务数据调用。 |

@@ -342,13 +342,13 @@ async function startCapture() {
           : toolResults ? 'structured_output' : businessTool
     const input = serialized.match(/\\?"availableSeconds\\?":(\d+),\\?"quantity\\?":(\d+)/)
     const stepLabel=businessTool==='geneway_gearjob_read_work_order'?'工单事实核对':'节拍核对'
-    const args = tool === 'structured_output' ? { status: 'done', explanation: `${stepLabel} ${usesKnowledge && knowledgeRef ? `KNOWLEDGE-R${knowledgeRef.revision}-CANARY` : '受控结果'} 已完成` }
+    const args = tool === 'structured_output' ? { status: 'done', explanation: `${stepLabel} ${usesKnowledge && knowledgeRef ? `KNOWLEDGE-R${knowledgeRef.revision}-CANARY ${knowledgeRef.knowledgeId}` : '受控结果'} ${scenario} employee-b collaboration-child 已完成` }
       : tool === 'geneway_collaboration_submit_summary' ? { resultRefs: summaryRefs }
         : tool === 'geneway_knowledge_search' ? { query: '浏览器当前依据' }
           : tool === 'geneway_knowledge_submit_references' ? { references: knowledgeRef ? [{ ...knowledgeRef, segmentId: 'p1-c1' }] : [] }
             : tool === 'geneway_gearjob_read_work_order' ? { workOrderId: 'WO-26-00096' }
               : { availableSeconds: Number(input?.[1] ?? 3600), quantity: Number(input?.[2] ?? 6) }
-    const complete = () => sendCaptureCompletion(response, body.model, tool, args)
+    const complete = () => sendCaptureCompletion(response, body.model, tool, args, scenario === 'root-summary' && !tool ? `受控协作汇总完成 ${summaryRefs.join(' ')} employee-lead read-order collaboration-root` : undefined)
     seen.add(scenario)
     if (holds.has(scenario) && toolResults === 0) {
       pending.set(scenario, { response, complete })
@@ -369,7 +369,7 @@ async function startCapture() {
   }
 }
 
-function sendCaptureCompletion(response, model, tool, args) {
+function sendCaptureCompletion(response, model, tool, args, content = '受控协作汇总完成') {
   response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive' })
   const id = `chatcmpl-${randomUUID()}`, send = value => response.write(`data: ${JSON.stringify(value)}\n\n`)
   send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })
@@ -377,7 +377,7 @@ function sendCaptureCompletion(response, model, tool, args) {
     send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `call-${randomUUID()}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] }, finish_reason: null }] })
     send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })
   } else {
-    send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: { content: '受控协作汇总完成' }, finish_reason: null }] })
+    send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })
     send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })
   }
   response.end('data: [DONE]\n\n')

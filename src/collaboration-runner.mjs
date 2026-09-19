@@ -255,7 +255,7 @@ export function createCollaborationRunner({
     summaryContexts.set(rootHandle.agent, structuredClone(projection))
     rootHandle.agent.ctx.tools.restrict({ allow: [COLLABORATION_TOOLS.summarize] })
     rootHandle.agent.followup(createUserMessage({
-      content: [{ type: 'text', text: `SCENARIO:root-summary Review only this persisted child result and handoff projection, call ${COLLABORATION_TOOLS.summarize} once with the exact resultRefs, then provide a concise factual summary: ${JSON.stringify(projection)}` }],
+      content: [{ type: 'text', text: `SCENARIO:root-summary Review only these persisted business results. Submit resultRefs only to ${COLLABORATION_TOOLS.summarize}; do not repeat identifiers in prose. Then provide a concise factual summary: ${JSON.stringify(modelSummaryProjection(projection))}` }],
       source: { kind: 'user' },
     }))
     await untilAbort(rootHandle.agent.whenIdle(), rootSignal)
@@ -507,9 +507,11 @@ export function createCollaborationRunner({
       if (refs.some(ref => !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, child.employeeId)
         || !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '知识引用已失效')
       const resultId = `result-${randomUUID()}`
+      const handoffId = `handoff-${randomUUID()}`
       if (binding.confirmationRefs.some(ref => !state.confirmations.some(item => item.id === ref.id && item.revision === ref.revision && item.ownerMemberId === rootWork.ownerMemberId && item.employeeId === child.employeeId && item.status === 'active'))) throw runtimeError('FORBIDDEN', '确认信息授权已失效')
-      const result = collaborationResult(resultId, child, parsed, execution.dshSessionRef, usageFromEvents(events), now, binding.generation, refs, binding.confirmationRefs)
-      const handoff = { id: `handoff-${randomUUID()}`, childWorkId: child.id, fromEmployeeId: child.employeeId, toEmployeeId: rootWork.employeeId, resultRefs: [resultId], knowledgeRefs: result.knowledgeDependencyRefs ?? [], revision: 1, generation: binding.generation, status: 'current', createdAt: now }
+      const safeParsed = { ...parsed, explanation: redactInternalReferences(parsed.explanation, state, rootWork, refs) }
+      const result = collaborationResult(resultId, child, safeParsed, execution.dshSessionRef, usageFromEvents(events), now, binding.generation, refs, binding.confirmationRefs)
+      const handoff = { id: handoffId, childWorkId: child.id, fromEmployeeId: child.employeeId, toEmployeeId: rootWork.employeeId, resultRefs: [resultId], knowledgeRefs: result.knowledgeDependencyRefs ?? [], revision: 1, generation: binding.generation, status: 'current', createdAt: now }
       result.handoffRefs = [handoff.id]
       const nextChild = { ...child, status: 'completed', results: [...child.results, result], executions: child.executions.map(candidate => candidate.id === execution.id ? { ...candidate, status: 'completed', completedAt: now, resultId, usage: result.usage } : candidate) }
       const handoffs = rootWork.handoffs.map(item => item.childWorkId === child.id && item.status === 'current' ? { ...item, status: 'superseded' } : item)
@@ -535,7 +537,7 @@ export function createCollaborationRunner({
           || !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '汇总知识引用已失效')
       }
       if (confirmationRefs.some(ref => !state.confirmations.some(item => item.id === ref.id && item.revision === ref.revision && item.ownerMemberId === rootWork.ownerMemberId && item.employeeId === rootWork.employeeId && item.status === 'active'))) throw runtimeError('FORBIDDEN', '确认信息授权已失效')
-      result = { id: `summary-${randomUUID()}`, kind: 'assistant.collaboration-summary', capabilityId: rootWork.capabilityId, skillId: rootWork.skillId, schemaVersion: 1, input: {}, payload: { resultRefs: refs }, explanation, createdAt: clock(), dshSessionRef: sessionId, contextConfirmationRefs: confirmationRefs, employeeId: rootWork.employeeId, handoffRefs: currentHandoffs.map(item => item.id), usage: usageFromEvents(events), knowledgeDependencyRefs, generation: binding.generation }
+      result = { id: `summary-${randomUUID()}`, kind: 'assistant.collaboration-summary', capabilityId: rootWork.capabilityId, skillId: rootWork.skillId, schemaVersion: 1, input: {}, payload: { resultRefs: refs }, explanation: redactInternalReferences(explanation, state, rootWork), createdAt: clock(), dshSessionRef: sessionId, contextConfirmationRefs: confirmationRefs, employeeId: rootWork.employeeId, handoffRefs: currentHandoffs.map(item => item.id), usage: usageFromEvents(events), knowledgeDependencyRefs, generation: binding.generation }
       const nextExecution = { ...execution, status: 'completed', completedAt: clock(), resultId: result.id, dshSessionRef: sessionId, usage: result.usage }
       const nextRoot = { ...rootWork, status: 'completed', results: [...rootWork.results, result], executions: rootWork.executions.map(candidate => candidate.id === execution.id ? nextExecution : candidate), collaboration: { ...rootWork.collaboration, status: 'completed', summaryResultRefs: refs } }
       return { ...state, works: state.works.map(work => work.id === rootWork.id ? nextRoot : work) }
@@ -607,7 +609,9 @@ export function createCollaborationRunner({
       if (!handoff || !result) throw runtimeError('TOOL_CHAIN_INVALID', '后置汇总投影缺少当前持久结果')
       if (handoff.knowledgeRefs.some(ref => !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, child.employeeId)
         || !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '汇总知识引用已失效')
-      return { itemId: item.id, employeeId: child.employeeId, resultId: result.id, handoffId: handoff.id, kind: result.kind, payload: result.payload, source: result.source, explanation: result.explanation, knowledgeRefs: handoff.knowledgeRefs }
+      const payload = structuredClone(result.payload)
+      if (typeof payload?.explanation === 'string') payload.explanation = redactInternalReferences(payload.explanation, state, rootWork)
+      return { itemId: item.id, goal: item.goal, employeeId: child.employeeId, employeeName: employeeLabel(state, child.employeeId, '协作员工'), resultId: result.id, handoffId: handoff.id, kind: result.kind, payload, source: result.source, explanation: redactInternalReferences(result.explanation, state, rootWork), knowledgeRefs: handoff.knowledgeRefs }
     })
     const confirmations = state.confirmations.filter(item => item.ownerMemberId === rootWork.ownerMemberId && item.employeeId === rootWork.employeeId && item.status === 'active').sort((left, right) => left.id.localeCompare(right.id))
     return { rootWorkId: rootWork.id, generation: binding.generation, resultRefs: entries.map(item => item.resultId), entries, confirmations: confirmations.map(item => ({ id: item.id, revision: item.revision, value: item.value })), confirmationRefs: confirmations.map(item => ({ id: item.id, revision: item.revision })) }
@@ -646,6 +650,81 @@ function collaborationResult(id, work, parsed, sessionId, usage, now, generation
     dshSessionRef: sessionId, contextConfirmationRefs, employeeId: work.employeeId, handoffRefs: [], usage,
     knowledgeDependencyRefs, generation, ...(work.inputProvenance ? { inputProvenance: structuredClone(work.inputProvenance) } : {}),
   }
+}
+
+function modelSummaryProjection(projection) {
+  return {
+    resultRefs: projection.resultRefs,
+    results: projection.entries.map(item => ({
+      goal: item.goal,
+      employee: item.employeeName,
+      kind: item.kind,
+      payload: publicModelPayload(item.payload),
+      source: item.source,
+      explanation: item.explanation,
+      usedAuthorizedKnowledge: item.knowledgeRefs.length > 0,
+    })),
+    confirmedFacts: projection.confirmations.map(item => item.value),
+  }
+}
+
+function publicModelPayload(payload) {
+  const value = structuredClone(payload)
+  if (value && typeof value === 'object') {
+    delete value.observationId
+    delete value.dshSessionRef
+    delete value.explanation
+  }
+  return value
+}
+
+function redactInternalReferences(text, state, rootWork, selectedKnowledgeRefs = []) {
+  if (typeof text !== 'string' || !text) return text
+  const children = state.works.filter(work => work.rootWorkId === rootWork.id)
+  const replacements = new Map([
+    [rootWork.id, '当前协作工作'],
+    [rootWork.employeeId, employeeLabel(state, rootWork.employeeId, '负责人')],
+  ])
+  for (const item of rootWork.plan.items) replacements.set(item.id, '当前计划步骤')
+  for (const ref of selectedKnowledgeRefs) replacements.set(ref.knowledgeId, '当前获准知识')
+  for (const work of children) {
+    replacements.set(work.id, '当前协作步骤')
+    replacements.set(work.employeeId, employeeLabel(state, work.employeeId, '协作员工'))
+    for (const execution of work.executions) {
+      replacements.set(execution.id, '当前执行记录')
+      replacements.set(execution.operation, '协作执行')
+    }
+    for (const result of work.results) {
+      replacements.set(result.id, resultLabel(result.kind))
+      for (const ref of result.knowledgeDependencyRefs ?? []) replacements.set(ref.knowledgeId, '当前获准知识')
+    }
+  }
+  for (const execution of rootWork.executions) {
+    replacements.set(execution.id, '当前执行记录')
+    replacements.set(execution.operation, '协作执行')
+  }
+  for (const result of rootWork.results) {
+    replacements.set(result.id, resultLabel(result.kind))
+    for (const ref of result.knowledgeDependencyRefs ?? []) replacements.set(ref.knowledgeId, '当前获准知识')
+  }
+  for (const handoff of rootWork.handoffs) {
+    replacements.set(handoff.id, '当前交接记录')
+    for (const ref of handoff.knowledgeRefs ?? []) replacements.set(ref.knowledgeId, '当前获准知识')
+  }
+  let safe = text
+  for (const [internal, label] of [...replacements].filter(([value]) => value).sort((left, right) => right[0].length - left[0].length)) safe = safe.split(internal).join(label)
+  return safe
+}
+
+function resultLabel(kind) {
+  if (kind === 'gearjob.work-order.observation') return '工单事实结果'
+  if (kind === 'manufacturing.takt') return '节拍核对结果'
+  return '协作结果'
+}
+
+function employeeLabel(state, employeeId, fallback) {
+  const name = state.employees.find(item => item.id === employeeId)?.name
+  return name && name !== employeeId ? name : fallback
 }
 
 function childPrompt(work, toolName, confirmations) {

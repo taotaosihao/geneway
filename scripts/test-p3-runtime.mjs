@@ -48,6 +48,14 @@ try {
   assert.deepEqual(knowledgeChild.results[0].knowledgeDependencyRefs, [{ knowledgeId: material.id, revision: 1, segmentId: 'p1-c1' }])
   assert.deepEqual(knowledgeDone.handoffs[0].knowledgeRefs, knowledgeChild.results[0].knowledgeDependencyRefs)
   assert.deepEqual(knowledgeDone.results.at(-1).knowledgeDependencyRefs, knowledgeChild.results[0].knowledgeDependencyRefs)
+  assert.equal(knowledgeChild.results[0].explanation.includes(material.id), false)
+  assert.equal(knowledgeChild.results[0].explanation.includes('item-knowledge'), false)
+  assert.equal(knowledgeChild.results[0].explanation.includes('employee-b'), false)
+  assert.equal(knowledgeChild.results[0].explanation.includes('collaboration-child'), false)
+  assert.match(knowledgeChild.results[0].explanation, /当前获准知识/)
+  assert.deepEqual(knowledgeChild.results[0].knowledgeDependencyRefs, [{ knowledgeId: material.id, revision: 1, segmentId: 'p1-c1' }])
+  assert.deepEqual(knowledgeDone.results.at(-1).payload.resultRefs, knowledgeDone.collaboration.summaryResultRefs)
+  for (const internal of [...knowledgeDone.collaboration.summaryResultRefs, material.id, 'item-knowledge', 'employee-lead', 'collaboration-root']) assert.equal(knowledgeDone.results.at(-1).explanation.includes(internal), false)
   const invalidCompleted = structuredClone(knowledgeState)
   invalidCompleted.knowledgeMaterials.find(entry => entry.id === material.id).revision += 1
   assert.throws(() => migrateState(invalidCompleted), /completed 知识依赖无效/)
@@ -552,7 +560,7 @@ async function startCapture() {
           : hasToolResult ? 'structured_output' : businessTool
     const inputMatch = serialized.match(/\\?"availableSeconds\\?":(\d+),\\?"quantity\\?":(\d+)/)
     const complete = () => sendCompletion(response, body.model, tool, tool === 'structured_output'
-      ? { status: 'done', explanation: knowledgeScenario ? `${scenario} KNOWLEDGE-CANARY 已完成` : `${scenario} 已完成` }
+      ? { status: 'done', explanation: knowledgeScenario ? `${scenario} KNOWLEDGE-CANARY knowledge-runtime employee-b collaboration-child 已完成` : `${scenario} 已完成` }
       : tool === 'geneway_collaboration_submit_summary' ? { resultRefs: summaryRefs }
       : tool === 'geneway_knowledge_search' ? { query: scenario === 'item-knowledge' ? 'KNOWLEDGE-CANARY' : scenario.includes('sibling-b') ? 'SIBLING-ONLY' : '替换后的当前依据' }
       : tool === 'geneway_knowledge_submit_references' ? { references: [{
@@ -561,7 +569,8 @@ async function startCapture() {
         segmentId: scenario.includes('bad-segment') ? 'p9-c9' : 'p1-c1',
       }] }
       : tool === 'geneway_gearjob_read_work_order' ? { workOrderId: 'WO-CANCEL' }
-        : { availableSeconds: Number(inputMatch?.[1] ?? 3600), quantity: Number(inputMatch?.[2] ?? 6) })
+        : { availableSeconds: Number(inputMatch?.[1] ?? 3600), quantity: Number(inputMatch?.[2] ?? 6) },
+    scenario === 'root-summary' && !tool ? `后置事实汇总已完成 ${summaryRefs.join(' ')} employee-lead item-knowledge collaboration-root` : undefined)
     seen.add(scenario)
     sequences.set(scenario, ++sequence)
     counts.set(scenario, (counts.get(scenario) ?? 0) + 1)
@@ -611,7 +620,7 @@ async function startCapture() {
   }
 }
 
-function sendCompletion(response, model, tool, args) {
+function sendCompletion(response, model, tool, args, content = '后置事实汇总已完成') {
   response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive' })
   const id = `chatcmpl-${randomUUID()}`
   const send = value => response.write(`data: ${JSON.stringify(value)}\n\n`)
@@ -620,7 +629,7 @@ function sendCompletion(response, model, tool, args) {
     send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: `call-${randomUUID()}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] }, finish_reason: null }] })
     send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })
   } else {
-    send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: { content: '后置事实汇总已完成' }, finish_reason: null }] })
+    send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })
     send({ id, object: 'chat.completion.chunk', created: 0, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })
   }
   response.end('data: [DONE]\n\n')

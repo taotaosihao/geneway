@@ -1,0 +1,27 @@
+{
+  "name": "geneway-dsh-greenfield",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@11.8.0",
+  "scripts": {
+    "dsh": "dsh",
+    "probe:dsh": "node scripts/probe-dsh.mjs",
+    "probe:dsh-plugin": "node scripts/probe-dsh-plugin.mjs",
+    "probe:dsh-sdk": "node scripts/probe-dsh-sdk.mjs",
+    "probe:p1-runtime": "node scripts/probe-p1-runtime.mjs",
+    "test:unit": "node scripts/test-domain.mjs",
+    "test:service": "node scripts/test-service.mjs",
+    "test:controlled": "node scripts/test-controlled.mjs",
+    "backup": "node scripts/state-transfer.mjs backup",
+    "restore": "node scripts/state-transfer.mjs restore",
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-sdk-client": "0.1.6-alpha.2",
+    "@deepseek-ai/dsh-tools": "0.1.6-alpha.2"
+  }
+}

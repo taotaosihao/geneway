@@ -1,0 +1,3 @@
+- insert:
+    - id: geneway-p1-diagnostic-tool
+      name: ../plugins/geneway-p1-diagnostic-tool.mjs

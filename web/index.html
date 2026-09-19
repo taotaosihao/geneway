@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Geneway · 工作台</title>
+  <style>
+    :root{--ink:#24322d;--muted:#68766e;--line:#e4eae5;--side:#f3f6f3;--soft:#f8faf8;--green:#167656;--green-soft:#e8f4ed;--amber:#a76b1e;--red:#b84f4a;--shadow:0 18px 50px #24493412}
+    *{box-sizing:border-box}body{margin:0;background:#eaf0eb;color:var(--ink);font:14px/1.55 Inter,"Noto Sans SC","PingFang SC",system-ui,sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}
+    .app{display:grid;grid-template-columns:216px minmax(0,1fr);width:min(1540px,100%);height:100dvh;min-height:640px;margin:auto;background:#fff;overflow:hidden;box-shadow:var(--shadow)}
+    aside{background:var(--side);border-right:1px solid #dfe7e0;padding:22px 12px;display:flex;flex-direction:column}.brand{padding:12px 12px 30px}.brand strong{font-size:23px;letter-spacing:-1px}.brand small{display:block;margin-top:3px;color:#75857a;font-size:11px}
+    nav{display:grid;gap:4px}.nav{border:0;background:transparent;text-align:left;padding:12px;border-radius:9px;color:#53665a;font-weight:600}.nav:hover,.nav.active{background:#e2ebe3;color:#185c40}.nav.active{box-shadow:inset 3px 0 #438967}.nav span{display:inline-block;width:26px;font-size:17px}.side-label{margin:30px 11px 7px;color:#728177;font-size:11px}.recent{padding:8px 11px;color:#65746a}.recent b{display:block;font-size:12px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.recent small{color:#8a978e}.profile{margin-top:auto;border-top:1px solid #dfe7e0;padding:18px 10px 3px;display:flex;gap:9px;align-items:center}.avatar{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:#c9ebd9;color:#176246;font-weight:800}.profile small{display:block;color:var(--muted);font-size:11px}
+    main{min-width:0;display:flex;flex-direction:column}.topbar{height:64px;flex-shrink:0;border-bottom:1px solid #edf1ed;padding:0 30px;display:flex;align-items:center}.topbar h1{font-size:14px;margin:0;font-weight:650}.topbar .state{margin-left:auto;border-radius:14px;padding:5px 9px;font-size:11px;background:#f1f4f1;color:#6a786d}.topbar .state.ready{background:var(--green-soft);color:var(--green)}.content{flex:1;overflow:auto;padding:34px 38px;background:#fbfcfa}.page{width:min(1120px,100%);margin:auto}.eyebrow{color:#6e8274;font-size:11px;letter-spacing:.12em}.title{margin:6px 0 7px;font-size:28px;font-weight:550;letter-spacing:-.04em}.sub{margin:0;color:var(--muted);font-size:13px}.home{max-width:940px;padding-top:28px}.home-head{text-align:center;margin-bottom:24px}.home-head .title{font-size:32px;font-weight:500}.composer{border:1px solid #bdcfc2;border-radius:16px;background:#fff;padding:18px 22px 14px;box-shadow:0 8px 30px #2f60450a}.composer:focus-within{box-shadow:0 0 0 3px #e7f3eb;border-color:#438967}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.field{display:grid;gap:6px}.field label{font-size:12px;font-weight:700}.input{width:100%;border:1px solid #d8e1da;border-radius:8px;padding:10px 11px;background:#fff;color:#344d3f}.composer-bottom{display:flex;gap:10px;align-items:end;border-top:1px solid #edf1ed;margin-top:15px;padding-top:12px}.composer-bottom .field{flex:1}.btn{border:1px solid var(--line);background:#fff;color:#344238;border-radius:8px;padding:9px 13px;font-weight:650;white-space:nowrap}.btn:hover{filter:brightness(.97)}.btn.primary{background:var(--green);border-color:var(--green);color:#fff}.btn.danger{color:var(--red);border-color:#efcfcd}.btn:disabled{cursor:not-allowed;opacity:.45}.message{min-height:24px;margin:13px 2px 0;color:var(--muted);font-size:12px}.message.error{color:var(--red)}.capability{display:flex;gap:8px;align-items:flex-start;margin-top:20px;padding:13px 15px;border:1px dashed #d5dfd7;border-radius:10px;background:#fff;color:#65746a;font-size:12px}.capability strong{color:#405b49}.section{margin-top:28px}.section-head{display:flex;align-items:end;justify-content:space-between;margin-bottom:12px}.section-head h2{margin:0;font-size:17px;font-weight:600}.section-head p{margin:3px 0 0;color:var(--muted);font-size:12px}.cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.card{border:1px solid var(--line);border-radius:12px;background:#fff;padding:17px}.empty{border:1px dashed #d5dfd7;border-radius:12px;background:#fff;color:#77857b;padding:24px;text-align:center}.work-card{display:flex;gap:13px;align-items:flex-start}.work-icon{display:grid;place-items:center;width:36px;height:36px;border-radius:10px;background:var(--green-soft);color:var(--green);font-weight:800}.work-card h3{margin:0 0 3px;font-size:14px}.work-card p{margin:0;color:var(--muted);font-size:12px}.work-card .status{margin-left:auto;color:var(--green);font-size:11px}.view{display:none}.view.active{display:block}.two{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:18px}.summary{border:1px solid var(--line);border-radius:14px;background:#fff;padding:20px}.summary h2{margin:3px 0 12px;font-size:19px}.summary .big{font-size:25px;color:var(--green);font-weight:700}.source{margin-top:14px;padding:12px;border:1px solid #e3e9e4;border-radius:9px;background:var(--soft);font-size:12px}.source .muted{margin-top:3px}.activity{margin-top:16px}.activity h2{font-size:16px;margin:0 0 8px}.observation{padding:12px 0;border-top:1px solid var(--line)}.observation:first-child{border-top:0}.observation b{font-size:13px}.muted{color:var(--muted);font-size:12px}.side-card{border:1px solid var(--line);border-radius:12px;background:#fff;padding:17px}.side-card+.side-card{margin-top:14px}.side-card h3{margin:0 0 12px;font-size:14px}.kv{display:flex;justify-content:space-between;gap:12px;border-top:1px solid var(--line);padding:9px 0;font-size:12px}.kv:first-of-type{border-top:0}.kv span:first-child{flex-shrink:0}.kv span:last-child{color:var(--muted);text-align:right}.model-copy{white-space:pre-line}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:15px}.follow{display:grid;gap:8px;margin-top:16px}.follow textarea{min-height:86px;resize:vertical}.employee-list{display:grid;gap:12px}.employee{display:flex;gap:13px;align-items:center}.employee-icon{display:grid;place-items:center;width:48px;height:48px;border-radius:14px;background:linear-gradient(145deg,#d9f6e9,#9fe1c5);color:#087a52;font-size:19px;font-weight:800}.employee h3{margin:0;font-size:15px}.employee .meta{color:var(--muted);font-size:12px}.badge{margin-left:auto;border-radius:14px;padding:4px 8px;background:#eef3ee;color:#607165;font-size:11px}.screen-note{padding:16px;border:1px solid var(--line);border-radius:11px;background:#fff;color:#65746a;font-size:12px;line-height:1.8}
+    @media(max-width:760px){.app{display:block;min-height:100dvh;height:auto}.app>aside{display:none}.topbar{height:54px;padding:0 18px}.content{padding:24px 17px}.home{padding-top:15px}.home-head .title{font-size:27px}.form-grid,.two,.cards{grid-template-columns:1fr}.composer{padding:15px}.composer-bottom{align-items:stretch;flex-wrap:wrap}.composer-bottom .field{flex-basis:100%}.composer-bottom .btn{width:100%;min-height:44px}.title{font-size:24px}.side-card{padding:14px}.section-head{align-items:start;gap:8px;flex-direction:column}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div class="brand"><strong>Geneway</strong><small>数字员工工作空间</small></div>
+      <nav aria-label="主导航">
+        <button class="nav active" data-view="home"><span>＋</span>新建工作</button>
+        <button class="nav" data-view="events"><span>✓</span>待办</button>
+        <button class="nav" data-view="work"><span>▤</span>工作</button>
+        <button class="nav" data-view="employee"><span>♙</span>员工</button>
+      </nav>
+      <div class="side-label">最近工作</div>
+      <div id="recent"></div>
+      <div class="profile"><span class="avatar">本</span><div><b>本机操作者</b><small>身份由服务端提供</small></div></div>
+    </aside>
+    <main>
+      <header class="topbar"><h1 id="top-title">新建工作</h1><span class="state" id="runtime-state">读取运行状态…</span></header>
+      <div class="content">
+        <section class="view active page home" id="view-home">
+          <div class="home-head"><div class="eyebrow">明确目标，保留依据</div><h2 class="title">今天想让哪位员工开始工作？</h2><p class="sub">选择已授权的员工与连接，输入精确工单号。查询成功后，结果和来源会保留在同一工作中。</p></div>
+          <form class="composer" id="work-form">
+            <div class="form-grid">
+              <div class="field"><label for="employee">数字员工</label><select class="input" id="employee" required><option value="">加载中…</option></select></div>
+              <div class="field"><label for="connection">业务连接</label><select class="input" id="connection" required><option value="">加载中…</option></select></div>
+            </div>
+            <div class="composer-bottom">
+              <div class="field"><label for="work-order">工单号</label><input class="input" id="work-order" autocomplete="off" placeholder="例如 WO-2026-001" required></div>
+              <button class="btn primary" id="submit-work" type="submit">开始查询</button>
+            </div>
+            <div class="message" id="home-message" role="status" aria-live="polite"></div>
+          </form>
+          <div class="capability" id="capability"></div>
+          <div class="section"><div class="section-head"><div><h2>最近工作</h2><p>只显示服务端已保存的真实工作记录。</p></div><button class="btn" data-view="events" type="button">查看待办</button></div><div class="cards" id="recent-cards"></div></div>
+        </section>
+
+        <section class="view page" id="view-events">
+          <div class="eyebrow">需要关注的真实状态</div><h2 class="title">待办</h2><p class="sub">没有来源数据时保持空白，不用合成卡片制造进展。</p>
+          <div class="section"><div class="cards" id="event-cards"></div></div>
+        </section>
+
+        <section class="view page" id="view-work">
+          <div class="eyebrow">结果、来源和下一步</div><h2 class="title">工作详情</h2><p class="sub" id="work-sub">从首页开始一项工作，或从最近工作中打开。</p>
+          <div id="work-detail" class="section"></div>
+        </section>
+
+        <section class="view page" id="view-employee">
+          <div class="eyebrow">实际装配与授权范围</div><h2 class="title">员工</h2><p class="sub">这里只展示服务端当前配置，不在浏览器中虚构保存、规则或写入能力。</p>
+          <div class="section employee-list" id="employee-list"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script>
+    const state = { bootstrap: null, currentWork: null, poll: null }
+    const titles = { home: '新建工作', events: '待办', work: '工作详情', employee: '员工' }
+    const labels = { accepted: '已受理', running: '执行中', completed: '已完成', failed: '执行失败', cancel_requested: '正在停止', cancelled: '已停止', interrupted: '进程中断' }
+    const html = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char]))
+    const modelCopy = value => html(value ?? '暂无模型说明').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1')
+    const el = id => document.getElementById(id)
+    const terminal = status => ['completed', 'failed', 'cancelled', 'interrupted'].includes(status)
+    const active = status => ['accepted', 'running', 'cancel_requested'].includes(status)
+    async function api(path, options = {}) {
+      const response = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options })
+      const body = await response.json()
+      if (!response.ok) throw Object.assign(new Error(body.error?.message || '请求失败'), { code: body.error?.code, status: response.status })
+      return body
+    }
+    function show(view, updateHistory = true) {
+      document.querySelectorAll('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view))
+      document.querySelectorAll('[data-view]').forEach(item => item.classList.toggle('active', item.dataset.view === view))
+      el('top-title').textContent = titles[view]
+      if (updateHistory) {
+        const query = new URLSearchParams()
+        if (view !== 'home') query.set('view', view)
+        if (view === 'work' && state.currentWork?.id) query.set('work', state.currentWork.id)
+        history.replaceState(null, '', query.toString() ? '?' + query : '/')
+      }
+      if (view === 'work') renderWork()
+    }
+    function empty(message) { return '<div class="empty">' + html(message) + '</div>' }
+    function workCard(work) {
+      const status = labels[work.status] || work.status
+      return '<article class="card work-card"><div class="work-icon">✓</div><div><h3>' + html(work.workOrderId) + '</h3><p>' + html(status) + ' · ' + work.observations.length + ' 条观察</p></div><span class="status">' + (active(work.status) ? '需要关注' : '已保存') + '</span><button class="btn" data-open-work="' + html(work.id) + '">查看</button></article>'
+    }
+    function renderRecent() {
+      const works = state.bootstrap?.works ?? []
+      el('recent').innerHTML = works.length ? works.slice(-3).reverse().map(work => '<div class="recent"><b>' + html(work.workOrderId) + '</b><small>' + html(labels[work.status] || work.status) + '</small></div>').join('') : '<div class="recent"><small>暂无已保存工作</small></div>'
+      el('recent-cards').innerHTML = works.length ? works.slice(-4).reverse().map(workCard).join('') : empty('还没有真实工作记录')
+      const events = works.filter(work => active(work.status) || work.status === 'failed' || work.status === 'interrupted')
+      el('event-cards').innerHTML = events.length ? events.slice().reverse().map(workCard).join('') : empty('暂无需要关注的真实工作状态')
+      document.querySelectorAll('[data-open-work]').forEach(button => button.addEventListener('click', () => openWork(button.dataset.openWork)))
+    }
+    function renderSelectors() {
+      const { employees = [], connections = [] } = state.bootstrap ?? {}
+      el('employee').innerHTML = employees.length ? '<option value="">请选择员工</option>' + employees.filter(item => item.enabled).map(item => '<option value="' + html(item.id) + '">' + html(item.name) + '</option>').join('') : '<option value="">尚未配置可用员工</option>'
+      el('connection').innerHTML = connections.length ? '<option value="">请选择连接</option>' + connections.filter(item => item.status === 'ready' && item.enabled !== false).map(item => '<option value="' + html(item.id) + '">' + html(item.name) + '</option>').join('') : '<option value="">尚未配置可用连接</option>'
+      el('submit-work').disabled = !(employees.some(item => item.enabled) && connections.some(item => item.status === 'ready' && item.enabled !== false))
+    }
+    function renderCapability() {
+      const capability = state.bootstrap?.capability ?? {}
+      const sourceReady = capability.source === 'configured'
+      el('runtime-state').textContent = sourceReady ? '来源已配置' : '等待来源配置'
+      el('runtime-state').classList.toggle('ready', sourceReady)
+      el('capability').innerHTML = sourceReady ? '<span>●</span><div><strong>GearJob 外部测试来源已配置</strong><br>团队生成模拟数据 · 非生产；服务端会重新核对员工、连接和工单范围，说明基于同一结构化观察。</div>' : '<span>○</span><div><strong>尚未配置真实工单来源</strong><br>当前入口只验证选择和授权边界，不创建合成工作。</div>'
+    }
+    function renderEmployees() {
+      const employees = state.bootstrap?.employees ?? []
+      el('employee-list').innerHTML = employees.length ? employees.map(item => '<article class="card employee"><span class="employee-icon">' + html(item.name?.slice(0, 1)) + '</span><div><h3>' + html(item.name) + '</h3><div class="meta">' + html(item.description || '未提供职责说明') + '</div></div><span class="badge">' + (item.enabled ? '已启用' : '已停用') + '</span></article>').join('') : '<div class="empty">尚未配置数字员工。管理员完成绑定后，这里才会出现可选择的员工。</div>'
+    }
+    async function openWork(id) {
+      stopPolling()
+      try { state.currentWork = await api('/api/works/' + encodeURIComponent(id)); show('work'); startPolling() } catch (error) { state.currentWork = null; el('work-sub').textContent = error.message; show('work') }
+    }
+    function renderWork() {
+      const work = state.currentWork
+      if (!work) { el('work-detail').innerHTML = empty('请选择一项已保存的工作'); return }
+      const latest = work.observations.at(-1)
+      const ratio = latest?.completion?.ratio
+      const ratioText = typeof ratio === 'number' ? Math.round(ratio * 100) + '%' : (latest?.completion?.reason || '未计算')
+      const status = labels[work.status] || work.status
+      const observations = work.observations.slice().reverse().map(item => '<div class="observation"><b>' + html(item.status) + ' · ' + html(typeof item.completion?.ratio === 'number' ? Math.round(item.completion.ratio * 100) + '%' : '比例未知') + '</b><div class="muted">记录 ' + html(item.sourceRecordId) + ' · 源时间 ' + html(item.sourceTime || '未提供') + ' · 查询于 ' + html(item.queriedAt) + '</div><div class="model-copy">' + modelCopy(item.explanation) + '</div></div>').join('')
+      const executions = (work.executions ?? []).slice().reverse().map(item => '<div class="observation"><b>' + html(item.operation) + ' · ' + html(labels[item.status] || item.status) + '</b><div class="muted">执行 ' + html(item.id) + (item.error ? ' · ' + html(item.error.message) : '') + '</div></div>').join('')
+      const followUps = (work.followUps ?? []).map(item => '<div class="observation"><b>追问</b><div>' + html(item.text) + '</div><div class="muted model-copy">' + modelCopy(item.explanation || '暂无说明') + '</div></div>').join('')
+      el('work-sub').textContent = work.workOrderId + ' · ' + status + (active(work.status) ? ' · 正在后台执行' : '')
+      el('work-detail').innerHTML = '<div class="two"><div><article class="summary"><div class="muted">当前结果</div><h2>' + html(latest?.status || (active(work.status) ? '等待来源结果' : status)) + '</h2><div class="big">' + html(ratioText) + '</div><div class="source"><b>GearJob 外部测试 · 团队生成模拟数据 · 非生产</b><div class="muted">来源记录：' + html(latest?.sourceRecordId || '执行中') + '<br>源时间：' + html(latest?.sourceTime || '未提供') + ' · 查询时间：' + html(latest?.queriedAt || '等待完成') + '</div></div><div class="actions"><button class="btn" id="refresh-work" ' + (active(work.status) ? 'disabled' : '') + '>查询最新</button><button class="btn danger" id="cancel-work" ' + (!active(work.status) ? 'disabled' : '') + '>停止本次</button></div></article><article class="card activity"><h2>历史观察</h2>' + (observations || empty(active(work.status) ? '首次查询进行中，完成后会保留观察。' : '没有可回读的观察')) + '<h2>执行历史</h2>' + (executions || empty('暂无执行记录')) + (followUps ? '<h2>追问记录</h2>' + followUps : '') + '<form class="follow" id="follow-form"><label for="follow-text">补充或追问</label><textarea class="input" id="follow-text" placeholder="输入依据问题或新的现场信息" ' + (active(work.status) ? 'disabled' : '') + '></textarea><button class="btn primary" type="submit" ' + (active(work.status) ? 'disabled' : '') + '>保留在同一工作</button><div class="message" id="work-message" role="status" aria-live="polite"></div></form></article></div><aside><div class="side-card"><h3>本次归属</h3><div class="kv"><span>工作</span><span>' + html(work.id) + '</span></div><div class="kv"><span>员工</span><span>' + html(work.employeeId) + '</span></div><div class="kv"><span>连接</span><span>' + html(work.connectionId) + '</span></div></div><div class="side-card"><h3>停止范围</h3><p class="muted">只停止这项工作未完成的派发；已保存观察保留，其他工作不受影响。</p></div></aside></div>'
+      el('refresh-work').addEventListener('click', () => runWorkAction('refresh', { clientRequestId: crypto.randomUUID() }))
+      el('cancel-work').addEventListener('click', () => runWorkAction('cancel', { clientRequestId: crypto.randomUUID() }))
+      el('follow-form').addEventListener('submit', async event => { event.preventDefault(); await runWorkAction('follow-up', { text: el('follow-text').value, clientRequestId: crypto.randomUUID() }) })
+    }
+    async function runWorkAction(action, body) {
+      if (!state.currentWork) return
+      const id = state.currentWork.id
+      try { state.currentWork = await api('/api/works/' + encodeURIComponent(id) + '/' + action, { method: 'POST', body: JSON.stringify(body) }); renderWork(); await reload(); startPolling() }
+      catch (error) { const target = el('work-message'); if (target) { target.textContent = error.message; target.classList.add('error') } }
+    }
+    function startPolling() {
+      stopPolling()
+      if (!state.currentWork || terminal(state.currentWork.status)) return
+      state.poll = setInterval(async () => { try { const latest = await api('/api/works/' + encodeURIComponent(state.currentWork.id)); state.currentWork = latest; renderWork(); if (terminal(latest.status)) { stopPolling(); await reload() } } catch {} }, 1000)
+    }
+    function stopPolling() { if (state.poll) { clearInterval(state.poll); state.poll = null } }
+    async function reload() { state.bootstrap = await api('/api/bootstrap'); renderSelectors(); renderCapability(); renderRecent(); renderEmployees() }
+    el('work-form').addEventListener('submit', async event => {
+      event.preventDefault(); const message = el('home-message'); message.className = 'message'; message.textContent = '正在核对员工、连接和来源…'
+      try { const work = await api('/api/works', { method: 'POST', body: JSON.stringify({ employeeId: el('employee').value, connectionId: el('connection').value, workOrderId: el('work-order').value, clientRequestId: crypto.randomUUID() }) }); await reload(); await openWork(work.id) }
+      catch (error) { message.textContent = error.message; message.classList.add('error') }
+    })
+    document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => show(button.dataset.view)))
+    reload().then(async () => { const params = new URLSearchParams(location.search); const id = params.get('work'); if (id) await openWork(id); else show(params.get('view') && titles[params.get('view')] ? params.get('view') : 'home', false) }).catch(error => { el('home-message').textContent = error.message; el('home-message').classList.add('error') })
+  </script>
+</body>
+</html>

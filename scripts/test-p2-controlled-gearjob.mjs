@@ -84,6 +84,16 @@ try {
   await disabled.close()
 }
 
+const customId = 'WO-26-00096'
+const custom = await startControlledGearJob({ env: { GENEWAY_P2_CONTROLLED_SOURCE_AUTHORIZATION: 'Bearer source-secret', GENEWAY_P2_CONTROLLED_WORK_ORDER_ID: customId } })
+try {
+  const response = await fetch(`${custom.address}/api/resource/Work%20Order/${customId}`, { headers: { authorization: 'Bearer source-secret' } })
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).data.name, customId)
+} finally {
+  await custom.close()
+}
+
 function requestJson(url, headers = {}) {
   return new Promise((resolve, reject) => {
     const pending = request(url, { headers }, response => {

@@ -6,6 +6,7 @@ export const CONTROLLED_WORK_ORDER_ID = 'GENEWAY-P2-SAME-001'
 const INITIAL_TIME = '2026-09-19T00:00:00.000Z'
 
 export async function startControlledGearJob({ env = process.env, port = Number(env.GENEWAY_P2_CONTROLLED_PORT ?? 0) } = {}) {
+  const workOrderId = controlledWorkOrderId(env.GENEWAY_P2_CONTROLLED_WORK_ORDER_ID)
   const sourceAuthorization = normalizeAuthorization(await readCredential(
     env.GENEWAY_P2_CONTROLLED_SOURCE_AUTHORIZATION,
     env.GENEWAY_P2_CONTROLLED_SOURCE_CREDENTIAL_FILE,
@@ -24,11 +25,11 @@ export async function startControlledGearJob({ env = process.env, port = Number(
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', 'http://controlled.invalid')
-      if (url.pathname === `/api/resource/Work%20Order/${CONTROLLED_WORK_ORDER_ID}` && request.method === 'GET') {
+      if (url.pathname === `/api/resource/Work%20Order/${encodeURIComponent(workOrderId)}` && request.method === 'GET') {
         authorize(request, sourceAuthorization, expectedHost)
         state.callCount += 1
         if (state.delayMs) await delay(state.delayMs)
-        return json(response, 200, { data: workOrder(state) })
+        return json(response, 200, { data: workOrder(state, workOrderId) })
       }
       if (url.pathname.startsWith('/api/resource/Work%20Order/') && request.method === 'GET') {
         authorize(request, sourceAuthorization, expectedHost)
@@ -36,7 +37,7 @@ export async function startControlledGearJob({ env = process.env, port = Number(
       }
       if (url.pathname === '/__control/state' && request.method === 'GET') {
         authorize(request, controlAuthorization)
-        return json(response, 200, publicState(state))
+        return json(response, 200, publicState(state, workOrderId))
       }
       if (url.pathname === '/__control/update' && request.method === 'POST') {
         authorize(request, controlAuthorization)
@@ -46,12 +47,12 @@ export async function startControlledGearJob({ env = process.env, port = Number(
         if (input.delayMs !== undefined) state.delayMs = integer(input.delayMs, 0, 30_000, 'delayMs')
         state.revision += 1
         state.sourceTime = revisionTime(state.revision)
-        return json(response, 200, publicState(state))
+        return json(response, 200, publicState(state, workOrderId))
       }
       if (url.pathname === '/__control/reset' && request.method === 'POST') {
         authorize(request, controlAuthorization)
         state = initialState()
-        return json(response, 200, publicState(state))
+        return json(response, 200, publicState(state, workOrderId))
       }
       return json(response, 404, { message: 'Not found' })
     } catch (error) {
@@ -74,9 +75,9 @@ function initialState() {
   return { plannedQuantity: 10, completedQuantity: 7, delayMs: 0, callCount: 0, revision: 1, sourceTime: INITIAL_TIME }
 }
 
-function workOrder(state) {
+function workOrder(state, workOrderId) {
   return {
-    name: CONTROLLED_WORK_ORDER_ID,
+    name: workOrderId,
     status: 'In Process',
     qty: state.plannedQuantity,
     produced_qty: state.completedQuantity,
@@ -91,8 +92,14 @@ function workOrder(state) {
   }
 }
 
-function publicState(state) {
-  return { ...state, workOrderId: CONTROLLED_WORK_ORDER_ID, controlled: true, sourceKind: 'Frappe-compatible controlled source' }
+function publicState(state, workOrderId) {
+  return { ...state, workOrderId, controlled: true, sourceKind: 'Frappe-compatible controlled source' }
+}
+
+function controlledWorkOrderId(value) {
+  const id = nonEmpty(value) || CONTROLLED_WORK_ORDER_ID
+  if (id.length > 140 || /[\u0000-\u001f\u007f/]/.test(id)) throw new Error('controlled work order id is invalid')
+  return id
 }
 
 function authorize(request, expected, expectedHost) {

@@ -1,8 +1,29 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { createServer } from 'node:http'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { shutdownServer } from '../src/server.mjs'
+
+let releaseServiceClose
+let serviceCloseStarted
+const closeStarted = new Promise(resolve => { serviceCloseStarted = resolve })
+const closeGate = new Promise(resolve => { releaseServiceClose = resolve })
+const heldServer = createServer((_request, response) => response.end('ok'))
+await new Promise(resolve => heldServer.listen(0, '127.0.0.1', resolve))
+const heldUrl = `http://127.0.0.1:${heldServer.address().port}/api/bootstrap`
+assert.equal((await fetch(heldUrl, { headers: { connection: 'close' } })).status, 200)
+const heldShutdown = shutdownServer(heldServer, { close: async () => { serviceCloseStarted(); await closeGate } })
+let heldShutdownSettled = false
+heldShutdown.finally(() => { heldShutdownSettled = true })
+await closeStarted
+await assert.rejects(() => fetch(heldUrl))
+await new Promise(resolve => setImmediate(resolve))
+assert.equal(heldShutdownSettled, false)
+releaseServiceClose()
+await heldShutdown
+await assert.rejects(() => fetch(heldUrl))
 
 const root = await mkdtemp(join(tmpdir(), 'geneway-shutdown-'))
 const port = 3499

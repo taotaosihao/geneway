@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { migrateState } from '../src/store/file-store.mjs'
+import { migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
 
 const execFile = promisify(execFileCallback)
 const repo = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -58,13 +58,14 @@ try {
   assert.equal(manifest.version, 2)
   assert.equal(manifest.candidate, 'p2-test-candidate')
   assert.deepEqual(manifest.schema, {
-    stateVersion: 4,
+    stateVersion: STATE_VERSION,
     members: 2,
     modelRoutes: 1,
     employees: 2,
     connections: 2,
     skills: 2,
     confirmations: 2,
+    knowledgeMaterials: 0,
     works: 5,
     sessionRefs: ['session-a', 'session-b', 'session-cycle'],
   })
@@ -124,6 +125,7 @@ try {
     ['employee-b', ['skill-cycle-time-calculate'], ['connection-b']],
   ])
   assert.equal(restoredState.confirmations.find(item => item.id === 'confirmation-revoked').status, 'revoked')
+  assert.deepEqual(restoredState.knowledgeMaterials, [])
   assert.deepEqual(restoredState.works.flatMap(item => item.results.map(result => result.kind)), [
     'gearjob.work-order.observation', 'assistant.follow-up', 'manufacturing.takt',
   ])
@@ -141,6 +143,7 @@ try {
   await run(['backup', '--output', stableBackup], { GENEWAY_STATE: stableStatePath, GENEWAY_DSH_HOME: dshHome })
   assert.equal(Buffer.compare(await readFile(join(stableBackup, 'state.json')), stableBytes), 0)
 
+  await verifyKnowledgeTransfer(state, dshHome, replayMarker, root)
   await rejectNonEmptyTarget(backup, statePath, dshHome, root)
   await rejectMaliciousManifests(backup, manifestPath, manifest, originalManifestText, root)
   await rejectSymlinksAndNonRegular(backup, manifestPath, originalManifestText, statePath, dshHome, root)
@@ -149,6 +152,53 @@ try {
   console.log('P2 state transfer checks passed')
 } finally {
   await rm(root, { recursive: true, force: true })
+}
+
+async function verifyKnowledgeTransfer(state, dshHome, replayMarker, root) {
+  const material = {
+    id: 'knowledge-transfer',
+    ownerMemberId: 'member-user',
+    employeeIds: ['employee-b'],
+    sharedMemberIds: ['member-admin'],
+    sharedEmployeeIds: ['employee-a'],
+    title: '进度复核说明',
+    body: '计划与完成量是业务事实，剩余时间由用户明确提供。',
+    format: 'markdown',
+    sourceLabel: 'P3 transfer fixture',
+    authorizationBasis: '用户明确提供并授权指定员工使用',
+    revision: 3,
+    status: 'active',
+    createdAt: '2026-09-19T05:00:00.000Z',
+    updatedAt: '2026-09-19T05:30:00.000Z',
+  }
+  const knowledgeState = { ...state, knowledgeMaterials: [material], works: state.works.slice(0, 2) }
+  assert.deepEqual(migrateState(structuredClone(knowledgeState)), knowledgeState)
+  const statePath = join(root, 'knowledge-state.json')
+  const backup = join(root, 'knowledge-backup')
+  const restored = join(root, 'knowledge-restored')
+  await writeFile(statePath, JSON.stringify(knowledgeState, null, 2) + '\n', { mode: 0o600 })
+  await run(['backup', '--output', backup], { GENEWAY_STATE: statePath, GENEWAY_DSH_HOME: dshHome })
+
+  const manifest = JSON.parse(await readFile(join(backup, 'manifest.json'), 'utf8'))
+  assert.equal(manifest.schema.stateVersion, STATE_VERSION)
+  assert.equal(manifest.schema.knowledgeMaterials, 1)
+  for (const entry of manifest.entries) {
+    const bytes = await readFile(join(backup, ...entry.path.split('/')))
+    assert.equal(entry.bytes, bytes.length)
+    assert.equal(entry.sha256, digest(bytes))
+  }
+  await assertModes(backup)
+
+  await run(['restore', '--input', backup, '--data-root', restored])
+  const restoredState = JSON.parse(await readFile(join(restored, 'state.json'), 'utf8'))
+  assert.deepEqual(restoredState.knowledgeMaterials, [material])
+  for (const entry of manifest.entries) {
+    const bytes = await readFile(join(restored, ...entry.path.split('/')))
+    assert.equal(entry.bytes, bytes.length)
+    assert.equal(entry.sha256, digest(bytes))
+  }
+  assert.equal(await exists(replayMarker), false)
+  await assertModes(restored)
 }
 
 async function rejectNonEmptyTarget(backup, statePath, dshHome, root) {
@@ -238,6 +288,15 @@ async function rejectSymlinksAndNonRegular(backup, manifestPath, originalManifes
 
 async function rejectSecretState(state, statePath, dshHome, root) {
   for (const [name, mutate, pattern] of [
+    ['password', value => { value.password = 'must-not-copy' }, /秘密字段：password/],
+    ['token', value => { value.accessToken = 'must-not-copy' }, /秘密字段：accessToken/],
+    ['secret', value => { value.apiSecret = 'must-not-copy' }, /秘密字段：apiSecret/],
+    ['verifier', value => { value.passwordVerifier = 'must-not-copy' }, /秘密字段：passwordVerifier/],
+    ['cookie', value => { value.browserCookie = 'must-not-copy' }, /秘密字段：browserCookie/],
+    ['grant', value => { value.executionGrant = 'must-not-copy' }, /秘密字段：executionGrant/],
+    ['grant-ref', value => { value.grantRef = 'must-not-copy' }, /秘密字段：grantRef/],
+    ['auth-ref-lookalike', value => { value.authorizationRef = 'must-not-copy' }, /秘密字段：authorizationRef/],
+    ['credential-ref-lookalike', value => { value.connectionCredentialRef = 'must-not-copy' }, /秘密字段：connectionCredentialRef/],
     ['api-key', value => { value.modelRoutes[0].apiKey = 'must-not-copy' }, /秘密字段：apiKey/],
     ['hmac', value => { value.hmacKey = 'must-not-copy' }, /秘密字段：hmacKey/],
     ['claude', value => { value.claudeSettings = { value: 'must-not-copy' } }, /秘密字段：claudeSettings/],
@@ -326,7 +385,7 @@ function fixtureState() {
     toolName: 'geneway_calculate_cycle_time', pluginId: 'geneway-cycle-time', pluginVersion: '2',
   }
   return {
-    version: 4,
+    version: STATE_VERSION,
     members: [
       { id: 'member-admin', loginName: 'admin', displayName: '管理员', role: 'admin', enabled: true, authRef: 'member-admin', sessionVersion: 3, employeeIds: ['employee-a', 'employee-b'] },
       { id: 'member-user', loginName: 'user', displayName: '成员', role: 'member', enabled: true, authRef: 'member-user', sessionVersion: 2, employeeIds: ['employee-b'] },
@@ -348,6 +407,7 @@ function fixtureState() {
       { id: 'confirmation-active', ownerMemberId: 'member-user', revision: 2, status: 'active', value: '白班' },
       { id: 'confirmation-revoked', ownerMemberId: 'member-user', revision: 3, status: 'revoked', revokedAt: '2026-09-19T03:00:00.000Z' },
     ],
+    knowledgeMaterials: [],
     works: [
       {
         id: 'work-gear', ownerMemberId: 'member-user', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', status: 'waiting_input',

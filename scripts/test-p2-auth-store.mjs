@@ -24,7 +24,8 @@ try {
 function checkMigration() {
   const original = v3Fixture()
   const migrated = migrateState(original)
-  assert.equal(migrated.version, 4)
+  assert.equal(migrated.version, 5)
+  assert.deepEqual(migrated.knowledgeMaterials, [])
   assert.equal(migrated.members[0].id, 'member-admin')
   assert.equal(migrated.members[0].role, 'admin')
   assert.equal(migrated.members[0].displayName, '旧操作者')
@@ -51,6 +52,10 @@ function checkMigration() {
   assert.equal(migrated.works[0].executions[1].resultFollowUpId, 'follow-stable')
   assert.ok(migrated.reservations['member-admin|keep'])
   assert.deepEqual(migrateState(structuredClone(migrated)), migrated)
+  const explicitV4 = structuredClone(migrated)
+  explicitV4.version = 4
+  delete explicitV4.knowledgeMaterials
+  assert.deepEqual(migrateState(explicitV4), migrated)
 
   const missingIds = v3Fixture()
   delete missingIds.works[0].observations[0].observationId
@@ -73,7 +78,7 @@ function checkMigration() {
     assert.throws(() => migrateState({ version: 3, [key]: {} }), new RegExp(key))
   }
   assert.throws(() => migrateState({ version: 3, reservations: [] }), /reservations/)
-  assert.throws(() => migrateState({ version: 5 }), /未来/)
+  assert.throws(() => migrateState({ version: 6 }), /未来/)
   assert.throws(() => migrateState({ version: '5' }), /版本无效/)
   assert.throws(() => migrateState({ version: 2 }), /不支持产品状态版本/)
   assert.throws(() => migrateState({ ...original, employees: [{ ...original.employees[0], skillIds: {} }] }), /skillIds/)
@@ -124,7 +129,9 @@ async function checkMigrationFailureDoesNotWrite() {
   assert.equal((await stat(newStateDirectory)).mode & 0o077, 0)
   assert.equal((await stat(newStatePath)).mode & 0o077, 0)
 
-  for (const state of [{ ...v3Fixture(), works: {} }, { version: 5 }]) {
+  const damagedV5 = migrateState(v3Fixture())
+  damagedV5.knowledgeMaterials = {}
+  for (const state of [{ ...v3Fixture(), works: {} }, damagedV5, { version: 6 }]) {
     const statePath = join(root, `failure-${Math.random()}.json`)
     const raw = JSON.stringify(state)
     await writeFile(statePath, raw, { mode: 0o600 })
@@ -139,7 +146,8 @@ async function checkMigrationFailureDoesNotWrite() {
   const store = createFileStore(statePath)
   await store.update(state => state)
   const persisted = JSON.parse(await readFile(statePath, 'utf8'))
-  assert.equal(persisted.version, 4)
+  assert.equal(persisted.version, 5)
+  assert.deepEqual(persisted.knowledgeMaterials, [])
   assert.equal(JSON.stringify(persisted).includes('"observations"'), false)
   assert.equal(JSON.stringify(persisted).includes('"followUps"'), false)
 }

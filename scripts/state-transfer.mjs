@@ -198,7 +198,7 @@ function visit(value, inspect, key = '') {
 function assertNoSecretKeys(state) {
   visit(state, key => {
     const compact = key.toLowerCase().replaceAll(/[^a-z0-9]/g, '')
-    if (!compact || compact.endsWith('ref')) return
+    if (!compact || ['authref', 'credentialref', 'secretref', 'authorizationbasis'].includes(compact)) return
     if (/password|verifier|secret|token$|cookie|grant|apikey|apisecret|hmac|claude|credential|^auth/.test(compact)) throw new Error(`产品状态包含秘密字段：${key}`)
   })
 }
@@ -213,6 +213,7 @@ function schemaSummary(state, sessionRefs) {
     connections: count('connections'),
     skills: count('skills'),
     confirmations: count('confirmations'),
+    knowledgeMaterials: count('knowledgeMaterials'),
     works: count('works'),
     sessionRefs,
   }

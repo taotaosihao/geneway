@@ -1,7 +1,15 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
-export const STATE_VERSION = 4
+export const STATE_VERSION = 5
+export const KNOWLEDGE_LIMITS = Object.freeze({
+  maxMaterials: 100,
+  maxBodyBytes: 32 * 1024,
+  maxTotalBodyBytes: Math.floor(3.2 * 1024 * 1024),
+  maxTitleCharacters: 200,
+  maxSourceCharacters: 500,
+  maxAuthorizationCharacters: 1000,
+})
 
 const ADMIN_MEMBER_ID = 'member-admin'
 const GEARJOB_CAPABILITY_ID = 'gearjob-work-order-read'
@@ -23,6 +31,7 @@ const EMPTY_STATE = {
   connections: [],
   skills: [],
   confirmations: [],
+  knowledgeMaterials: [],
   works: [],
   reservations: {},
 }
@@ -62,9 +71,10 @@ export function migrateState(value) {
   if (value.version !== undefined && !Number.isInteger(value.version)) throw new Error('产品状态版本无效')
   const version = value.version ?? 3
   if (version > STATE_VERSION) throw new Error(`不支持未来产品状态版本：${version}`)
-  if (version === STATE_VERSION) return normalizeV4(value)
-  if (version !== 3) throw new Error(`不支持产品状态版本：${version}`)
-  return migrateV3(value)
+  if (version === STATE_VERSION) return normalizeV5(value)
+  if (version === 4) return migrateV4(value)
+  if (version === 3) return migrateV4(migrateV3(value))
+  throw new Error(`不支持产品状态版本：${version}`)
 }
 
 function migrateV3(value) {
@@ -93,7 +103,7 @@ function migrateV3(value) {
   const { operator: _operator, ...rest } = value
   return normalizeV4({
     ...rest,
-    version: STATE_VERSION,
+    version: 4,
     members: [admin],
     modelRoutes,
     employees: migratedEmployees,
@@ -103,6 +113,10 @@ function migrateV3(value) {
     works: works.map(migrateWork),
     reservations: migrateReservations(reservations, value.operator?.id),
   })
+}
+
+function migrateV4(value) {
+  return normalizeV5({ ...normalizeV4(value), version: STATE_VERSION, knowledgeMaterials: [] })
 }
 
 function migrateEmployee(employee) {
@@ -242,7 +256,7 @@ function migrateFollowUp(work, followUp, index) {
   })
 }
 
-function normalizeV4(value) {
+function normalizeV4(value, { allowKnowledgeDependencyRefs = false } = {}) {
   const members = requiredArray(value, 'members').map(member => {
     if (!record(member)) throw new Error('成员状态无效')
     if (!['admin', 'member'].includes(member.role)) throw new Error('成员角色无效')
@@ -266,7 +280,7 @@ function normalizeV4(value) {
     requiredText(work.employeeId, `工作 ${workId} employeeId 无效`)
     requiredText(work.skillId, `工作 ${workId} skillId 无效`)
     requiredText(work.capabilityId, `工作 ${workId} capabilityId 无效`)
-    const results = requiredArray(work, 'results').map(normalizeResult)
+    const results = requiredArray(work, 'results').map(result => normalizeResult(result, { allowKnowledgeDependencyRefs }))
     uniqueIds(results, `工作 ${workId} 的结果`)
     const resultIds = new Set(results.map(result => result.id))
     const executions = requiredArray(work, 'executions').map(execution => {
@@ -295,7 +309,7 @@ function normalizeV4(value) {
   const { operator: _operator, ...rest } = value
   return {
     ...rest,
-    version: STATE_VERSION,
+    version: 4,
     members,
     modelRoutes,
     employees,
@@ -307,9 +321,76 @@ function normalizeV4(value) {
   }
 }
 
-function normalizeResult(result) {
+function normalizeV5(value) {
+  const { knowledgeMaterials: _knowledgeMaterials, ...legacy } = value
+  const common = normalizeV4({ ...legacy, version: 4 }, { allowKnowledgeDependencyRefs: true })
+  const knowledgeMaterials = requiredArray(value, 'knowledgeMaterials').map(normalizeKnowledgeMaterial)
+  uniqueIds(knowledgeMaterials, '知识材料')
+  const activeMaterials = knowledgeMaterials.filter(item => item.status === 'active')
+  if (activeMaterials.length > KNOWLEDGE_LIMITS.maxMaterials) throw new Error('活动知识材料超过数量上限')
+  if (activeMaterials.reduce((sum, item) => sum + Buffer.byteLength(item.body, 'utf8'), 0) > KNOWLEDGE_LIMITS.maxTotalBodyBytes) throw new Error('活动知识材料超过总容量上限')
+
+  const memberIds = new Set(common.members.map(item => item.id))
+  const employeeIds = new Set(common.employees.map(item => item.id))
+  for (const material of knowledgeMaterials) {
+    if (!memberIds.has(material.ownerMemberId)) throw new Error(`知识材料 ${material.id} ownerMemberId 不存在`)
+    if (material.status === 'deleted') continue
+    for (const id of [...material.employeeIds, ...material.sharedEmployeeIds]) {
+      if (!employeeIds.has(id)) throw new Error(`知识材料 ${material.id} 引用不存在的员工：${id}`)
+    }
+    for (const id of material.sharedMemberIds) {
+      if (!memberIds.has(id)) throw new Error(`知识材料 ${material.id} 引用不存在的成员：${id}`)
+    }
+  }
+  const materialById = new Map(knowledgeMaterials.map(item => [item.id, item]))
+  for (const result of common.works.flatMap(work => work.results)) {
+    for (const ref of result.knowledgeDependencyRefs ?? []) {
+      const material = materialById.get(ref.knowledgeId)
+      if (!material) throw new Error(`结果 ${result.id} 引用不存在的知识：${ref.knowledgeId}`)
+      if (ref.revision > material.revision) throw new Error(`结果 ${result.id} 知识引用 revision 超前`)
+    }
+  }
+
+  return { ...common, version: STATE_VERSION, knowledgeMaterials }
+}
+
+function normalizeKnowledgeMaterial(material) {
+  if (!record(material)) throw new Error('知识材料状态无效')
+  const id = requiredText(material.id, '知识材料 ID 无效')
+  const ownerMemberId = requiredText(material.ownerMemberId, `知识材料 ${id} ownerMemberId 无效`)
+  if (!Number.isSafeInteger(material.revision) || material.revision < 1) throw new Error(`知识材料 ${id} revision 无效`)
+  if (!['active', 'deleted'].includes(material.status)) throw new Error(`知识材料 ${id} 状态无效`)
+  requiredText(material.createdAt, `知识材料 ${id} createdAt 无效`)
+  requiredText(material.updatedAt, `知识材料 ${id} updatedAt 无效`)
+
+  if (material.status === 'deleted') {
+    exactKeys(material, ['id', 'ownerMemberId', 'revision', 'status', 'createdAt', 'updatedAt', 'deletedAt'], `知识材料 ${id} tombstone`)
+    requiredText(material.deletedAt, `知识材料 ${id} deletedAt 无效`)
+    return material
+  }
+
+  exactKeys(material, ['id', 'ownerMemberId', 'employeeIds', 'sharedMemberIds', 'sharedEmployeeIds', 'title', 'body', 'format', 'sourceLabel', 'authorizationBasis', 'revision', 'status', 'createdAt', 'updatedAt'], `知识材料 ${id}`)
+  const employeeIds = uniqueTextArray(material.employeeIds, `知识材料 ${id} employeeIds`)
+  if (!employeeIds.length) throw new Error(`知识材料 ${id} 至少需要一名员工`)
+  const sharedMemberIds = uniqueTextArray(material.sharedMemberIds, `知识材料 ${id} sharedMemberIds`)
+  const sharedEmployeeIds = uniqueTextArray(material.sharedEmployeeIds, `知识材料 ${id} sharedEmployeeIds`)
+  if (Boolean(sharedMemberIds.length) !== Boolean(sharedEmployeeIds.length)) throw new Error(`知识材料 ${id} 共享成员与员工必须同时设置`)
+  const title = requiredRawText(material.title, `知识材料 ${id} 标题无效`)
+  const body = requiredRawText(material.body, `知识材料 ${id} 正文无效`)
+  const sourceLabel = requiredRawText(material.sourceLabel, `知识材料 ${id} 来源无效`)
+  const authorizationBasis = requiredRawText(material.authorizationBasis, `知识材料 ${id} 授权依据无效`)
+  if (![title, body, sourceLabel, authorizationBasis].every(item => item.isWellFormed())) throw new Error(`知识材料 ${id} 必须是有效 Unicode 文本`)
+  if (Buffer.byteLength(body, 'utf8') > KNOWLEDGE_LIMITS.maxBodyBytes) throw new Error(`知识材料 ${id} 正文超过容量上限`)
+  if (Array.from(title).length > KNOWLEDGE_LIMITS.maxTitleCharacters) throw new Error(`知识材料 ${id} 标题过长`)
+  if (!['text', 'markdown'].includes(material.format)) throw new Error(`知识材料 ${id} 格式无效`)
+  if (Array.from(sourceLabel).length > KNOWLEDGE_LIMITS.maxSourceCharacters) throw new Error(`知识材料 ${id} 来源过长`)
+  if (Array.from(authorizationBasis).length > KNOWLEDGE_LIMITS.maxAuthorizationCharacters) throw new Error(`知识材料 ${id} 授权依据过长`)
+  return { ...material, employeeIds, sharedMemberIds, sharedEmployeeIds }
+}
+
+function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) {
   if (!record(result)) throw new Error('结果状态无效')
-  exactKeys(result, ['id', 'kind', 'capabilityId', 'skillId', 'schemaVersion', 'input', 'payload', 'explanation', 'source', 'createdAt', 'toolName', 'pluginId', 'pluginVersion', 'dshSessionRef', 'continuedFromDshSessionRef', 'contextObservationId', 'continuity', 'contextConfirmationRefs'], '结果')
+  exactKeys(result, ['id', 'kind', 'capabilityId', 'skillId', 'schemaVersion', 'input', 'payload', 'explanation', 'source', 'createdAt', 'toolName', 'pluginId', 'pluginVersion', 'dshSessionRef', 'continuedFromDshSessionRef', 'contextObservationId', 'continuity', 'contextConfirmationRefs', ...(allowKnowledgeDependencyRefs ? ['knowledgeDependencyRefs'] : [])], '结果')
   const id = requiredText(result.id, '结果 ID 无效')
   const kind = requiredText(result.kind, `结果 ${id} 类型无效`)
   if (!RESULT_KINDS.has(kind)) throw new Error(`结果 ${id} 类型不受支持：${kind}`)
@@ -332,6 +413,20 @@ function normalizeResult(result) {
     exactKeys(ref, ['id', 'revision'], `结果 ${id} confirmation ref`)
     requiredText(ref.id, `结果 ${id} confirmation ref ID 无效`)
     if (!Number.isSafeInteger(ref.revision) || ref.revision < 1) throw new Error(`结果 ${id} confirmation ref revision 无效`)
+  }
+  if (result.knowledgeDependencyRefs !== undefined) {
+    if (!Array.isArray(result.knowledgeDependencyRefs)) throw new Error(`结果 ${id} knowledge dependency refs 无效`)
+    const keys = new Set()
+    for (const ref of result.knowledgeDependencyRefs) {
+      if (!record(ref)) throw new Error(`结果 ${id} knowledge dependency ref 无效`)
+      exactKeys(ref, ['knowledgeId', 'revision', 'segmentId'], `结果 ${id} knowledge dependency ref`)
+      const knowledgeId = requiredText(ref.knowledgeId, `结果 ${id} knowledgeId 无效`)
+      if (!Number.isSafeInteger(ref.revision) || ref.revision < 1) throw new Error(`结果 ${id} knowledge revision 无效`)
+      const segmentId = requiredText(ref.segmentId, `结果 ${id} segmentId 无效`)
+      const key = `${knowledgeId}\0${ref.revision}\0${segmentId}`
+      if (keys.has(key)) throw new Error(`结果 ${id} knowledge dependency ref 重复`)
+      keys.add(key)
+    }
   }
   if (kind === 'gearjob.work-order.observation') {
     exactKeys(result.input, ['workOrderId'], `结果 ${id} 输入`)
@@ -464,9 +559,21 @@ function requiredText(value, message) {
   return result
 }
 
+function requiredRawText(value, message) {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(message)
+  return value
+}
+
 function uniqueIds(items, label) {
   const ids = items.map(item => requiredText(item.id, `${label} ID 无效`))
   if (new Set(ids).size !== ids.length) throw new Error(`${label} ID 重复`)
+}
+
+function uniqueTextArray(value, label) {
+  if (!Array.isArray(value)) throw new Error(`${label} 必须是数组`)
+  const items = value.map(item => requiredText(item, `${label} 无效`))
+  if (new Set(items).size !== items.length) throw new Error(`${label} 重复`)
+  return items
 }
 
 function exactKeys(value, allowed, label) {

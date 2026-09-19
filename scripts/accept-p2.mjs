@@ -64,7 +64,7 @@ try {
 
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
   await waitFor(`document.querySelector('#login-shell:not(.hidden)')`)
-  await login(evaluate, waitFor, 'admin', adminPassword, 'admin')
+  await login(send, evaluate, waitFor, 'admin', adminPassword, 'admin')
 
   const configured = await evaluate(`(async()=>{
     const route=await api('/api/admin/model-routes',{method:'POST',body:{id:'model-zenmux',provider:'zenmux',model:'deepseek/deepseek-v4-pro',displayName:'ZenMux · DeepSeek V4 Pro',enabled:true,credentialRef:'ZENMUX_API_KEY'}})
@@ -90,7 +90,7 @@ try {
 
   await evaluate(`show('home');document.querySelector('#logout').click()`)
   await waitFor(`document.querySelector('#login-shell:not(.hidden)')`)
-  await login(evaluate, waitFor, 'member', memberPassword, 'member')
+  await login(send, evaluate, waitFor, 'member', memberPassword, 'member')
   const memberBoundary = await evaluate(`(async()=>{let adminStatus;try{await api('/api/admin/members');adminStatus=200}catch(error){adminStatus=error.status}return {adminStatus,visibleAdmin:document.querySelectorAll('.admin-only:not(.hidden)').length,role:state.session.role}})()`)
   if (memberBoundary.role !== 'member' || memberBoundary.adminStatus !== 403 || memberBoundary.visibleAdmin !== 0) throw new Error('member admin boundary failed')
 
@@ -109,7 +109,7 @@ try {
   server = await startServer()
   await send('Page.reload', { ignoreCache: true })
   await waitFor(`document.querySelector('#login-shell:not(.hidden)')`)
-  await login(evaluate, waitFor, 'member', memberPassword, 'member')
+  await login(send, evaluate, waitFor, 'member', memberPassword, 'member')
   await waitFor(`state.currentWork?.id===${JSON.stringify(waitingId)} && state.currentWork.status==='waiting_input'`)
   await evaluate(`document.querySelector('#continue-order').value=${JSON.stringify(workOrderId)};document.querySelector('#continue-form').requestSubmit()`)
   await waitFor(`state.currentWork?.id===${JSON.stringify(waitingId)} && state.currentWork.status==='completed'`, 180_000)
@@ -158,13 +158,13 @@ try {
 
   await evaluate(`show('home');document.querySelector('#logout').click()`)
   await waitFor(`document.querySelector('#login-shell:not(.hidden)')`)
-  await login(evaluate, waitFor, 'admin', adminPassword, 'admin')
+  await login(send, evaluate, waitFor, 'admin', adminPassword, 'admin')
   const ownerIsolation = await evaluate(`(async()=>{const response=await fetch('/api/works/'+${JSON.stringify(waitingId)});return {status:response.status,visibleWorks:state.bootstrap.works.length}})()`)
   if (ownerIsolation.status !== 404 || ownerIsolation.visibleWorks !== 0) throw new Error(`owner isolation failed: ${JSON.stringify(ownerIsolation)}`)
 
   await evaluate(`document.querySelector('#logout').click()`)
   await waitFor(`document.querySelector('#login-shell:not(.hidden)')`)
-  await login(evaluate, waitFor, 'member', memberPassword, 'member')
+  await login(send, evaluate, waitFor, 'member', memberPassword, 'member')
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
   await evaluate(`(async()=>{await openWork(${JSON.stringify(waitingId)})})()`)
   await waitFor(`state.currentWork?.id===${JSON.stringify(waitingId)} && document.querySelector('#work-detail').innerText.includes('40%')`)
@@ -200,9 +200,11 @@ try {
   await rm(scratch, { recursive: true, force: true })
 }
 
-async function login(evaluate, waitFor, loginName, password, role) {
+async function login(send, evaluate, waitFor, loginName, password, role) {
   await evaluate(`(()=>{document.querySelector('#login-name').value=${JSON.stringify(loginName)};document.querySelector('#login-password').value=${JSON.stringify(password)};document.querySelector('#login-form').requestSubmit()})()`)
   await waitFor(`state.session?.loginName===${JSON.stringify(loginName)} && state.session?.role===${JSON.stringify(role)}`, 30_000)
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape' })
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape' })
 }
 
 async function createWork(evaluate, waitFor, options) {
@@ -322,11 +324,17 @@ async function ensureBrowser() {
     await new Promise(resolveWait => setTimeout(resolveWait, 500))
     if (xvfb.exitCode !== null) throw new Error('Xvfb failed to start')
   }
+  const chromeProfile = join(scratch, 'chrome')
+  await mkdir(join(chromeProfile, 'Default'), { recursive: true, mode: 0o700 })
+  await writeFile(join(chromeProfile, 'Default', 'Preferences'), JSON.stringify({
+    credentials_enable_service: false,
+    profile: { password_manager_enabled: false },
+  }), { mode: 0o600 })
   const chrome = spawn('google-chrome', [
     '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
     '--disable-save-password-bubble', '--password-store=basic', '--disable-features=PasswordManagerOnboarding,PasswordLeakDetection',
     '--window-size=1440,900', '--window-position=0,0', '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${debuggingPort}`,
-    `--user-data-dir=${join(scratch, 'chrome')}`, 'about:blank',
+    `--user-data-dir=${chromeProfile}`, 'about:blank',
   ], { env: { ...process.env, DISPLAY: display }, stdio: 'ignore' })
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (chrome.exitCode !== null) throw new Error('Chrome failed to start')

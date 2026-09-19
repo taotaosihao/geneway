@@ -60,9 +60,13 @@ server.listen(port, host, () => console.log(`Geneway listening on http://${host}
 process.once('SIGTERM', () => shutdown(0))
 process.once('SIGINT', () => shutdown(0))
 
+let shuttingDown = false
 async function shutdown(code) {
+  if (shuttingDown) return
+  shuttingDown = true
+  await new Promise(resolveClose => server.close(resolveClose))
   await service.close().catch(() => undefined)
-  server.close(() => process.exit(code))
+  process.exit(code)
 }
 
 function resultResponse(response, result) {

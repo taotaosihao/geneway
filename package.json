@@ -13,7 +13,7 @@
     "probe:dsh-sdk": "node scripts/probe-dsh-sdk.mjs",
     "probe:p1-runtime": "node scripts/probe-p1-runtime.mjs",
     "test:unit": "node scripts/test-domain.mjs",
-    "test:service": "node scripts/test-service.mjs",
+    "test:service": "node scripts/test-service.mjs && node scripts/test-shutdown.mjs",
     "test:controlled": "node scripts/test-controlled.mjs",
     "accept:p1": "node scripts/accept-p1.mjs",
     "backup": "node scripts/state-transfer.mjs backup",

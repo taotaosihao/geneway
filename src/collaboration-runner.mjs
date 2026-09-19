@@ -69,7 +69,11 @@ export function createCollaborationRunner({
       const entry = { controller, generation: rootWork.collaboration.generation, handles: new Set(), runs: new Set(), promise: undefined }
       entry.promise = executeRoot(rootWorkId, rootWork.collaboration.generation, entry)
         .catch(async error => { await failRoot(rootWorkId, rootWork.collaboration.generation, error); onError(error); throw error })
-        .finally(async () => { await disposeEntry(entry); activeRoots.delete(rootWorkId) })
+        .finally(async () => {
+          await disposeEntry(entry)
+          activeRoots.delete(rootWorkId)
+          testHooks.afterRootDispose?.({ rootWorkId, active: activeRoots.has(rootWorkId) })
+        })
       activeRoots.set(rootWorkId, entry)
       return entry.promise
     },
@@ -178,7 +182,7 @@ export function createCollaborationRunner({
         if (!decision.ok) throw decision.error
         const binding = bindings.get(current)
         try {
-          await testHooks.beforeAgentRequest?.({ binding, agent: current })
+          await untilAbort(Promise.resolve(testHooks.beforeAgentRequest?.({ binding, agent: current })), signal)
           await authorize(binding, { reserveRequest: true })
           await validateRequestContext(binding, current)
         }
@@ -226,7 +230,7 @@ export function createCollaborationRunner({
     rootHandle.agent.ctx.on('agent/request', async ({ agent, signal }, next) => {
       if (bindings.get(agent) !== rootBinding || signal.aborted) throw runtimeError('CANCELLED', '协作根执行已停止')
       try {
-        await testHooks.beforeAgentRequest?.({ binding: rootBinding, agent })
+        await untilAbort(Promise.resolve(testHooks.beforeAgentRequest?.({ binding: rootBinding, agent })), signal)
         await authorize(rootBinding, { reserveRequest: true })
         await validateRequestContext(rootBinding, agent)
       }
@@ -315,7 +319,7 @@ export function createCollaborationRunner({
       if (knowledgeDependent) knowledgeSelections.set(run.localAgent, { allowlist: new Map(), selected: [] })
       await bindSession(binding, run.id, 'running')
       gate.gate.resolve({ ok: true })
-      const result = await run.result
+      const result = await untilAbort(testHooks.childResult?.({ binding, run, signal }) ?? run.result, signal)
       const events = run.localAgent.session.snapshotEvents()
       const requestFailure = requestFailures.get(run.localAgent)
       if (requestFailure) throw requestFailure
@@ -327,14 +331,18 @@ export function createCollaborationRunner({
       await finishChild(binding, parsed, events, knowledgeSelections.get(run.localAgent)?.selected ?? [])
       return true
     } catch (error) {
+      const failure = signal.aborted && signal.reason?.name === 'TimeoutError'
+        ? runtimeError('UPSTREAM_TIMEOUT', '协作子工作超时')
+        : error
       const gate = run && gates.get(run.id)
-      if (gate && !gate.gate.settled()) gate.gate.resolve({ ok: false, error })
-      await failChild(child.id, execution.id, generation, error)
-      throw error
+      if (gate && !gate.gate.settled()) gate.gate.resolve({ ok: false, error: failure })
+      await failChild(child.id, execution.id, generation, failure)
+      throw failure
     } finally {
       if (run) {
         entry.runs.delete(run)
         await run.dispose().catch(() => undefined)
+        testHooks.afterChildDispose?.({ workId: child.id, runId: run.id })
       }
     }
   }

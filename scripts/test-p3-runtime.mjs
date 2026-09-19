@@ -415,6 +415,85 @@ try {
   assert.equal(timeoutFailed.executions.at(-1).error.code, 'UPSTREAM_TIMEOUT')
   capture.release('item-timeout')
 
+  capture.hold('item-native-timeout')
+  const nativeTimeout = await create(deferredService, actor, 'native-timeout', [item('item-native-timeout', 'employee-b', 90, 3)])
+  const nativeTimeoutState = await store.read()
+  const nativeTimeoutChild = nativeTimeoutState.works.find(work => work.rootWorkId === nativeTimeout.value.id)
+  await store.update(state => ({ ...state, works: state.works.map(work => work.id === nativeTimeout.value.id ? { ...work, collaboration: { ...work.collaboration, childTimeoutMs: 100 } } : work) }))
+  let nativeTimeoutDisposals = 0
+  const cleanedRoots = []
+  runtimeHooks.childResult = ({ binding }) => binding.workId === nativeTimeoutChild.id ? new Promise(() => undefined) : undefined
+  runtimeHooks.afterChildDispose = ({ workId }) => { if (workId === nativeTimeoutChild.id) nativeTimeoutDisposals += 1 }
+  runtimeHooks.afterRootDispose = snapshot => { cleanedRoots.push(snapshot) }
+  const nativeTimeoutRun = runner.run(nativeTimeout.value.id).catch(() => undefined)
+  await capture.waitFor('item-native-timeout')
+  const timeoutIndependent = await create(service, actor, 'timeout-independent', [item('item-timeout-independent', 'employee-b', 60, 1)])
+  assert.equal((await waitFor(service, actor, timeoutIndependent.value.id, work => work.status === 'completed')).status, 'completed')
+  await nativeTimeoutRun
+  const nativeTimeoutFailed = (await deferredService.getWork(actor, nativeTimeout.value.id)).value
+  const nativeTimeoutFailedChild = (await store.read()).works.find(work => work.id === nativeTimeoutChild.id)
+  assert.equal(nativeTimeoutFailed.status, 'failed')
+  assert.equal(nativeTimeoutFailed.executions.at(-1).error.code, 'UPSTREAM_TIMEOUT')
+  assert.equal(nativeTimeoutFailedChild.executions.at(-1).error.code, 'UPSTREAM_TIMEOUT')
+  assert.equal(nativeTimeoutDisposals, 1)
+  assert.equal(cleanedRoots.some(entry => entry.rootWorkId === nativeTimeout.value.id && entry.active === false), true)
+  delete runtimeHooks.childResult
+  delete runtimeHooks.afterChildDispose
+  delete runtimeHooks.afterRootDispose
+  capture.release('item-native-timeout')
+
+  const requestHookTimeout = await create(deferredService, actor, 'request-hook-timeout', [item('item-request-hook-timeout', 'employee-b', 90, 3)])
+  const requestHookTimeoutChild = (await store.read()).works.find(work => work.rootWorkId === requestHookTimeout.value.id)
+  await store.update(state => ({ ...state, works: state.works.map(work => work.id === requestHookTimeout.value.id ? { ...work, collaboration: { ...work.collaboration, childTimeoutMs: 100 } } : work) }))
+  let requestHookEnteredResolve
+  const requestHookEntered = new Promise(resolve => { requestHookEnteredResolve = resolve })
+  let requestHookDisposals = 0
+  const requestHookCleanups = []
+  runtimeHooks.beforeAgentRequest = ({ binding }) => {
+    if (binding.kind !== 'child' || binding.workId !== requestHookTimeoutChild.id) return undefined
+    requestHookEnteredResolve()
+    return new Promise(() => undefined)
+  }
+  runtimeHooks.afterChildDispose = ({ workId }) => { if (workId === requestHookTimeoutChild.id) requestHookDisposals += 1 }
+  runtimeHooks.afterRootDispose = snapshot => { requestHookCleanups.push(snapshot) }
+  const requestHookTimeoutRun = runner.run(requestHookTimeout.value.id).catch(() => undefined)
+  await requestHookEntered
+  const requestHookIndependent = await create(service, actor, 'request-hook-independent', [item('item-request-hook-independent', 'employee-b', 60, 1)])
+  assert.equal((await waitFor(service, actor, requestHookIndependent.value.id, work => work.status === 'completed')).status, 'completed')
+  await requestHookTimeoutRun
+  const requestHookTimeoutFailed = (await deferredService.getWork(actor, requestHookTimeout.value.id)).value
+  const requestHookTimeoutFailedChild = (await store.read()).works.find(work => work.id === requestHookTimeoutChild.id)
+  assert.equal(requestHookTimeoutFailed.executions.at(-1).error.code, 'UPSTREAM_TIMEOUT')
+  assert.equal(requestHookTimeoutFailedChild.executions.at(-1).error.code, 'UPSTREAM_TIMEOUT')
+  assert.equal(requestHookDisposals, 1)
+  assert.equal(requestHookCleanups.some(entry => entry.rootWorkId === requestHookTimeout.value.id && entry.active === false), true)
+  delete runtimeHooks.beforeAgentRequest
+  delete runtimeHooks.afterChildDispose
+  delete runtimeHooks.afterRootDispose
+
+  const rootHookCancellation = await create(deferredService, actor, 'root-hook-cancellation', [item('item-root-hook-cancellation', 'employee-b', 60, 1)])
+  let rootHookEnteredResolve
+  const rootHookEntered = new Promise(resolve => { rootHookEnteredResolve = resolve })
+  const rootHookCleanups = []
+  runtimeHooks.beforeAgentRequest = ({ binding }) => {
+    if (binding.kind !== 'root' || binding.rootWorkId !== rootHookCancellation.value.id) return undefined
+    rootHookEnteredResolve()
+    return new Promise(() => undefined)
+  }
+  runtimeHooks.afterRootDispose = snapshot => { rootHookCleanups.push(snapshot) }
+  const rootHookRun = runner.run(rootHookCancellation.value.id).catch(() => undefined)
+  await rootHookEntered
+  const rootHookIndependent = await create(service, actor, 'root-hook-independent', [item('item-root-hook-independent', 'employee-b', 60, 1)])
+  assert.equal((await waitFor(service, actor, rootHookIndependent.value.id, work => work.status === 'completed')).status, 'completed')
+  assert.equal((await deferredService.cancel(actor, rootHookCancellation.value.id)).accepted, true)
+  await rootHookRun
+  const rootHookCancelled = (await deferredService.getWork(actor, rootHookCancellation.value.id)).value
+  assert.equal(rootHookCancelled.status, 'cancelled')
+  assert.equal(rootHookCancelled.executions.at(-1).error.code, 'CANCELLED')
+  assert.equal(rootHookCleanups.some(entry => entry.rootWorkId === rootHookCancellation.value.id && entry.active === false), true)
+  delete runtimeHooks.beforeAgentRequest
+  delete runtimeHooks.afterRootDispose
+
   const admin = { id: 'member-admin' }
   await service.updateMember(admin, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-revoked', 'employee-incompatible'] })
   assert.equal((await service.getWork(actor, remountedKnowledge.value.id)).value.collaboration.status, 'stale')

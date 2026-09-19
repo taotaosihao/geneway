@@ -69,6 +69,7 @@ try {
   const mobile = await evaluate(`({innerWidth,scrollWidth:document.documentElement.scrollWidth,hasSource:document.body.innerText.includes('GearJob 外部测试'),has40:document.body.innerText.includes('40%')})`)
   if (mobile.innerWidth !== 390 || mobile.scrollWidth !== 390 || !mobile.hasSource || !mobile.has40) throw new Error('mobile contract failed')
   if (browserErrors.length) throw new Error(`browser emitted ${browserErrors.length} error(s): ${browserErrors[0]}`)
+  await new Promise(resolve => setTimeout(resolve, 2_000))
 
   if (recordPath) {
     const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })

@@ -167,7 +167,7 @@ async function browserJourney(ownerSession, runtimeCapture, runtime) {
   await writeFile(files.extensionless, 'no suffix')
   await writeFile(files.invalid, Buffer.from([0xff, 0xfe, 0xfd]))
   await writeFile(files.large, '甲'.repeat(11_000))
-  browser = spawn('/usr/bin/google-chrome', ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${userData}`, `--remote-debugging-port=${debuggingPort}`, '--remote-debugging-address=127.0.0.1', '--window-size=1440,900', origin], { stdio: 'ignore' })
+  browser = spawn('/usr/bin/google-chrome', ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${userData}`, `--remote-debugging-port=${debuggingPort}`, '--remote-debugging-address=127.0.0.1', '--window-size=1440,900', `--app=${origin}`], { stdio: 'ignore' })
   const target = await browserTarget(debuggingPort, origin), socket = new WebSocket(target.webSocketDebuggerUrl), pending = new Map(), browserErrors = [], failedRequests = [], requests = new Map(), responses = []
   let sequence = 0
   await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }) })
@@ -177,8 +177,8 @@ async function browserJourney(ownerSession, runtimeCapture, runtime) {
   const pressTab=async()=>{await send('Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9})}
   const tabTo=async selector=>{for(let index=0;index<120;index+=1){if(await evaluate(`document.activeElement?.matches(${JSON.stringify(selector)})`)){const focus=await evaluate(`({name:document.activeElement.getAttribute('aria-label')||document.activeElement.innerText||document.activeElement.labels?.[0]?.innerText||'',outline:getComputedStyle(document.activeElement).outlineWidth})`);assert.equal(Boolean(focus.name.trim())&&focus.outline!=='0px',true);return}await pressTab()}throw new Error(`keyboard focus target not reached: ${selector}`)}
   const keyboardActivate=async selector=>{await tabTo(selector);await send('Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});await send('Input.dispatchKeyEvent',{type:'char',key:'Enter',code:'Enter',text:'\r',unmodifiedText:'\r',windowsVirtualKeyCode:13});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13})}
-  const visibleEngineeringPattern=/[0-9a-f]{8}-[0-9a-f-]{27,}|\b(?:collaboration-root|collaboration-recheck|collaboration-continue|read-order|check-cycle|employee-a|employee-b|session-)\b|\bsegmentId\b|\bsegment\s*[:：]?\s*p\d+-c\d+\b|P3-(?:R\d+|REVOKED)-[0-9a-f]+|KNOWLEDGE-R\d+-CANARY/i
-  assert.equal(visibleEngineeringPattern.test('segmentId p1-c1'),true);assert.equal(visibleEngineeringPattern.test('segment p1-c1'),true);assert.equal(visibleEngineeringPattern.test('Knowledge search returned the authorized segment'),false)
+  const visibleEngineeringPattern=/[0-9a-f]{8}-[0-9a-f-]{27,}|\b(?:collaboration-root|collaboration-recheck|collaboration-continue|read-order|check-cycle|employee-a|employee-b|session-|sessionVersion|sourceInstance|sourceEnvironment|dataMode|evidenceMode|confirmedFacts)\b|\bsegmentId\b|\bsegment\s*[:：]?\s*p\d+-c\d+\b|P3-(?:R\d+|REVOKED)-[0-9a-f]+|KNOWLEDGE-R\d+-CANARY/i
+  assert.equal(visibleEngineeringPattern.test('segmentId p1-c1'),true);assert.equal(visibleEngineeringPattern.test('segment p1-c1'),true);assert.equal(visibleEngineeringPattern.test('Knowledge search returned the authorized segment'),false);for(const key of ['sessionVersion','sourceInstance','sourceEnvironment','dataMode','evidenceMode','confirmedFacts'])assert.equal(visibleEngineeringPattern.test(key),true)
   const assertVisibleSurfaceClean=async()=>{const dom=await evaluate(`document.body.innerText`),ax=await send('Accessibility.getFullAXTree'),axText=ax.nodes.flatMap(node=>[node.name?.value,node.description?.value,node.value?.value]).filter(value=>typeof value==='string').join('\n'),raw=dom+'\n'+axText,match=raw.match(visibleEngineeringPattern);assert.equal(match,null,match?.[0])}
   await send('Runtime.enable');await send('Network.enable');await send('Page.enable');await send('DOM.enable');await send('Log.enable')
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
@@ -236,6 +236,7 @@ async function browserJourney(ownerSession, runtimeCapture, runtime) {
   await evaluate(`reloadAll().then(()=>openWork(${JSON.stringify(workId)}))`)
   await waitEval(evaluate, `document.body.innerText.includes('工单核对员 → 协调负责人')&&document.body.innerText.includes('节拍核对员 → 协调负责人')&&document.body.innerText.includes('当前有效')`)
   await assertVisibleSurfaceClean()
+  const businessFieldProjection=await evaluate(`Object.fromEntries(['来源实例：p3-http','来源环境：external-test','数据模式：synthetic','证据方式：controlled','已确认事实：工单字段已核对','sourceInstance','sourceEnvironment','dataMode','evidenceMode','confirmedFacts'].map(value=>[value,document.body.innerText.includes(value)]))`);assert.deepEqual(businessFieldProjection,{'来源实例：p3-http':true,'来源环境：external-test':true,'数据模式：synthetic':true,'证据方式：controlled':true,'已确认事实：工单字段已核对':true,sourceInstance:false,sourceEnvironment:false,dataMode:false,evidenceMode:false,confirmedFacts:false})
   assert.equal(await evaluate(`document.body.innerText.includes('片段位置 p1-c1')&&!/segment(?:Id)?\\s+p1-c1/i.test(document.body.innerText)`),true)
   assert.equal(await evaluate(`document.querySelector('[data-open-reference]').innerText.includes('版本 2 · 片段位置 p1-c1')`),true)
   assert.equal((await request(`/api/bootstrap`, { cookie: apiOwner.cookie })).body.works.filter(work=>work.workType==='collaboration-child').length >= 2, true)
@@ -344,7 +345,7 @@ async function startCapture() {
           : toolResults ? 'structured_output' : businessTool
     const input = serialized.match(/\\?"availableSeconds\\?":(\d+),\\?"quantity\\?":(\d+)/)
     const stepLabel=businessTool==='geneway_gearjob_read_work_order'?'工单事实核对':'节拍核对'
-    const args = tool === 'structured_output' ? { status: 'done', explanation: `${stepLabel} ${usesKnowledge && knowledgeRef ? 'Knowledge search returned the authorized segment；segmentId p1-c1；segment p1-c1' : '受控结果'} 已完成` }
+    const args = tool === 'structured_output' ? { status: 'done', explanation: `${stepLabel} ${usesKnowledge && knowledgeRef ? 'Knowledge search returned the authorized segment；segmentId p1-c1；segment p1-c1；sourceInstance: p3-http；sourceEnvironment: external-test；dataMode: synthetic；evidenceMode: controlled；confirmedFacts: 工单字段已核对' : '受控结果'} 已完成` }
       : tool === 'geneway_collaboration_submit_summary' ? { resultRefs: summaryRefs }
         : tool === 'geneway_knowledge_search' ? { query: '浏览器当前依据' }
           : tool === 'geneway_knowledge_submit_references' ? { references: knowledgeRef ? [{ ...knowledgeRef, segmentId: 'p1-c1' }] : [] }

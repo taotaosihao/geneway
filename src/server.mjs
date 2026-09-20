@@ -10,6 +10,7 @@ import { createCollaborationRunner } from './collaboration-runner.mjs'
 import { readRuntimeConfig } from './runtime-config.mjs'
 import { readConnectionCatalog } from './connection-catalog.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
+import { ChannelServiceError, createChannelService } from './channel-service.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
@@ -52,7 +53,8 @@ export async function start() {
   })
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
-  const server = createGenewayServer({ service, knowledge, collaborationRunner, store, auth, index, trustedOrigin })
+  const channel = createChannelService({ store, workService: service })
+  const server = createGenewayServer({ service, knowledge, collaborationRunner, channel, store, auth, index, trustedOrigin })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
   let shuttingDown = false
@@ -67,8 +69,10 @@ export async function start() {
   return server
 }
 
-export function createGenewayServer({ service, knowledge, collaborationRunner, store, auth, index = '', trustedOrigin }) {
+export function createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntimeAvailable = false, store, auth, index = '', trustedOrigin }) {
   if (!service || !store || !auth || !trustedOrigin) throw new Error('server dependencies are required')
+  channel ??= createChannelService({ store, workService: service })
+  const channelRuntimeReady = typeof channelRuntimeAvailable === 'function' ? channelRuntimeAvailable : () => channelRuntimeAvailable === true
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', trustedOrigin)
@@ -179,6 +183,77 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, s
         return resultResponse(response, result)
       }
 
+      if (channel && request.method === 'GET' && url.pathname === '/api/channels/apps') {
+        exactQuery(url)
+        return sendJson(response, 200, safeMemberChannelApps(await channel.listChannelApps(actor), channelRuntimeReady()))
+      }
+      if (channel && request.method === 'GET' && url.pathname === '/api/channels') {
+        exactQuery(url)
+        return sendJson(response, 200, safeChannelState(await channel.memberChannelState(actor)))
+      }
+      if (channel && request.method === 'POST' && url.pathname === '/api/channels/link-codes') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['channelAppId'])
+        if (!channelRuntimeReady()) throw httpError('UNAVAILABLE', '真实渠道传输尚未启用，未生成关联码')
+        return sendJson(response, 200, await channel.issueLinkCode(actor, body))
+      }
+      const linkMatch = url.pathname.match(/^\/api\/channels\/link-codes\/([^/]+)\/confirm$/)
+      if (channel && linkMatch && request.method === 'POST') {
+        exactQuery(url)
+        await protectedWrite(request, context.token, auth, trustedOrigin, [])
+        return sendJson(response, 200, await channel.confirmLink(actor, { linkCodeId: decode(linkMatch[1]) }))
+      }
+      const identityMatch = url.pathname.match(/^\/api\/channels\/identities\/([^/]+)$/)
+      if (channel && identityMatch && request.method === 'DELETE') {
+        exactQuery(url)
+        await protectedWrite(request, context.token, auth, trustedOrigin, [])
+        return sendJson(response, 200, await channel.unlinkIdentity(actor, { identityId: decode(identityMatch[1]) }))
+      }
+      const dispatchMatch = url.pathname.match(/^\/api\/channels\/conversations\/([^/]+)\/default-dispatch$/)
+      if (channel && dispatchMatch && request.method === 'PATCH') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'skillId', 'capabilityId', 'connectionId'])
+        return sendJson(response, 200, await channel.setDefaultDispatch(actor, { conversationId: decode(dispatchMatch[1]), ...body }))
+      }
+      if (channel && dispatchMatch && request.method === 'DELETE') {
+        exactQuery(url)
+        await protectedWrite(request, context.token, auth, trustedOrigin, [])
+        return sendJson(response, 200, await channel.clearDefaultDispatch(actor, { conversationId: decode(dispatchMatch[1]) }))
+      }
+      if (channel && request.method === 'POST' && url.pathname === '/api/channels/deliveries') {
+        exactQuery(url)
+        await protectedWrite(request, context.token, auth, trustedOrigin, ['requestId', 'workId', 'resultId'])
+        throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，未建立待发回复')
+      }
+      const deliveryMatch = url.pathname.match(/^\/api\/channels\/deliveries\/([^/]+)(?:\/(retry))?$/)
+      if (channel && deliveryMatch && request.method === 'DELETE' && !deliveryMatch[2]) {
+        exactQuery(url)
+        await protectedWrite(request, context.token, auth, trustedOrigin, [])
+        return sendJson(response, 200, await channel.cancelDelivery(actor, { deliveryId: decode(deliveryMatch[1]) }))
+      }
+      if (channel && deliveryMatch && request.method === 'POST' && deliveryMatch[2] === 'retry') {
+        exactQuery(url)
+        await protectedWrite(request, context.token, auth, trustedOrigin, [])
+        throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，投递状态未改变')
+      }
+
+      if (channel && request.method === 'GET' && url.pathname === '/api/admin/channel-apps') {
+        exactQuery(url)
+        if (actor.role !== 'admin') throw httpError('FORBIDDEN', '需要管理员权限')
+        return sendJson(response, 200, await channel.listChannelApps(actor))
+      }
+      if (channel && request.method === 'POST' && url.pathname === '/api/admin/channel-apps') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['id', 'provider', 'providerAppId', 'providerTenantId', 'credentialRef', 'enabled', 'allowedScopes'])
+        return sendJson(response, 200, await channel.upsertChannelApp(actor, { ...body, status: body.enabled === false ? 'disabled' : 'unavailable' }))
+      }
+      const channelAppMatch = url.pathname.match(/^\/api\/admin\/channel-apps\/([^/]+)$/)
+      if (channel && channelAppMatch && request.method === 'PATCH') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['credentialRef', 'enabled', 'allowedScopes'])
+        return sendJson(response, 200, await channel.upsertChannelApp(actor, { id: decode(channelAppMatch[1]), ...body, status: body.enabled === false ? 'disabled' : 'unavailable' }))
+      }
+
       if (url.pathname === '/api/knowledge/share-targets' && request.method === 'GET') {
         exactQuery(url)
         return sendJson(response, 200, await requireKnowledge(knowledge).listShareTargets(actor))
@@ -251,9 +326,36 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, s
       return notFound(response)
     } catch (error) {
       const result = serviceFailure(error)
+      if (error instanceof ChannelServiceError) result.error.status = CHANNEL_ERROR_STATUS[error.code] ?? 500
+      else if (Number.isInteger(error?.status)) result.error.status = error.status
       return sendJson(response, result.error.status, { error: clientError(result.error) })
     }
   })
+}
+
+const CHANNEL_ERROR_STATUS = {
+  INVALID_REQUEST: 400, LINK_CODE_INVALID: 400, UNAUTHORIZED: 401, FORBIDDEN: 403,
+  DELIVERY_FORBIDDEN: 403, NOT_FOUND: 404, CONFLICT: 409, INVALID_STATE: 409, UNAVAILABLE: 503,
+}
+
+function safeChannelState(value) {
+  const workChannels = [...new Map(value.messages.filter(item => item.status === 'accepted' && item.direction === 'inbound' && item.workId && item.conversationId).map(item => [`${item.workId}:${item.conversationId}`, { workId: item.workId, channelAppId: item.channelAppId, conversationId: item.conversationId }])).values()]
+  return {
+    identities: value.identities.map(item => ({ id: item.id, channelAppId: item.channelAppId, status: item.status, externalIdentity: maskOfficialId(item.providerUserId), updatedAt: item.updatedAt })),
+    conversations: value.conversations.map(item => ({ id: item.id, channelAppId: item.channelAppId, identityId: item.identityId, type: item.type, status: item.status, externalConversation: maskOfficialId(item.providerConversationId), defaultDispatch: item.defaultDispatch, updatedAt: item.updatedAt })),
+    deliveries: value.deliveries.map(item => ({ id: item.id, channelAppId: item.channelAppId, workId: item.workId, resultId: item.resultId, targetConversationId: item.targetConversationId, status: item.status, attempts: item.attempts, error: item.error, createdAt: item.createdAt, updatedAt: item.updatedAt })),
+    linkCodes: value.linkCodes.map(item => ({ id: item.id, channelAppId: item.channelAppId, status: item.status, expiresAt: item.expiresAt, matchedIdentityId: item.matchedIdentityId, matchedConversationId: item.matchedConversationId, updatedAt: item.updatedAt })),
+    workChannels,
+  }
+}
+
+function safeMemberChannelApps(items, runtimeReady) {
+  return items.filter(item => item.enabled === true && item.status === 'active').map(item => ({ id: item.id, provider: item.provider, runtimeStatus: runtimeReady ? 'ready' : 'unavailable' }))
+}
+
+function maskOfficialId(value) {
+  const text = String(value ?? '')
+  return text.length <= 4 ? '•'.repeat(text.length) : `…${text.slice(-4)}`
 }
 
 export async function shutdownServer(server, service) {
@@ -332,6 +434,6 @@ function requireKnowledgeEnabled(knowledge, runner) {
 }
 function decode(value) { try { return decodeURIComponent(value) } catch { throw httpError('INVALID_REQUEST', '路径参数无效') } }
 function positivePort(value) { const port = Number(value); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('GENEWAY_PORT 无效'); return port }
-function httpError(code, message) { return Object.assign(new Error(message), { code, status: ERROR_STATUS[code] ?? 500 }) }
+function httpError(code, message) { return Object.assign(new Error(message), { code, status: ERROR_STATUS[code] ?? (code === 'UNAVAILABLE' ? 503 : 500) }) }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await start()

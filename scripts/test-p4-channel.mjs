@@ -62,8 +62,22 @@ try {
   const conversation1 = ownerState.conversations.find(item => item.channelAppId === app1.id)
   const identity2 = ownerState.identities.find(item => item.channelAppId === app2.id)
   const conversation2 = ownerState.conversations.find(item => item.channelAppId === app2.id)
-  const configuredDispatch = await service.setDefaultDispatch(owner, { conversationId: conversation1.id, employeeId: 'employee-1', skillId: 'skill-1', capabilityId: 'capability-1', connectionId: 'connection-1' })
-  await assert.rejects(service.setDefaultDispatch(peer, { conversationId: conversation1.id, employeeId: 'employee-1', skillId: 'skill-1', capabilityId: 'capability-1' }), hasCode('NOT_FOUND'))
+  const dispatchInput = { conversationId: conversation1.id, employeeId: 'employee-1', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-1' }
+  for (const [mutate, restore] of [
+    [state => { state.employees.find(item => item.id === 'employee-1').enabled = false }, state => { state.employees.find(item => item.id === 'employee-1').enabled = true }],
+    [state => { state.skills.find(item => item.id === 'skill-gearjob-work-order-read').enabled = false }, state => { state.skills.find(item => item.id === 'skill-gearjob-work-order-read').enabled = true }],
+    [state => { state.connections.find(item => item.id === 'connection-1').enabled = false }, state => { state.connections.find(item => item.id === 'connection-1').enabled = true }],
+    [state => { state.connections.find(item => item.id === 'connection-1').status = 'unknown' }, state => { state.connections.find(item => item.id === 'connection-1').status = 'ready' }],
+    [state => { state.connections.find(item => item.id === 'connection-1').skillIds = ['skill-1'] }, state => { state.connections.find(item => item.id === 'connection-1').skillIds = ['skill-1', 'skill-gearjob-work-order-read'] }],
+  ]) {
+    await store.update(state => { mutate(state); return state })
+    await assert.rejects(service.setDefaultDispatch(owner, dispatchInput), hasCode('FORBIDDEN'))
+    await store.update(state => { restore(state); return state })
+  }
+  await assert.rejects(service.setDefaultDispatch(owner, { ...dispatchInput, skillId: 'skill-1', capabilityId: 'capability-1' }), hasCode('FORBIDDEN'))
+  await assert.rejects(service.setDefaultDispatch(owner, { ...dispatchInput, connectionId: undefined }), hasCode('FORBIDDEN'))
+  const configuredDispatch = await service.setDefaultDispatch(owner, dispatchInput)
+  await assert.rejects(service.setDefaultDispatch(peer, dispatchInput), hasCode('NOT_FOUND'))
   const clearDelivery = await service.createDelivery(owner, { channelAppId: app1.id, requestId: 'request-clear-default', workId: 'work-1', resultId: 'result-1', targetIdentityId: identity1.id, targetConversationId: conversation1.id, contentScope: 'result' })
   const clearedDispatch = await service.clearDefaultDispatch(owner, { conversationId: conversation1.id })
   assert.equal(clearedDispatch.defaultDispatch, undefined)
@@ -73,7 +87,7 @@ try {
   assert.equal((await service.memberChannelState(owner)).conversations.find(item => item.id === conversation1.id).defaultDispatch, undefined)
   await assert.rejects(service.clearDefaultDispatch(peer, { conversationId: conversation1.id }), hasCode('NOT_FOUND'))
   await service.cancelDelivery(owner, { deliveryId: clearDelivery.delivery.id })
-  await service.setDefaultDispatch(owner, { conversationId: conversation1.id, employeeId: 'employee-1', skillId: 'skill-1', capabilityId: 'capability-1', connectionId: 'connection-1' })
+  await service.setDefaultDispatch(owner, dispatchInput)
 
   const received = await service.recordInbound({ channelAppId: app1.id, providerEventId: 'event-1', providerMessageId: 'message-1', providerConversationId: 'private-1', providerUserId: 'external-user', text: '交办 工单 WO-1' })
   assert.equal(received.message.status, 'received')
@@ -265,11 +279,11 @@ function v5Fixture() {
     ],
     modelRoutes: [],
     employees: [
-      { id: 'employee-1', enabled: true, connectionIds: ['connection-1'], skillIds: ['skill-1'] },
+      { id: 'employee-1', enabled: true, connectionIds: ['connection-1'], skillIds: ['skill-1', 'skill-gearjob-work-order-read'] },
       { id: 'employee-peer', enabled: true, connectionIds: [], skillIds: ['skill-peer'] },
     ],
-    connections: [{ id: 'connection-1', enabled: true, status: 'ready', skillIds: ['skill-1'] }],
-    skills: [{ id: 'skill-1', enabled: true, capabilityId: 'capability-1' }, { id: 'skill-peer', enabled: true, capabilityId: 'capability-peer' }],
+    connections: [{ id: 'connection-1', enabled: true, status: 'ready', skillIds: ['skill-1', 'skill-gearjob-work-order-read'] }],
+    skills: [{ id: 'skill-1', enabled: true, capabilityId: 'capability-1' }, { id: 'skill-gearjob-work-order-read', enabled: true, capabilityId: 'gearjob-work-order-read' }, { id: 'skill-peer', enabled: true, capabilityId: 'capability-peer' }],
     confirmations: [],
     knowledgeMaterials: [{ id: 'knowledge-1', ownerMemberId: 'member-owner', employeeIds: ['employee-1'], sharedMemberIds: [], sharedEmployeeIds: [], title: 'Knowledge', body: 'approved content', format: 'text', sourceLabel: 'fixture', authorizationBasis: 'test', revision: 1, status: 'active', createdAt: timestamp, updatedAt: timestamp }],
     works: [{

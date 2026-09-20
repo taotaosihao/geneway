@@ -288,11 +288,9 @@ export function createChannelService({
         const timestamp = now(clock), member = requireMember(state, actor)
         const conversation = state.channelConversations.find(item => item.id === clean(conversationId) && item.memberId === member.id && item.status === 'active')
         if (!conversation || !state.channelApps.some(item => item.id === conversation.channelAppId && item.enabled && item.status === 'active')) throw error('NOT_FOUND', '渠道会话不存在')
-        const employee = state.employees.find(item => item.id === clean(employeeId) && item.enabled === true && member.employeeIds.includes(item.id))
-        const skill = state.skills.find(item => item.id === clean(skillId) && item.enabled === true && employee?.skillIds?.includes(item.id) && item.capabilityId === clean(capabilityId))
-        const connection = connectionId === undefined || connectionId === null || connectionId === '' ? undefined : state.connections.find(item => item.id === clean(connectionId) && item.enabled === true && employee?.connectionIds?.includes(item.id) && item.skillIds?.includes(skill?.id))
-        if (!employee || !skill || (connectionId !== undefined && connectionId !== null && connectionId !== '' && !connection)) throw error('FORBIDDEN', '默认派发绑定当前未获准')
-        output = { ...conversation, defaultDispatch: compact({ employeeId: employee.id, skillId: skill.id, capabilityId: skill.capabilityId, connectionId: connection?.id }), revision: conversation.revision + 1, updatedAt: timestamp }
+        const dispatch = compact({ employeeId: clean(employeeId), skillId: clean(skillId), capabilityId: clean(capabilityId), connectionId: clean(connectionId) })
+        if (!dispatchAuthorized(state, member, dispatch)) throw error('FORBIDDEN', '默认派发绑定当前未获准')
+        output = { ...conversation, defaultDispatch: dispatch, revision: conversation.revision + 1, updatedAt: timestamp }
         return { ...state, channelConversations: replaceById(state.channelConversations, output) }
       })
       return conversationDto(output)

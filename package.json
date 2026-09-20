@@ -22,6 +22,7 @@
     "test:p3-http": "node scripts/test-p3-http-ui.mjs",
     "test:p4-channel": "node scripts/test-p4-channel.mjs",
     "test:p4-channel-work": "node scripts/test-p4-channel-work.mjs",
+    "test:p4-http": "node scripts/test-p4-http-ui.mjs",
     "accept:p1": "node scripts/accept-p1.mjs",
     "accept:p2": "node scripts/accept-p2.mjs",
     "accept:p3": "node scripts/accept-p3.mjs",

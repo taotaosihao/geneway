@@ -1,6 +1,6 @@
 # P5 定时、事件与主动持续工作详细计划
 
-状态：**P5-T0 探针代码与受控真实拓扑已通过独立复核，但未修补 GearJob 常态事件 runtime 为 `BLOCKED_EXTERNAL_RUNTIME`；双 Astra 已收敛为 `READY_PARTIAL`。工程依赖允许在取得当前 D Flow Approval 后继续 v7、权限/预算、每日定时和对应 UI；批准前 E 为 draft、实施暂停，真实事件启用及完整 P5 完成门保持阻塞。**
+状态：**P5-T0 探针代码与受控真实拓扑已通过独立复核，但未修补 GearJob 常态事件 runtime 为 `BLOCKED_EXTERNAL_RUNTIME`；双 Astra 已收敛为 `READY_PARTIAL`，当前 D 已依据用户对中间产品决策的多 agent 委托完成 Flow Approval 绑定。可继续 v7、权限/预算、每日定时和对应 UI；真实事件启用及完整 P5 完成门保持阻塞。**
 
 基线：`283771c5240799360f9c0d5f0d439e440fdaa4ad`（P4 飞书 runtime 切片）。P4 企业微信、真实手机 HTTPS 和阶段末真人验收仍为 deferred，P4 不是 PASS。
 
@@ -168,6 +168,6 @@ fake 时钟/SDK、受控 POST 和受控模型只补故障路径，不代替真�
 
 2026-09-20 用户当前消息已同时批准 P5 C/D、允许 P4 仍非 PASS 时先实施 P5，并允许 T0 为 GearJob 容器建立只绑 Docker bridge `172.20.0.1` 的固定路径 HMAC 回调窄入口。这一授权不允许消费 default 队列历史 job、开放主 Web、修改 GearJob/Frappe 产品源码、生产写入、部署或发布。
 
-当前 D Flow Approval 后，依赖图为：T0 接口结论 → T1 → T2 → T3a 定时 → 对应 T4/T5/T6 → T7a；外部 GearJob 常态故障解除 → T0 无临时修补复验 → T3b 事件 → 对应 T4/T5/T6 → T7b。只有 T7a、T7b 和原有同候选组合门全部通过，才判断 P5 PASS。当前事件分支 blocked 不构成 T1/T2/定时的工程依赖，但 draft E 在新 Flow Approval 前阻止所有后续产品实施；批准后也不得降低最终完成条件。
+当前依赖图为：T0 接口结论 → T1 → T2 → T3a 定时 → 对应 T4/T5/T6 → T7a；外部 GearJob 常态故障解除 → T0 无临时修补复验 → T3b 事件 → 对应 T4/T5/T6 → T7b。只有 T7a、T7b 和原有同候选组合门全部通过，才判断 P5 PASS。当前事件分支 blocked 不构成 T1/T2/定时的工程依赖，也不得降低最终完成条件。
 
 P5 只有在真定时、真 GearJob 事件、真模型/工具、真通知、Web/移动操作、权限/预算/重投/恢复、P1–P4 回归、Design Review、独立正确性/复杂度复审和 MP4/report/Lark 回读均通过后才能 PASS。P5 技术完成不会关闭 P4 缺口。

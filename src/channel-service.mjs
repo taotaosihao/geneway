@@ -298,6 +298,20 @@ export function createChannelService({
       return conversationDto(output)
     },
 
+    async clearDefaultDispatch(actor, { conversationId } = {}) {
+      let output
+      await store.update(state => {
+        const timestamp = now(clock), member = requireMember(state, actor)
+        const conversation = state.channelConversations.find(item => item.id === clean(conversationId) && item.memberId === member.id && item.status === 'active')
+        if (!conversation || !state.channelApps.some(item => item.id === conversation.channelAppId && item.enabled && item.status === 'active')) throw error('NOT_FOUND', '渠道会话不存在')
+        if (!conversation.defaultDispatch) { output = conversation; return state }
+        const { defaultDispatch: _defaultDispatch, ...cleared } = conversation
+        output = { ...cleared, revision: conversation.revision + 1, updatedAt: timestamp }
+        return { ...state, channelConversations: replaceById(state.channelConversations, output) }
+      })
+      return conversationDto(output)
+    },
+
     async recordInbound(input = {}) {
       let output, deduplicated = false
       await store.update(state => {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
@@ -59,15 +59,22 @@ export function createFileStore(filePath) {
       }
     },
 
-    update(mutator) {
+    update(mutator, options = {}) {
       const operation = pending.then(async () => {
         const current = await this.read()
         const next = migrateState(await mutator(current))
         await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
         const fileName = filePath.split('/').pop()
         const tempPath = join(dirname(filePath), `.${fileName}.${process.pid}.tmp`)
-        await writeFile(tempPath, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
-        await rename(tempPath, filePath)
+        let committed = false
+        try {
+          await writeFile(tempPath, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
+          await options.beforeCommit?.()
+          await rename(tempPath, filePath)
+          committed = true
+        } finally {
+          if (!committed) await unlink(tempPath).catch(() => undefined)
+        }
         return next
       })
       pending = operation.catch(() => undefined)

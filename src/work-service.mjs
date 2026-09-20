@@ -57,18 +57,29 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       return prepareAutomationWork(state, rule, options)
     },
 
-    async dispatchAutomationWork(workId, executionId, acceptedAt) {
+    async dispatchAutomationWork(workId, executionId, acceptedAt, options = {}) {
       await recover()
       try {
+        if (options.ownerCheck && !options.ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
         const accepted = parseInstant(acceptedAt)
         if (!accepted) throw serviceError('INVALID_REQUEST', '自动工作 acceptedAt 无效')
         const deadlineAt = new Date(accepted.getTime() + 120_000).toISOString()
-        schedule(workId, executionId, 'automation', undefined, { deadlineAt })
+        schedule(workId, executionId, 'automation', undefined, { deadlineAt, ownerCheck: options.ownerCheck })
         return { workId, executionId, acceptedAt, deadlineAt }
       } catch (error) {
-        await finishError(workId, executionId, error)
+        if (error?.code !== 'OWNER_LOCK_LOST') await finishError(workId, executionId, error)
         throw error
       }
+    },
+
+    async automationOwnerLost() {
+      const tasks = [...active.values()].filter(item => item.operation === 'automation')
+      for (const item of tasks) {
+        item.ownerLost = true
+        item.controller.abort(serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效'))
+      }
+      await Promise.all(tasks.map(cancelRunner))
+      await Promise.all(tasks.map(item => item.promise.catch(() => undefined)))
     },
 
     async bootstrap(actor) {
@@ -654,7 +665,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
 
   function schedule(workId, executionId, operation, question, options = {}) {
     const controller = new AbortController()
-    const entry = { controller, executionId, deadlineAt: options.deadlineAt, deadlineExpired: false, userCancelled: false, timer: undefined, promise: undefined, clock }
+    const entry = { controller, executionId, operation, deadlineAt: options.deadlineAt, ownerCheck: options.ownerCheck, ownerLost: false, deadlineExpired: false, userCancelled: false, timer: undefined, promise: undefined, cancelPromise: undefined, clock }
     active.set(executionId, entry)
     const remaining = entry.deadlineAt ? deadlineRemaining(entry.deadlineAt, clock()) : undefined
     if (entry.deadlineAt && remaining <= 0) {
@@ -681,8 +692,10 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         if (controller.signal.aborted) await finishError(workId, executionId, abortError(entry))
         return
       }
+      assertAutomationOwner(entry)
       assertNotAborted(entry)
       const context = await dispatchContext(workId, executionId)
+      assertAutomationOwner(entry)
       assertNotAborted(entry)
       const sessionResult = latestSessionResult(context.work)
       const runnerOptions = {
@@ -705,10 +718,10 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const model = await explain(runnerOptions, entry)
       assertNotAborted(entry)
       if (operation === 'follow-up') await finishFollowUp(workId, executionId, question, model)
-      else await finishBusinessResult(workId, executionId, model, context.work, entry.deadlineAt)
+      else await finishBusinessResult(workId, executionId, model, context.work, entry)
     } catch (error) {
       const finalError = entry.deadlineExpired && !entry.userCancelled ? timeoutError() : error
-      await finishError(workId, executionId, finalError)
+      if (!entry.ownerLost && finalError?.code !== 'OWNER_LOCK_LOST') await finishError(workId, executionId, finalError)
     } finally {
       if (entry.timer) clearTimeout(entry.timer)
       active.delete(executionId)
@@ -763,10 +776,11 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
 
   async function explain(options, entry) {
     if (!runner || runner.configured === false) throw serviceError('MODEL_NOT_CONFIGURED', '尚未配置 ZenMux DSH runner')
-    const running = Promise.resolve().then(() => runner.run(options))
+    const running = Promise.resolve().then(() => { assertAutomationOwner(entry); return runner.run(options) })
     if (!entry?.deadlineAt) return running
     if (entry.controller.signal.aborted) {
-      await runner.cancel?.(entry.executionId)
+      await cancelRunner(entry)
+      void running.catch(() => undefined)
       throw abortError(entry)
     }
     let stopListening
@@ -782,7 +796,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     ])
     stopListening?.()
     if (outcome.aborted) {
-      await runner.cancel?.(entry.executionId)
+      await cancelRunner(entry)
       void running.catch(() => undefined)
       throw abortError(entry)
     }
@@ -790,9 +804,9 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     return outcome.value
   }
 
-  async function finishBusinessResult(workId, executionId, model, originalWork, deadlineAt) {
+  async function finishBusinessResult(workId, executionId, model, originalWork, entry) {
     if (!model?.result) throw serviceError('TOOL_CHAIN_INVALID', 'DSH 未返回规范化能力结果')
-    await finishResult(workId, executionId, businessEnvelope(model, originalWork, clock()), model, deadlineAt)
+    await finishResult(workId, executionId, businessEnvelope(model, originalWork, clock()), model, entry?.deadlineAt, entry)
   }
 
   async function finishFollowUp(workId, executionId, question, model) {
@@ -808,8 +822,10 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     await finishResult(workId, executionId, result, model)
   }
 
-  async function finishResult(workId, executionId, result, model, deadlineAt) {
+  async function finishResult(workId, executionId, result, model, deadlineAt, entry) {
+    const beforeCommit = () => { if (entry) { assertAutomationOwner(entry); assertNotAborted(entry) } }
     await store.update(state => {
+      beforeCommit()
       const work = state.works.find(item => item.id === workId)
       const execution = work?.executions.find(item => item.id === executionId)
       if (!work || !execution) return state
@@ -828,7 +844,12 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         continuity: result.continuity, contextConfirmationRefs: result.contextConfirmationRefs, dshEventCount: eventCount(model), resultId: result.id, ...legacy })
       const nextWork = { ...work, status: 'completed', results: [...work.results, result], executions: replaceById(work.executions, nextExecution) }
       return { ...state, works: replaceById(state.works, nextWork) }
-    })
+    }, { beforeCommit })
+  }
+
+  function cancelRunner(entry) {
+    entry.cancelPromise ??= Promise.resolve(runner?.cancel?.(entry.executionId)).catch(() => undefined)
+    return entry.cancelPromise
   }
 
   async function finishError(workId, executionId, error) {
@@ -1089,8 +1110,9 @@ function deadlineReached(entry) { return Boolean(entry.deadlineAt && (entry.dead
 function clockValue(entry) { return entry?.clock ? entry.clock() : new Date().toISOString() }
 function timeoutError() { return serviceError('UPSTREAM_TIMEOUT', '自动工作执行超时') }
 function cancelledError() { return serviceError('CANCELLED', '本次执行已停止') }
-function abortError(entry) { return entry?.deadlineExpired ? timeoutError() : cancelledError() }
+function abortError(entry) { return entry?.ownerLost ? serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效') : entry?.deadlineExpired ? timeoutError() : cancelledError() }
 function assertNotAborted(entry) { if (deadlineReached(entry)) throw timeoutError(); if (entry.controller?.signal.aborted) throw abortError(entry) }
+function assertAutomationOwner(entry) { if (entry?.ownerCheck && !entry.ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效') }
 function safeError(error, fallbackCode = 'INTERNAL_ERROR') {
   const code = error?.code ?? fallbackCode
   return SAFE_ERROR_MESSAGES[code] ? { code, message: SAFE_ERROR_MESSAGES[code] } : { ...GENERIC_ERROR }

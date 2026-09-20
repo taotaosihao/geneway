@@ -16,6 +16,9 @@ const catalog = [{ kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl
 
 await atomicAndAdmissionChecks()
 await concurrencyAndCapacityChecks()
+await ownerLossBeforeDispatchChecks()
+await ownerLossAfterRunnerStartChecks()
+await ownerLossBeforeResultCommitChecks()
 await requestGuardChecks()
 await actualProfileGuardChecks()
 await deadlineAndCancellationChecks()
@@ -88,6 +91,99 @@ async function atomicAndAdmissionChecks() {
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+}
+
+async function ownerLossBeforeDispatchChecks() {
+  let state = fixture({ rules: ['rule-a'] })
+  let dispatches = 0, checks = 0
+  const store = { async read() { return structuredClone(state) }, async update(mutator) { state = migrateState(await mutator(structuredClone(state))); return structuredClone(state) } }
+  const workService = {
+    async ensureReady() {},
+    prepareAutomationWork(_state, rule, options) { return { ok: true, workId: options.workId, executionId: options.executionId, acceptedAt: options.acceptedAt, work: { id: options.workId, ownerMemberId: rule.ownerMemberId, employeeId: rule.employeeId, skillId: rule.skillId, capabilityId: 'gearjob-work-order-read', connectionId: rule.connectionId, input: { workOrderId: rule.workOrderId }, status: 'accepted', acceptedAt: options.acceptedAt, results: [], executions: [{ id: options.executionId, operation: 'automation', status: 'accepted' }] } } },
+    async dispatchAutomationWork() { dispatches += 1 },
+  }
+  const automation = createAutomationService({ store, workService, clock: () => now, idFactory: () => 'owner-loss' })
+  const result = await automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21', ownerCheck: () => ++checks < 3 })
+  assert.equal(result.dispatchError.code, 'OWNER_LOCK_LOST')
+  assert.equal(dispatches, 0)
+  assert.equal(state.automationOccurrences[0].workId, result.workId, 'atomic acceptance remains for next-owner recovery')
+
+  let owned = true, runnerCalls = 0, markedRunning = false
+  state = fixture({ rules: ['rule-a'] })
+  const racingStore = {
+    async read() { return structuredClone(state) },
+    async update(mutator) {
+      state = migrateState(await mutator(structuredClone(state)))
+      if (!markedRunning && state.works.some(work => work.executions.some(execution => execution.status === 'running'))) {
+        markedRunning = true
+        owned = false
+      }
+      return structuredClone(state)
+    },
+  }
+  const guardedWork = createWorkService({ store: racingStore, runner: { configured: true, async run() { runnerCalls += 1; return validModel() } }, clock: () => now, connectionCatalog: catalog })
+  const guardedAutomation = createAutomationService({ store: racingStore, workService: guardedWork, clock: () => now, idFactory: () => 'owner-race', connectionCatalog: catalog })
+  const raced = await guardedAutomation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21', ownerCheck: () => owned })
+  await waitFor(() => markedRunning)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(raced.accepted, true)
+  assert.equal(runnerCalls, 0, 'owner loss after markRunning must stop before model I/O')
+  assert.equal(state.works[0].status, 'running', 'next owner recovers the accepted work without former-owner writes')
+  await guardedWork.close()
+}
+
+async function ownerLossAfterRunnerStartChecks() {
+  let state = fixture({ rules: ['rule-a'] }), rejectRun, runnerCalls = 0, cancelCalls = 0
+  const store = { async read() { return structuredClone(state) }, async update(mutator) { state = migrateState(await mutator(structuredClone(state))); return structuredClone(state) } }
+  const runner = {
+    configured: true,
+    async run() { runnerCalls += 1; return new Promise((_resolve, reject) => { rejectRun = reject }) },
+    async cancel() { cancelCalls += 1; rejectRun?.(Object.assign(new Error('owner lost'), { code: 'OWNER_LOCK_LOST' })); throw new Error('cancel cleanup failed') },
+  }
+  const workService = createWorkService({ store, runner, clock: () => now, connectionCatalog: catalog })
+  const automation = createAutomationService({ store, workService, clock: () => now, idFactory: () => 'owner-running', connectionCatalog: catalog })
+  const accepted = await automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21', ownerCheck: () => true })
+  await waitFor(() => runnerCalls === 1)
+  await workService.automationOwnerLost()
+  assert.equal(accepted.accepted, true)
+  assert.equal(cancelCalls, 1, 'owner loss must cancel the active automation runner')
+  assert.equal(state.works[0].status, 'running', 'former owner must not write a terminal result after lock loss')
+  assert.equal(state.works[0].results.length, 0)
+  await workService.close()
+}
+
+async function ownerLossBeforeResultCommitChecks() {
+  let state = fixture({ rules: ['rule-a'] }), owned = true, cancelCalls = 0, releaseCommit, reachedCommit
+  const commitReached = new Promise(resolve => { reachedCommit = resolve })
+  const commitGate = new Promise(resolve => { releaseCommit = resolve })
+  const store = {
+    async read() { return structuredClone(state) },
+    async update(mutator, options = {}) {
+      const next = migrateState(await mutator(structuredClone(state)))
+      if (state.works.some(work => work.status === 'running') && next.works.some(work => work.status === 'completed')) {
+        reachedCommit()
+        await commitGate
+        await options.beforeCommit?.()
+      }
+      state = next
+      return structuredClone(state)
+    },
+  }
+  const runner = { configured: true, async run() { return validModel() }, async cancel() { cancelCalls += 1 } }
+  const workService = createWorkService({ store, runner, clock: () => now, connectionCatalog: catalog })
+  const automation = createAutomationService({ store, workService, clock: () => now, idFactory: () => 'owner-result', connectionCatalog: catalog })
+  const accepted = await automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21', ownerCheck: () => owned })
+  await commitReached
+  owned = false
+  const losing = workService.automationOwnerLost()
+  releaseCommit()
+  await losing
+  assert.equal(accepted.accepted, true)
+  assert.equal(cancelCalls, 1, 'owner loss must cancel once after the runner returned')
+  assert.equal(state.works[0].status, 'running')
+  assert.equal(state.works[0].executions[0].status, 'running')
+  assert.equal(state.works[0].results.length, 0, 'former owner must not commit a result after lock loss')
+  await workService.close()
 }
 
 async function actualProfileGuardChecks() {

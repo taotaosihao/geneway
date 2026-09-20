@@ -12,6 +12,7 @@ import { readConnectionCatalog } from './connection-catalog.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 import { createFeishuRuntime } from '../plugins/feishu.mjs'
 import { ChannelServiceError, createChannelService } from './channel-service.mjs'
+import { createAutomationRuntime, createAutomationService } from './automation-service.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
@@ -54,9 +55,20 @@ export async function start() {
   })
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
+  const automation = createAutomationService({ store, workService: service, connectionCatalog })
+  const automationRuntime = createAutomationRuntime({ store, automationService: automation, workService: service, dataRoot: runtimeConfig.dataRoot, onError: error => console.error(error) })
   const channel = createChannelService({ store, workService: service })
   const channelRuntime = createFeishuRuntime({ store, channelService: channel, secretRoot: process.env.GENEWAY_SECRET_ROOT?.trim() ? runtimeConfig.secretRoot : undefined })
-  await channelRuntime.start()
+  try {
+    await automationRuntime.start()
+    await channelRuntime.start()
+  } catch (error) {
+    await automationRuntime.stop().catch(() => undefined)
+    await channelRuntime.close().catch(() => undefined)
+    await service.close().catch(() => undefined)
+    await automationRuntime.close().catch(() => undefined)
+    throw error
+  }
   const server = createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntime, store, auth, index, trustedOrigin })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
@@ -64,7 +76,7 @@ export async function start() {
   const shutdown = async code => {
     if (shuttingDown) return
     shuttingDown = true
-    await shutdownServer(server, service, channelRuntime)
+    await shutdownServer(server, service, channelRuntime, automationRuntime)
     process.exit(code)
   }
   process.once('SIGTERM', () => shutdown(0))
@@ -375,11 +387,13 @@ function maskOfficialId(value) {
   return text.length <= 4 ? '•'.repeat(text.length) : `…${text.slice(-4)}`
 }
 
-export async function shutdownServer(server, service, channelRuntime) {
+export async function shutdownServer(server, service, channelRuntime, automationRuntime) {
   const intakeClosed = new Promise((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose()))
+  await automationRuntime?.stop?.().catch(() => undefined)
   await channelRuntime?.close?.().catch(() => undefined)
   await service.close().catch(() => undefined)
   await intakeClosed
+  await automationRuntime?.close?.().catch(() => undefined)
 }
 
 async function authenticated(request, store, auth) {

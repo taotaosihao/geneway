@@ -1,4 +1,8 @@
 import { randomUUID } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { closeSync, constants as fsConstants, fchmodSync, fstatSync, openSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
+import { isAbsolute, join, parse, resolve } from 'node:path'
 import { assertTrustedConnection } from './connection-catalog.mjs'
 import { validateCapabilityInput } from './capabilities.mjs'
 
@@ -20,11 +24,13 @@ export function createAutomationService({ store, workService = null, clock = () 
   if (!store?.read || !store?.update) throw new TypeError('automation service 需要 store')
 
   return {
-    async acceptDailyOccurrence({ ruleId, scheduledDate } = {}) {
+    async acceptDailyOccurrence({ ruleId, scheduledDate, scheduledAt, ownerCheck } = {}) {
       const occurrenceKey = dailyOccurrenceKey(ruleId, scheduledDate)
       await workService?.ensureReady?.()
+      if (ownerCheck && !ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
       let admission
       await store.update(state => {
+        if (ownerCheck && !ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
         const existing = state.automationOccurrences.find(item => item.occurrenceKey === occurrenceKey)
         if (existing) {
           admission = occurrenceAdmission(existing, state)
@@ -38,6 +44,18 @@ export function createAutomationService({ store, workService = null, clock = () 
           const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'blocked', 'rule-inactive')
           admission = occurrenceAdmission(occurrence, state, false)
           return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
+        }
+        if (scheduledAt !== undefined) {
+          const expected = localDateTime(scheduledDate, rule.trigger.time).toISOString()
+          const scheduled = parseInstant(scheduledAt)
+          const current = parseInstant(now)
+          const effective = parseInstant(rule.effectiveFrom)
+          if (!scheduled || scheduled.toISOString() !== expected || !current || !effective || scheduled < effective || current < scheduled) throw serviceError('INVALID_REQUEST', '自动发生时间无效')
+          if (current.getTime() - scheduled.getTime() > 60_000) {
+            const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'skipped', 'missed-window')
+            admission = occurrenceAdmission(occurrence, state, false)
+            return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
+          }
         }
         const prepared = workService?.prepareAutomationWork?.(state, rule, {
           occurrenceKey,
@@ -82,8 +100,9 @@ export function createAutomationService({ store, workService = null, clock = () 
         return { ...state, works: [...state.works, prepared.work], automationOccurrences: [...state.automationOccurrences, occurrence] }
       })
       if (admission?.accepted && !admission.deduplicated) {
+        if (ownerCheck && !ownerCheck()) return { ...admission, dispatched: false, dispatchError: { code: 'OWNER_LOCK_LOST', message: 'automation owner lock 已失效' } }
         try {
-          await workService?.dispatchAutomationWork?.(admission.workId, admission.executionId, admission.acceptedAt)
+          await workService?.dispatchAutomationWork?.(admission.workId, admission.executionId, admission.acceptedAt, { ownerCheck })
           admission = { ...admission, dispatched: true }
         } catch (error) {
           admission = { ...admission, dispatched: false, dispatchError: { code: error?.code ?? 'INTERNAL_ERROR', message: error?.message ?? '自动工作派发失败' } }
@@ -197,6 +216,168 @@ export function createAutomationService({ store, workService = null, clock = () 
     })
     return projectRule(await store.read(), updated, clock())
   }
+}
+
+export function createAutomationRuntime({ store, automationService, workService, dataRoot, clock = () => new Date().toISOString(), timerFactory = setTimeout, clearTimer = clearTimeout, lockFactory = acquireAutomationOwner, onError = () => undefined } = {}) {
+  if (!store?.read || !automationService?.acceptDailyOccurrence || !workService?.ensureReady || !workService?.automationOwnerLost) throw new TypeError('automation runtime 依赖无效')
+  if (!isAbsolute(dataRoot) || resolve(dataRoot) === parse(resolve(dataRoot)).root) throw new TypeError('automation data root 无效')
+  let owner
+  let timer
+  let tickPromise
+  let running = false
+
+  return {
+    async start() {
+      if (running) return
+      owner = await lockFactory(resolve(dataRoot))
+      running = true
+      owner.lost?.then(async error => {
+        if (!running) return
+        running = false
+        if (timer) clearTimer(timer)
+        timer = undefined
+        await workService.automationOwnerLost()
+        onError(Object.assign(new Error('automation owner lock lost'), { code: 'OWNER_LOCK_LOST', cause: error }))
+      }).catch(onError)
+      try {
+        await workService.ensureReady()
+        if (!running) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
+        await arm()
+        if (!running) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
+      } catch (error) {
+        running = false
+        await owner.release().catch(() => undefined)
+        owner = undefined
+        throw error
+      }
+    },
+
+    async close() {
+      await stop()
+      await owner?.release()
+      owner = undefined
+    },
+
+    async stop() { await stop() },
+  }
+
+  async function stop() {
+    running = false
+    if (timer) clearTimer(timer)
+    timer = undefined
+    await tickPromise?.catch(() => undefined)
+  }
+
+  async function arm() {
+    if (!running) return
+    const state = await store.read()
+    if (!running) return
+    const now = timestamp(clock())
+    const candidates = state.automationRules
+      .map(rule => ({ rule, dueAt: nextDailyOccurrence(rule, now, state.automationOccurrences) }))
+      .filter(item => item.dueAt)
+      .sort((left, right) => left.dueAt.localeCompare(right.dueAt) || left.rule.id.localeCompare(right.rule.id))
+    if (!candidates.length) return
+    const dueAt = candidates[0].dueAt
+    const due = candidates.filter(candidate => candidate.dueAt === dueAt)
+    const delay = Math.max(0, Date.parse(dueAt) - Date.parse(now))
+    timer = timerFactory(() => {
+      timer = undefined
+      tickPromise = tickDue(due).catch(onError).finally(() => {
+        tickPromise = undefined
+        if (running) void arm().catch(onError)
+      })
+    }, delay)
+    timer?.unref?.()
+  }
+
+  async function tickDue(candidates) {
+    for (const candidate of candidates) {
+      if (!running) return
+      await tick(candidate)
+    }
+  }
+
+  async function tick(candidate) {
+    if (!running) return
+    const state = await store.read()
+    const rule = state.automationRules.find(item => item.id === candidate.rule.id)
+    if (!rule || rule.status !== 'active' || rule.trigger.kind !== 'daily-time') return
+    const scheduledDate = shanghaiDate(candidate.dueAt)
+    const expected = localDateTime(scheduledDate, rule.trigger.time).toISOString()
+    if (expected !== candidate.dueAt || !rule.effectiveFrom || Date.parse(rule.effectiveFrom) > Date.parse(candidate.dueAt)) return
+    const now = timestamp(clock())
+    if (Date.parse(now) < Date.parse(candidate.dueAt)) return
+    await automationService.acceptDailyOccurrence({ ruleId: rule.id, scheduledDate, scheduledAt: candidate.dueAt, ownerCheck: () => running })
+  }
+}
+
+export async function acquireAutomationOwner(dataRoot, { spawnImpl = spawn } = {}) {
+  await mkdir(dataRoot, { recursive: true, mode: 0o700 })
+  const lockPath = join(dataRoot, '.geneway-automation.lock')
+  let descriptor
+  try {
+    descriptor = openSync(lockPath, fsConstants.O_CREAT | fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0), 0o600)
+    const metadata = fstatSync(descriptor)
+    if (!metadata.isFile() || (process.getuid && metadata.uid !== process.getuid())) throw serviceError('OWNER_LOCK_INVALID', 'automation owner lock 无效')
+    fchmodSync(descriptor, 0o600)
+    const holder = spawnImpl('/bin/sh', ['-c', '/usr/bin/flock --nonblock --conflict-exit-code 73 3 || exit $?; printf ready; IFS= read -r _'], { stdio: ['pipe', 'pipe', 'ignore', descriptor] })
+    closeSync(descriptor)
+    descriptor = undefined
+    await waitForOwnerReady(holder)
+    let releasing = false
+    let resolveLost
+    const lost = new Promise(resolveLockLost => { resolveLost = resolveLockLost })
+    holder.once('exit', (code, signal) => { if (!releasing) resolveLost({ code, signal }) })
+    return {
+      lost,
+      async release() {
+        releasing = true
+        if (holder.exitCode !== null || holder.signalCode !== null) return
+        holder.stdin.end('\n')
+        await waitForOwnerExit(holder)
+      },
+    }
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor)
+    throw error
+  }
+}
+
+function waitForOwnerReady(holder) {
+  return new Promise((resolveReady, rejectReady) => {
+    const timeout = setTimeout(() => { holder.kill('SIGKILL'); rejectReady(serviceError('OWNER_LOCK_TIMEOUT', 'automation owner lock 超时')) }, 1_000)
+    const onData = chunk => {
+      if (!String(chunk).includes('ready')) return
+      clearTimeout(timeout)
+      holder.stdout.off('data', onData)
+      holder.off('exit', onExit)
+      holder.off('error', onError)
+      resolveReady()
+    }
+    const onExit = code => {
+      clearTimeout(timeout)
+      holder.stdout.off('data', onData)
+      holder.off('error', onError)
+      rejectReady(serviceError(code === 73 ? 'OWNER_ALREADY_RUNNING' : 'OWNER_LOCK_FAILED', code === 73 ? 'automation owner 已运行' : 'automation owner lock 失败'))
+    }
+    const onError = () => {
+      clearTimeout(timeout)
+      holder.stdout.off('data', onData)
+      holder.off('exit', onExit)
+      rejectReady(serviceError('OWNER_LOCK_FAILED', 'automation owner lock 失败'))
+    }
+    holder.stdout.on('data', onData)
+    holder.once('exit', onExit)
+    holder.once('error', onError)
+  })
+}
+
+function waitForOwnerExit(holder) {
+  return new Promise(resolveExit => {
+    const timeout = setTimeout(() => { holder.kill('SIGKILL'); resolveExit() }, 1_000)
+    holder.once('exit', () => { clearTimeout(timeout); resolveExit() })
+  })
 }
 
 export function dailyOccurrenceKey(ruleId, scheduledDate) {
@@ -341,7 +522,7 @@ function exactInput(value, allowed) {
 }
 
 function replaceById(items, value) { return items.map(item => item.id === value.id ? value : item) }
-function timestamp(value) { const result = typeof value === 'string' ? value : value instanceof Date ? value.toISOString() : ''; if (!result) throw serviceError('INTERNAL_ERROR', '时钟无效'); return result }
+function timestamp(value) { const result = typeof value === 'string' ? value : value instanceof Date ? value.toISOString() : ''; if (!result || !Number.isFinite(Date.parse(result))) throw serviceError('INTERNAL_ERROR', '时钟无效'); return result }
 function required(value, label) { const result = text(value); if (!result) throw serviceError('INVALID_REQUEST', `${label} 无效`); return result }
 function nullableText(value) { if (value === null) return null; return required(value, 'notificationConversationId') }
 function text(value) { return typeof value === 'string' && value.trim() ? value.trim() : undefined }
@@ -349,5 +530,6 @@ function serviceError(code, message) { return new AutomationServiceError(code, m
 function parseInstant(value) { const time = typeof value === 'string' || value instanceof Date ? new Date(value) : null; return time && Number.isFinite(time.getTime()) ? time : null }
 function shifted(date) { return new Date(date.getTime() + ZONE_OFFSET_MS) }
 function dateOnly(date) { return date.toISOString().slice(0, 10) }
+function shanghaiDate(value) { const instant = parseInstant(value); if (!instant) throw serviceError('INVALID_REQUEST', '自动发生时间无效'); return dateOnly(shifted(instant)) }
 function localDateTime(localDate, time) { return new Date(Date.parse(`${localDate}T${time}:00.000Z`) - ZONE_OFFSET_MS) }
 function isDateOnly(value) { if (!/^\d{4}-\d\d-\d\d$/.test(value)) return false; const date = new Date(`${value}T00:00:00.000Z`); return date.toISOString().slice(0, 10) === value }

@@ -67,6 +67,7 @@ T0 必须证明：
 
 - 实际站点是 `dev.localhost`，容器 `deploy-frappe-1` 在 `deploy_default` bridge 上的 IP 为 `172.20.0.5/16`，宿主 bridge gateway 为 `172.20.0.1`；容器与宿主 loopback 不是同一网络空间。
 - 容器当前只运行 `bench serve --port 8100`；`bench doctor` 回读 `Workers online: 0`，`default` 队列已有 4 个历史 job。Frappe Webhook 是 after-commit 后 `frappe.enqueue`，因此不得在验收中用 `frappe.in_test` 同步例外或只启 Web 进程冒充真实 worker 消费。
+- 经 `bench --site dev.localhost console` 只读查询，当前 `Webhook` 记录为空数组 `[]`；没有可直接复用的已有 Work Order 回调，T0 必须为团队 synthetic 工单新建明确专用配置。
 - 容器无 `host.docker.internal`/`extra_hosts`，宿主 `172.20.0.1` 也没有已证明的 P5 回调 listener。宿主已发布的 GearJob 端口是宿主进入 GearJob，不是 GearJob 回调 Geneway 的路径。
 
 因此 T0 不能直接启动 default worker：先审计/隔离现有积压，为 P5 Webhook 选专用测试队列并只启消费该队列的 worker。回调优先建立一个只绑 `172.20.0.1:<明确端口>`、只接受固定 P5 路径/方法、限定 GearJob 来源并强制 raw-body HMAC 的窄 listener；主认证 Web 继续 loopback。这一 bridge 监听是实施前需用户明确允许的本地网络边界，不由“测试环境”自动推导。

@@ -42,7 +42,7 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
 })
 const GENERIC_ERROR = Object.freeze({ code: 'INTERNAL_ERROR', message: '服务暂时无法完成请求' })
 
-export function createWorkService({ store, runner = null, collaborationRunner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [], idFactory = randomUUID } = {}) {
+export function createWorkService({ store, runner = null, collaborationRunner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [], idFactory = randomUUID, onAutomationTerminal } = {}) {
   if (!store) throw new Error('store is required')
   const active = new Map()
   let recovered = false
@@ -725,6 +725,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     } finally {
       if (entry.timer) clearTimeout(entry.timer)
       active.delete(executionId)
+      if (operation === 'automation' && !entry.ownerLost) await Promise.resolve(onAutomationTerminal?.({ ownerCheck: entry.ownerCheck })).catch(() => undefined)
     }
   }
 

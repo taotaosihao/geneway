@@ -66,7 +66,8 @@ export function createChannelService({
       if (delivery.status !== 'sending') throw transitionError(delivery.status)
       if (!currentDeliveryAuthorization(state, delivery, { validateClaim: true })) {
         denied = true
-        output = { ...delivery, status: 'blocked', error: { code: 'SEND_CLAIM_INVALID', message: '发送前授权已失效' }, updatedAt: now(clock) }
+        const unknown = automationOccurrence(state, delivery)?.deliveryId === delivery.id
+        output = { ...delivery, status: unknown ? 'unknown' : 'blocked', error: { code: unknown ? 'DELIVERY_UNKNOWN' : 'SEND_CLAIM_INVALID', message: unknown ? '发送效果待核对' : '发送前授权已失效' }, updatedAt: now(clock) }
         return { ...state, deliveries: replaceById(state.deliveries, output) }
       }
       output = delivery
@@ -154,6 +155,45 @@ export function createChannelService({
         }),
       }))
       return { recoveredDeliveries: recovered, startedMessages: 0, retriedDeliveries: 0 }
+    },
+
+    async ensureAutomationDeliveries({ ownerCheck } = {}) {
+      const assertOwner = () => { if (ownerCheck && !ownerCheck()) throw error('OWNER_LOCK_LOST', 'automation owner lock 已失效') }
+      assertOwner()
+      const outputs = []
+      await store.update(state => {
+        assertOwner()
+        let next = state
+        for (const occurrence of state.automationOccurrences) {
+          if (!occurrence.workId) continue
+          if (occurrence.deliveryId) {
+            const delivery = state.deliveries.find(item => item.id === occurrence.deliveryId)
+            if (delivery?.status === 'pending') outputs.push(delivery)
+            continue
+          }
+          const work = state.works.find(item => item.id === occurrence.workId)
+          const execution = work?.executions?.find(item => item.operation === 'automation' && item.clientRequestId === occurrence.occurrenceKey)
+          if (!work || !execution || !['completed', 'failed', 'cancelled', 'interrupted'].includes(execution.status)) continue
+          const created = automationDelivery(next, occurrence, work, execution, clock, idFactory)
+          if (!created) continue
+          next = created.state
+          outputs.push(created.delivery)
+        }
+        return next
+      }, { beforeCommit: assertOwner })
+      return { deliveries: outputs.map(deliveryDto) }
+    },
+
+    async abandonAutomationClaim({ deliveryId } = {}) {
+      let output
+      await store.update(state => {
+        const delivery = state.deliveries.find(item => item.id === clean(deliveryId))
+        if (!delivery || !automationOccurrence(state, delivery)) throw error('NOT_FOUND', '自动投递不存在')
+        if (delivery.status !== 'sending') throw transitionError(delivery.status)
+        output = { ...delivery, status: 'unknown', error: { code: 'DELIVERY_UNKNOWN', message: '发送效果待核对' }, updatedAt: now(clock) }
+        return { ...state, deliveries: replaceById(state.deliveries, output) }
+      })
+      return deliveryDto(output)
     },
 
     async listChannelApps(actor) {
@@ -811,10 +851,13 @@ function currentDeliveryAuthorization(state, delivery, { validateClaim = false }
   const result = delivery.resultId === undefined ? undefined : work?.results.find(item => item.id === delivery.resultId)
   const revisions = delivery.authorizationRevisions
   const fixed = Object.hasOwn(FIXED_CONTENT, delivery.contentKey)
+  const occurrence = automationOccurrence(state, delivery)
+  const rule = occurrence && state.automationRules.find(item => item.id === occurrence.ruleId)
   const workAuthorized = work && workBindingAuthorized(state, member, work)
   if (!app || !identity || !conversation || !member
     || identity.channelAppId !== app.id || conversation.channelAppId !== app.id || identity.memberId !== member.id
     || (conversation.type === 'private' && (conversation.memberId !== member.id || conversation.identityId !== identity.id))
+    || (occurrence && (conversation.type !== 'private' || rule?.ownerMemberId !== work?.ownerMemberId || rule.status !== 'active' || rule.notificationConversationId !== conversation.id))
     || (!fixed && (!workAuthorized || !employee || !skill || (work.connectionId !== undefined && !connection)
       || !app.allowedScopes.includes(delivery.contentScope) || !conversation.allowedScopes.includes(delivery.contentScope) || (delivery.resultId !== undefined && !result)
       || result?.knowledgeDependencyRefs?.some(ref => !currentKnowledgeReference(state, ref, member.id, result.employeeId ?? work.employeeId))))) return undefined
@@ -841,7 +884,8 @@ function formatWorkContent(contentKey, work, result) {
   if (!work) return undefined
   const path = `/works/${encodeURIComponent(work.id)}`
   if (contentKey === 'work.accepted') return `工作 ${work.id} 已受理，当前状态：${work.status}。来源：渠道文本交办。详情：${path}`
-  if (contentKey !== 'result.gearjob') return undefined
+  if (contentKey === 'automation.failed') return `自动工作 ${work.id} 未完成，状态：${({ failed: '失败', cancelled: '已停止', interrupted: '已中断' })[work.status] ?? '未完成'}。详情：${path}`
+  if (!['result.gearjob', 'automation.completed'].includes(contentKey)) return undefined
   if (result?.kind !== 'gearjob.work-order.observation') return `工作 ${work.id} 当前状态：${work.status}。来源：已验证工作结果。详情：${path}`
   const fact = result.payload ?? {}
   const source = result.source ?? fact
@@ -869,6 +913,33 @@ function invalidateClaims(deliveries, predicate, timestamp, code, message) {
     const unknown = delivery.status === 'sending'
     return { ...delivery, status: unknown ? 'unknown' : 'blocked', error: { code: unknown ? 'DELIVERY_UNKNOWN' : code, message: unknown ? '发送效果待核对' : message }, updatedAt: timestamp }
   })
+}
+
+function automationOccurrence(state, delivery) { return state.automationOccurrences?.find(item => item.deliveryId === delivery.id) }
+
+function automationDelivery(state, occurrence, work, execution, clock, idFactory) {
+  const rule = state.automationRules.find(item => item.id === occurrence.ruleId)
+  const conversation = state.channelConversations.find(item => item.id === rule?.notificationConversationId)
+  const identity = state.channelIdentities.find(item => item.id === conversation?.identityId)
+  const app = state.channelApps.find(item => item.id === conversation?.channelAppId)
+  if (!rule?.notificationConversationId || !conversation || !identity || !app) return undefined
+  const requestId = `automation:${occurrence.occurrenceKey}:terminal`
+  const existing = state.deliveries.find(item => item.channelAppId === app.id && item.requestId === requestId)
+  if (existing) return existing.workId === work.id ? { state: { ...state, automationOccurrences: replaceById(state.automationOccurrences, { ...occurrence, deliveryId: existing.id }) }, delivery: existing } : undefined
+  const timestamp = now(clock)
+  const completed = execution.status === 'completed'
+  const resultId = completed ? execution.resultId : undefined
+  let delivery = compact({
+    id: `delivery-${idFactory()}`, channelAppId: app.id, requestId, workId: work.id, resultId,
+    targetConversationId: conversation.id, targetIdentityId: identity.id, contentScope: 'result',
+    contentKey: completed ? 'automation.completed' : 'automation.failed', status: 'pending', attempts: 0, createdAt: timestamp, updatedAt: timestamp,
+  })
+  let next = { ...state, deliveries: [...state.deliveries, delivery], automationOccurrences: replaceById(state.automationOccurrences, { ...occurrence, deliveryId: delivery.id }) }
+  if (rule.revision !== occurrence.ruleRevision || !currentDeliveryAuthorization(next, delivery)) {
+    delivery = { ...delivery, status: 'blocked', error: { code: 'DELIVERY_FORBIDDEN', message: '自动通知当前不允许发送' } }
+    next = { ...next, deliveries: replaceById(next.deliveries, delivery) }
+  }
+  return { state: next, delivery }
 }
 
 function deliveryTuple(value) {

@@ -541,7 +541,7 @@ function normalizeV7(value) {
     if (event && rule.status === 'draft' && rule.eventAcceptAfter !== null) throw new Error(`自动规则 ${rule.id} draft eventAcceptAfter 状态不闭合`)
     if (event && ['active', 'paused'].includes(rule.status) && rule.eventAcceptAfter === null) throw new Error(`自动规则 ${rule.id} active eventAcceptAfter 缺失`)
   }
-  const workOccurrenceIds = new Set(), successfulByRule = new Map()
+  const workOccurrenceIds = new Set(), deliveryOccurrenceIds = new Set(), successfulByRule = new Map()
   for (const occurrence of automationOccurrences) {
     const rule = ruleById.get(occurrence.ruleId)
     if (!rule || rule.trigger.kind !== 'daily-time' || occurrence.ruleRevision > rule.revision || dailyAutomationOccurrenceKey(occurrence.ruleId, occurrence.scheduledDate) !== occurrence.occurrenceKey) throw new Error(`自动发生 ${occurrence.id} 规则引用不闭合`)
@@ -557,8 +557,11 @@ function normalizeV7(value) {
     if (occurrence.deliveryId !== null) {
       const delivery = deliveryById.get(occurrence.deliveryId)
       if (!delivery || delivery.workId !== occurrence.workId) throw new Error(`自动发生 ${occurrence.id} 投递引用不闭合`)
+      if (deliveryOccurrenceIds.has(delivery.id)) throw new Error(`自动发生 ${occurrence.id} 投递引用重复`)
+      deliveryOccurrenceIds.add(delivery.id)
     }
   }
+  for (const delivery of common.deliveries) if (delivery.contentKey.startsWith('automation.') && !deliveryOccurrenceIds.has(delivery.id)) throw new Error(`自动投递 ${delivery.id} 未由发生回链`)
   for (const [ruleId, count] of successfulByRule) if (count > ruleById.get(ruleId).maxRuns) throw new Error(`自动规则 ${ruleId} 累计预算超限`)
   return { ...common, version: STATE_VERSION, automationRules, automationOccurrences }
 }
@@ -727,7 +730,8 @@ function normalizeDelivery(source) {
   if (delivery.workId !== undefined) requiredText(delivery.workId, `渠道投递 ${id} workId 无效`)
   const fixed = ['group.accepted', 'help.unsupported', 'help.unavailable'].includes(delivery.contentKey)
   if ((!fixed && !delivery.workId) || (delivery.contentKey === 'result.gearjob' && !delivery.resultId)
-    || !['work.accepted', 'result.gearjob', 'group.accepted', 'help.unsupported', 'help.unavailable'].includes(delivery.contentKey)) throw new Error(`渠道投递 ${id} 内容引用无效`)
+      || !['work.accepted', 'result.gearjob', 'automation.completed', 'automation.failed', 'group.accepted', 'help.unsupported', 'help.unavailable'].includes(delivery.contentKey)
+      || (delivery.contentKey === 'automation.completed' && !delivery.resultId) || (delivery.contentKey === 'automation.failed' && delivery.resultId)) throw new Error(`渠道投递 ${id} 内容引用无效`)
   if (delivery.resultId !== undefined) requiredText(delivery.resultId, `渠道投递 ${id} resultId 无效`)
   if (delivery.channelMessageId !== undefined) requiredText(delivery.channelMessageId, `渠道投递 ${id} channelMessageId 无效`)
   if (delivery.providerMessageId !== undefined) requiredText(delivery.providerMessageId, `渠道投递 ${id} providerMessageId 无效`)

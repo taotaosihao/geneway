@@ -10,7 +10,7 @@ const READY_TIMEOUT_MS = 15_000
 const CLOSE_DRAIN_TIMEOUT_MS = 10_000
 const silentLogger = Object.fromEntries(['error', 'warn', 'info', 'debug', 'trace'].map(name => [name, () => {}]))
 
-export function createFeishuRuntime({ store, channelService, secretRoot, sdk = Lark, httpTimeoutMs = HTTP_TIMEOUT_MS, readyTimeoutMs = READY_TIMEOUT_MS, closeDrainTimeoutMs = CLOSE_DRAIN_TIMEOUT_MS } = {}) {
+export function createFeishuRuntime({ store, channelService, secretRoot, sdk = Lark, httpTimeoutMs = HTTP_TIMEOUT_MS, readyTimeoutMs = READY_TIMEOUT_MS, closeDrainTimeoutMs = CLOSE_DRAIN_TIMEOUT_MS, automationOwnerCheck } = {}) {
   if (!store?.read || !channelService?.recover || !channelService?.setChannelAppRuntime) throw new TypeError('Feishu runtime dependencies are required')
   for (const [name, value] of Object.entries({ httpTimeoutMs, readyTimeoutMs, closeDrainTimeoutMs })) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${name} must be a positive integer`)
   const instances = new Map()
@@ -150,15 +150,19 @@ export function createFeishuRuntime({ store, channelService, secretRoot, sdk = L
     for (const app of desired.values()) if (!instances.has(app.id) && !stopping) await build(app)
   }
 
-  async function sendDelivery(deliveryId, { retry = false } = {}) {
+  async function sendDelivery(deliveryId, { retry = false, ownerCheck } = {}) {
     if (stopping) throw runtimeError('UNAVAILABLE', 'Feishu runtime is stopping')
+    if (ownerCheck && !ownerCheck()) throw runtimeError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
     const authorized = await (retry ? channelService.retryDelivery({ deliveryId }) : channelService.authorizeDelivery({ deliveryId }))
+    if (ownerCheck && !ownerCheck()) return channelService.abandonAutomationClaim({ deliveryId })
     const entry = instances.get(authorized.channelAppId)
     if (!entry?.available || !current(entry)) {
+      if (ownerCheck && !ownerCheck()) return channelService.abandonAutomationClaim({ deliveryId })
       await channelService.recordDeliveryOutcome({ deliveryId, status: 'failed', error: { code: 'CHANNEL_RUNTIME_UNAVAILABLE' } })
       throw runtimeError('UNAVAILABLE', 'Feishu runtime is unavailable')
     }
     const envelope = await channelService.validateSendClaim({ deliveryId })
+    if (ownerCheck && !ownerCheck()) return channelService.abandonAutomationClaim({ deliveryId })
     let outcome
     try {
       const response = await bounded(entry.client.im.v1.message.create({
@@ -174,7 +178,16 @@ export function createFeishuRuntime({ store, channelService, secretRoot, sdk = L
     } catch {
       outcome = { status: 'unknown', error: { code: 'DELIVERY_UNKNOWN' } }
     }
+    if (ownerCheck && !ownerCheck()) outcome = { status: 'unknown', error: { code: 'DELIVERY_UNKNOWN' } }
     return channelService.recordDeliveryOutcome({ deliveryId, ...outcome })
+  }
+
+  async function flushAutomationNotifications({ ownerCheck = automationOwnerCheck } = {}) {
+    const created = await channelService.ensureAutomationDeliveries({ ownerCheck })
+    for (const delivery of created.deliveries) if (delivery.status === 'pending') {
+      try { await sendDelivery(delivery.id, { ownerCheck }) } catch (error) { if (!['INVALID_STATE', 'DELIVERY_FORBIDDEN'].includes(error?.code)) throw error }
+    }
+    return created
   }
 
   return {
@@ -182,6 +195,7 @@ export function createFeishuRuntime({ store, channelService, secretRoot, sdk = L
       if (stopping) throw runtimeError('UNAVAILABLE', 'Feishu runtime is stopping')
       await channelService.recover()
       await this.sync()
+      await flushAutomationNotifications()
     },
     sync() {
       syncChain = syncChain.then(reconcile, reconcile)
@@ -192,6 +206,7 @@ export function createFeishuRuntime({ store, channelService, secretRoot, sdk = L
       return Boolean(entry?.available && current(entry))
     },
     sendDelivery,
+    sendAutomationNotifications: flushAutomationNotifications,
     async close() {
       if (stopping) return
       stopping = true

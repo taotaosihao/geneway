@@ -42,6 +42,7 @@ export async function start() {
   const runner = createDshRunner({ root, config: runtimeConfig })
   const collaborationRunner = createCollaborationRunner({ store, root, dshHome: runtimeConfig.dshHome, secretRoot: runtimeConfig.secretRoot })
   const knowledge = collaborationRunner.getKnowledgeService()
+  let channelRuntime, automationRuntime
   const service = createWorkService({
     store, runner, collaborationRunner,
     connectionCatalog,
@@ -52,13 +53,14 @@ export async function start() {
       const result = await readGearJobWorkOrder({ workOrderId, connection, secretRoot: runtimeConfig.secretRoot })
       return result.sourceRecordId
     },
+    onAutomationTerminal: () => channelRuntime?.sendAutomationNotifications({ ownerCheck: () => automationRuntime?.ownsLock() === true }),
   })
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
   const automation = createAutomationService({ store, workService: service, connectionCatalog })
-  const automationRuntime = createAutomationRuntime({ store, automationService: automation, workService: service, dataRoot: runtimeConfig.dataRoot, onError: error => console.error(error) })
+  automationRuntime = createAutomationRuntime({ store, automationService: automation, workService: service, dataRoot: runtimeConfig.dataRoot, onError: error => console.error(error) })
   const channel = createChannelService({ store, workService: service })
-  const channelRuntime = createFeishuRuntime({ store, channelService: channel, secretRoot: process.env.GENEWAY_SECRET_ROOT?.trim() ? runtimeConfig.secretRoot : undefined })
+  channelRuntime = createFeishuRuntime({ store, channelService: channel, secretRoot: process.env.GENEWAY_SECRET_ROOT?.trim() ? runtimeConfig.secretRoot : undefined, automationOwnerCheck: () => automationRuntime.ownsLock() })
   try {
     await automationRuntime.start()
     await channelRuntime.start()

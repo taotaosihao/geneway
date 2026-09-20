@@ -165,7 +165,7 @@ export function createAutomationService({ store, workService = null, clock = () 
           effectiveFrom: rule.status === 'active' ? now : rule.effectiveFrom,
           eventAcceptAfter: null,
         }
-        return { ...state, automationRules: replaceById(state.automationRules, updated) }
+        return invalidateAutomationNotifications({ ...state, automationRules: replaceById(state.automationRules, updated) }, rule.id, now)
       })
       return projectRule(await store.read(), updated, clock())
     },
@@ -191,7 +191,7 @@ export function createAutomationService({ store, workService = null, clock = () 
         if (!['draft', 'active', 'paused'].includes(rule.status)) throw serviceError('INVALID_STATE', '规则当前不可撤销')
         const now = timestamp(clock())
         revoked = { ...rule, status: 'revoked', revision: rule.revision + 1, updatedAt: now, revokedAt: now, eventAcceptAfter: null }
-        return { ...state, automationRules: replaceById(state.automationRules, revoked) }
+        return invalidateAutomationNotifications({ ...state, automationRules: replaceById(state.automationRules, revoked) }, rule.id, now)
       })
       return projectRule(await store.read(), revoked, clock())
     },
@@ -212,7 +212,8 @@ export function createAutomationService({ store, workService = null, clock = () 
       if (enteringActive && deriveUsedRuns(rule, state.automationOccurrences) >= rule.maxRuns) throw serviceError('BUDGET_EXHAUSTED', '规则累计预算已用尽')
       const now = timestamp(clock())
       updated = { ...rule, status: to, revision: rule.revision + 1, updatedAt: now, effectiveFrom: enteringActive ? now : rule.effectiveFrom }
-      return { ...state, automationRules: replaceById(state.automationRules, updated) }
+      const next = { ...state, automationRules: replaceById(state.automationRules, updated) }
+      return enteringActive ? next : invalidateAutomationNotifications(next, rule.id, now)
     })
     return projectRule(await store.read(), updated, clock())
   }
@@ -259,6 +260,7 @@ export function createAutomationRuntime({ store, automationService, workService,
     },
 
     async stop() { await stop() },
+    ownsLock() { return running },
   }
 
   async function stop() {
@@ -445,6 +447,19 @@ function terminalOccurrence(id, rule, scheduledDate, createdAt, status, reason) 
 function activeAutomationWorkCount(state, ruleId) {
   const workIds = new Set(state.automationOccurrences.filter(item => (!ruleId || item.ruleId === ruleId) && item.workId).map(item => item.workId))
   return state.works.filter(work => workIds.has(work.id) && work.executions?.some(execution => ['accepted', 'running', 'cancel_requested'].includes(execution.status))).length
+}
+
+function invalidateAutomationNotifications(state, ruleId, timestamp) {
+  const deliveryIds = new Set(state.automationOccurrences.filter(item => item.ruleId === ruleId && item.deliveryId).map(item => item.deliveryId))
+  if (!deliveryIds.size) return state
+  return {
+    ...state,
+    deliveries: state.deliveries.map(delivery => {
+      if (!deliveryIds.has(delivery.id) || !['pending', 'sending'].includes(delivery.status)) return delivery
+      const unknown = delivery.status === 'sending'
+      return { ...delivery, status: unknown ? 'unknown' : 'blocked', error: { code: unknown ? 'DELIVERY_UNKNOWN' : 'RULE_CHANGED', message: unknown ? '发送效果待核对' : '自动规则或通知目标已变化' }, updatedAt: timestamp }
+    }),
+  }
 }
 
 function ruleFields(state, member, input, connectionCatalog) {

@@ -79,6 +79,23 @@ P4 不实现通用消息总线、分布式队列、通用审批引擎、跨渠�
 
 用户把 secret 直接提供到会话后，后续不得复述或写入仓库/state/log/report；正式测试或迁移完成后应轮换，并只从仓库外 `credentialRef` 使用。
 
+### 2.5 Hermes 成熟实现复核与自主验收裁决
+
+用户明确不再承担逐项 canary 发送，要求团队自行完成剩余测试，只在阶段候选冻结后参与一次最终验收；并建议优先复用成熟飞书方案，例如本机 Hermes。
+
+两名只读分析者分别检查 Geneway 接入面与本机 Hermes 0.16.0 实际运行源码，收敛为：**继续使用已锁定并真实验证的飞书官方 Node SDK；复用 Hermes 已验证的局部设计规则，不直接调用或整体复制 Hermes runtime/adapter。**
+
+关键证据与裁决：
+
+1. 官方 Node SDK 会 `await EventDispatcher.invoke()` 后再写 ACK；Geneway handler 可以先 `await channelService.handleInbound()`，把 durable inbox/去重置于 handler 返回之前。
+2. Hermes Python adapter 把 coroutine 提交到另一个 loop 后立即返回，Python SDK 随即 ACK；其独立 JSON 去重又发生在业务持久化前，不满足本合同的 durable-before-handler-return 边界。
+3. Hermes 没有稳定的外部 adapter HTTP/IPC API；直接复用会引入 Python gateway、session/agent、独立去重文件、第二套权限/配置与第二事实源。
+4. Hermes 对发送异常最多自动重试三次且每次生成新 UUID，不能复用于 `unknown` 不盲重发的 Geneway delivery 状态机。
+5. 借鉴且重新实现为极薄 Node glue 的规则只有：app-scoped `open_id` 身份、bot `open_id` 精确 self-echo/群 @ gate、per-app 实时 availability、停用后关闭并禁止重连、每 attempt 固定 UUID、成功 message ID 回读；群结果仍只发已验证私聊。
+6. 本机 Hermes gateway 使用另一个 app，继续保持独立运行，不停止、不接入 Geneway，也不读取/复制其 secret 或含临时 WS ticket 的历史日志。
+
+后续实现与确定性测试不再要求用户逐项发消息：使用去标识真实形状 fixture、官方 `EventDispatcher.invoke()`、真实 channel store 和 fake official client 验证 durable-before-resolve、重复/冲突、发送前撤权、成功/failed/unknown、配置轮换和关闭重连。已经取得的真实私聊入站/出站/SDK fast/slow/lifecycle 作为 T0 bootstrap 证据；真实 DM 与群 @mention 正反例只在 P4 最终候选阶段请用户一次验收，bot 消息不得冒充真人路径。
+
 ## 3. 当前事实、已验证依赖与未知
 
 ### 3.1 已观察事实
@@ -88,19 +105,20 @@ P4 不实现通用消息总线、分布式队列、通用审批引擎、跨渠�
 - `src/server.mjs` 当前是 loopback HTTP，Cookie 为 `HttpOnly; SameSite=Strict`，没有 `Secure`；桌面本地验收成立，但不构成真实手机/渠道内 Web 安全入口。
 - P3 已用 ZenMux 的 `deepseek/deepseek-v4-pro` 完成 root/child/recheck 真实调用。ZenMux 官方模型目录当前列出该精确 model id；P4 不更换 provider/model，不从 `~/.claude/setting.json` 复制或输出 API key。
 - P3 `lark-cli` 仅证明工程验收资料能够送达既有飞书会话；它不是 P4 产品 app、产品身份映射或产品消息适配器。
-- 当前依赖仅有 DSH 三包，没有飞书或微信 SDK。Ponytail 约束下仅在真实探针证明需要时增加一个官方 SDK；不为适配器框架引入额外依赖。
-- 用户提供的飞书 app `cli_aaae8b6cbdb89cc0` 机器人已激活，名称为 `IoT Deploy - Multica`；本机 credential 仅进入 `lark-cli` 加密存储。受控 T0 连接可进入 `ready`，但停止后开放平台持续报告另一个在线实例，归属未知；依据 §2.4 保持 hard stop。
+- T0 真实探针证明需要官方 SDK 后，仓库已精确锁定 `@larksuiteoapi/node-sdk@1.74.0`；不为 adapter factory、队列、webhook 或 Hermes runtime 引入额外依赖。
+- 用户提供的飞书 app `cli_aaae8b6cbdb89cc0` 机器人已激活，名称为 `IoT Deploy - Multica`；本机 credential 仅进入 `lark-cli` 加密存储。历史碰撞曾表现为本机停止后仍有一个未知在线实例；用户随后授权清理 Multica 绑定，精确 installation 被正式 API 标记为 revoked，远端连接数约 20 秒后从 1 降为 0，唯一事件 owner 冲突已经解除。
+- Geneway 已独占完成真实私聊入站、幂等出站/回读、关闭重连和官方 SDK fast/slow probe。fast 通过；slow 的 4 秒 handler 在 20 秒内未观察到重投，因此重投语义保持 `not-observed`，不能当作丢失补偿保证。
 
 ### 3.2 外部事实与待验证假设
 
-- 飞书官方 Node SDK 提供 `WSClient`/`EventDispatcher`，长连接可避免为入站消息暴露公网 webhook；SDK 文档称 handler 应在约 3 秒内完成，否则事件会被重复推送。实际 ACK 时点、应用类型、消息发送回执、重连与关闭行为必须由 T0 真实探针证明。
+- 飞书官方 Node SDK 的真实 `WSClient`/`EventDispatcher` 已证明 ready、真实入站、真实发送回执、幂等出站、关闭后连接归零及重新连接。SDK 实现会等待 async handler 完成后再写 ACK；但 4 秒 handler 在本次 20 秒窗口内没有观测到重投，不能把平台重投当可靠补偿。仍待产品 adapter 和阶段末一次真人验收证明 durable inbox、私聊/群完整路径、发送前撤权、失败/unknown 和实际业务回读。
 - 飞书长连接只解决产品 app 的事件通道，不解决手机打开 Web。真实手机/飞书内 Web 仍需要用户可达、可信 HTTPS origin 与相应网络暴露授权。安全拓扑固定为：Geneway 继续只监听 loopback，由明确获准的 TLS 终止器反向代理；服务只配置一个 canonical HTTPS origin，HTTPS 模式的 session Cookie 强制 `Secure; HttpOnly; SameSite=Strict`。只信任来自明确代理来源的转发上下文，不接受客户端任意 `Forwarded`/`X-Forwarded-*` 决定 origin 或身份；明文外网监听、origin 不匹配或代理来源不可信均拒绝。具体域名、TLS 终止器和网络暴露仍由用户授权。
 - 微信具体形态、正式接口、账号资质、回调要求和消息限制未知。个人微信、企业微信内部应用/客户联系、微信客服等不可互换。
 
 ### 3.3 必须由用户决定或提供的外部门
 
 1. 微信真实入口形态，以及可用账号/API/负责人；用户已决定本轮企业微信真实验证 deferred，该义务不删除；
-2. 飞书 app 唯一事件 owner：确认现有 `IoT Deploy - Multica` 在线实例永久退出并独占移交 Geneway，或提供/授权创建独立 Geneway app；随后仍需真实测试用户/私聊/群、权限和凭据引用；
+2. 飞书真实测试用户、测试私聊与测试群的最终验收范围；app 唯一事件 owner 与私聊测试对象已经具备，群聊正反例留到阶段末一次真人验收；
 3. 所选微信的真实测试对象与允许收发范围；
 4. 两渠道允许外发的数据范围；默认只允许当前 work 的获准结构化事实与保守提示，不允许任意知识正文或模型 explanation；
 5. 若要求群内直接显示业务详情，必须另行明确群接收范围和数据共享规则；默认保持 owner-only；

@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 
@@ -421,12 +422,12 @@ function normalizeV6(value) {
   }
   for (const conversation of channelConversations) {
     const app = appById.get(conversation.channelAppId), identity = identityById.get(conversation.identityId)
-    if (!app || !memberById.has(conversation.memberId) || !identity || identity.channelAppId !== app.id || identity.memberId !== conversation.memberId || conversation.provider !== app.provider) throw new Error(`渠道会话 ${conversation.id} 引用不闭合`)
+    if (!app || !memberById.has(conversation.memberId) || !identity || identity.channelAppId !== app.id || identity.memberId !== conversation.memberId) throw new Error(`渠道会话 ${conversation.id} 引用不闭合`)
     if (conversation.defaultDispatch) validateDefaultDispatch(conversation, common, memberById, employeeById, skillById, connectionById)
   }
   for (const message of channelMessages) {
     const app = appById.get(message.channelAppId)
-    if (!app || message.provider !== app.provider) throw new Error(`渠道消息 ${message.id} 应用引用无效`)
+    if (!app) throw new Error(`渠道消息 ${message.id} 应用引用无效`)
     const conversation = message.conversationId && conversationById.get(message.conversationId)
     const identity = message.senderIdentityId && identityById.get(message.senderIdentityId)
     if ((message.conversationId && (!conversation || conversation.channelAppId !== app.id)) || (message.senderIdentityId && (!identity || identity.channelAppId !== app.id))) throw new Error(`渠道消息 ${message.id} 身份或会话引用无效`)
@@ -434,16 +435,32 @@ function normalizeV6(value) {
       const work = workById.get(message.workId)
       if (!work || (identity && work.ownerMemberId !== identity.memberId)) throw new Error(`渠道消息 ${message.id} 工作引用无效`)
     }
+    if (message.authorizationRevisions && (!identity || !conversation || message.authorizationRevisions.app > app.revision || message.authorizationRevisions.identity > identity.revision || message.authorizationRevisions.conversation > conversation.revision)) throw new Error(`渠道消息 ${message.id} 授权 revision 引用无效`)
     if (message.status === 'accepted') {
       const work = workById.get(message.workId)
       if (message.direction !== 'inbound' || !conversation || !identity || conversation.identityId !== identity.id || conversation.memberId !== identity.memberId || work?.ownerMemberId !== identity.memberId
         || message.providerUserId !== identity.providerUserId || message.providerConversationId !== conversation.providerConversationId) throw new Error(`渠道消息 ${message.id} accepted 引用不闭合`)
+      if (message.command?.type === 'create') {
+        const reservation = common.reservations[`${identity.memberId}|create|${message.clientRequestId}`]
+        if (work.capabilityId !== GEARJOB_CAPABILITY_ID || work.input?.workOrderId !== message.command.workOrderId || !reservation || reservation.workId !== work.id) throw new Error(`渠道消息 ${message.id} create 工作引用不闭合`)
+      }
+      if (message.command?.type === 'follow-up') {
+        const reservation = common.reservations[`${identity.memberId}|${work.id}|follow-up|${message.clientRequestId}`]
+        if (!reservation || reservation.workId !== work.id) throw new Error(`渠道消息 ${message.id} follow-up reservation 不闭合`)
+      }
+      if (message.replyToProviderMessageId && ['follow-up', 'stop'].includes(message.command?.type)) {
+        const replyWorkIds = new Set([
+          ...deliveries.filter(item => item.channelAppId === app.id && item.targetConversationId === conversation.id && item.providerMessageId === message.replyToProviderMessageId).map(item => item.workId),
+          ...channelMessages.filter(item => item.channelAppId === app.id && item.conversationId === conversation.id && item.direction === 'outbound' && item.providerMessageId === message.replyToProviderMessageId && item.workId).map(item => item.workId),
+        ])
+        if (replyWorkIds.size !== 1 || !replyWorkIds.has(work.id)) throw new Error(`渠道消息 ${message.id} reply 工作引用不闭合`)
+      }
     }
   }
   for (const delivery of deliveries) {
     const app = appById.get(delivery.channelAppId), work = workById.get(delivery.workId)
     const identity = identityById.get(delivery.targetIdentityId), conversation = conversationById.get(delivery.targetConversationId)
-    if (!app || delivery.provider !== app.provider || !work || !identity || !conversation || identity.channelAppId !== app.id || conversation.channelAppId !== app.id || identity.memberId !== work.ownerMemberId || conversation.memberId !== work.ownerMemberId || conversation.identityId !== identity.id) throw new Error(`渠道投递 ${delivery.id} 引用不闭合`)
+    if (!app || !work || !identity || !conversation || identity.channelAppId !== app.id || conversation.channelAppId !== app.id || identity.memberId !== work.ownerMemberId || conversation.memberId !== work.ownerMemberId || conversation.identityId !== identity.id) throw new Error(`渠道投递 ${delivery.id} 引用不闭合`)
     if (delivery.resultId && !work.results.some(item => item.id === delivery.resultId)) throw new Error(`渠道投递 ${delivery.id} 结果引用不存在`)
     if (delivery.channelMessageId) {
       const message = messageById.get(delivery.channelMessageId)
@@ -485,11 +502,12 @@ function normalizeChannelIdentity(identity) {
   return identity
 }
 
-function normalizeChannelConversation(conversation) {
-  if (!record(conversation)) throw new Error('渠道会话状态无效')
-  exactKeys(conversation, ['id', 'channelAppId', 'providerConversationId', 'provider', 'identityId', 'memberId', 'type', 'allowedScopes', 'verificationMethod', 'status', 'revision', 'defaultDispatch', 'createdAt', 'updatedAt', 'unlinkedAt'], '渠道会话')
+function normalizeChannelConversation(source) {
+  if (!record(source)) throw new Error('渠道会话状态无效')
+  const { provider: _provider, ...conversation } = source
+  exactKeys(conversation, ['id', 'channelAppId', 'providerConversationId', 'identityId', 'memberId', 'type', 'allowedScopes', 'verificationMethod', 'status', 'revision', 'defaultDispatch', 'createdAt', 'updatedAt', 'unlinkedAt'], '渠道会话')
   const id = requiredText(conversation.id, '渠道会话 ID 无效')
-  for (const key of ['channelAppId', 'providerConversationId', 'provider', 'identityId', 'memberId', 'createdAt', 'updatedAt']) requiredText(conversation[key], `渠道会话 ${id} ${key} 无效`)
+  for (const key of ['channelAppId', 'providerConversationId', 'identityId', 'memberId', 'createdAt', 'updatedAt']) requiredText(conversation[key], `渠道会话 ${id} ${key} 无效`)
   if (!['private', 'group'].includes(conversation.type) || conversation.verificationMethod !== 'link-code' || !['pending', 'active', 'unlinked'].includes(conversation.status) || !Number.isSafeInteger(conversation.revision) || conversation.revision < 1) throw new Error(`渠道会话 ${id} 状态无效`)
   const allowedScopes = uniqueTextArray(conversation.allowedScopes, `渠道会话 ${id} allowedScopes`)
   if (!allowedScopes.length) throw new Error(`渠道会话 ${id} 允许范围为空`)
@@ -497,36 +515,70 @@ function normalizeChannelConversation(conversation) {
   return { ...conversation, allowedScopes }
 }
 
-function normalizeChannelMessage(message) {
-  if (!record(message)) throw new Error('渠道消息状态无效')
-  exactKeys(message, ['id', 'channelAppId', 'provider', 'providerEventId', 'providerMessageId', 'providerConversationId', 'providerUserId', 'conversationId', 'senderIdentityId', 'direction', 'text', 'receivedAt', 'persistedAt', 'status', 'workId', 'error'], '渠道消息')
+function normalizeChannelMessage(source) {
+  if (!record(source)) throw new Error('渠道消息状态无效')
+  const { provider: _provider, ...message } = source
+  exactKeys(message, ['id', 'channelAppId', 'providerEventId', 'providerMessageId', 'replyToProviderMessageId', 'providerConversationId', 'providerUserId', 'conversationId', 'senderIdentityId', 'direction', 'text', 'receivedAt', 'persistedAt', 'reservedAt', 'status', 'command', 'clientRequestId', 'authorizationRevisions', 'workId', 'error'], '渠道消息')
   const id = requiredText(message.id, '渠道消息 ID 无效')
-  for (const key of ['channelAppId', 'provider', 'providerConversationId', 'providerUserId', 'receivedAt', 'persistedAt']) requiredText(message[key], `渠道消息 ${id} ${key} 无效`)
+  for (const key of ['channelAppId', 'providerConversationId', 'providerUserId', 'receivedAt', 'persistedAt']) requiredText(message[key], `渠道消息 ${id} ${key} 无效`)
   if (!text(message.providerEventId) && !text(message.providerMessageId)) throw new Error(`渠道消息 ${id} 缺少官方稳定 ID`)
   if (message.providerEventId !== undefined) requiredText(message.providerEventId, `渠道消息 ${id} event ID 无效`)
   if (message.providerMessageId !== undefined) requiredText(message.providerMessageId, `渠道消息 ${id} message ID 无效`)
+  if (message.replyToProviderMessageId !== undefined) requiredText(message.replyToProviderMessageId, `渠道消息 ${id} reply message ID 无效`)
   if (message.conversationId !== undefined) requiredText(message.conversationId, `渠道消息 ${id} conversationId 无效`)
   if (message.senderIdentityId !== undefined) requiredText(message.senderIdentityId, `渠道消息 ${id} senderIdentityId 无效`)
   if (message.text !== undefined) requiredRawText(message.text, `渠道消息 ${id} 文本无效`)
-  if (!['inbound', 'outbound'].includes(message.direction) || !['received', 'unhandled', 'accepted', 'rejected'].includes(message.status)) throw new Error(`渠道消息 ${id} 状态无效`)
+  if (!['inbound', 'outbound'].includes(message.direction) || !['received', 'reserved', 'unhandled', 'accepted', 'rejected'].includes(message.status)) throw new Error(`渠道消息 ${id} 状态无效`)
+  if (message.command !== undefined) normalizeChannelCommand(message.command, id)
+  if (message.clientRequestId !== undefined && (!text(message.clientRequestId) || message.clientRequestId.length > 340)) throw new Error(`渠道消息 ${id} clientRequestId 无效`)
+  if (message.clientRequestId !== undefined) {
+    const kind = message.providerEventId ? 'event' : 'message', officialId = message.providerEventId ?? message.providerMessageId
+    const digest = createHash('sha256').update(`${message.channelAppId}\0${kind}\0${officialId}`).digest('hex')
+    if (message.clientRequestId !== `channel:${message.channelAppId}:${digest}`) throw new Error(`渠道消息 ${id} clientRequestId 不闭合`)
+  }
+  if (message.authorizationRevisions !== undefined) normalizeChannelAuthorizationRevisions(message.authorizationRevisions, `渠道消息 ${id}`)
+  if (message.reservedAt !== undefined) requiredText(message.reservedAt, `渠道消息 ${id} reservedAt 无效`)
+  if (message.status === 'reserved' && (message.direction !== 'inbound' || !message.command || !message.clientRequestId || !message.authorizationRevisions || !message.reservedAt)) throw new Error(`渠道消息 ${id} reserved 状态不闭合`)
   if (message.status === 'accepted') requiredText(message.workId, `渠道消息 ${id} workId 无效`)
+  if (message.command?.workId !== undefined && message.workId !== message.command.workId) throw new Error(`渠道消息 ${id} command 工作引用不闭合`)
   if (message.error !== undefined) normalizeChannelError(message.error, `渠道消息 ${id}`)
   return message
 }
 
-function normalizeDelivery(delivery) {
-  if (!record(delivery)) throw new Error('渠道投递状态无效')
-  exactKeys(delivery, ['id', 'channelAppId', 'requestId', 'provider', 'workId', 'resultId', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'authorizationRevisions', 'status', 'attempts', 'providerMessageId', 'error', 'createdAt', 'updatedAt'], '渠道投递')
+function normalizeChannelCommand(command, messageId) {
+  if (!record(command) || !['create', 'follow-up', 'status', 'stop'].includes(command.type)) throw new Error(`渠道消息 ${messageId} command 无效`)
+  const fields = command.type === 'create'
+    ? ['type', 'workOrderId', 'employeeId', 'skillId', 'capabilityId', 'connectionId']
+    : command.type === 'follow-up' ? ['type', 'workId', 'text'] : ['type', 'workId']
+  exactKeys(command, fields, `渠道消息 ${messageId} command`)
+  if (command.type === 'create') {
+    for (const key of ['workOrderId', 'employeeId', 'skillId', 'capabilityId']) requiredText(command[key], `渠道消息 ${messageId} command ${key} 无效`)
+    if (command.connectionId !== undefined) requiredText(command.connectionId, `渠道消息 ${messageId} command connectionId 无效`)
+    if (command.capabilityId !== GEARJOB_CAPABILITY_ID) throw new Error(`渠道消息 ${messageId} command capability 无效`)
+  } else {
+    requiredText(command.workId, `渠道消息 ${messageId} command workId 无效`)
+    if (command.type === 'follow-up') requiredRawText(command.text, `渠道消息 ${messageId} command text 无效`)
+  }
+}
+
+function normalizeChannelAuthorizationRevisions(revisions, label) {
+  if (!record(revisions)) throw new Error(`${label} 授权 revision 无效`)
+  exactKeys(revisions, ['app', 'identity', 'conversation'], `${label} 授权 revision`)
+  for (const value of Object.values(revisions)) if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} 授权 revision 无效`)
+}
+
+function normalizeDelivery(source) {
+  if (!record(source)) throw new Error('渠道投递状态无效')
+  const { provider: _provider, ...delivery } = source
+  exactKeys(delivery, ['id', 'channelAppId', 'requestId', 'workId', 'resultId', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'authorizationRevisions', 'status', 'attempts', 'providerMessageId', 'error', 'createdAt', 'updatedAt'], '渠道投递')
   const id = requiredText(delivery.id, '渠道投递 ID 无效')
-  for (const key of ['channelAppId', 'requestId', 'provider', 'workId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'createdAt', 'updatedAt']) requiredText(delivery[key], `渠道投递 ${id} ${key} 无效`)
+  for (const key of ['channelAppId', 'requestId', 'workId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'createdAt', 'updatedAt']) requiredText(delivery[key], `渠道投递 ${id} ${key} 无效`)
   if (delivery.resultId !== undefined) requiredText(delivery.resultId, `渠道投递 ${id} resultId 无效`)
   if (delivery.channelMessageId !== undefined) requiredText(delivery.channelMessageId, `渠道投递 ${id} channelMessageId 无效`)
   if (delivery.providerMessageId !== undefined) requiredText(delivery.providerMessageId, `渠道投递 ${id} providerMessageId 无效`)
   if (!Number.isSafeInteger(delivery.attempts) || delivery.attempts < 0 || !['pending', 'sending', 'delivered', 'failed', 'unknown', 'blocked', 'cancelled'].includes(delivery.status)) throw new Error(`渠道投递 ${id} 状态无效`)
   if (delivery.authorizationRevisions !== undefined) {
-    if (!record(delivery.authorizationRevisions)) throw new Error(`渠道投递 ${id} 授权 revision 无效`)
-    exactKeys(delivery.authorizationRevisions, ['app', 'identity', 'conversation'], `渠道投递 ${id} 授权 revision`)
-    for (const value of Object.values(delivery.authorizationRevisions)) if (!Number.isSafeInteger(value) || value < 1) throw new Error(`渠道投递 ${id} 授权 revision 无效`)
+    normalizeChannelAuthorizationRevisions(delivery.authorizationRevisions, `渠道投递 ${id}`)
   }
   if (delivery.error !== undefined) normalizeChannelError(delivery.error, `渠道投递 ${id}`)
   const hasAuthorization = delivery.authorizationRevisions !== undefined

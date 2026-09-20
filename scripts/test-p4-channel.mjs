@@ -9,14 +9,13 @@ import { createFileStore, migrateState, STATE_VERSION } from '../src/store/file-
 const root = await mkdtemp(join(tmpdir(), 'geneway-p4-channel-'))
 let currentTime = '2026-09-20T00:00:00.000Z'
 let sequence = 0
-const revealed = []
 
 try {
   checkMigrations()
   const statePath = join(root, 'state.json')
   await writeFile(statePath, JSON.stringify(v5Fixture()), { mode: 0o600 })
   const store = createFileStore(statePath)
-  const service = createChannelService({ store, clock: () => currentTime, idFactory: () => String(++sequence), deliverLinkCode: value => revealed.push(value) })
+  const service = createChannelService({ store, clock: () => currentTime, idFactory: () => String(++sequence) })
   const admin = { id: 'member-admin' }, owner = { id: 'member-owner' }, peer = { id: 'member-peer' }
 
   await assert.rejects(service.upsertChannelApp(owner, appInput('app-1', 'official-app-1')), hasCode('FORBIDDEN'))
@@ -27,9 +26,8 @@ try {
   await assert.rejects(service.upsertChannelApp(admin, { id: 'app-1', providerAppId: 'replacement' }), hasCode('INVALID_REQUEST'))
 
   const first = await service.issueLinkCode(owner, { channelAppId: app1.id })
-  const firstCode = revealed.at(-1).code
+  const firstCode = first.code
   assert.equal(Buffer.from(firstCode, 'base64url').length, 32)
-  assert.equal(first.code, undefined)
   assert.equal(first.digest, undefined)
   let state = await store.read()
   assert.equal(state.linkCodes[0].digest, createHash('sha256').update(firstCode).digest('hex'))
@@ -42,7 +40,7 @@ try {
   assert.equal((await store.read()).linkCodes[0].status, 'cancelled')
 
   const second = await service.issueLinkCode(owner, { channelAppId: app1.id })
-  const secondCode = revealed.at(-1).code
+  const secondCode = second.code
   await assert.rejects(service.matchLinkCode({ channelAppId: app1.id, code: 'unknown-code', providerUserId: 'external-user', providerConversationId: 'private-1', conversationType: 'private' }), hasCode('LINK_CODE_INVALID'))
   assert.equal((await store.read()).linkCodes.find(item => item.id === second.id).failedAttempts, 0)
   const matched1 = await service.matchLinkCode({ channelAppId: app1.id, code: secondCode, providerUserId: 'external-user', providerConversationId: 'private-1', conversationType: 'private' })
@@ -50,13 +48,13 @@ try {
   await assert.rejects(service.confirmLink(owner, { linkCodeId: matched1.id }), hasCode('LINK_CODE_INVALID'))
 
   const crossApp = await service.issueLinkCode(owner, { channelAppId: app2.id })
-  const matched2 = await service.matchLinkCode({ channelAppId: app2.id, code: revealed.at(-1).code, providerUserId: 'external-user', providerConversationId: 'private-1', conversationType: 'private' })
+  const matched2 = await service.matchLinkCode({ channelAppId: app2.id, code: crossApp.code, providerUserId: 'external-user', providerConversationId: 'private-1', conversationType: 'private' })
   await service.confirmLink(owner, { linkCodeId: matched2.id })
   state = await store.read()
   assert.equal(state.channelIdentities.filter(item => item.providerUserId === 'external-user').length, 2)
 
   const conflict = await service.issueLinkCode(peer, { channelAppId: app1.id })
-  await assert.rejects(service.matchLinkCode({ channelAppId: app1.id, code: revealed.at(-1).code, providerUserId: 'external-user', providerConversationId: 'peer-private', conversationType: 'private' }), hasCode('LINK_CODE_INVALID'))
+  await assert.rejects(service.matchLinkCode({ channelAppId: app1.id, code: conflict.code, providerUserId: 'external-user', providerConversationId: 'peer-private', conversationType: 'private' }), hasCode('LINK_CODE_INVALID'))
   assert.equal((await store.read()).linkCodes.find(item => item.id === conflict.id).failedAttempts, 1)
 
   const ownerState = await service.memberChannelState(owner)
@@ -70,25 +68,20 @@ try {
   const received = await service.recordInbound({ channelAppId: app1.id, providerEventId: 'event-1', providerMessageId: 'message-1', providerConversationId: 'private-1', providerUserId: 'external-user', text: '交办 工单 WO-1' })
   assert.equal(received.message.status, 'received')
   const duplicate = await service.recordInbound({ channelAppId: app1.id, providerEventId: 'event-1', providerMessageId: 'message-other', providerConversationId: 'private-1', providerUserId: 'external-user', text: '不会覆盖' })
-  assert.equal(duplicate.deduplicated, true)
-  assert.equal(duplicate.message.id, received.message.id)
+  assert.equal(duplicate.deduplicated, false)
+  assert.equal(duplicate.message.status, 'rejected')
+  assert.equal(duplicate.message.providerEventId, undefined)
+  assert.equal(duplicate.message.providerMessageId, 'message-other')
+  const conflictReplay = await service.recordInbound({ channelAppId: app1.id, providerMessageId: 'message-other', providerConversationId: 'private-1', providerUserId: 'external-user', text: '单独重投' })
+  assert.equal(conflictReplay.deduplicated, true)
+  assert.equal(conflictReplay.message.id, duplicate.message.id)
   const unhandled = await service.recordInbound({ channelAppId: app1.id, providerEventId: 'event-unhandled', providerConversationId: 'unknown-private', providerUserId: 'unknown-user', text: 'unknown' })
   assert.equal(unhandled.message.status, 'unhandled')
-  await assert.rejects(service.bindMessageWork(owner, { messageId: unhandled.message.id, workId: 'work-1' }), hasCode('FORBIDDEN'))
-  const disabledMessage = await service.recordInbound({ channelAppId: app1.id, providerEventId: 'event-disabled', providerConversationId: 'private-1', providerUserId: 'external-user', text: 'before disable' })
-  await service.upsertChannelApp(admin, { id: app1.id, enabled: false })
-  await assert.rejects(service.bindMessageWork(owner, { messageId: disabledMessage.message.id, workId: 'work-1' }), hasCode('FORBIDDEN'))
-  await service.upsertChannelApp(admin, { id: app1.id, enabled: true, status: 'active' })
-  const mismatchedMessage = await service.recordInbound({ channelAppId: app1.id, providerEventId: 'event-mismatch', providerConversationId: 'private-1', providerUserId: 'external-user', text: 'mismatch' })
-  await store.update(value => ({ ...value, channelMessages: value.channelMessages.map(item => item.id === mismatchedMessage.message.id ? { ...item, providerUserId: 'mismatched-user' } : item) }))
-  await assert.rejects(service.bindMessageWork(owner, { messageId: mismatchedMessage.message.id, workId: 'work-1' }), hasCode('FORBIDDEN'))
-  const rejectedMessage = await service.recordInbound({ channelAppId: app1.id, providerEventId: 'event-rejected', providerConversationId: 'private-1', providerUserId: 'external-user', text: 'rejected' })
-  await store.update(value => ({ ...value, channelMessages: value.channelMessages.map(item => item.id === rejectedMessage.message.id ? { ...item, status: 'rejected' } : item) }))
-  await assert.rejects(service.bindMessageWork(owner, { messageId: rejectedMessage.message.id, workId: 'work-1' }), hasCode('FORBIDDEN'))
-  const unlinkedMessage = await service.recordInbound({ channelAppId: app2.id, providerEventId: 'event-unlinked', providerConversationId: 'private-1', providerUserId: 'external-user', text: 'before unlink' })
-  const acceptedMessage = await service.bindMessageWork(owner, { messageId: received.message.id, workId: 'work-1' })
-  assert.deepEqual(await service.bindMessageWork(owner, { messageId: received.message.id, workId: 'work-1' }), acceptedMessage)
-  await assert.rejects(service.bindMessageWork(owner, { messageId: received.message.id, workId: 'work-2' }), hasCode('FORBIDDEN'))
+  await store.update(value => ({ ...value, channelMessages: value.channelMessages.map(item => item.id === received.message.id ? { ...item, status: 'accepted', workId: 'work-1' } : item) }))
+  const acceptedMessage = (await store.read()).channelMessages.find(item => item.id === received.message.id)
+  assert.equal(acceptedMessage.status, 'accepted')
+  assert.equal('provider' in acceptedMessage, false)
+  assert.equal('provider' in conversation1, false)
 
   const delivery1 = await service.createDelivery(owner, { channelAppId: app1.id, requestId: 'request-1', workId: 'work-1', resultId: 'result-1', channelMessageId: received.message.id, targetIdentityId: identity1.id, targetConversationId: conversation1.id, contentScope: 'result' })
   const delivery1Again = await service.createDelivery(owner, { channelAppId: app1.id, requestId: 'request-1', workId: 'work-1', resultId: 'result-1', channelMessageId: received.message.id, targetIdentityId: identity1.id, targetConversationId: conversation1.id, contentScope: 'result' })
@@ -99,6 +92,7 @@ try {
   await assert.rejects(service.createDelivery(peer, { channelAppId: app1.id, requestId: 'request-1', workId: 'work-1', resultId: 'result-1', channelMessageId: received.message.id, targetIdentityId: identity1.id, targetConversationId: conversation1.id, contentScope: 'result' }), hasCode('NOT_FOUND'))
   const crossAppRequest = await service.createDelivery(owner, { channelAppId: app2.id, requestId: 'request-1', workId: 'work-1', resultId: 'result-1', targetIdentityId: identity2.id, targetConversationId: conversation2.id, contentScope: 'result' })
   assert.notEqual(crossAppRequest.delivery.id, delivery1.delivery.id)
+  assert.equal('provider' in delivery1.delivery, false)
 
   let sending = await service.authorizeDelivery({ deliveryId: delivery1.delivery.id })
   assert.equal(sending.status, 'sending')
@@ -137,7 +131,6 @@ try {
   assert.equal((await store.read()).deliveries.find(item => item.id === crossAppRequest.delivery.id).status, 'unknown')
   await assert.rejects(service.validateSendClaim({ deliveryId: crossAppRequest.delivery.id }), hasCode('INVALID_STATE'))
   await assert.rejects(service.retryDelivery({ deliveryId: crossAppRequest.delivery.id }), hasCode('INVALID_STATE'))
-  await assert.rejects(service.bindMessageWork(owner, { messageId: unlinkedMessage.message.id, workId: 'work-1' }), hasCode('FORBIDDEN'))
   assert.equal((await service.reconcileDelivery({ deliveryId: crossAppRequest.delivery.id, status: 'failed' })).status, 'failed')
 
   const recoveryCandidate = await service.createDelivery(owner, { channelAppId: app1.id, requestId: 'request-recovery', workId: 'work-1', resultId: 'result-1', targetIdentityId: identity1.id, targetConversationId: conversation1.id, contentScope: 'result' })

@@ -103,3 +103,5 @@
       name: ../plugins/gearjob-work-order.mjs
     - id: cycle-time
       name: ../plugins/cycle-time.mjs
+    - id: execution-request-guard
+      name: ../plugins/execution-request-guard.mjs

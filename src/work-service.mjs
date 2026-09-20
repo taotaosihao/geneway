@@ -42,12 +42,35 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
 })
 const GENERIC_ERROR = Object.freeze({ code: 'INTERNAL_ERROR', message: '服务暂时无法完成请求' })
 
-export function createWorkService({ store, runner = null, collaborationRunner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [] } = {}) {
+export function createWorkService({ store, runner = null, collaborationRunner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [], idFactory = randomUUID } = {}) {
   if (!store) throw new Error('store is required')
   const active = new Map()
   let recovered = false
+  let recoveryPromise
 
   return {
+    async ensureReady() {
+      await recover()
+    },
+
+    prepareAutomationWork(state, rule, options = {}) {
+      return prepareAutomationWork(state, rule, options)
+    },
+
+    async dispatchAutomationWork(workId, executionId, acceptedAt) {
+      await recover()
+      try {
+        const accepted = parseInstant(acceptedAt)
+        if (!accepted) throw serviceError('INVALID_REQUEST', '自动工作 acceptedAt 无效')
+        const deadlineAt = new Date(accepted.getTime() + 120_000).toISOString()
+        schedule(workId, executionId, 'automation', undefined, { deadlineAt })
+        return { workId, executionId, acceptedAt, deadlineAt }
+      } catch (error) {
+        await finishError(workId, executionId, error)
+        throw error
+      }
+    },
+
     async bootstrap(actor) {
       await recover()
       const state = await store.read()
@@ -331,8 +354,13 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       })
       if (current?.error) return current.error
       if (executionId) {
-        active.get(executionId)?.controller.abort()
-        await runner?.cancel?.(executionId)
+        const entry = active.get(executionId)
+        if (entry) {
+          entry.userCancelled = true
+          entry.controller.abort(cancelledError())
+        }
+        if (entry?.deadlineAt) await entry.promise?.catch(() => undefined)
+        else await runner?.cancel?.(executionId)
       }
       return { ok: true, value: await projectOwned(actor, current.value), accepted: current.accepted }
     },
@@ -515,7 +543,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         return changed ? { ...state, works } : state
       })
       for (const item of tasks) item.controller.abort()
-      await Promise.all(tasks.map(item => runner?.cancel?.(item.executionId)))
+      await Promise.all(tasks.filter(item => !item.deadlineAt).map(item => runner?.cancel?.(item.executionId)))
       await Promise.all(tasks.map(item => item.promise.catch(() => undefined)))
       await runner?.close?.()
       await collaborationRunner?.close?.()
@@ -600,21 +628,62 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     return success(await projectOwned(actor, work), reservation)
   }
 
-  function schedule(workId, executionId, operation, question) {
+  function prepareAutomationWork(state, rule, options = {}) {
+    const member = state?.members?.find(item => item.id === rule?.ownerMemberId && item.enabled === true)
+    if (!member) return failure('FORBIDDEN', '成员未获准使用该员工')
+    if (rule?.status !== 'active') return failure('FORBIDDEN', '自动规则当前不可执行')
+    const binding = authorizedBinding(state, member, rule, connectionCatalog)
+    if (!binding.ok) return binding
+    const parsed = parseInput(binding.capability.id, { workOrderId: rule.workOrderId }, false)
+    if (!parsed.ok) return parsed
+    if (!inputAllowed(binding, parsed.input)) return failure('FORBIDDEN', '业务对象不在当前连接允许范围内')
+    const acceptedAt = clean(options.acceptedAt) ?? clock()
+    const workId = clean(options.workId) ?? `work-${idFactory()}`
+    const executionId = clean(options.executionId) ?? `exec-${idFactory()}`
+    const occurrenceKey = clean(options.occurrenceKey)
+    if (!occurrenceKey) return failure('INVALID_REQUEST', '自动发生 identity 无效')
+    const execution = newExecution(executionId, 'automation', occurrenceKey, parsed.input, acceptedAt)
+    const work = {
+      id: workId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
+      capabilityId: binding.capability.id, ...(binding.connection ? { connectionId: binding.connection.id } : {}),
+      goal: binding.capability.action, input: parsed.input, requiredInputs: [], status: 'accepted', acceptedAt,
+      results: [], executions: [execution],
+    }
+    return { ok: true, work, workId, executionId, acceptedAt }
+  }
+
+  function schedule(workId, executionId, operation, question, options = {}) {
     const controller = new AbortController()
-    const promise = execute(workId, executionId, operation, question, controller)
-    active.set(executionId, { controller, executionId, promise })
+    const entry = { controller, executionId, deadlineAt: options.deadlineAt, deadlineExpired: false, userCancelled: false, timer: undefined, promise: undefined, clock }
+    active.set(executionId, entry)
+    const remaining = entry.deadlineAt ? deadlineRemaining(entry.deadlineAt, clock()) : undefined
+    if (entry.deadlineAt && remaining <= 0) {
+      entry.deadlineExpired = true
+      controller.abort(timeoutError())
+    } else if (entry.deadlineAt) {
+      entry.timer = setTimeout(() => {
+        if (entry.userCancelled || entry.deadlineExpired) return
+        entry.deadlineExpired = true
+        const error = timeoutError()
+        controller.abort(error)
+      }, remaining)
+      entry.timer.unref?.()
+    }
+    const promise = execute(workId, executionId, operation, question, controller, entry)
+    entry.promise = promise
     void promise.catch(() => undefined)
   }
 
-  async function execute(workId, executionId, operation, question, controller) {
+  async function execute(workId, executionId, operation, question, controller, entry = {}) {
     try {
+      if (deadlineReached(entry)) throw timeoutError()
       if (!await markRunning(workId, executionId)) {
-        if (controller.signal.aborted) await finishError(workId, executionId, serviceError('CANCELLED', '本次执行已停止'))
+        if (controller.signal.aborted) await finishError(workId, executionId, abortError(entry))
         return
       }
+      assertNotAborted(entry)
       const context = await dispatchContext(workId, executionId)
-      if (controller.signal.aborted) throw serviceError('CANCELLED', '本次执行已停止')
+      assertNotAborted(entry)
       const sessionResult = latestSessionResult(context.work)
       const runnerOptions = {
         executionId, operation, capabilityId: context.work.capabilityId, input: context.work.input,
@@ -633,10 +702,17 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         const previous = businessResults(context.work).at(-1)
         if (previous) runnerOptions.previousFact = compact({ kind: previous.kind, payload: previous.payload, source: previous.source })
       }
-      const model = await explain(runnerOptions)
+      const model = await explain(runnerOptions, entry)
+      assertNotAborted(entry)
       if (operation === 'follow-up') await finishFollowUp(workId, executionId, question, model)
-      else await finishBusinessResult(workId, executionId, model, context.work)
-    } catch (error) { await finishError(workId, executionId, error) } finally { active.delete(executionId) }
+      else await finishBusinessResult(workId, executionId, model, context.work, entry.deadlineAt)
+    } catch (error) {
+      const finalError = entry.deadlineExpired && !entry.userCancelled ? timeoutError() : error
+      await finishError(workId, executionId, finalError)
+    } finally {
+      if (entry.timer) clearTimeout(entry.timer)
+      active.delete(executionId)
+    }
   }
 
   async function markRunning(workId, executionId) {
@@ -685,14 +761,38 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     return context
   }
 
-  async function explain(options) {
+  async function explain(options, entry) {
     if (!runner || runner.configured === false) throw serviceError('MODEL_NOT_CONFIGURED', '尚未配置 ZenMux DSH runner')
-    return runner.run(options)
+    const running = Promise.resolve().then(() => runner.run(options))
+    if (!entry?.deadlineAt) return running
+    if (entry.controller.signal.aborted) {
+      await runner.cancel?.(entry.executionId)
+      throw abortError(entry)
+    }
+    let stopListening
+    const aborted = new Promise(resolve => {
+      const onAbort = () => resolve({ aborted: true })
+      entry.controller.signal.addEventListener('abort', onAbort, { once: true })
+      stopListening = () => entry.controller.signal.removeEventListener('abort', onAbort)
+      if (entry.controller.signal.aborted) onAbort()
+    })
+    const outcome = await Promise.race([
+      running.then(value => ({ value }), error => ({ error })),
+      aborted,
+    ])
+    stopListening?.()
+    if (outcome.aborted) {
+      await runner.cancel?.(entry.executionId)
+      void running.catch(() => undefined)
+      throw abortError(entry)
+    }
+    if (outcome.error) throw outcome.error
+    return outcome.value
   }
 
-  async function finishBusinessResult(workId, executionId, model, originalWork) {
+  async function finishBusinessResult(workId, executionId, model, originalWork, deadlineAt) {
     if (!model?.result) throw serviceError('TOOL_CHAIN_INVALID', 'DSH 未返回规范化能力结果')
-    await finishResult(workId, executionId, businessEnvelope(model, originalWork, clock()), model)
+    await finishResult(workId, executionId, businessEnvelope(model, originalWork, clock()), model, deadlineAt)
   }
 
   async function finishFollowUp(workId, executionId, question, model) {
@@ -708,7 +808,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     await finishResult(workId, executionId, result, model)
   }
 
-  async function finishResult(workId, executionId, result, model) {
+  async function finishResult(workId, executionId, result, model, deadlineAt) {
     await store.update(state => {
       const work = state.works.find(item => item.id === workId)
       const execution = work?.executions.find(item => item.id === executionId)
@@ -718,6 +818,10 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         return { ...state, works: replaceById(state.works, { ...work, status: 'cancelled', executions: replaceById(work.executions, nextExecution) }) }
       }
       if (execution.status !== 'running') return state
+      if (deadlineAt && deadlineReachedAt(deadlineAt, clock())) {
+        const nextExecution = { ...execution, status: 'failed', completedAt: clock(), error: safeError(timeoutError()) }
+        return { ...state, works: replaceById(state.works, { ...work, status: 'failed', executions: replaceById(work.executions, nextExecution) }) }
+      }
       const legacy = result.kind === 'gearjob.work-order.observation' ? { resultObservationId: result.id } : result.kind === 'assistant.follow-up' ? { resultFollowUpId: result.id } : {}
       const nextExecution = compact({ ...execution, status: 'completed', completedAt: clock(), dshSessionRef: result.dshSessionRef,
         continuedFromDshSessionRef: result.continuedFromDshSessionRef, contextObservationId: result.contextObservationId,
@@ -732,7 +836,8 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const work = state.works.find(item => item.id === workId)
       const execution = work?.executions.find(item => item.id === executionId)
       if (!work || !execution || TERMINAL_EXECUTION.has(execution.status)) return state
-      const cancelled = execution.status === 'cancel_requested' || error?.code === 'CANCELLED' || error?.name === 'AbortError'
+      const timedOut = error?.code === 'UPSTREAM_TIMEOUT'
+      const cancelled = !timedOut && (execution.status === 'cancel_requested' || error?.code === 'CANCELLED' || error?.name === 'AbortError')
       const status = cancelled ? 'cancelled' : 'failed'
       const nextExecution = { ...execution, status, completedAt: clock(), error: cancelled ? { code: 'CANCELLED', message: '本次执行已停止' } : safeError(error) }
       return { ...state, works: replaceById(state.works, { ...work, status, executions: replaceById(work.executions, nextExecution) }) }
@@ -741,20 +846,25 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
 
   async function recover() {
     if (recovered) return
-    recovered = true
-    await store.update(state => {
-      let changed = false
-      const works = state.works.map(work => {
-        if (!ACTIVE_EXECUTION.has(work.status) && !work.executions.some(item => ACTIVE_EXECUTION.has(item.status))) return work
-        changed = true
-        const now = clock()
-        const interrupted = { ...work, status: 'interrupted', executions: work.executions.map(execution => ACTIVE_EXECUTION.has(execution.status)
-          ? { ...execution, status: 'interrupted', interruptedAt: now, error: { code: 'PROCESS_RESTARTED', message: '进程重启时未完成' } } : execution) }
-        if (!work.collaboration) return interrupted
-        return { ...interrupted, collaboration: { ...work.collaboration, status: 'interrupted' }, plan: { ...work.plan, items: work.plan.items.map(item => ['not_started', 'running', 'waiting_input'].includes(item.status) ? { ...item, status: 'interrupted' } : item) } }
-      })
-      return changed ? { ...state, works } : state
-    })
+    if (!recoveryPromise) {
+      recoveryPromise = (async () => {
+        await store.update(state => {
+          let changed = false
+          const works = state.works.map(work => {
+            if (!ACTIVE_EXECUTION.has(work.status) && !work.executions.some(item => ACTIVE_EXECUTION.has(item.status))) return work
+            changed = true
+            const now = clock()
+            const interrupted = { ...work, status: 'interrupted', executions: work.executions.map(execution => ACTIVE_EXECUTION.has(execution.status)
+              ? { ...execution, status: 'interrupted', interruptedAt: now, error: { code: 'PROCESS_RESTARTED', message: '进程重启时未完成' } } : execution) }
+            if (!work.collaboration) return interrupted
+            return { ...interrupted, collaboration: { ...work.collaboration, status: 'interrupted' }, plan: { ...work.plan, items: work.plan.items.map(item => ['not_started', 'running', 'waiting_input'].includes(item.status) ? { ...item, status: 'interrupted' } : item) } }
+          })
+          return changed ? { ...state, works } : state
+        })
+        recovered = true
+      })().finally(() => { recoveryPromise = undefined })
+    }
+    await recoveryPromise
   }
 
   async function ownedWork(actor, id) {
@@ -972,6 +1082,15 @@ function hasDependencyCycle(items) {
 function compact(value) { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) }
 function pick(value, keys) { return Object.fromEntries(keys.filter(key => value?.[key] !== undefined).map(key => [key, value[key]])) }
 function serviceError(code, message) { return Object.assign(new Error(message), { code }) }
+function parseInstant(value) { const parsed = typeof value === 'string' || value instanceof Date ? new Date(value) : null; return parsed && Number.isFinite(parsed.getTime()) ? parsed : null }
+function deadlineRemaining(deadlineAt, now = new Date().toISOString()) { const deadline = parseInstant(deadlineAt), current = parseInstant(now); return deadline && current ? Math.max(0, deadline.getTime() - current.getTime()) : 0 }
+function deadlineReachedAt(deadlineAt, now) { const deadline = parseInstant(deadlineAt), current = parseInstant(now); return Boolean(deadline && current && current.getTime() >= deadline.getTime()) }
+function deadlineReached(entry) { return Boolean(entry.deadlineAt && (entry.deadlineExpired || deadlineReachedAt(entry.deadlineAt, clockValue(entry)))) }
+function clockValue(entry) { return entry?.clock ? entry.clock() : new Date().toISOString() }
+function timeoutError() { return serviceError('UPSTREAM_TIMEOUT', '自动工作执行超时') }
+function cancelledError() { return serviceError('CANCELLED', '本次执行已停止') }
+function abortError(entry) { return entry?.deadlineExpired ? timeoutError() : cancelledError() }
+function assertNotAborted(entry) { if (deadlineReached(entry)) throw timeoutError(); if (entry.controller?.signal.aborted) throw abortError(entry) }
 function safeError(error, fallbackCode = 'INTERNAL_ERROR') {
   const code = error?.code ?? fallbackCode
   return SAFE_ERROR_MESSAGES[code] ? { code, message: SAFE_ERROR_MESSAGES[code] } : { ...GENERIC_ERROR }

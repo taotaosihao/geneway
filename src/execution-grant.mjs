@@ -25,6 +25,13 @@ export async function consumeExecutionGrant({ filePath = process.env.GENEWAY_DSH
   return grant
 }
 
+export async function authorizeExecutionRequestFile(options = {}) {
+  const filePath = typeof options === 'string' ? options : options.filePath ?? process.env.GENEWAY_DSH_REQUEST_GRANT_FILE
+  const readState = typeof options === 'string' ? readPolicyState : options.readState ?? readPolicyState
+  const grant = await readExecutionRequestGrant(filePath)
+  return { grant, authorization: await authorizeExecutionGrant(grant, { readState }) }
+}
+
 export async function authorizeExecutionGrant(grant, { readState = readPolicyState } = {}) {
   validateGrantShape(grant)
   const state = await readState(grant.policyFile, grant.policyRoot)
@@ -49,6 +56,15 @@ export async function authorizeExecutionGrant(grant, { readState = readPolicySta
     .map(item => ({ id: item.id, revision: item.revision }))
     .sort(compareRefs)
   if (!isDeepStrictEqual(currentConfirmationRefs, [...grant.confirmationRefs].sort(compareRefs))) throw grantError('FORBIDDEN', '当前确认信息 revision 已变化')
+
+  const occurrence = (state.automationOccurrences ?? []).find(item => item?.workId === work.id)
+  if (occurrence) {
+    const rule = (state.automationRules ?? []).find(item => item?.id === occurrence.ruleId)
+    const workOrderId = work.input?.workOrderId
+    if (!rule || rule.status !== 'active' || rule.ownerMemberId !== member.id
+      || rule.employeeId !== work.employeeId || rule.skillId !== work.skillId || rule.connectionId !== work.connectionId
+      || rule.workOrderId !== workOrderId) throw grantError('FORBIDDEN', '当前自动规则授权已失效')
+  }
 
   const capability = getCapability(grant.capabilityId)
   if (!capability) throw grantError('FORBIDDEN', '能力不存在')
@@ -145,6 +161,23 @@ async function readPolicyState(filePath, policyRoot) {
     return JSON.parse(await handle.readFile('utf8'))
   } catch {
     throw grantError('FORBIDDEN', '当前策略状态不可用')
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+}
+
+async function readExecutionRequestGrant(filePath) {
+  if (!text(filePath) || !isAbsolute(filePath)) throw grantError('FORBIDDEN', '本次执行的 request 授权路径无效')
+  let handle
+  try {
+    if ((await lstat(filePath)).isSymbolicLink()) throw new Error('symlink')
+    handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    const metadata = await handle.stat()
+    if (!metadata.isFile() || (process.platform !== 'win32' && (metadata.mode & 0o777) !== 0o600)) throw new Error('permissions')
+    const raw = await handle.readFile('utf8')
+    return JSON.parse(raw)
+  } catch {
+    throw grantError('FORBIDDEN', '本次执行的 request 授权不可用')
   } finally {
     await handle?.close().catch(() => undefined)
   }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
@@ -35,6 +35,7 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       if (!capability) throw runnerError('CAPABILITY_NOT_FOUND', '能力不存在')
       const isFollowUp = operation === 'follow-up'
       const input = isFollowUp ? undefined : normalizedInput(capabilityId, options)
+      const requestInput = isFollowUp ? normalizedInput(capabilityId, options) : input
       const metadata = sessionMetadata(options.sessionMetadata, { capability, input, options })
       const requestedSessionId = text(options.sessionId)
       let record = requestedSessionId ? sessions.get(requestedSessionId) : undefined
@@ -49,15 +50,17 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       let harness = record?.harness
       const sameSession = Boolean(harness && requestedSessionId)
       const successorFrom = !sameSession ? requestedSessionId : undefined
-      const createdHarness = !harness
-      let grantFile = harness ? grants.get(harness) : undefined
+      let grantFiles = harness ? grants.get(harness) : undefined
 
       try {
         if (!harness) {
           const grantDirectory = join(config.dshHome, 'grants')
           await mkdir(grantDirectory, { recursive: true, mode: 0o700 })
           if (runState.cancelled) throw cancelledError()
-          grantFile = join(grantDirectory, `grant-${randomUUID()}.json`)
+          grantFiles = {
+            tool: join(grantDirectory, `grant-${randomUUID()}.json`),
+            request: join(grantDirectory, `request-${randomUUID()}.json`),
+          }
           harness = harnessFactory({
             profile: 'sdk',
             patches: [patch],
@@ -66,20 +69,23 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
             cwd: root,
             provider: config.model.provider,
             model: config.model.model,
-            env: childEnvironment(config, grantFile),
+            env: childEnvironment(config, grantFiles.tool, grantFiles.request),
             initializeTimeoutMs: 15_000,
             requestTimeoutMs: 120_000,
           })
           runState.harness = harness
-          grants.set(harness, grantFile)
+          grants.set(harness, grantFiles)
         }
         if (runState.cancelled) throw cancelledError()
-        if (isFollowUp) await writeGrant(grantFile, deniedGrant(capability, operation, metadata, options, config))
-        else await writeGrant(grantFile, executionGrant({ executionId, operation, capability, input, metadata, supplied: options.grant, config }))
+        const requestGrant = executionGrant({ executionId, operation, capability, input: requestInput, metadata, supplied: options.grant, config })
+        const toolGrant = isFollowUp ? deniedGrant(capability, operation, metadata, options, config) : requestGrant
+        await writeGrant(grantFiles.request, requestGrant)
+        await writeGrant(grantFiles.tool, toolGrant)
         if (runState.cancelled) throw cancelledError()
         const prompt = isFollowUp ? followUpPrompt(options) : buildCapabilityPrompt(capabilityId, input, previousFact(options), options.confirmations)
         const result = await harness.run(prompt, sameSession ? { sessionId: requestedSessionId } : undefined)
         if (runState.cancelled) throw cancelledError()
+        if (requestAuthorizationFailed(result)) throw runnerError('FORBIDDEN', '执行授权已失效')
         const parsed = parseRunResult(result, { operation, capabilityId, input })
         const actualSessionId = text(result?.sessionId)
         if (!actualSessionId) throw runnerError('TOOL_CHAIN_INVALID', 'DSH 未返回有效 Session ID')
@@ -99,12 +105,10 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
           runState.closed = true
           await harness.close().catch(() => undefined)
           await removeHarness(harness)
-        } else if (createdHarness && grantFile) {
-          await unlink(grantFile).catch(() => undefined)
         }
         throw runState.cancelled && error?.code !== 'CANCELLED' ? cancelledError() : error
       } finally {
-        if (grantFile) await unlink(grantFile).catch(() => undefined)
+        if (grantFiles) await removeGrantFiles(grantFiles)
         active.delete(executionId)
       }
     },
@@ -114,8 +118,8 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       if (!activeRun) return false
       activeRun.cancelled = true
       if (!activeRun.harness) return true
-      const grantFile = grants.get(activeRun.harness)
-      if (grantFile) await unlink(grantFile).catch(() => undefined)
+      const grantFiles = grants.get(activeRun.harness)
+      if (grantFiles) await removeGrantFiles(grantFiles)
       activeRun.closed = true
       await activeRun.harness.close().catch(() => undefined)
       await removeHarness(activeRun.harness)
@@ -133,9 +137,9 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
 
   async function removeHarness(harness) {
     for (const [sessionId, item] of sessions) if (item.harness === harness) sessions.delete(sessionId)
-    const grantFile = grants.get(harness)
+    const grantFiles = grants.get(harness)
     grants.delete(harness)
-    if (grantFile) await unlink(grantFile).catch(() => undefined)
+    if (grantFiles) await removeGrantFiles(grantFiles)
   }
 }
 
@@ -273,17 +277,39 @@ function previousFact(options) {
   return { kind: 'gearjob.work-order.observation', payload: options.observation }
 }
 
-function childEnvironment(config, grantFile) {
+function requestAuthorizationFailed(result) {
+  return (result?.events ?? []).some(event => event.type === 'turn/end'
+    && event.data?.reason?.kind === 'error'
+    && event.data.reason.error?.message === '执行授权已失效')
+}
+
+function childEnvironment(config, grantFile, requestGrantFile) {
   const settings = readSettings()
   const settingsEnv = settings?.env && typeof settings.env === 'object' ? settings.env : {}
-  const env = { DSH_TELEMETRY_MODE: 'DISABLED', GENEWAY_DSH_GRANT_FILE: grantFile }
+  const env = {
+    DSH_TELEMETRY_MODE: 'DISABLED',
+    GENEWAY_DSH_GRANT_FILE: grantFile,
+    GENEWAY_DSH_REQUEST_GRANT_FILE: requestGrantFile,
+  }
   for (const key of ['PATH', 'HOME', 'USER', 'LANG', 'LC_ALL', 'TMPDIR']) if (typeof process.env[key] === 'string') env[key] = process.env[key]
   if (typeof settingsEnv.ANTHROPIC_AUTH_TOKEN === 'string' && settingsEnv.ANTHROPIC_AUTH_TOKEN.trim()) env.ZENMUX_API_KEY = settingsEnv.ANTHROPIC_AUTH_TOKEN
   return env
 }
 
 async function writeGrant(path, grant) {
-  await writeFile(path, JSON.stringify(grant), { mode: 0o600 })
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, JSON.stringify(grant), { mode: 0o600, flag: 'wx' })
+    await chmod(temporary, 0o600)
+    await rename(temporary, path)
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined)
+    throw error
+  }
+}
+
+async function removeGrantFiles(files) {
+  await Promise.all([unlink(files?.tool).catch(() => undefined), unlink(files?.request).catch(() => undefined)])
 }
 
 function text(value) {

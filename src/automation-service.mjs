@@ -16,10 +16,82 @@ export class AutomationServiceError extends Error {
   }
 }
 
-export function createAutomationService({ store, clock = () => new Date().toISOString(), idFactory = randomUUID, connectionCatalog = [] } = {}) {
+export function createAutomationService({ store, workService = null, clock = () => new Date().toISOString(), idFactory = randomUUID, connectionCatalog = [] } = {}) {
   if (!store?.read || !store?.update) throw new TypeError('automation service 需要 store')
 
   return {
+    async acceptDailyOccurrence({ ruleId, scheduledDate } = {}) {
+      const occurrenceKey = dailyOccurrenceKey(ruleId, scheduledDate)
+      await workService?.ensureReady?.()
+      let admission
+      await store.update(state => {
+        const existing = state.automationOccurrences.find(item => item.occurrenceKey === occurrenceKey)
+        if (existing) {
+          admission = occurrenceAdmission(existing, state)
+          return state
+        }
+        const rule = state.automationRules.find(item => item.id === text(ruleId))
+        const now = timestamp(clock())
+        if (!rule) throw serviceError('NOT_FOUND', '自动规则不存在')
+        if (rule.trigger?.kind !== 'daily-time') throw serviceError('SOURCE_NOT_CONFIGURED', '事件来源暂不可用')
+        if (rule.status !== 'active') {
+          const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'blocked', 'rule-inactive')
+          admission = occurrenceAdmission(occurrence, state, false)
+          return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
+        }
+        const prepared = workService?.prepareAutomationWork?.(state, rule, {
+          occurrenceKey,
+          acceptedAt: now,
+          workId: `work-${idFactory()}`,
+          executionId: `exec-${idFactory()}`,
+        })
+        if (!prepared?.ok) {
+          const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'blocked', 'auth-blocked')
+          admission = occurrenceAdmission(occurrence, state, false)
+          return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
+        }
+        const usedRuns = deriveUsedRuns(rule, state.automationOccurrences)
+        if (usedRuns >= rule.maxRuns) {
+          const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'skipped', 'budget')
+          admission = occurrenceAdmission(occurrence, state, false)
+          return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
+        }
+        if (activeAutomationWorkCount(state, rule.id)) {
+          const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'skipped', 'overlap')
+          admission = occurrenceAdmission(occurrence, state, false)
+          return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
+        }
+        if (activeAutomationWorkCount(state) >= 2) {
+          const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'skipped', 'capacity')
+          admission = occurrenceAdmission(occurrence, state, false)
+          return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
+        }
+        const occurrence = {
+          id: `occurrence-${idFactory()}`,
+          occurrenceKey,
+          ruleId: rule.id,
+          ruleRevision: rule.revision,
+          scheduledDate,
+          workId: prepared.workId,
+          status: null,
+          reason: null,
+          deliveryId: null,
+          createdAt: now,
+        }
+        admission = { accepted: true, deduplicated: false, occurrence, work: prepared.work, workId: prepared.workId, executionId: prepared.executionId, acceptedAt: prepared.acceptedAt }
+        return { ...state, works: [...state.works, prepared.work], automationOccurrences: [...state.automationOccurrences, occurrence] }
+      })
+      if (admission?.accepted && !admission.deduplicated) {
+        try {
+          await workService?.dispatchAutomationWork?.(admission.workId, admission.executionId, admission.acceptedAt)
+          admission = { ...admission, dispatched: true }
+        } catch (error) {
+          admission = { ...admission, dispatched: false, dispatchError: { code: error?.code ?? 'INTERNAL_ERROR', message: error?.message ?? '自动工作派发失败' } }
+        }
+      }
+      return admission
+    },
+
     async listRules(actor) {
       const state = await store.read(), member = requireMember(state, actor)
       return state.automationRules.filter(rule => rule.ownerMemberId === member.id).map(rule => projectRule(state, rule, clock()))
@@ -157,6 +229,41 @@ export function nextDailyOccurrence(rule, now, occurrences = []) {
 function projectRule(state, rule, now) {
   if (!rule) throw serviceError('NOT_FOUND', '自动规则不存在')
   return { ...structuredClone(rule), usedRuns: deriveUsedRuns(rule, state.automationOccurrences), nextDueAt: nextDailyOccurrence(rule, now, state.automationOccurrences) }
+}
+
+function occurrenceAdmission(occurrence, state, deduplicated = true) {
+  const work = occurrence.workId ? state.works.find(item => item.id === occurrence.workId) : undefined
+  const execution = work?.executions?.find(item => ['accepted', 'running', 'cancel_requested'].includes(item.status))
+  return {
+    accepted: Boolean(occurrence.workId),
+    deduplicated,
+    occurrence,
+    work,
+    workId: occurrence.workId,
+    executionId: execution?.id,
+    acceptedAt: work?.acceptedAt,
+    ...(occurrence.status ? { skipped: occurrence.status === 'skipped', blocked: occurrence.status === 'blocked', reason: occurrence.reason } : {}),
+  }
+}
+
+function terminalOccurrence(id, rule, scheduledDate, createdAt, status, reason) {
+  return {
+    id,
+    occurrenceKey: dailyOccurrenceKey(rule.id, scheduledDate),
+    ruleId: rule.id,
+    ruleRevision: rule.revision,
+    scheduledDate,
+    workId: null,
+    status,
+    reason,
+    deliveryId: null,
+    createdAt,
+  }
+}
+
+function activeAutomationWorkCount(state, ruleId) {
+  const workIds = new Set(state.automationOccurrences.filter(item => (!ruleId || item.ruleId === ruleId) && item.workId).map(item => item.workId))
+  return state.works.filter(work => workIds.has(work.id) && work.executions?.some(execution => ['accepted', 'running', 'cancel_requested'].includes(execution.status))).length
 }
 
 function ruleFields(state, member, input, connectionCatalog) {

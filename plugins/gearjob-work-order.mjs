@@ -52,7 +52,7 @@ export function createGearJobWorkOrderTool({ authorize = defaultAuthorize } = {}
     async execute(args, invocation = {}) {
       try {
         const grant = await authorize({ toolName: GEARJOB_TOOL, input: args, invocation })
-        if (invocation.signal?.aborted) throw sourceError('CANCELLED', '本次执行已停止')
+        if (invocation.signal?.aborted) throw signalAbortError(invocation.signal)
         return {
           ok: true,
           ...await readGearJobWorkOrder({
@@ -88,7 +88,7 @@ export async function readGearJobWorkOrder({ workOrderId, connection, secretRoot
   if (!source.allowedObjectIds?.includes(id)) throw sourceError('FORBIDDEN', '工单不在当前连接的允许范围内')
   const credentialFile = await resolveCredentialFile(root, source.credentialRef)
   const authorization = await readAuthorization(credentialFile)
-  if (signal?.aborted) throw sourceError('CANCELLED', '本次执行已停止')
+  if (signal?.aborted) throw signalAbortError(signal)
   await authorize()
   const url = resourceUrl(source.baseUrl, id)
   const timeout = AbortSignal.timeout(timeoutMs)
@@ -200,9 +200,16 @@ function legacyConnection(source) {
 }
 
 function requestError(error, signal, timeout) {
+  if (signal?.reason?.code === 'UPSTREAM_TIMEOUT' || timeout?.reason?.code === 'UPSTREAM_TIMEOUT') return sourceError('UPSTREAM_TIMEOUT', 'GearJob 查询超时')
   if (signal?.aborted) return sourceError('CANCELLED', '本次执行已停止')
   if (timeout.aborted || error?.name === 'TimeoutError') return sourceError('UPSTREAM_TIMEOUT', 'GearJob 查询超时')
   return sourceError('UPSTREAM_ERROR', 'GearJob 查询连接失败')
+}
+
+function signalAbortError(signal) {
+  return signal?.reason?.code === 'UPSTREAM_TIMEOUT'
+    ? sourceError('UPSTREAM_TIMEOUT', 'GearJob 查询超时')
+    : sourceError('CANCELLED', '本次执行已停止')
 }
 
 function safeInstance(baseUrl) {

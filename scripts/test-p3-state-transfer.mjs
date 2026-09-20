@@ -17,7 +17,8 @@ const temp = await mkdtemp(join(tmpdir(), 'geneway-p3-transfer-'))
 
 try {
   await legacyV4Restore()
-  await completeV5Transfer()
+  await legacyV5Restore()
+  await completeV6Transfer()
   console.log('P3 state transfer checks passed; external effects=unknown; replay/dispatch=0')
 } finally {
   await rm(temp, { recursive: true, force: true })
@@ -52,7 +53,7 @@ async function legacyV4Restore() {
     ['manifest-v1', value => { value.version = 1 }, /manifest 无效/],
     ['manifest-v3', value => { value.version = 3 }, /manifest 无效/],
     ['state-v3', value => { value.schema.stateVersion = 3 }, /版本不受支持|schema 摘要/],
-    ['state-v6', value => { value.schema.stateVersion = 6 }, /版本不受支持|schema 摘要/],
+    ['state-v7', value => { value.schema.stateVersion = 7 }, /版本不受支持|schema 摘要/],
   ]) {
     const bad = join(temp, name)
     await copyBackup(input, bad)
@@ -73,17 +74,43 @@ async function legacyV4Restore() {
   }
 }
 
-async function completeV5Transfer() {
-  const source = join(temp, 'v5-source')
-  const backup = join(temp, 'v5-backup')
-  const restored = join(temp, 'v5-restored')
-  const sourceState = v5State()
+async function legacyV5Restore() {
+  const input = join(temp, 'legacy-v5')
+  const output = join(temp, 'legacy-v5-restored')
+  const state = v5State()
+  const refs = collectRefs(state)
+  const files = [['state.json', bytes(state)], ...refs.map(id => [`dsh/sessions/project/${id}/session.v3.jsonl.zstd`, Buffer.from(`{"session":${JSON.stringify(id)}}\n`)])]
+  for (const [path, raw] of files) await put(input, path, raw)
+  const manifest = {
+    format: 'geneway-state-transfer', version: 2, createdAt: '2026-09-20T00:00:00.000Z', candidate: 'legacy-v5',
+    schema: { stateVersion: 5, members: 4, modelRoutes: 0, employees: 3, connections: 0, skills: 1, confirmations: 0, knowledgeMaterials: 2, works: state.works.length, sessionRefs: refs },
+    entries: files.map(([path, raw]) => entry(path, raw)).sort((a, b) => a.path.localeCompare(b.path)),
+  }
+  await put(input, 'manifest.json', bytes(manifest))
+  assert.equal(Object.keys(manifest.schema).some(key => key.startsWith('channel') || ['deliveries', 'linkCodes'].includes(key)), false)
+  const before = await treeDigest(input)
+  await run(['restore', '--input', input, '--data-root', output])
+  assert.deepEqual(await treeDigest(input), before)
+  const restored = JSON.parse(await readFile(join(output, 'state.json'), 'utf8'))
+  assert.deepEqual(restored, migrateState(state))
+  assert.equal(restored.version, 6)
+  assert.equal(restored.knowledgeMaterials.find(item => item.id === 'knowledge-active').body, 'CURRENT KNOWLEDGE BODY')
+  for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.deepEqual(restored[key], [])
+  for (const id of refs) assert.equal(await exists(join(output, 'dsh', 'sessions', 'project', id, 'session.v3.jsonl.zstd')), true)
+}
+
+async function completeV6Transfer() {
+  const source = join(temp, 'v6-source')
+  const backup = join(temp, 'v6-backup')
+  const restored = join(temp, 'v6-restored')
+  const sourceState = v6State()
   assert.deepEqual(migrateState(structuredClone(sourceState)), sourceState)
   await put(source, 'state.json', bytes(sourceState))
   const refs = collectRefs(sourceState)
   for (const id of [...refs, 'session-unrelated']) await put(source, `dsh/sessions/project/${id}/session.v3.jsonl.zstd`, Buffer.from(`{"session":${JSON.stringify(id)}}\n`))
   await put(source, 'private/zenmux', Buffer.from('P3_ZENMUX_SECRET_CANARY'))
   await put(source, 'private/gearjob', Buffer.from('P3_GEARJOB_SECRET_CANARY'))
+  await put(source, 'private/channel', Buffer.from('P4_CHANNEL_SECRET_CANARY'))
   const sourceBefore = await treeDigest(source)
 
   const backupRun = JSON.parse((await run(['backup', '--output', backup], { GENEWAY_STATE: join(source, 'state.json'), GENEWAY_DSH_HOME: join(source, 'dsh') })).stdout)
@@ -91,9 +118,13 @@ async function completeV5Transfer() {
   assert.deepEqual(await treeDigest(source), sourceBefore)
   const manifest = JSON.parse(await readFile(join(backup, 'manifest.json'), 'utf8'))
   assert.deepEqual(manifest.schema.sessionRefs, refs)
+  for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.equal(manifest.schema[key], sourceState[key].length)
+  assert.match(manifest.schema.channelGraphSha256, /^[a-f0-9]{64}$/)
   assert.equal(manifest.entries.some(item => item.path.includes('session-unrelated')), false)
   assert.equal((await allText(backup)).includes('P3_ZENMUX_SECRET_CANARY'), false)
   assert.equal((await allText(backup)).includes('P3_GEARJOB_SECRET_CANARY'), false)
+  assert.equal((await allText(backup)).includes('P4_CHANNEL_SECRET_CANARY'), false)
+  await rejectUnsafeAuthorizationRevisions(sourceState, source)
 
   const interrupted = JSON.parse(await readFile(join(backup, 'state.json'), 'utf8'))
   const root = interrupted.works.find(work => work.id === 'work-root')
@@ -111,11 +142,26 @@ async function completeV5Transfer() {
   assert.equal(waiting.status, 'waiting_input')
   assert.deepEqual(backupTerminalSiblings, sourceTerminalSiblings)
   assert.deepEqual(interrupted.works.find(work => work.id === 'work-root-terminal-siblings').plan.items.map(item => item.status), ['failed', 'cancelled', 'interrupted'])
+  assert.deepEqual(interrupted.deliveries.find(item => item.id === 'delivery-sending').authorizationRevisions, { app: 1, identity: 1, conversation: 1 })
   assert.deepEqual(migrateState(structuredClone(interrupted)), interrupted)
 
   let dispatches = 0
   await run(['restore', '--input', backup, '--data-root', restored])
-  assert.equal(Buffer.compare(await readFile(join(restored, 'state.json')), await readFile(join(backup, 'state.json'))), 0)
+  const restoredState = JSON.parse(await readFile(join(restored, 'state.json'), 'utf8'))
+  assert.ok(restoredState.channelApps.every(app => app.enabled === false && app.status === 'disabled'))
+  assert.deepEqual(restoredState.linkCodes.map(link => link.status), ['cancelled', 'cancelled'])
+  assert.equal(restoredState.channelIdentities.find(item => item.id === 'identity-pending').status, 'unlinked')
+  assert.equal(restoredState.channelConversations.find(item => item.id === 'conversation-pending').status, 'unlinked')
+  assert.deepEqual(Object.fromEntries(restoredState.deliveries.map(item => [item.id, item.status])), {
+    'delivery-pending': 'pending',
+    'delivery-sending': 'unknown',
+    'delivery-failed': 'failed',
+    'delivery-unknown': 'unknown',
+    'delivery-delivered': 'delivered',
+  })
+  assert.equal(restoredState.deliveries.find(item => item.id === 'delivery-sending').error.code, 'RECOVERY_UNKNOWN')
+  assert.deepEqual(restoredState.channelMessages, interrupted.channelMessages)
+  assert.equal(restoredState.deliveries.length, interrupted.deliveries.length)
   const store = createFileStore(join(restored, 'state.json'))
   const knowledge = createKnowledgeService({ store })
   const works = createWorkService({ store, runner: { run() { dispatches += 1 }, async close() {} }, collaborationRunner: { run() { dispatches += 1 }, async close() {} } })
@@ -141,6 +187,20 @@ async function completeV5Transfer() {
 
   await rejectSessionMismatch(backup, manifest)
   await rejectTamperAndFilesystem(backup, manifest)
+}
+
+async function rejectUnsafeAuthorizationRevisions(state, source) {
+  for (const [name, value] of [
+    ['scalar', 'P4_PLAINTEXT_SECRET_CANARY'],
+    ['extra-key', { app: 1, identity: 1, conversation: 1, secret: 'P4_PLAINTEXT_SECRET_CANARY' }],
+    ['string-value', { app: 'P4_PLAINTEXT_SECRET_CANARY', identity: 1, conversation: 1 }],
+  ]) {
+    const statePath = join(temp, `unsafe-authorization-revisions-${name}.json`)
+    const output = join(temp, `unsafe-authorization-revisions-${name}-backup`)
+    await writeFile(statePath, bytes({ ...state, authorizationRevisions: value }), { mode: 0o600 })
+    await assert.rejects(run(['backup', '--output', output], { GENEWAY_STATE: statePath, GENEWAY_DSH_HOME: join(source, 'dsh') }), error => /秘密字段：authorizationRevisions/.test(`${error.stderr}\n${error.stdout}`))
+    assert.equal(await exists(output), false)
+  }
 }
 
 async function rejectSessionMismatch(backup, manifest) {
@@ -235,6 +295,36 @@ function v5State() {
       ...['failed', 'cancelled', 'interrupted'].map(status => ({ id: `work-child-${status}`, ownerMemberId: 'member-owner', employeeId: 'employee-child', skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', goal: status, input: { availableSeconds: 60, quantity: 1 }, requiredInputs: [], status, acceptedAt: now, results: [], executions: [{ id: `exec-child-${status}`, status }], workType: 'collaboration-child', parentWorkId: 'work-root-terminal-siblings', rootWorkId: 'work-root-terminal-siblings', collaborationGeneration: 1, planItemId: `item-${status}` })),
     ], reservations: {},
   }
+}
+
+function v6State() {
+  const state = migrateState(v5State())
+  const now = '2026-09-20T00:00:00.000Z'
+  const app = { id: 'app-feishu', provider: 'feishu', providerAppId: 'provider-app', providerTenantId: 'provider-tenant', credentialRef: 'P4_CHANNEL_CREDENTIAL', enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now }
+  const activeIdentity = { id: 'identity-active', channelAppId: app.id, providerUserId: 'provider-user-active', memberId: 'member-owner', verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }
+  const pendingIdentity = { id: 'identity-pending', channelAppId: app.id, providerUserId: 'provider-user-pending', memberId: 'member-peer', verificationMethod: 'link-code', status: 'pending', revision: 1, createdAt: now, updatedAt: now }
+  const activeConversation = { id: 'conversation-active', channelAppId: app.id, providerConversationId: 'provider-conversation-active', provider: app.provider, identityId: activeIdentity.id, memberId: 'member-owner', type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }
+  const pendingConversation = { id: 'conversation-pending', channelAppId: app.id, providerConversationId: 'provider-conversation-pending', provider: app.provider, identityId: pendingIdentity.id, memberId: 'member-peer', type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'pending', revision: 1, createdAt: now, updatedAt: now }
+  const message = { id: 'channel-message-inbound', channelAppId: app.id, provider: app.provider, providerEventId: 'provider-event-1', providerMessageId: 'provider-inbound-1', providerConversationId: activeConversation.providerConversationId, providerUserId: activeIdentity.providerUserId, conversationId: activeConversation.id, senderIdentityId: activeIdentity.id, direction: 'inbound', text: '历史消息保留', receivedAt: now, persistedAt: now, status: 'accepted', workId: 'work-root' }
+  const delivery = (id, status, extra = {}) => ({ id, channelAppId: app.id, requestId: `request-${id}`, provider: app.provider, workId: 'work-root', resultId: 'summary-old', channelMessageId: message.id, targetConversationId: activeConversation.id, targetIdentityId: activeIdentity.id, contentScope: 'result', ...(status === 'pending' ? {} : { authorizationRevisions: { app: 1, identity: 1, conversation: 1 } }), status, attempts: status === 'pending' ? 0 : 1, createdAt: now, updatedAt: now, ...extra })
+  return migrateState({
+    ...state,
+    channelApps: [app],
+    channelIdentities: [activeIdentity, pendingIdentity],
+    channelConversations: [activeConversation, pendingConversation],
+    channelMessages: [message],
+    deliveries: [
+      delivery('delivery-pending', 'pending'),
+      delivery('delivery-sending', 'sending', { authorizationRevisions: { app: 1, identity: 1, conversation: 1 } }),
+      delivery('delivery-failed', 'failed', { error: { code: 'PLATFORM_FAILED', message: '发送失败' } }),
+      delivery('delivery-unknown', 'unknown', { error: { code: 'DELIVERY_UNKNOWN', message: '发送效果待核对' } }),
+      delivery('delivery-delivered', 'delivered', { providerMessageId: 'provider-outbound-1' }),
+    ],
+    linkCodes: [
+      { id: 'link-active', channelAppId: app.id, memberId: 'member-owner', digest: 'a'.repeat(64), status: 'active', failedAttempts: 0, expiresAt: '2026-09-20T00:10:00.000Z', createdAt: now, updatedAt: now },
+      { id: 'link-matched', channelAppId: app.id, memberId: 'member-peer', digest: 'b'.repeat(64), status: 'matched', failedAttempts: 0, expiresAt: '2026-09-20T00:10:00.000Z', createdAt: now, updatedAt: now, matchedIdentityId: pendingIdentity.id, matchedConversationId: pendingConversation.id, matchedAt: now },
+    ],
+  })
 }
 
 function result(id, handoff, generation, session, ref) {

@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 
-export const STATE_VERSION = 5
+export const STATE_VERSION = 6
 export const KNOWLEDGE_LIMITS = Object.freeze({
   maxMaterials: 100,
   maxBodyBytes: 32 * 1024,
@@ -33,6 +33,12 @@ const EMPTY_STATE = {
   skills: [],
   confirmations: [],
   knowledgeMaterials: [],
+  channelApps: [],
+  channelIdentities: [],
+  channelConversations: [],
+  channelMessages: [],
+  deliveries: [],
+  linkCodes: [],
   works: [],
   reservations: {},
 }
@@ -72,9 +78,10 @@ export function migrateState(value) {
   if (value.version !== undefined && !Number.isInteger(value.version)) throw new Error('产品状态版本无效')
   const version = value.version ?? 3
   if (version > STATE_VERSION) throw new Error(`不支持未来产品状态版本：${version}`)
-  if (version === STATE_VERSION) return normalizeV5(value)
-  if (version === 4) return migrateV4(value)
-  if (version === 3) return migrateV4(migrateV3(value))
+  if (version === STATE_VERSION) return normalizeV6(value)
+  if (version === 5) return migrateV5(value)
+  if (version === 4) return migrateV5(migrateV4(value))
+  if (version === 3) return migrateV5(migrateV4(migrateV3(value)))
   throw new Error(`不支持产品状态版本：${version}`)
 }
 
@@ -117,7 +124,20 @@ function migrateV3(value) {
 }
 
 function migrateV4(value) {
-  return normalizeV5({ ...normalizeV4(value), version: STATE_VERSION, knowledgeMaterials: [] })
+  return normalizeV5({ ...normalizeV4(value), version: 5, knowledgeMaterials: [] })
+}
+
+function migrateV5(value) {
+  return normalizeV6({
+    ...normalizeV5(value),
+    version: STATE_VERSION,
+    channelApps: [],
+    channelIdentities: [],
+    channelConversations: [],
+    channelMessages: [],
+    deliveries: [],
+    linkCodes: [],
+  })
 }
 
 function migrateEmployee(employee) {
@@ -355,7 +375,207 @@ function normalizeV5(value) {
 
   normalizeCollaborations(common.works, memberIds, { ...common, knowledgeMaterials })
 
-  return { ...common, version: STATE_VERSION, knowledgeMaterials }
+  return { ...common, version: 5, knowledgeMaterials }
+}
+
+function normalizeV6(value) {
+  const {
+    channelApps: _channelApps,
+    channelIdentities: _channelIdentities,
+    channelConversations: _channelConversations,
+    channelMessages: _channelMessages,
+    deliveries: _deliveries,
+    linkCodes: _linkCodes,
+    ...legacy
+  } = value
+  const common = normalizeV5({ ...legacy, version: 5 })
+  const channelApps = requiredArray(value, 'channelApps').map(normalizeChannelApp)
+  const channelIdentities = requiredArray(value, 'channelIdentities').map(normalizeChannelIdentity)
+  const channelConversations = requiredArray(value, 'channelConversations').map(normalizeChannelConversation)
+  const channelMessages = requiredArray(value, 'channelMessages').map(normalizeChannelMessage)
+  const deliveries = requiredArray(value, 'deliveries').map(normalizeDelivery)
+  const linkCodes = requiredArray(value, 'linkCodes').map(normalizeLinkCode)
+  for (const [items, label] of [[channelApps, '渠道应用'], [channelIdentities, '渠道身份'], [channelConversations, '渠道会话'], [channelMessages, '渠道消息'], [deliveries, '渠道投递'], [linkCodes, '关联码']]) uniqueIds(items, label)
+
+  uniqueDomain(channelApps, item => [item.provider, item.providerTenantId, item.providerAppId], '渠道应用官方 identity')
+  uniqueDomain(channelIdentities, item => [item.channelAppId, item.providerUserId], '渠道身份官方 identity')
+  uniqueDomain(channelConversations, item => [item.channelAppId, item.providerConversationId], '渠道会话官方 identity')
+  uniqueDomain(channelMessages.filter(item => item.providerEventId), item => [item.channelAppId, item.providerEventId], '渠道 event')
+  uniqueDomain(channelMessages.filter(item => item.providerMessageId), item => [item.channelAppId, item.providerMessageId], '渠道 message')
+  uniqueDomain(deliveries, item => [item.channelAppId, item.requestId], '渠道投递 request')
+  uniqueDomain(deliveries.filter(item => item.providerMessageId), item => [item.channelAppId, item.providerMessageId], '渠道投递 message')
+  uniqueDomain(linkCodes, item => [item.digest], '关联码摘要')
+
+  const appById = new Map(channelApps.map(item => [item.id, item]))
+  const memberById = new Map(common.members.map(item => [item.id, item]))
+  const identityById = new Map(channelIdentities.map(item => [item.id, item]))
+  const conversationById = new Map(channelConversations.map(item => [item.id, item]))
+  const messageById = new Map(channelMessages.map(item => [item.id, item]))
+  const workById = new Map(common.works.map(item => [item.id, item]))
+  const employeeById = new Map(common.employees.map(item => [item.id, item]))
+  const skillById = new Map(common.skills.map(item => [item.id, item]))
+  const connectionById = new Map(common.connections.map(item => [item.id, item]))
+
+  for (const identity of channelIdentities) {
+    if (!appById.has(identity.channelAppId) || !memberById.has(identity.memberId)) throw new Error(`渠道身份 ${identity.id} 引用不存在`)
+  }
+  for (const conversation of channelConversations) {
+    const app = appById.get(conversation.channelAppId), identity = identityById.get(conversation.identityId)
+    if (!app || !memberById.has(conversation.memberId) || !identity || identity.channelAppId !== app.id || identity.memberId !== conversation.memberId || conversation.provider !== app.provider) throw new Error(`渠道会话 ${conversation.id} 引用不闭合`)
+    if (conversation.defaultDispatch) validateDefaultDispatch(conversation, common, memberById, employeeById, skillById, connectionById)
+  }
+  for (const message of channelMessages) {
+    const app = appById.get(message.channelAppId)
+    if (!app || message.provider !== app.provider) throw new Error(`渠道消息 ${message.id} 应用引用无效`)
+    const conversation = message.conversationId && conversationById.get(message.conversationId)
+    const identity = message.senderIdentityId && identityById.get(message.senderIdentityId)
+    if ((message.conversationId && (!conversation || conversation.channelAppId !== app.id)) || (message.senderIdentityId && (!identity || identity.channelAppId !== app.id))) throw new Error(`渠道消息 ${message.id} 身份或会话引用无效`)
+    if (message.workId) {
+      const work = workById.get(message.workId)
+      if (!work || (identity && work.ownerMemberId !== identity.memberId)) throw new Error(`渠道消息 ${message.id} 工作引用无效`)
+    }
+    if (message.status === 'accepted') {
+      const work = workById.get(message.workId)
+      if (message.direction !== 'inbound' || !conversation || !identity || conversation.identityId !== identity.id || conversation.memberId !== identity.memberId || work?.ownerMemberId !== identity.memberId
+        || message.providerUserId !== identity.providerUserId || message.providerConversationId !== conversation.providerConversationId) throw new Error(`渠道消息 ${message.id} accepted 引用不闭合`)
+    }
+  }
+  for (const delivery of deliveries) {
+    const app = appById.get(delivery.channelAppId), work = workById.get(delivery.workId)
+    const identity = identityById.get(delivery.targetIdentityId), conversation = conversationById.get(delivery.targetConversationId)
+    if (!app || delivery.provider !== app.provider || !work || !identity || !conversation || identity.channelAppId !== app.id || conversation.channelAppId !== app.id || identity.memberId !== work.ownerMemberId || conversation.memberId !== work.ownerMemberId || conversation.identityId !== identity.id) throw new Error(`渠道投递 ${delivery.id} 引用不闭合`)
+    if (delivery.resultId && !work.results.some(item => item.id === delivery.resultId)) throw new Error(`渠道投递 ${delivery.id} 结果引用不存在`)
+    if (delivery.channelMessageId) {
+      const message = messageById.get(delivery.channelMessageId)
+      if (!message || message.channelAppId !== app.id || (message.workId && message.workId !== work.id)) throw new Error(`渠道投递 ${delivery.id} 消息引用无效`)
+    }
+  }
+  for (const link of linkCodes) {
+    if (!appById.has(link.channelAppId) || !memberById.has(link.memberId)) throw new Error(`关联码 ${link.id} 引用不存在`)
+    if (link.matchedIdentityId || link.matchedConversationId) {
+      const identity = identityById.get(link.matchedIdentityId), conversation = conversationById.get(link.matchedConversationId)
+      if (!identity || !conversation || identity.channelAppId !== link.channelAppId || conversation.channelAppId !== link.channelAppId || identity.memberId !== link.memberId || conversation.memberId !== link.memberId || conversation.identityId !== identity.id) throw new Error(`关联码 ${link.id} 匹配引用不闭合`)
+    }
+  }
+  for (const link of linkCodes.filter(item => item.status === 'active')) {
+    if (linkCodes.some(item => item !== link && item.status === 'active' && item.memberId === link.memberId && item.channelAppId === link.channelAppId)) throw new Error('每名成员与渠道应用只能有一个活动关联码')
+  }
+
+  return { ...common, version: STATE_VERSION, channelApps, channelIdentities, channelConversations, channelMessages, deliveries, linkCodes }
+}
+
+function normalizeChannelApp(app) {
+  if (!record(app)) throw new Error('渠道应用状态无效')
+  exactKeys(app, ['id', 'provider', 'providerAppId', 'providerTenantId', 'credentialRef', 'enabled', 'allowedScopes', 'revision', 'status', 'createdAt', 'updatedAt'], '渠道应用')
+  const id = requiredText(app.id, '渠道应用 ID 无效')
+  for (const key of ['provider', 'providerAppId', 'providerTenantId', 'credentialRef', 'createdAt', 'updatedAt']) requiredText(app[key], `渠道应用 ${id} ${key} 无效`)
+  if (typeof app.enabled !== 'boolean' || !Number.isSafeInteger(app.revision) || app.revision < 1 || !['active', 'disabled', 'unavailable'].includes(app.status) || (app.enabled === false) !== (app.status === 'disabled')) throw new Error(`渠道应用 ${id} 状态无效`)
+  const allowedScopes = uniqueTextArray(app.allowedScopes, `渠道应用 ${id} allowedScopes`)
+  if (!allowedScopes.length) throw new Error(`渠道应用 ${id} 允许范围为空`)
+  return { ...app, id, allowedScopes }
+}
+
+function normalizeChannelIdentity(identity) {
+  if (!record(identity)) throw new Error('渠道身份状态无效')
+  exactKeys(identity, ['id', 'channelAppId', 'providerUserId', 'memberId', 'verificationMethod', 'status', 'revision', 'createdAt', 'updatedAt', 'unlinkedAt'], '渠道身份')
+  const id = requiredText(identity.id, '渠道身份 ID 无效')
+  for (const key of ['channelAppId', 'providerUserId', 'memberId', 'createdAt', 'updatedAt']) requiredText(identity[key], `渠道身份 ${id} ${key} 无效`)
+  if (identity.verificationMethod !== 'link-code' || !['pending', 'active', 'unlinked'].includes(identity.status) || !Number.isSafeInteger(identity.revision) || identity.revision < 1) throw new Error(`渠道身份 ${id} 状态无效`)
+  if (identity.status === 'unlinked') requiredText(identity.unlinkedAt, `渠道身份 ${id} unlinkedAt 无效`)
+  return identity
+}
+
+function normalizeChannelConversation(conversation) {
+  if (!record(conversation)) throw new Error('渠道会话状态无效')
+  exactKeys(conversation, ['id', 'channelAppId', 'providerConversationId', 'provider', 'identityId', 'memberId', 'type', 'allowedScopes', 'verificationMethod', 'status', 'revision', 'defaultDispatch', 'createdAt', 'updatedAt', 'unlinkedAt'], '渠道会话')
+  const id = requiredText(conversation.id, '渠道会话 ID 无效')
+  for (const key of ['channelAppId', 'providerConversationId', 'provider', 'identityId', 'memberId', 'createdAt', 'updatedAt']) requiredText(conversation[key], `渠道会话 ${id} ${key} 无效`)
+  if (!['private', 'group'].includes(conversation.type) || conversation.verificationMethod !== 'link-code' || !['pending', 'active', 'unlinked'].includes(conversation.status) || !Number.isSafeInteger(conversation.revision) || conversation.revision < 1) throw new Error(`渠道会话 ${id} 状态无效`)
+  const allowedScopes = uniqueTextArray(conversation.allowedScopes, `渠道会话 ${id} allowedScopes`)
+  if (!allowedScopes.length) throw new Error(`渠道会话 ${id} 允许范围为空`)
+  if (conversation.status === 'unlinked') requiredText(conversation.unlinkedAt, `渠道会话 ${id} unlinkedAt 无效`)
+  return { ...conversation, allowedScopes }
+}
+
+function normalizeChannelMessage(message) {
+  if (!record(message)) throw new Error('渠道消息状态无效')
+  exactKeys(message, ['id', 'channelAppId', 'provider', 'providerEventId', 'providerMessageId', 'providerConversationId', 'providerUserId', 'conversationId', 'senderIdentityId', 'direction', 'text', 'receivedAt', 'persistedAt', 'status', 'workId', 'error'], '渠道消息')
+  const id = requiredText(message.id, '渠道消息 ID 无效')
+  for (const key of ['channelAppId', 'provider', 'providerConversationId', 'providerUserId', 'receivedAt', 'persistedAt']) requiredText(message[key], `渠道消息 ${id} ${key} 无效`)
+  if (!text(message.providerEventId) && !text(message.providerMessageId)) throw new Error(`渠道消息 ${id} 缺少官方稳定 ID`)
+  if (message.providerEventId !== undefined) requiredText(message.providerEventId, `渠道消息 ${id} event ID 无效`)
+  if (message.providerMessageId !== undefined) requiredText(message.providerMessageId, `渠道消息 ${id} message ID 无效`)
+  if (message.conversationId !== undefined) requiredText(message.conversationId, `渠道消息 ${id} conversationId 无效`)
+  if (message.senderIdentityId !== undefined) requiredText(message.senderIdentityId, `渠道消息 ${id} senderIdentityId 无效`)
+  if (message.text !== undefined) requiredRawText(message.text, `渠道消息 ${id} 文本无效`)
+  if (!['inbound', 'outbound'].includes(message.direction) || !['received', 'unhandled', 'accepted', 'rejected'].includes(message.status)) throw new Error(`渠道消息 ${id} 状态无效`)
+  if (message.status === 'accepted') requiredText(message.workId, `渠道消息 ${id} workId 无效`)
+  if (message.error !== undefined) normalizeChannelError(message.error, `渠道消息 ${id}`)
+  return message
+}
+
+function normalizeDelivery(delivery) {
+  if (!record(delivery)) throw new Error('渠道投递状态无效')
+  exactKeys(delivery, ['id', 'channelAppId', 'requestId', 'provider', 'workId', 'resultId', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'authorizationRevisions', 'status', 'attempts', 'providerMessageId', 'error', 'createdAt', 'updatedAt'], '渠道投递')
+  const id = requiredText(delivery.id, '渠道投递 ID 无效')
+  for (const key of ['channelAppId', 'requestId', 'provider', 'workId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'createdAt', 'updatedAt']) requiredText(delivery[key], `渠道投递 ${id} ${key} 无效`)
+  if (delivery.resultId !== undefined) requiredText(delivery.resultId, `渠道投递 ${id} resultId 无效`)
+  if (delivery.channelMessageId !== undefined) requiredText(delivery.channelMessageId, `渠道投递 ${id} channelMessageId 无效`)
+  if (delivery.providerMessageId !== undefined) requiredText(delivery.providerMessageId, `渠道投递 ${id} providerMessageId 无效`)
+  if (!Number.isSafeInteger(delivery.attempts) || delivery.attempts < 0 || !['pending', 'sending', 'delivered', 'failed', 'unknown', 'blocked', 'cancelled'].includes(delivery.status)) throw new Error(`渠道投递 ${id} 状态无效`)
+  if (delivery.authorizationRevisions !== undefined) {
+    if (!record(delivery.authorizationRevisions)) throw new Error(`渠道投递 ${id} 授权 revision 无效`)
+    exactKeys(delivery.authorizationRevisions, ['app', 'identity', 'conversation'], `渠道投递 ${id} 授权 revision`)
+    for (const value of Object.values(delivery.authorizationRevisions)) if (!Number.isSafeInteger(value) || value < 1) throw new Error(`渠道投递 ${id} 授权 revision 无效`)
+  }
+  if (delivery.error !== undefined) normalizeChannelError(delivery.error, `渠道投递 ${id}`)
+  const hasAuthorization = delivery.authorizationRevisions !== undefined
+  const hasProviderMessage = delivery.providerMessageId !== undefined
+  const hasError = delivery.error !== undefined
+  if (delivery.status === 'pending' && (delivery.attempts !== 0 || hasAuthorization || hasProviderMessage || hasError)) throw new Error(`渠道投递 ${id} pending 状态不闭合`)
+  if (delivery.status === 'sending' && (delivery.attempts < 1 || !hasAuthorization || hasProviderMessage || hasError)) throw new Error(`渠道投递 ${id} sending 状态不闭合`)
+  if (delivery.status === 'delivered' && (delivery.attempts < 1 || !hasAuthorization || !hasProviderMessage || hasError)) throw new Error(`渠道投递 ${id} delivered 状态不闭合`)
+  if (['failed', 'unknown'].includes(delivery.status) && (delivery.attempts < 1 || !hasAuthorization || !hasError)) throw new Error(`渠道投递 ${id} ${delivery.status} 状态不闭合`)
+  if (delivery.status === 'blocked' && (!hasError || hasProviderMessage)) throw new Error(`渠道投递 ${id} blocked 状态不闭合`)
+  if (delivery.status === 'cancelled' && hasProviderMessage) throw new Error(`渠道投递 ${id} cancelled 状态不闭合`)
+  return delivery
+}
+
+function normalizeLinkCode(link) {
+  if (!record(link)) throw new Error('关联码状态无效')
+  exactKeys(link, ['id', 'channelAppId', 'memberId', 'digest', 'status', 'failedAttempts', 'expiresAt', 'createdAt', 'updatedAt', 'matchedIdentityId', 'matchedConversationId', 'matchedAt', 'consumedAt'], '关联码')
+  const id = requiredText(link.id, '关联码 ID 无效')
+  for (const key of ['channelAppId', 'memberId', 'expiresAt', 'createdAt', 'updatedAt']) requiredText(link[key], `关联码 ${id} ${key} 无效`)
+  if (typeof link.digest !== 'string' || !/^[a-f0-9]{64}$/.test(link.digest) || !['active', 'matched', 'consumed', 'expired', 'cancelled'].includes(link.status) || !Number.isSafeInteger(link.failedAttempts) || link.failedAttempts < 0 || link.failedAttempts > 5) throw new Error(`关联码 ${id} 状态无效`)
+  if (['matched', 'consumed'].includes(link.status)) {
+    requiredText(link.matchedIdentityId, `关联码 ${id} matchedIdentityId 无效`)
+    requiredText(link.matchedConversationId, `关联码 ${id} matchedConversationId 无效`)
+    requiredText(link.matchedAt, `关联码 ${id} matchedAt 无效`)
+  }
+  if (link.status === 'consumed') requiredText(link.consumedAt, `关联码 ${id} consumedAt 无效`)
+  return link
+}
+
+function normalizeChannelError(error, label) {
+  if (!record(error)) throw new Error(`${label} error 无效`)
+  exactKeys(error, ['code', 'message'], `${label} error`)
+  requiredText(error.code, `${label} error code 无效`)
+  requiredText(error.message, `${label} error message 无效`)
+}
+
+function validateDefaultDispatch(conversation, state, memberById, employeeById, skillById, connectionById) {
+  const value = conversation.defaultDispatch
+  if (!record(value)) throw new Error(`渠道会话 ${conversation.id} 默认派发无效`)
+  exactKeys(value, ['employeeId', 'skillId', 'capabilityId', 'connectionId'], `渠道会话 ${conversation.id} 默认派发`)
+  for (const key of ['employeeId', 'skillId', 'capabilityId']) requiredText(value[key], `渠道会话 ${conversation.id} 默认派发 ${key} 无效`)
+  const member = memberById.get(conversation.memberId), employee = employeeById.get(value.employeeId), skill = skillById.get(value.skillId)
+  if (!member?.employeeIds.includes(value.employeeId) || !employee || !employee.skillIds?.includes(value.skillId) || !skill || skill.capabilityId !== value.capabilityId) throw new Error(`渠道会话 ${conversation.id} 默认派发引用无效`)
+  if (value.connectionId !== undefined && (!connectionById.has(value.connectionId) || !employee.connectionIds?.includes(value.connectionId))) throw new Error(`渠道会话 ${conversation.id} 默认派发连接无效`)
+}
+
+function uniqueDomain(items, key, label) {
+  const values = items.map(item => key(item).join('\0'))
+  if (new Set(values).size !== values.length) throw new Error(`${label} 重复`)
 }
 
 function normalizeCollaborations(works, memberIds, state) {

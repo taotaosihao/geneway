@@ -109,7 +109,7 @@ async function restore(inputArg, dataRootArg) {
     if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
     const stateFile = files.find(item => item.path === STATE_PATH)
     const sourceStateBuffer = await readFileFromStart(stateFile.file.handle)
-    const sourceState = parseState(sourceStateBuffer, { versions: [4, STATE_VERSION], migrate: false })
+    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, STATE_VERSION], migrate: false })
     const sessionRefs = collectSessionRefs(sourceState)
     const expectedSchema = schemaSummary(sourceState, sessionRefs)
     if (JSON.stringify(manifest.schema) !== JSON.stringify(expectedSchema)) throw new Error('备份 schema 摘要不匹配')
@@ -121,11 +121,9 @@ async function restore(inputArg, dataRootArg) {
     const missing = sessionRefs.filter(id => !includedSessionRefs.includes(id))
     if (missing.length) throw new Error(`备份缺少关联 DSH Session：${missing.join(', ')}`)
 
-    const state = sourceState.version === STATE_VERSION ? sourceState : migrateState(structuredClone(sourceState))
+    const state = prepareRestoredState(sourceState)
     assertNoSecretKeys(state)
-    const restoredStateBuffer = sourceState.version === STATE_VERSION
-      ? sourceStateBuffer
-      : Buffer.from(JSON.stringify(state, null, 2) + '\n')
+    const restoredStateBuffer = Buffer.from(JSON.stringify(state, null, 2) + '\n')
     const restoredEntries = files.map(file => file.path === STATE_PATH
       ? { path: STATE_PATH, buffer: restoredStateBuffer, bytes: restoredStateBuffer.length, sha256: digest(restoredStateBuffer) }
       : file)
@@ -195,6 +193,30 @@ function interruptActiveForBackup(state, interruptedAt) {
   return changed ? { ...state, works } : state
 }
 
+function prepareRestoredState(sourceState) {
+  const state = sourceState.version === STATE_VERSION ? structuredClone(sourceState) : migrateState(structuredClone(sourceState))
+  const timestamp = new Date().toISOString()
+  const closingLinks = new Set(state.linkCodes.filter(link => ['active', 'matched'].includes(link.status)).map(link => link.id))
+  const identityIds = new Set(state.linkCodes.filter(link => closingLinks.has(link.id)).map(link => link.matchedIdentityId).filter(Boolean))
+  const conversationIds = new Set(state.linkCodes.filter(link => closingLinks.has(link.id)).map(link => link.matchedConversationId).filter(Boolean))
+  return migrateState({
+    ...state,
+    channelApps: state.channelApps.map(app => app.enabled || app.status !== 'disabled'
+      ? { ...app, enabled: false, status: 'disabled', revision: app.revision + 1, updatedAt: timestamp }
+      : app),
+    channelIdentities: state.channelIdentities.map(identity => identityIds.has(identity.id) && identity.status === 'pending'
+      ? { ...identity, status: 'unlinked', revision: identity.revision + 1, updatedAt: timestamp, unlinkedAt: timestamp }
+      : identity),
+    channelConversations: state.channelConversations.map(conversation => conversationIds.has(conversation.id) && conversation.status === 'pending'
+      ? { ...conversation, status: 'unlinked', revision: conversation.revision + 1, updatedAt: timestamp, unlinkedAt: timestamp }
+      : conversation),
+    deliveries: state.deliveries.map(delivery => delivery.status === 'sending'
+      ? { ...delivery, status: 'unknown', error: { code: 'RECOVERY_UNKNOWN', message: '发送效果待核对' }, updatedAt: timestamp }
+      : delivery),
+    linkCodes: state.linkCodes.map(link => closingLinks.has(link.id) ? { ...link, status: 'cancelled', updatedAt: timestamp } : link),
+  })
+}
+
 function parseManifest(buffer) {
   let value
   try { value = JSON.parse(buffer.toString('utf8')) } catch { throw new Error('备份 manifest JSON 无效') }
@@ -228,8 +250,14 @@ function visit(value, inspect, key = '') {
 }
 
 function assertNoSecretKeys(state) {
-  visit(state, key => {
+  visit(state, (key, value) => {
     const compact = key.toLowerCase().replaceAll(/[^a-z0-9]/g, '')
+    if (compact === 'authorizationrevisions') {
+      if (record(value)
+        && Object.keys(value).sort().join(',') === 'app,conversation,identity'
+        && Object.values(value).every(item => Number.isSafeInteger(item) && item > 0)) return
+      throw new Error(`产品状态包含秘密字段：${key}`)
+    }
     if (!compact || ['authref', 'credentialref', 'secretref', 'authorizationbasis'].includes(compact)) return
     if (/password|verifier|secret|token$|cookie|grant|apikey|apisecret|hmac|claude|credential|^auth/.test(compact)) throw new Error(`产品状态包含秘密字段：${key}`)
   })
@@ -246,9 +274,30 @@ function schemaSummary(state, sessionRefs) {
     skills: count('skills'),
     confirmations: count('confirmations'),
     ...(state.version >= 5 ? { knowledgeMaterials: count('knowledgeMaterials') } : {}),
+    ...(state.version >= 6 ? {
+      channelApps: count('channelApps'),
+      channelIdentities: count('channelIdentities'),
+      channelConversations: count('channelConversations'),
+      channelMessages: count('channelMessages'),
+      deliveries: count('deliveries'),
+      linkCodes: count('linkCodes'),
+      channelGraphSha256: digest(Buffer.from(JSON.stringify(channelGraph(state)))),
+    } : {}),
     works: count('works'),
     sessionRefs,
   }
+}
+
+function channelGraph(state) {
+  const rows = [
+    ...state.channelApps.map(item => ['app', item.id]),
+    ...state.channelIdentities.map(item => ['identity', item.id, item.channelAppId, item.memberId]),
+    ...state.channelConversations.map(item => ['conversation', item.id, item.channelAppId, item.identityId, item.memberId]),
+    ...state.channelMessages.map(item => ['message', item.id, item.channelAppId, item.conversationId ?? '', item.senderIdentityId ?? '', item.workId ?? '']),
+    ...state.deliveries.map(item => ['delivery', item.id, item.channelAppId, item.targetConversationId, item.targetIdentityId, item.workId, item.resultId ?? '', item.channelMessageId ?? '']),
+    ...state.linkCodes.map(item => ['link', item.id, item.channelAppId, item.memberId, item.matchedIdentityId ?? '', item.matchedConversationId ?? '']),
+  ]
+  return rows.map(row => row.join('\0')).sort()
 }
 
 function candidate() {

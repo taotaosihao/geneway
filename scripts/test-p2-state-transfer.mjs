@@ -66,6 +66,13 @@ try {
     skills: 2,
     confirmations: 2,
     knowledgeMaterials: 0,
+    channelApps: 0,
+    channelIdentities: 0,
+    channelConversations: 0,
+    channelMessages: 0,
+    deliveries: 0,
+    linkCodes: 0,
+    channelGraphSha256: digest(Buffer.from('[]')),
     works: 5,
     sessionRefs: ['session-a', 'session-b', 'session-cycle'],
   })
@@ -126,6 +133,7 @@ try {
   ])
   assert.equal(restoredState.confirmations.find(item => item.id === 'confirmation-revoked').status, 'revoked')
   assert.deepEqual(restoredState.knowledgeMaterials, [])
+  for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.deepEqual(restoredState[key], [])
   assert.deepEqual(restoredState.works.flatMap(item => item.results.map(result => result.kind)), [
     'gearjob.work-order.observation', 'assistant.follow-up', 'manufacturing.takt',
   ])
@@ -407,7 +415,6 @@ function fixtureState() {
       { id: 'confirmation-active', ownerMemberId: 'member-user', revision: 2, status: 'active', value: '白班' },
       { id: 'confirmation-revoked', ownerMemberId: 'member-user', revision: 3, status: 'revoked', revokedAt: '2026-09-19T03:00:00.000Z' },
     ],
-    knowledgeMaterials: [],
     works: [
       {
         id: 'work-gear', ownerMemberId: 'member-user', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', status: 'waiting_input',
@@ -428,5 +435,12 @@ function fixtureState() {
       })),
     ],
     reservations: {},
+    knowledgeMaterials: [],
+    channelApps: [],
+    channelIdentities: [],
+    channelConversations: [],
+    channelMessages: [],
+    deliveries: [],
+    linkCodes: [],
   }
 }

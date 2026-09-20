@@ -17,10 +17,11 @@ function checkMigrations() {
   ])
   const v4 = v4Fixture()
   const migrated = migrateState(v4)
-  assert.equal(STATE_VERSION, 5)
-  assert.equal(migrated.version, 5)
+  const emptyChannels = Object.fromEntries(['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes'].map(key => [key, []]))
+  assert.equal(STATE_VERSION, 6)
+  assert.equal(migrated.version, 6)
   assert.deepEqual(migrated.knowledgeMaterials, [])
-  assert.deepEqual(migrated, { ...v4, version: 5, knowledgeMaterials: [] })
+  assert.deepEqual(migrated, { ...v4, version: 6, knowledgeMaterials: [], ...emptyChannels })
   assert.equal(migrated.works[0].id, v4.works[0].id)
   assert.equal(migrated.works[0].results[0].id, v4.works[0].results[0].id)
   assert.equal(migrated.works[0].results[0].dshSessionRef, 'session-stable')
@@ -29,6 +30,13 @@ function checkMigrations() {
   assert.deepEqual(migrated.reservations, v4.reservations)
   assert.deepEqual(migrateState(structuredClone(migrated)), migrated)
 
+  const v5 = { ...v4, version: 5, knowledgeMaterials: [activeMaterial()] }
+  const fromV5 = migrateState(v5)
+  assert.equal(fromV5.version, 6)
+  assert.deepEqual(fromV5.knowledgeMaterials, v5.knowledgeMaterials)
+  for (const key of Object.keys(emptyChannels)) assert.deepEqual(fromV5[key], [])
+  assert.deepEqual(migrateState(structuredClone(fromV5)), fromV5)
+
   const v3 = migrateState({
     version: 3,
     operator: { id: 'legacy-owner', displayName: '旧管理员' },
@@ -36,18 +44,18 @@ function checkMigrations() {
     modelRoutes: [], connections: [], skills: [], confirmations: [{ id: 'confirmation-legacy' }], works: [],
     reservations: { 'legacy-owner|keep': { workId: 'work-legacy', executionId: 'exec-legacy' } },
   })
-  assert.equal(v3.version, 5)
+  assert.equal(v3.version, 6)
   assert.equal(v3.members[0].id, 'member-admin')
   assert.equal(v3.confirmations[0].id, 'confirmation-legacy')
   assert.deepEqual(v3.reservations['member-admin|keep'], { workId: 'work-legacy', executionId: 'exec-legacy' })
   assert.deepEqual(v3.knowledgeMaterials, [])
+  for (const key of Object.keys(emptyChannels)) assert.deepEqual(v3[key], [])
 
-  assert.throws(() => migrateState({ version: 6 }), /未来/)
-  assert.throws(() => migrateState({ version: '5' }), /版本无效/)
+  assert.throws(() => migrateState({ version: 7 }), /未来/)
+  assert.throws(() => migrateState({ version: '6' }), /版本无效/)
   assert.throws(() => migrateState({ ...migrated, knowledgeMaterials: {} }), /knowledgeMaterials/)
 
-  const withDependency = structuredClone(migrated)
-  withDependency.knowledgeMaterials = [activeMaterial()]
+  const withDependency = structuredClone(fromV5)
   withDependency.works[0].results[0].knowledgeDependencyRefs = [{ knowledgeId: 'knowledge-valid', revision: 1, segmentId: 'p1-c1' }]
   assert.deepEqual(migrateState(withDependency).works[0].results[0].knowledgeDependencyRefs, [{ knowledgeId: 'knowledge-valid', revision: 1, segmentId: 'p1-c1' }])
   const v4WithDependency = structuredClone(v4)

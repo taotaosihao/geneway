@@ -20,6 +20,7 @@
     "test:p3": "node scripts/test-p3-knowledge.mjs && node scripts/test-p3-runtime.mjs && node scripts/test-p3-http-ui.mjs && node scripts/test-p3-state-transfer.mjs",
     "test:p3-state-transfer": "node scripts/test-p3-state-transfer.mjs",
     "test:p3-http": "node scripts/test-p3-http-ui.mjs",
+    "test:p4-channel": "node scripts/test-p4-channel.mjs",
     "accept:p1": "node scripts/accept-p1.mjs",
     "accept:p2": "node scripts/accept-p2.mjs",
     "accept:p3": "node scripts/accept-p3.mjs",

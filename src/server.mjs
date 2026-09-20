@@ -10,6 +10,7 @@ import { createCollaborationRunner } from './collaboration-runner.mjs'
 import { readRuntimeConfig } from './runtime-config.mjs'
 import { readConnectionCatalog } from './connection-catalog.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
+import { createFeishuRuntime } from '../plugins/feishu.mjs'
 import { ChannelServiceError, createChannelService } from './channel-service.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -54,14 +55,16 @@ export async function start() {
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
   const channel = createChannelService({ store, workService: service })
-  const server = createGenewayServer({ service, knowledge, collaborationRunner, channel, store, auth, index, trustedOrigin })
+  const channelRuntime = createFeishuRuntime({ store, channelService: channel, secretRoot: process.env.GENEWAY_SECRET_ROOT?.trim() ? runtimeConfig.secretRoot : undefined })
+  await channelRuntime.start()
+  const server = createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntime, store, auth, index, trustedOrigin })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
   let shuttingDown = false
   const shutdown = async code => {
     if (shuttingDown) return
     shuttingDown = true
-    await shutdownServer(server, service)
+    await shutdownServer(server, service, channelRuntime)
     process.exit(code)
   }
   process.once('SIGTERM', () => shutdown(0))
@@ -69,10 +72,10 @@ export async function start() {
   return server
 }
 
-export function createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntimeAvailable = false, store, auth, index = '', trustedOrigin }) {
+export function createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntime, store, auth, index = '', trustedOrigin }) {
   if (!service || !store || !auth || !trustedOrigin) throw new Error('server dependencies are required')
   channel ??= createChannelService({ store, workService: service })
-  const channelRuntimeReady = typeof channelRuntimeAvailable === 'function' ? channelRuntimeAvailable : () => channelRuntimeAvailable === true
+  const channelRuntimeReady = channelAppId => channelRuntime?.isAvailable?.(channelAppId) === true
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', trustedOrigin)
@@ -185,7 +188,7 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
 
       if (channel && request.method === 'GET' && url.pathname === '/api/channels/apps') {
         exactQuery(url)
-        return sendJson(response, 200, safeMemberChannelApps(await channel.listChannelApps(actor), channelRuntimeReady()))
+        return sendJson(response, 200, safeMemberChannelApps(await channel.listChannelApps(actor), channelRuntimeReady))
       }
       if (channel && request.method === 'GET' && url.pathname === '/api/channels') {
         exactQuery(url)
@@ -194,7 +197,7 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       if (channel && request.method === 'POST' && url.pathname === '/api/channels/link-codes') {
         exactQuery(url)
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['channelAppId'])
-        if (!channelRuntimeReady()) throw httpError('UNAVAILABLE', '真实渠道传输尚未启用，未生成关联码')
+        if (!channelRuntimeReady(body.channelAppId)) throw httpError('UNAVAILABLE', '真实渠道传输尚未启用，未生成关联码')
         return sendJson(response, 200, await channel.issueLinkCode(actor, body))
       }
       const linkMatch = url.pathname.match(/^\/api\/channels\/link-codes\/([^/]+)\/confirm$/)
@@ -223,8 +226,14 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       if (channel && request.method === 'POST' && url.pathname === '/api/channels/deliveries') {
         exactQuery(url)
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['requestId', 'workId', 'resultId'])
-        if (!channelRuntimeReady()) throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，未建立待发回复')
-        return sendJson(response, 200, await channel.createWorkDelivery(actor, body))
+        const channelState = await channel.memberChannelState(actor)
+        const originApps = new Set(channelState.messages.filter(item => item.workId === body.workId && item.status === 'accepted' && item.command?.type === 'create').map(item => item.channelAppId))
+        if (originApps.size === 1 && !channelRuntimeReady([...originApps][0])) throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，未建立待发回复')
+        const created = await channel.createWorkDelivery(actor, body)
+        if (created.delivery.status !== 'pending') return sendJson(response, 200, created)
+        if (!channelRuntimeReady(created.delivery.channelAppId)) throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，回复保留为待发送')
+        const delivery = await channelRuntime.sendDelivery(created.delivery.id)
+        return sendJson(response, 200, { ...created, delivery })
       }
       const deliveryMatch = url.pathname.match(/^\/api\/channels\/deliveries\/([^/]+)(?:\/(retry))?$/)
       if (channel && deliveryMatch && request.method === 'DELETE' && !deliveryMatch[2]) {
@@ -235,7 +244,10 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       if (channel && deliveryMatch && request.method === 'POST' && deliveryMatch[2] === 'retry') {
         exactQuery(url)
         await protectedWrite(request, context.token, auth, trustedOrigin, [])
-        throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，投递状态未改变')
+        const delivery = (await channel.memberChannelState(actor)).deliveries.find(item => item.id === decode(deliveryMatch[1]))
+        if (!delivery) throw httpError('NOT_FOUND', '投递不存在')
+        if (!channelRuntimeReady(delivery.channelAppId)) throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，投递状态未改变')
+        return sendJson(response, 200, await channelRuntime.sendDelivery(delivery.id, { retry: true }))
       }
 
       if (channel && request.method === 'GET' && url.pathname === '/api/admin/channel-apps') {
@@ -246,13 +258,17 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       if (channel && request.method === 'POST' && url.pathname === '/api/admin/channel-apps') {
         exactQuery(url)
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['id', 'provider', 'providerAppId', 'providerTenantId', 'credentialRef', 'enabled', 'allowedScopes'])
-        return sendJson(response, 200, await channel.upsertChannelApp(actor, { ...body, status: body.enabled === false ? 'disabled' : 'unavailable' }))
+        const app = await channel.upsertChannelApp(actor, { ...body, status: body.enabled === false ? 'disabled' : 'unavailable' })
+        await channelRuntime?.sync?.()
+        return sendJson(response, 200, (await channel.listChannelApps(actor)).find(item => item.id === app.id) ?? app)
       }
       const channelAppMatch = url.pathname.match(/^\/api\/admin\/channel-apps\/([^/]+)$/)
       if (channel && channelAppMatch && request.method === 'PATCH') {
         exactQuery(url)
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['credentialRef', 'enabled', 'allowedScopes'])
-        return sendJson(response, 200, await channel.upsertChannelApp(actor, { id: decode(channelAppMatch[1]), ...body, status: body.enabled === false ? 'disabled' : 'unavailable' }))
+        const app = await channel.upsertChannelApp(actor, { id: decode(channelAppMatch[1]), ...body, status: body.enabled === false ? 'disabled' : 'unavailable' })
+        await channelRuntime?.sync?.()
+        return sendJson(response, 200, (await channel.listChannelApps(actor)).find(item => item.id === app.id) ?? app)
       }
 
       if (url.pathname === '/api/knowledge/share-targets' && request.method === 'GET') {
@@ -351,7 +367,7 @@ function safeChannelState(value) {
 }
 
 function safeMemberChannelApps(items, runtimeReady) {
-  return items.filter(item => item.enabled === true && item.status === 'active').map(item => ({ id: item.id, provider: item.provider, runtimeStatus: runtimeReady ? 'ready' : 'unavailable' }))
+  return items.filter(item => item.enabled === true && item.status === 'active' && runtimeReady(item.id)).map(item => ({ id: item.id, provider: item.provider, runtimeStatus: 'ready' }))
 }
 
 function maskOfficialId(value) {
@@ -359,8 +375,9 @@ function maskOfficialId(value) {
   return text.length <= 4 ? '•'.repeat(text.length) : `…${text.slice(-4)}`
 }
 
-export async function shutdownServer(server, service) {
+export async function shutdownServer(server, service, channelRuntime) {
   const intakeClosed = new Promise((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose()))
+  await channelRuntime?.close?.().catch(() => undefined)
   await service.close().catch(() => undefined)
   await intakeClosed
 }

@@ -34,8 +34,16 @@ try {
 
   const auth = createAuthRuntime({ filePath: authPath }), index = await readFile(new URL('../web/index.html', import.meta.url), 'utf8')
   const knowledge = { async listShareTargets() { return { members: [], employees: [] } }, async listMaterials() { return [] } }
-  let runtimeReady = false
-  server = createGenewayServer({ service, knowledge, collaborationRunner: { isKnowledgeEnabled: () => true }, channel, channelRuntimeAvailable: () => runtimeReady, store, auth, index, trustedOrigin: origin })
+  const readyApps = new Set()
+  const channelRuntime = {
+    isAvailable: id => readyApps.has(id),
+    async sync() {},
+    async sendDelivery(id, { retry = false } = {}) {
+      if (retry) throw Object.assign(new Error('controlled unavailable runtime'), { code: 'UNAVAILABLE', status: 503 })
+      return (await store.read()).deliveries.find(item => item.id === id)
+    },
+  }
+  server = createGenewayServer({ service, knowledge, collaborationRunner: { isKnowledgeEnabled: () => true }, channel, channelRuntime, store, auth, index, trustedOrigin: origin })
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(new URL(origin).port, '127.0.0.1', resolve) })
 
   const admin = await login('admin', 'admin password'), owner = await login('owner', 'owner password'), peer = await login('peer', 'peer password')
@@ -65,7 +73,7 @@ try {
   assert.equal((await request('/api/channels/deliveries', { method: 'POST', session: owner, json: { requestId: 'web-reply-unavailable', workId: work.id, resultId } })).status, 503)
   assert.deepEqual((await store.read()).deliveries, deliveriesBeforeUnavailable)
   await channel.setChannelAppRuntime({ channelAppId: unavailableApp.id, revision: unavailableApp.revision, providerAppId: unavailableApp.providerAppId, providerTenantId: unavailableApp.providerTenantId, available: true })
-  runtimeReady = true
+  readyApps.add(unavailableApp.id)
   const recoveredApps = await request('/api/channels/apps', { cookie: owner.cookie })
   assert.deepEqual(Object.keys(recoveredApps.body[0]).sort(), ['id', 'provider', 'runtimeStatus']); assert.equal(recoveredApps.body[0].runtimeStatus, 'ready')
   const issued = await request('/api/channels/link-codes', { method: 'POST', session: owner, json: { channelAppId: 'app-feishu' } })

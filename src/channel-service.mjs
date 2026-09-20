@@ -187,15 +187,16 @@ export function createChannelService({
       return appDto(output, true)
     },
 
-    async setChannelAppRuntime({ channelAppId, revision, providerAppId, providerTenantId, available } = {}) {
+    async setChannelAppRuntime({ channelAppId, revision, providerAppId, providerTenantId, credentialRef, available, preservePending = false } = {}) {
       let output
       await store.update(state => {
         const app = state.channelApps.find(item => item.id === clean(channelAppId))
-        if (!app || app.enabled !== true || app.revision !== revision || app.providerAppId !== providerAppId || app.providerTenantId !== providerTenantId || typeof available !== 'boolean') throw error('CHANNEL_RUNTIME_STALE', '渠道应用运行配置已变化')
+        if (!app || app.enabled !== true || app.revision !== revision || app.providerAppId !== providerAppId || app.providerTenantId !== providerTenantId
+          || (credentialRef !== undefined && app.credentialRef !== credentialRef) || typeof available !== 'boolean' || typeof preservePending !== 'boolean') throw error('CHANNEL_RUNTIME_STALE', '渠道应用运行配置已变化')
         const status = available ? 'active' : 'unavailable'
         if (app.status === status) { output = app; return state }
         output = { ...app, status, updatedAt: now(clock) }
-        const deliveries = available ? state.deliveries : invalidateClaims(state.deliveries, item => item.channelAppId === app.id && ['pending', 'sending'].includes(item.status), output.updatedAt, 'APP_UNAVAILABLE', '渠道应用当前不可用')
+        const deliveries = available ? state.deliveries : invalidateClaims(state.deliveries, item => item.channelAppId === app.id && (item.status === 'sending' || (!preservePending && item.status === 'pending')), output.updatedAt, 'APP_UNAVAILABLE', '渠道应用当前不可用')
         return { ...state, channelApps: replaceById(state.channelApps, output), deliveries }
       })
       return appDto(output, true)

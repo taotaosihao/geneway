@@ -5,8 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { createAutomationService, dailyOccurrenceKey, deriveUsedRuns, nextDailyOccurrence } from '../src/automation-service.mjs'
-import { migrateState } from '../src/store/file-store.mjs'
+import { createAutomationRuntime, createAutomationService, dailyOccurrenceKey, deriveUsedRuns, nextDailyOccurrence } from '../src/automation-service.mjs'
+import { createChannelService } from '../src/channel-service.mjs'
+import { createWorkService } from '../src/work-service.mjs'
+import { createFeishuRuntime } from '../plugins/feishu.mjs'
+import { createFileStore, migrateState } from '../src/store/file-store.mjs'
 
 const execFile = promisify(execFileCallback)
 const transfer = fileURLToPath(new URL('./state-transfer.mjs', import.meta.url))
@@ -204,14 +207,23 @@ async function transferChecks() {
     const source = join(root, 'source'), backup = join(root, 'backup'), restored = join(root, 'restored')
     await mkdir(source, { recursive: true })
     const rules = [automationRule('rule-active', 'active', daily('08:00'), { notificationConversationId: 'conversation-owner' }), automationRule('rule-draft', 'draft', daily('08:00')), automationRule('rule-paused', 'paused', daily('08:00')), automationRule('rule-revoked', 'revoked', daily('08:00'))]
-    const transferWork = workRecord('work-transfer')
-    const transferOccurrence = occurrenceRecord('occurrence-transfer', rules[0], '2026-09-20', transferWork.id)
-    const transferState = migrateState({ ...fixture().current, works: [transferWork], automationRules: rules, automationOccurrences: [transferOccurrence] })
+    const sendingWork = workRecord('work-sending'), pendingWork = workRecord('work-pending')
+    const sendingDelivery = automationDelivery('delivery-sending', sendingWork.id, 'sending'), pendingDelivery = automationDelivery('delivery-pending', pendingWork.id, 'pending')
+    const sendingOccurrence = occurrenceRecord('occurrence-sending', rules[0], '2026-09-20', sendingWork.id, sendingDelivery.id)
+    const pendingOccurrence = occurrenceRecord('occurrence-pending', rules[3], '2026-09-19', pendingWork.id, pendingDelivery.id)
+    const transferState = migrateState({ ...fixture().current, works: [sendingWork, pendingWork], deliveries: [sendingDelivery, pendingDelivery], automationRules: rules, automationOccurrences: [sendingOccurrence, pendingOccurrence] })
     await writeFile(join(source, 'state.json'), JSON.stringify(transferState, null, 2) + '\n', { mode: 0o600 })
+    const secretCanary = 'P5_TRANSFER_SECRET_CANARY_DO_NOT_COPY'
+    await mkdir(join(source, 'secrets'), { recursive: true, mode: 0o700 })
+    await writeFile(join(source, 'secrets', 'FEISHU_REF'), secretCanary, { mode: 0o600 })
+    await mkdir(join(source, 'dsh'), { recursive: true, mode: 0o700 })
+    await writeFile(join(source, 'dsh', 'unreferenced-secret.txt'), secretCanary, { mode: 0o600 })
     await run(['backup', '--output', backup], { GENEWAY_STATE: join(source, 'state.json'), GENEWAY_DSH_HOME: join(source, 'dsh') })
     const manifest = JSON.parse(await readFile(join(backup, 'manifest.json'), 'utf8'))
     assert.equal(manifest.schema.automationRules, 4)
-    assert.equal(manifest.schema.automationOccurrences, 1)
+    assert.equal(manifest.schema.automationOccurrences, 2)
+    assert.equal((await readFile(join(backup, 'state.json'), 'utf8')).includes(secretCanary), false)
+    assert.equal((await readFile(join(backup, 'manifest.json'), 'utf8')).includes(secretCanary), false)
     await run(['restore', '--input', backup, '--data-root', restored])
     const restoredState = JSON.parse(await readFile(join(restored, 'state.json'), 'utf8'))
     const restoredRules = new Map(restoredState.automationRules.map(rule => [rule.id, rule]))
@@ -219,10 +231,46 @@ async function transferChecks() {
     assert.equal(restoredRules.get('rule-active').revision, 2)
     assert.notEqual(restoredRules.get('rule-active').updatedAt, rules[0].updatedAt)
     for (const rule of rules.slice(1)) assert.deepEqual(restoredRules.get(rule.id), rule)
-    assert.deepEqual(restoredState.automationOccurrences, [transferOccurrence])
+    assert.deepEqual(restoredState.automationOccurrences, [sendingOccurrence, pendingOccurrence])
+    assert.equal(restoredState.deliveries.find(item => item.id === sendingDelivery.id).status, 'unknown')
+    assert.equal(restoredState.deliveries.find(item => item.id === pendingDelivery.id).status, 'pending')
+    assert.equal(JSON.stringify(restoredState).includes(secretCanary), false)
+    await assert.rejects(readFile(join(restored, 'secrets', 'FEISHU_REF')), error => error.code === 'ENOENT')
+    await assert.rejects(readFile(join(restored, 'dsh', 'unreferenced-secret.txt')), error => error.code === 'ENOENT')
+
+    const restoredStore = createFileStore(join(restored, 'state.json'))
+    let runnerCalls = 0, timerCalls = 0, sdkTouches = 0
+    const workService = createWorkService({ store: restoredStore, runner: { configured: true, async run() { runnerCalls += 1; throw new Error('restore must not dispatch') }, async cancel() {}, async close() {} }, clock: () => now, connectionCatalog: catalog })
+    const restoredAutomation = createAutomationService({ store: restoredStore, workService, clock: () => now, connectionCatalog: catalog })
+    const automationRuntime = createAutomationRuntime({ store: restoredStore, automationService: restoredAutomation, workService, dataRoot: restored, clock: () => now, timerFactory() { timerCalls += 1; return { unref() {} } }, clearTimer() {}, lockFactory: async () => ({ lost: new Promise(() => {}), async release() {} }) })
+    const channel = createChannelService({ store: restoredStore, workService, clock: () => now })
+    const feishu = createFeishuRuntime({ store: restoredStore, channelService: channel, secretRoot: join(restored, 'secrets'), sdk: new Proxy({}, { get() { sdkTouches += 1; return undefined } }), automationOwnerCheck: () => automationRuntime.ownsLock() })
+    const beforeStart = await restoredStore.read()
+    try {
+      await automationRuntime.start()
+      await feishu.start()
+      const afterStart = await restoredStore.read()
+      assert.equal(timerCalls, 0)
+      assert.equal(runnerCalls, 0)
+      assert.equal(sdkTouches, 0)
+      assert.equal(afterStart.works.length, beforeStart.works.length)
+      assert.equal(afterStart.works.reduce((count, work) => count + work.executions.length, 0), beforeStart.works.reduce((count, work) => count + work.executions.length, 0))
+      assert.equal(afterStart.automationOccurrences.length, beforeStart.automationOccurrences.length)
+      assert.equal(afterStart.deliveries.find(item => item.id === sendingDelivery.id).status, 'unknown')
+      assert.notEqual(afterStart.deliveries.find(item => item.id === pendingDelivery.id).status, 'sending')
+    } finally {
+      await automationRuntime.stop()
+      await feishu.close()
+      await workService.close()
+      await automationRuntime.close()
+    }
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+}
+
+function automationDelivery(id, workId, status) {
+  return { id, channelAppId: 'app-owner', requestId: `automation:${id}:terminal`, workId, targetConversationId: 'conversation-owner', targetIdentityId: 'identity-owner', contentScope: 'result', contentKey: 'automation.failed', status, attempts: status === 'sending' ? 1 : 0, ...(status === 'sending' ? { authorizationRevisions: { app: 1, identity: 1, conversation: 1 } } : {}), createdAt: now, updatedAt: now }
 }
 
 function fixture() {

@@ -84,9 +84,9 @@ async function duplicateAndCreateCrashGap() {
   assert.equal(crashState.works[0].input.workOrderId, 'WO-1')
   assert.equal(crashState.works[0].executions.length, 1)
   await waitUntil(() => crash.runner.calls.length === 1)
-  const suppressed = await crash.channelService.createDelivery(crash.owner, { channelAppId: 'app-1', requestId: 'suppressed-after-crash', workId: crashState.works[0].id, targetIdentityId: 'identity-owner', targetConversationId: 'conversation-owner', contentScope: 'result' })
-  await assert.rejects(crash.channelService.authorizeDelivery({ deliveryId: suppressed.delivery.id }), hasCode('DELIVERY_FORBIDDEN'))
-  assert.equal((await crash.store.read()).deliveries.find(item => item.id === suppressed.delivery.id).status, 'blocked')
+  const deliveriesBeforeSuppressed = crashState.deliveries.length
+  await assert.rejects(crash.channelService.createDelivery(crash.owner, { channelAppId: 'app-1', requestId: 'suppressed-after-crash', workId: crashState.works[0].id, targetIdentityId: 'identity-owner', targetConversationId: 'conversation-owner', contentScope: 'result' }), hasCode('FORBIDDEN'))
+  assert.equal((await crash.store.read()).deliveries.length, deliveriesBeforeSuppressed)
 
   const cross = await createEnvironment('cross-id')
   await cross.channelService.handleInbound(inbound('cross-a', '不支持 A'))

@@ -24,6 +24,9 @@ try {
   const inbound = await channel.handleInbound({ channelAppId: 'app-feishu', providerEventId: 'event-origin', providerMessageId: 'message-origin', providerConversationId: 'conversation-official-owner', providerUserId: 'user-official-owner', text: '交办 工单 WO-1' })
   assert.equal(inbound.code, 'WORK_ACCEPTED')
   const work = await waitWork(service, ownerActor, inbound.workId), resultId = work.results[0].id
+  const groupInbound = await channel.handleInbound({ channelAppId: 'app-feishu', providerEventId: 'event-group-origin', providerMessageId: 'message-group-origin', providerConversationId: 'group-official-owner', providerUserId: 'user-official-owner', conversationType: 'group', botMentioned: true, text: '交办 工单 WO-1' })
+  assert.equal(groupInbound.code, 'WORK_ACCEPTED')
+  const groupWork = await waitWork(service, ownerActor, groupInbound.workId), groupResultId = groupWork.results[0].id
   const pending = await channel.createDelivery(ownerActor, delivery('pending', work.id, resultId))
   const failed = await channel.createDelivery(ownerActor, delivery('failed', work.id, resultId)); await channel.authorizeDelivery({ deliveryId: failed.delivery.id }); await channel.recordDeliveryOutcome({ deliveryId: failed.delivery.id, status: 'failed' })
   const unknown = await channel.createDelivery(ownerActor, delivery('unknown', work.id, resultId)); await channel.authorizeDelivery({ deliveryId: unknown.delivery.id }); await channel.recordDeliveryOutcome({ deliveryId: unknown.delivery.id, status: 'unknown' })
@@ -38,11 +41,11 @@ try {
   const admin = await login('admin', 'admin password'), owner = await login('owner', 'owner password'), peer = await login('peer', 'peer password')
   assert.equal((await request('/api/channels')).status, 401)
   assert.equal((await request('/api/admin/channel-apps', { cookie: peer.cookie })).status, 403)
-  const adminApps = await request('/api/admin/channel-apps', { cookie: admin.cookie }); assert.equal(adminApps.body[0].credentialRef, 'FEISHU_SECRET_REF')
+  const adminApps = await request('/api/admin/channel-apps', { cookie: admin.cookie }), unavailableApp = adminApps.body.find(item => item.id === 'app-feishu')
+  assert.equal(unavailableApp.credentialRef, 'FEISHU_SECRET_REF'); assert.equal(unavailableApp.status, 'unavailable')
   for (const session of [owner, peer]) {
     const apps = await request('/api/channels/apps', { cookie: session.cookie })
-    assert.deepEqual(Object.keys(apps.body[0]).sort(), ['id', 'provider', 'runtimeStatus'])
-    assert.equal(apps.body[0].runtimeStatus, 'unavailable')
+    assert.deepEqual(apps.body, [])
   }
   const configured = await request('/api/admin/channel-apps', { method: 'POST', session: admin, json: { id: 'app-configured-only', provider: 'feishu', providerAppId: 'configured-only-app', providerTenantId: 'configured-only-tenant', credentialRef: 'CONFIGURED_ONLY_REF', enabled: true, allowedScopes: ['result'] } })
   assert.equal(configured.body.status, 'unavailable')
@@ -58,11 +61,16 @@ try {
   const linksBeforeUnavailable = (await store.read()).linkCodes
   assert.equal((await request('/api/channels/link-codes', { method: 'POST', session: owner, json: { channelAppId: 'app-feishu' } })).status, 503)
   assert.deepEqual((await store.read()).linkCodes, linksBeforeUnavailable)
+  const deliveriesBeforeUnavailable = (await store.read()).deliveries
+  assert.equal((await request('/api/channels/deliveries', { method: 'POST', session: owner, json: { requestId: 'web-reply-unavailable', workId: work.id, resultId } })).status, 503)
+  assert.deepEqual((await store.read()).deliveries, deliveriesBeforeUnavailable)
+  await channel.setChannelAppRuntime({ channelAppId: unavailableApp.id, revision: unavailableApp.revision, providerAppId: unavailableApp.providerAppId, providerTenantId: unavailableApp.providerTenantId, available: true })
   runtimeReady = true
+  const recoveredApps = await request('/api/channels/apps', { cookie: owner.cookie })
+  assert.deepEqual(Object.keys(recoveredApps.body[0]).sort(), ['id', 'provider', 'runtimeStatus']); assert.equal(recoveredApps.body[0].runtimeStatus, 'ready')
   const issued = await request('/api/channels/link-codes', { method: 'POST', session: owner, json: { channelAppId: 'app-feishu' } })
   assert.equal(issued.status, 200); assert.equal(typeof issued.body.code, 'string')
   const disk = await readFile(statePath, 'utf8'); assert.equal(disk.includes(issued.body.code), false); assert.equal(disk.includes('digest'), true)
-  runtimeReady = false
   assert.equal((await request('/api/channels/link-codes/match', { method: 'POST', session: owner, json: {} })).status, 404)
   const conversationId = ownerView.body.conversations[0].id
   assert.equal((await request('/api/channels/identities/identity-owner', { method: 'DELETE', session: peer, json: {} })).status, 404)
@@ -73,8 +81,17 @@ try {
   await store.update(state => ({ ...state, connections: state.connections.map(item => item.id === 'connection-owner' ? { ...item, status: 'ready' } : item) }))
   assert.equal((await request(`/api/channels/conversations/${conversationId}/default-dispatch`, { method: 'PATCH', session: owner, json: { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner' } })).status, 200)
 
+  for (const [field, value] of Object.entries({ channelAppId: 'app-feishu', targetIdentityId: 'identity-owner', targetConversationId: 'conversation-owner', contentScope: 'result', contentKey: 'result.gearjob' })) {
+    const before = (await store.read()).deliveries
+    assert.equal((await request('/api/channels/deliveries', { method: 'POST', session: owner, json: { requestId: `forbidden-${field}`, workId: work.id, resultId, [field]: value } })).status, 400)
+    assert.deepEqual((await store.read()).deliveries, before)
+  }
+  const beforeRecoveredReply = await store.read(), recoveredReply = await request('/api/channels/deliveries', { method: 'POST', session: owner, json: { requestId: 'web-reply', workId: work.id, resultId } })
+  assert.equal(recoveredReply.status, 200); assert.equal(recoveredReply.body.delivery.status, 'pending'); assert.equal(recoveredReply.body.delivery.targetConversationId, 'conversation-owner'); assert.equal(recoveredReply.body.delivery.targetIdentityId, 'identity-owner'); assert.equal((await store.read()).deliveries.length, beforeRecoveredReply.deliveries.length + 1)
+  const groupConversation = (await store.read()).channelConversations.find(item => item.type === 'group' && item.providerConversationId === 'group-official-owner')
+  const groupReply = await request('/api/channels/deliveries', { method: 'POST', session: owner, json: { requestId: 'web-reply-group', workId: groupWork.id, resultId: groupResultId } })
+  assert.equal(groupReply.status, 200); assert.equal(groupReply.body.delivery.targetConversationId, 'conversation-owner'); assert.notEqual(groupReply.body.delivery.targetConversationId, groupConversation.id); assert.equal(groupReply.body.delivery.targetIdentityId, 'identity-owner')
   const beforeUnavailable = await store.read()
-  assert.equal((await request('/api/channels/deliveries', { method: 'POST', session: owner, json: { requestId: 'web-reply', workId: work.id, resultId } })).status, 503)
   assert.equal((await request(`/api/channels/deliveries/${failed.delivery.id}/retry`, { method: 'POST', session: owner, json: {} })).status, 503)
   const afterUnavailable = await store.read()
   assert.deepEqual(afterUnavailable.deliveries, beforeUnavailable.deliveries)
@@ -83,6 +100,10 @@ try {
 
   const browserResult = await browserJourney(work.id, pending.delivery.id)
   assert.deepEqual(browserResult, { desktopOverflow: false, mobileOverflow: false, pendingCancelled: true, workStatus: 'completed' })
+  assert.equal((await request('/api/channels/identities/identity-owner', { method: 'DELETE', session: owner, json: {} })).status, 200)
+  const afterUnlink = (await store.read()).deliveries
+  assert.equal((await request('/api/channels/deliveries', { method: 'POST', session: owner, json: { requestId: 'web-reply-unlinked', workId: work.id, resultId } })).status, 404)
+  assert.deepEqual((await store.read()).deliveries, afterUnlink)
   console.log('P4 HTTP/UI checks passed', JSON.stringify(browserResult))
 } finally {
   if (browser?.exitCode === null) { browser.kill('SIGKILL'); await new Promise(resolve => browser.once('exit', resolve)) }
@@ -125,7 +146,7 @@ async function browserJourney(workId, pendingId) {
   const channelText = await evaluate(`document.querySelector('#view-channels').innerText`)
   assert.match(channelText, /发送结果待核对，请勿重复发送/); assert.match(channelText, /确定未发送/); assert.equal(await evaluate(`Boolean(document.querySelector('[data-cancel-delivery="${pendingId}"]'))`), true)
   const desktopOverflow = await evaluate(`document.documentElement.scrollWidth>innerWidth`)
-  assert.equal(await evaluate(`document.querySelector('[data-issue-link]').disabled&&document.body.innerText.includes('真实渠道传输尚未接入')&&document.querySelector('[data-issue-link]').closest('.card').innerText.includes('传输未启用')`), true)
+  assert.equal(await evaluate(`!document.querySelector('[data-issue-link]').disabled&&document.querySelector('[data-issue-link]').closest('.card').innerText.includes('传输可用')`), true)
   assert.equal(await evaluate(`(()=>{const button=document.querySelector('[data-unlink]');button.focus();return document.activeElement===button&&getComputedStyle(button).outlineWidth!=='0px'})()`), true)
   assert.equal(await evaluate(`document.querySelectorAll('[data-config]').length===6&&[...document.querySelectorAll('[role="tab"]')].every(tab=>tab.hasAttribute('aria-selected')&&tab.hasAttribute('aria-controls'))&&[...document.querySelectorAll('[role="tabpanel"]')].every(panel=>panel.hasAttribute('aria-labelledby'))`), true)
   assert.equal(await evaluate(`document.querySelector('button[title="需要可信平台回查能力"]')?.disabled===true&&!document.querySelector('[data-retry-unknown]')`), true)

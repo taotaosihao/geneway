@@ -7,6 +7,11 @@ const CHANNEL_CAPABILITY_ID = 'gearjob-work-order-read'
 const ACTIVE_WORK_EXECUTION = new Set(['accepted', 'running', 'cancel_requested'])
 const DELIVERY_OUTCOMES = new Set(['delivered', 'failed', 'unknown'])
 const RECONCILED_OUTCOMES = new Set(['delivered', 'failed'])
+const FIXED_CONTENT = Object.freeze({
+  'group.accepted': '已受理，后续仅通过已验证私聊反馈；详情请到 Web 查看。',
+  'help.unsupported': '当前仅支持明确文本命令，请到 Web 处理其他内容。',
+  'help.unavailable': '当前请求无法处理，请到 Web 核对。',
+})
 
 export class ChannelServiceError extends Error {
   constructor(code, message) {
@@ -54,7 +59,7 @@ export function createChannelService({
   }
 
   async function validateSendClaim({ deliveryId } = {}) {
-    let output, denied = false
+    let output, transport, denied = false
     await store.update(state => {
       const delivery = state.deliveries.find(item => item.id === clean(deliveryId))
       if (!delivery) throw error('NOT_FOUND', '投递不存在')
@@ -65,10 +70,11 @@ export function createChannelService({
         return { ...state, deliveries: replaceById(state.deliveries, output) }
       }
       output = delivery
+      transport = deliveryEnvelope(state, delivery)
       return state
     })
     if (denied) throw error('DELIVERY_FORBIDDEN', '发送前授权已失效')
-    return deliveryDto(output)
+    return { ...transport, id: output.id, status: output.status }
   }
 
   async function handleInbound(input = {}) {
@@ -84,6 +90,7 @@ export function createChannelService({
       }
       let message = resolved.message
       if (!message) {
+        state = ensureGroupConversation(state, input, clock, idFactory)
         message = newInbound(state, input, clock, idFactory)
         state = { ...state, channelMessages: [...state.channelMessages, message] }
       }
@@ -166,9 +173,8 @@ export function createChannelService({
         const credentialRef = credentialReference(input.credentialRef ?? current?.credentialRef)
         const enabled = input.enabled ?? current?.enabled ?? true
         const allowedScopes = idList(input.allowedScopes ?? current?.allowedScopes, 'allowedScopes')
-        const requestedStatus = input.status ?? (current?.status === 'disabled' ? 'active' : current?.status) ?? 'active'
-        const status = enabled === false ? 'disabled' : requestedStatus
-        if (typeof enabled !== 'boolean' || !allowedScopes.length || (enabled ? !['active', 'unavailable'].includes(status) : status !== 'disabled')) throw error('INVALID_REQUEST', '渠道应用配置无效')
+        const status = enabled === false ? 'disabled' : 'unavailable'
+        if (typeof enabled !== 'boolean' || !allowedScopes.length) throw error('INVALID_REQUEST', '渠道应用配置无效')
         if (current && [provider, providerAppId, providerTenantId].some((value, index) => value !== [current.provider, current.providerAppId, current.providerTenantId][index])) throw error('INVALID_REQUEST', '渠道应用官方 identity 不可原地更换')
         if (state.channelApps.some(item => item.id !== id && item.provider === provider && item.providerAppId === providerAppId && item.providerTenantId === providerTenantId)) throw error('CONFLICT', '渠道应用官方 identity 已存在')
         const timestamp = now(clock)
@@ -177,6 +183,20 @@ export function createChannelService({
           ? invalidateClaims(state.deliveries, item => item.channelAppId === id && (item.status === 'sending' || (!enabled && item.status === 'pending')), timestamp, 'APP_CHANGED', '渠道应用配置已变化')
           : state.deliveries
         return { ...state, channelApps: current ? replaceById(state.channelApps, output) : [...state.channelApps, output], deliveries }
+      })
+      return appDto(output, true)
+    },
+
+    async setChannelAppRuntime({ channelAppId, revision, providerAppId, providerTenantId, available } = {}) {
+      let output
+      await store.update(state => {
+        const app = state.channelApps.find(item => item.id === clean(channelAppId))
+        if (!app || app.enabled !== true || app.revision !== revision || app.providerAppId !== providerAppId || app.providerTenantId !== providerTenantId || typeof available !== 'boolean') throw error('CHANNEL_RUNTIME_STALE', '渠道应用运行配置已变化')
+        const status = available ? 'active' : 'unavailable'
+        if (app.status === status) { output = app; return state }
+        output = { ...app, status, updatedAt: now(clock) }
+        const deliveries = available ? state.deliveries : invalidateClaims(state.deliveries, item => item.channelAppId === app.id && ['pending', 'sending'].includes(item.status), output.updatedAt, 'APP_UNAVAILABLE', '渠道应用当前不可用')
+        return { ...state, channelApps: replaceById(state.channelApps, output), deliveries }
       })
       return appDto(output, true)
     },
@@ -321,6 +341,7 @@ export function createChannelService({
         }
         const existing = resolved.message
         if (existing) { output = existing; deduplicated = true; return state }
+        state = ensureGroupConversation(state, input, clock, idFactory)
         output = newInbound(state, input, clock, idFactory)
         return { ...state, channelMessages: [...state.channelMessages, output] }
       })
@@ -330,7 +351,7 @@ export function createChannelService({
     async createDelivery(actor, input = {}) {
       let output, deduplicated = false
       await store.update(state => {
-        const member = requireMember(state, actor), app = state.channelApps.find(item => item.id === clean(input.channelAppId))
+        const member = requireMember(state, actor), app = state.channelApps.find(item => item.id === clean(input.channelAppId) && item.enabled === true && item.status === 'active')
         const requestId = requiredId(input.requestId, 'requestId')
         const existing = state.deliveries.find(item => item.channelAppId === app?.id && item.requestId === requestId)
         if (existing) {
@@ -341,16 +362,65 @@ export function createChannelService({
           return state
         }
         const work = state.works.find(item => item.id === clean(input.workId) && item.ownerMemberId === member.id)
-        const identity = state.channelIdentities.find(item => item.id === clean(input.targetIdentityId) && item.memberId === member.id && item.channelAppId === app?.id)
-        const conversation = state.channelConversations.find(item => item.id === clean(input.targetConversationId) && item.memberId === member.id && item.channelAppId === app?.id && item.identityId === identity?.id)
+        const identity = state.channelIdentities.find(item => item.id === clean(input.targetIdentityId) && item.memberId === member.id && item.channelAppId === app?.id && item.status === 'active')
+        const conversation = state.channelConversations.find(item => item.id === clean(input.targetConversationId) && item.memberId === member.id && item.channelAppId === app?.id && item.identityId === identity?.id && item.type === 'private' && item.status === 'active')
         const resultId = input.resultId === undefined ? undefined : clean(input.resultId)
         const channelMessageId = input.channelMessageId === undefined ? undefined : clean(input.channelMessageId)
         if (!app || !work || !identity || !conversation || (resultId && !work.results.some(item => item.id === resultId)) || (channelMessageId && !state.channelMessages.some(item => item.id === channelMessageId && item.channelAppId === app.id))) throw error('FORBIDDEN', '投递目标或内容引用无效')
         const timestamp = now(clock)
-        output = compact({ id: `delivery-${idFactory()}`, channelAppId: app.id, requestId, workId: work.id, resultId, channelMessageId, targetConversationId: conversation.id, targetIdentityId: identity.id, contentScope: requiredId(input.contentScope, 'contentScope'), status: 'pending', attempts: 0, createdAt: timestamp, updatedAt: timestamp })
+        const contentKey = resultId ? 'result.gearjob' : 'work.accepted'
+        output = compact({ id: `delivery-${idFactory()}`, channelAppId: app.id, requestId, workId: work.id, resultId, channelMessageId, targetConversationId: conversation.id, targetIdentityId: identity.id, contentScope: requiredId(input.contentScope, 'contentScope'), contentKey, status: 'pending', attempts: 0, createdAt: timestamp, updatedAt: timestamp })
         return { ...state, deliveries: [...state.deliveries, output] }
       })
       return { delivery: deliveryDto(output), deduplicated }
+    },
+
+    async createInboundDeliveries({ channelMessageId, requestId } = {}) {
+      let outputs = [], deduplicated = true
+      await store.update(state => {
+        const message = state.channelMessages.find(item => item.id === clean(channelMessageId) && item.direction === 'inbound')
+        if (!message || !['accepted', 'rejected'].includes(message.status)) throw error('INVALID_STATE', '渠道消息尚未完成受理')
+        const identity = state.channelIdentities.find(item => item.id === message.senderIdentityId)
+        const source = state.channelConversations.find(item => item.id === message.conversationId)
+        if (!identity || !source) return state
+        const baseRequest = requiredId(requestId, 'requestId')
+        const specs = []
+        if (source.type === 'group') {
+          specs.push({ suffix: 'group', conversation: source, contentScope: 'fixed', contentKey: message.status === 'accepted' ? 'group.accepted' : fixedHelpKey(message) })
+          if (message.status === 'accepted') {
+            const privateConversation = uniquePrivateConversation(state, message.channelAppId, identity.id)
+            if (privateConversation) specs.push({ suffix: 'private', conversation: privateConversation, contentScope: 'result', contentKey: 'work.accepted' })
+          }
+        } else {
+          specs.push({ suffix: 'private', conversation: source, contentScope: message.status === 'accepted' ? 'result' : 'fixed', contentKey: message.status === 'accepted' ? 'work.accepted' : fixedHelpKey(message) })
+        }
+        for (const spec of specs) {
+          const scopedRequest = `${baseRequest}:${spec.suffix}`
+          const existing = state.deliveries.find(item => item.channelAppId === message.channelAppId && item.requestId === scopedRequest)
+          if (existing) {
+            if (existing.channelMessageId !== message.id || existing.workId !== message.workId || existing.targetConversationId !== spec.conversation.id || existing.targetIdentityId !== identity.id || existing.contentScope !== spec.contentScope || existing.contentKey !== spec.contentKey) throw error('CONFLICT', '幂等投递请求已绑定其他消息')
+            outputs.push(existing)
+            continue
+          }
+          deduplicated = false
+          const timestamp = now(clock)
+          const delivery = compact({ id: `delivery-${idFactory()}`, channelAppId: message.channelAppId, requestId: scopedRequest, workId: message.workId, channelMessageId: message.id, targetConversationId: spec.conversation.id, targetIdentityId: identity.id, contentScope: spec.contentScope, contentKey: spec.contentKey, status: 'pending', attempts: 0, createdAt: timestamp, updatedAt: timestamp })
+          state = { ...state, deliveries: [...state.deliveries, delivery] }
+          outputs.push(delivery)
+        }
+        return state
+      })
+      return { deliveries: outputs.map(deliveryDto), deduplicated }
+    },
+
+    async createWorkDelivery(actor, { workId, resultId, requestId } = {}) {
+      const state = await store.read(), member = requireMember(state, actor)
+      const work = state.works.find(item => item.id === clean(workId) && item.ownerMemberId === member.id)
+      const origin = state.channelMessages.find(item => item.workId === work?.id && item.status === 'accepted' && item.command?.type === 'create')
+      const identity = state.channelIdentities.find(item => item.id === origin?.senderIdentityId)
+      const conversation = identity && uniquePrivateConversation(state, origin.channelAppId, identity.id)
+      if (!work || !origin || !identity || !conversation) throw error('NOT_FOUND', '工作没有可用的已验证私聊来源')
+      return this.createDelivery(actor, { channelAppId: origin.channelAppId, requestId, workId: work.id, resultId, channelMessageId: origin.id, targetIdentityId: identity.id, targetConversationId: conversation.id, contentScope: 'result' })
     },
 
     authorizeDelivery,
@@ -383,11 +453,12 @@ export function createChannelService({
       const state = await store.read(), member = requireMember(state, actor)
       const identityIds = new Set(state.channelIdentities.filter(item => item.memberId === member.id).map(item => item.id))
       const workIds = new Set(state.works.filter(item => item.ownerMemberId === member.id).map(item => item.id))
+      const conversationIds = new Set(state.channelMessages.filter(item => identityIds.has(item.senderIdentityId)).map(item => item.conversationId).filter(Boolean))
       return {
         identities: state.channelIdentities.filter(item => identityIds.has(item.id)).map(identityDto),
-        conversations: state.channelConversations.filter(item => identityIds.has(item.identityId)).map(conversationDto),
+        conversations: state.channelConversations.filter(item => identityIds.has(item.identityId) || conversationIds.has(item.id)).map(conversationDto),
         messages: state.channelMessages.filter(item => item.senderIdentityId && identityIds.has(item.senderIdentityId)).map(messageDto),
-        deliveries: state.deliveries.filter(item => workIds.has(item.workId)).map(deliveryDto),
+        deliveries: state.deliveries.filter(item => workIds.has(item.workId) || identityIds.has(item.targetIdentityId)).map(deliveryDto),
         linkCodes: state.linkCodes.filter(item => item.memberId === member.id).map(linkDto),
       }
     },
@@ -433,7 +504,11 @@ function newInbound(state, input, clock, idFactory) {
   if (state.linkCodes.some(link => link.digest === sha256(body.trim()))) throw error('INVALID_REQUEST', '关联码必须通过关联入口处理')
   const identity = state.channelIdentities.find(item => item.channelAppId === app.id && item.providerUserId === providerUserId && item.status === 'active')
   const conversation = state.channelConversations.find(item => item.channelAppId === app.id && item.providerConversationId === providerConversationId && item.status === 'active')
-  const allowed = app.enabled && app.status === 'active' && identity && conversation && conversation.identityId === identity.id && conversation.memberId === identity.memberId
+  const type = input.conversationType ?? 'private'
+  const privateConversation = identity && uniquePrivateConversation(state, app.id, identity.id)
+  const allowed = app.enabled && app.status === 'active' && identity && conversation && conversation.type === type
+    && (type === 'group' || conversation.identityId === identity.id && conversation.memberId === identity.memberId)
+    && (type === 'private' || input.botMentioned === true && privateConversation?.defaultDispatch)
   const timestamp = now(clock)
   return compact({
     id: `channel-message-${idFactory()}`, channelAppId: app.id, providerEventId, providerMessageId,
@@ -442,6 +517,29 @@ function newInbound(state, input, clock, idFactory) {
     persistedAt: timestamp, status: allowed ? 'received' : 'unhandled',
     error: allowed ? undefined : inboundError('CHANNEL_UNAVAILABLE'),
   })
+}
+
+function ensureGroupConversation(state, input, clock, idFactory) {
+  if (input.conversationType !== 'group' || input.botMentioned !== true) return state
+  const app = state.channelApps.find(item => item.id === clean(input.channelAppId) && item.enabled === true && item.status === 'active')
+  const providerUserId = validOfficialId(input.providerUserId) ? input.providerUserId : undefined
+  const providerConversationId = validOfficialId(input.providerConversationId) ? input.providerConversationId : undefined
+  const identity = state.channelIdentities.find(item => item.channelAppId === app?.id && item.providerUserId === providerUserId && item.status === 'active')
+  const privateConversation = identity && uniquePrivateConversation(state, app.id, identity.id)
+  if (!app || !identity || !privateConversation?.defaultDispatch || !providerConversationId) return state
+  const current = state.channelConversations.find(item => item.channelAppId === app.id && item.providerConversationId === providerConversationId)
+  if (current) return state
+  const timestamp = now(clock)
+  const group = {
+    id: `channel-conversation-${idFactory()}`, channelAppId: app.id, providerConversationId,
+    type: 'group', allowedScopes: ['fixed'], verificationMethod: 'bot-mention', status: 'active', revision: 1, createdAt: timestamp, updatedAt: timestamp,
+  }
+  return { ...state, channelConversations: [...state.channelConversations, group] }
+}
+
+function uniquePrivateConversation(state, channelAppId, identityId) {
+  const matches = state.channelConversations.filter(item => item.channelAppId === channelAppId && item.identityId === identityId && item.type === 'private' && item.status === 'active')
+  return matches.length === 1 ? matches[0] : undefined
 }
 
 function reserveInbound(state, message, input = {}, clock) {
@@ -464,7 +562,7 @@ function reserveInbound(state, message, input = {}, clock) {
   const clientRequestId = `channel:${message.channelAppId}:${sha256(`${message.channelAppId}\0${officialKind}\0${officialId}`)}`
   const reserved = compact({
     ...message, status: 'reserved', command: parsed.command, clientRequestId, workId: parsed.command.workId,
-    authorizationRevisions: { app: context.app.revision, identity: context.identity.revision, conversation: context.conversation.revision },
+    authorizationRevisions: { app: context.app.revision, identity: context.identity.revision, conversation: context.commandConversation.revision },
     reservedAt: now(clock), error: undefined,
   })
   const next = { ...state, channelMessages: replaceById(state.channelMessages, reserved) }
@@ -497,21 +595,23 @@ function committedInboundWork(state, message) {
 function currentInboundContext(state, message) {
   const app = state.channelApps.find(item => item.id === message.channelAppId && item.enabled === true && item.status === 'active')
   const identity = state.channelIdentities.find(item => item.id === message.senderIdentityId && item.channelAppId === app?.id && item.status === 'active')
-  const conversation = state.channelConversations.find(item => item.id === message.conversationId && item.channelAppId === app?.id && item.status === 'active' && item.type === 'private')
+  const conversation = state.channelConversations.find(item => item.id === message.conversationId && item.channelAppId === app?.id && item.status === 'active')
   const member = state.members.find(item => item.id === identity?.memberId && item.enabled === true)
-  if (!app || !identity || !conversation || !member || conversation.identityId !== identity.id || conversation.memberId !== member.id
+  const commandConversation = conversation?.type === 'group' ? uniquePrivateConversation(state, app?.id, identity?.id) : conversation
+  if (!app || !identity || !conversation || !member || (conversation.type === 'private' && (conversation.identityId !== identity.id || conversation.memberId !== member.id))
+    || !commandConversation || (conversation.type === 'group' && !commandConversation.defaultDispatch)
     || message.providerUserId !== identity.providerUserId || message.providerConversationId !== conversation.providerConversationId) return undefined
-  return { app, identity, conversation, member }
+  return { app, identity, conversation, commandConversation, member }
 }
 
 function commandStillAuthorized(state, context, message) {
   const command = message.command, revisions = message.authorizationRevisions
-  if (!command || !revisions || revisions.app !== context.app.revision || revisions.identity !== context.identity.revision || revisions.conversation !== context.conversation.revision) return false
+  if (!command || !revisions || revisions.app !== context.app.revision || revisions.identity !== context.identity.revision || revisions.conversation !== context.commandConversation.revision) return false
   if (command.type !== 'create') {
     const work = state.works.find(item => item.id === command.workId && item.ownerMemberId === context.member.id)
     return Boolean(work && workBindingAuthorized(state, context.member, work))
   }
-  const binding = context.conversation.defaultDispatch
+  const binding = context.commandConversation.defaultDispatch
   return ['employeeId', 'skillId', 'capabilityId', 'connectionId'].every(key => binding?.[key] === command[key]) && dispatchAuthorized(state, context.member, command)
 }
 
@@ -519,7 +619,7 @@ function parseInboundCommand(state, message, context, input) {
   if (input.attachments !== undefined || input.url !== undefined || hasUriToken(message.text)) return { error: inboundError('UNSUPPORTED') }
   const create = /^\u4ea4\u529e \u5de5\u5355 (\S+)$/u.exec(message.text)
   if (create) {
-    const dispatch = context.conversation.defaultDispatch
+    const dispatch = context.commandConversation.defaultDispatch
     if (!dispatch || !dispatchAuthorized(state, context.member, dispatch)) return { error: inboundError('DEFAULT_DISPATCH_UNAVAILABLE') }
     const command = compact({ type: 'create', workOrderId: create[1], employeeId: dispatch.employeeId, skillId: dispatch.skillId, capabilityId: dispatch.capabilityId, connectionId: dispatch.connectionId })
     return { command }
@@ -703,18 +803,63 @@ function currentDeliveryAuthorization(state, delivery, { validateClaim = false }
   const identity = state.channelIdentities.find(item => item.id === delivery.targetIdentityId && item.status === 'active')
   const conversation = state.channelConversations.find(item => item.id === delivery.targetConversationId && item.status === 'active')
   const work = state.works.find(item => item.id === delivery.workId)
-  const member = state.members.find(item => item.id === work?.ownerMemberId && item.enabled === true)
+  const member = state.members.find(item => item.id === (work?.ownerMemberId ?? identity?.memberId) && item.enabled === true)
   const employee = state.employees.find(item => item.id === work?.employeeId && item.enabled === true && member?.employeeIds.includes(item.id))
   const skill = state.skills.find(item => item.id === work?.skillId && item.enabled === true && employee?.skillIds?.includes(item.id) && item.capabilityId === work.capabilityId)
   const connection = work?.connectionId === undefined ? undefined : state.connections.find(item => item.id === work.connectionId && item.enabled === true && item.status === 'ready' && employee?.connectionIds?.includes(item.id) && item.skillIds?.includes(skill?.id))
   const result = delivery.resultId === undefined ? undefined : work?.results.find(item => item.id === delivery.resultId)
   const revisions = delivery.authorizationRevisions
-  if (!app || !identity || !conversation || !work || !member || !employee || !skill || (work.connectionId !== undefined && !connection)
-    || identity.channelAppId !== app.id || conversation.channelAppId !== app.id || identity.memberId !== member.id || conversation.memberId !== member.id || conversation.identityId !== identity.id
-    || !app.allowedScopes.includes(delivery.contentScope) || !conversation.allowedScopes.includes(delivery.contentScope) || (delivery.resultId !== undefined && !result)
-    || result?.knowledgeDependencyRefs?.some(ref => !currentKnowledgeReference(state, ref, member.id, result.employeeId ?? work.employeeId))) return undefined
+  const fixed = Object.hasOwn(FIXED_CONTENT, delivery.contentKey)
+  const workAuthorized = work && workBindingAuthorized(state, member, work)
+  if (!app || !identity || !conversation || !member
+    || identity.channelAppId !== app.id || conversation.channelAppId !== app.id || identity.memberId !== member.id
+    || (conversation.type === 'private' && (conversation.memberId !== member.id || conversation.identityId !== identity.id))
+    || (!fixed && (!workAuthorized || !employee || !skill || (work.connectionId !== undefined && !connection)
+      || !app.allowedScopes.includes(delivery.contentScope) || !conversation.allowedScopes.includes(delivery.contentScope) || (delivery.resultId !== undefined && !result)
+      || result?.knowledgeDependencyRefs?.some(ref => !currentKnowledgeReference(state, ref, member.id, result.employeeId ?? work.employeeId))))) return undefined
   if (validateClaim && (!revisions || revisions.app !== app.revision || revisions.identity !== identity.revision || revisions.conversation !== conversation.revision)) return undefined
   return { app, identity, conversation, work, member, employee, skill, connection, result }
+}
+
+function deliveryEnvelope(state, delivery) {
+  const conversation = state.channelConversations.find(item => item.id === delivery.targetConversationId)
+  const work = delivery.workId && state.works.find(item => item.id === delivery.workId)
+  const result = delivery.resultId && work?.results.find(item => item.id === delivery.resultId)
+  const text = FIXED_CONTENT[delivery.contentKey] ?? formatWorkContent(delivery.contentKey, work, result)
+  if (!conversation || !text) throw error('DELIVERY_FORBIDDEN', '投递内容无法生成')
+  return Object.freeze({
+    deliveryId: delivery.id,
+    attempt: delivery.attempts,
+    providerConversationId: conversation.providerConversationId,
+    text,
+    uuid: stableAttemptUuid(delivery.id, delivery.attempts),
+  })
+}
+
+function formatWorkContent(contentKey, work, result) {
+  if (!work) return undefined
+  const path = `/works/${encodeURIComponent(work.id)}`
+  if (contentKey === 'work.accepted') return `工作 ${work.id} 已受理，当前状态：${work.status}。来源：渠道文本交办。详情：${path}`
+  if (contentKey !== 'result.gearjob') return undefined
+  if (result?.kind !== 'gearjob.work-order.observation') return `工作 ${work.id} 当前状态：${work.status}。来源：已验证工作结果。详情：${path}`
+  const fact = result.payload ?? {}
+  const source = result.source ?? fact
+  return [
+    `工单：${fact.workOrderId ?? work.input?.workOrderId ?? '未知'}`,
+    `状态：${fact.status ?? work.status}`,
+    `计划/完成量：${fact.plannedQuantity ?? '未知'}/${fact.completedQuantity ?? '未知'}${fact.unit ? ` ${fact.unit}` : ''}`,
+    `来源：${source.sourceSystem ?? '未知'} / ${source.sourceInstance ?? '未知'} / ${source.sourceEnvironment ?? '未知'} / ${source.dataMode ?? '未知'} / ${source.evidenceMode ?? '未知'}`,
+    `Web：${path}`,
+  ].join('\n')
+}
+
+function stableAttemptUuid(deliveryId, attempt) {
+  const hex = sha256(`${deliveryId}\0${attempt}`)
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${((Number.parseInt(hex[16], 16) & 3) | 8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
+function fixedHelpKey(message) {
+  return message.error?.code === 'UNSUPPORTED' ? 'help.unsupported' : 'help.unavailable'
 }
 
 function invalidateClaims(deliveries, predicate, timestamp, code, message) {
@@ -733,6 +878,7 @@ function deliveryTuple(value) {
     targetConversationId: clean(value.targetConversationId),
     targetIdentityId: clean(value.targetIdentityId),
     contentScope: clean(value.contentScope),
+    contentKey: clean(value.resultId) ? 'result.gearjob' : 'work.accepted',
   }
 }
 

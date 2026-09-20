@@ -222,8 +222,9 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       }
       if (channel && request.method === 'POST' && url.pathname === '/api/channels/deliveries') {
         exactQuery(url)
-        await protectedWrite(request, context.token, auth, trustedOrigin, ['requestId', 'workId', 'resultId'])
-        throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，未建立待发回复')
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['requestId', 'workId', 'resultId'])
+        if (!channelRuntimeReady()) throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，未建立待发回复')
+        return sendJson(response, 200, await channel.createWorkDelivery(actor, body))
       }
       const deliveryMatch = url.pathname.match(/^\/api\/channels\/deliveries\/([^/]+)(?:\/(retry))?$/)
       if (channel && deliveryMatch && request.method === 'DELETE' && !deliveryMatch[2]) {

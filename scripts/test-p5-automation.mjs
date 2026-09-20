@@ -11,7 +11,10 @@ import { migrateState } from '../src/store/file-store.mjs'
 const execFile = promisify(execFileCallback)
 const transfer = fileURLToPath(new URL('./state-transfer.mjs', import.meta.url))
 const now = '2026-09-20T01:00:00.000Z'
-const catalog = [{ kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test' }]
+const catalog = [
+  { kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test' },
+  { kind: 'gearjob-rest', targetIdentity: 'gearjob-test-2', baseUrl: 'https://gearjob.test-2', hostHeader: 'gearjob.test-2', credentialRef: 'GEARJOB_TEST_2', sourceSystem: 'gearjob', sourceInstance: 'test-2', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test' },
+]
 
 const state = fixture()
 let idCounter = 0
@@ -23,6 +26,7 @@ const service = createAutomationService({ store, clock: () => state.clock, idFac
 
 await migrationChecks()
 await validatorChecks()
+await historicalBindingChecks()
 await ruleChecks()
 await derivedChecks()
 await transferChecks()
@@ -50,6 +54,38 @@ async function validatorChecks() {
   assert.throws(() => migrateState({ ...base, works: [work1, work2], automationRules: [budgetRule], automationOccurrences: [occurrenceRecord('occurrence-budget-1', budgetRule, '2026-09-20', work1.id), occurrenceRecord('occurrence-budget-2', budgetRule, '2026-09-21', work2.id)] }), /累计预算超限/)
   assert.throws(() => migrateState({ ...base, works: [work1], deliveries: [delivery], automationRules: [dailyRule], automationOccurrences: [occurrenceRecord('occurrence-terminal-delivery', dailyRule, '2026-09-20', null, 'delivery-valid', 'skipped')] }), /投递引用不闭合/)
   assert.throws(() => migrateState({ ...base, automationRules: [eventDraft], automationOccurrences: [occurrenceRecord('occurrence-event', eventDraft, '2026-09-20', null, null, 'skipped')] }), /规则引用不闭合/)
+}
+
+async function historicalBindingChecks() {
+  const local = fixture(), localStore = {
+    async read() { return structuredClone(local.current) },
+    async update(mutator) { local.current = migrateState(await mutator(structuredClone(local.current))); return structuredClone(local.current) },
+  }
+  const localService = createAutomationService({ store: localStore, clock: () => local.clock, idFactory: () => 'history', connectionCatalog: catalog })
+  const created = await localService.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: daily('08:00') })
+  const active = await localService.enableRule({ id: 'member-owner' }, created.id, { expectedRevision: 1 })
+  const historicalWork = workRecord('historical-work')
+  const historicalOccurrence = occurrenceRecord('historical-occurrence', active, '2026-09-20', historicalWork.id)
+  local.current = migrateState({ ...local.current, works: [historicalWork], automationOccurrences: [historicalOccurrence] })
+  const updated = await localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 2, employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', workOrderId: 'WO-2' })
+  assert.equal(updated.revision, 3)
+  assert.deepEqual([updated.employeeId, updated.skillId, updated.connectionId, updated.workOrderId], ['employee-owner-2', 'skill-owner-2', 'connection-owner-2', 'WO-2'])
+  local.current = migrateState({
+    ...local.current,
+    members: local.current.members.map(member => member.id === 'member-owner' ? { ...member, employeeIds: ['employee-owner'] } : member),
+    employees: local.current.employees.map(employee => employee.id === 'employee-owner-2' ? { ...employee, enabled: false } : employee),
+    connections: local.current.connections.map(connection => connection.id === 'connection-owner-2' ? { ...connection, enabled: false, status: 'unavailable', allowedObjectIds: [] } : connection),
+  })
+  assert.doesNotThrow(() => migrateState(structuredClone(local.current)))
+  await assert.rejects(localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 3, maxRuns: 9 }), error => error.code === 'FORBIDDEN')
+  await assert.rejects(localService.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', workOrderId: 'WO-2', trigger: daily('08:00') }), error => error.code === 'FORBIDDEN')
+  const paused = await localService.pauseRule({ id: 'member-owner' }, active.id, { expectedRevision: 3 })
+  assert.equal(paused.status, 'paused')
+  await assert.rejects(localService.resumeRule({ id: 'member-owner' }, active.id, { expectedRevision: 4 }), error => error.code === 'FORBIDDEN')
+  await localService.revokeRule({ id: 'member-owner' }, active.id, { expectedRevision: 4 })
+  const persisted = await localStore.read()
+  assert.deepEqual(persisted.automationOccurrences, [historicalOccurrence])
+  assert.deepEqual(persisted.works, [historicalWork])
 }
 
 async function ruleChecks() {
@@ -195,11 +231,11 @@ function fixture() {
   const conversation = { id: 'conversation-owner', channelAppId: app.id, providerConversationId: 'conversation', identityId: identity.id, memberId: 'member-owner', type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }
   const value = migrateState({
     version: 7,
-    members: [member('member-owner', ['employee-owner']), member('member-peer', ['employee-peer']), member('member-admin', [])],
-    modelRoutes: [route('route-owner'), route('route-peer')],
-    employees: [employee('employee-owner', 'route-owner', 'connection-owner'), employee('employee-peer', 'route-peer', 'connection-peer')],
-    connections: [connection('connection-owner', 'WO-1'), connection('connection-peer', 'WO-2')],
-    skills: [skill(), { id: 'skill-peer', capabilityId: 'gearjob-work-order-read', enabled: true }],
+    members: [member('member-owner', ['employee-owner', 'employee-owner-2']), member('member-peer', ['employee-peer']), member('member-admin', [])],
+    modelRoutes: [route('route-owner'), route('route-owner-2'), route('route-peer')],
+    employees: [employee('employee-owner', 'route-owner', 'connection-owner'), employee('employee-owner-2', 'route-owner-2', 'connection-owner-2'), employee('employee-peer', 'route-peer', 'connection-peer')],
+    connections: [connection('connection-owner', 'WO-1'), connection('connection-owner-2', 'WO-2'), connection('connection-peer', 'WO-3')],
+    skills: [skill(), { id: 'skill-owner-2', capabilityId: 'gearjob-work-order-read', enabled: true }, { id: 'skill-peer', capabilityId: 'gearjob-work-order-read', enabled: true }],
     confirmations: [], knowledgeMaterials: [], channelApps: [app], channelIdentities: [identity], channelConversations: [conversation], channelMessages: [], deliveries: [], linkCodes: [], works: [], reservations: {}, automationRules: [], automationOccurrences: [],
   })
   return { current: value, clock: now }
@@ -207,9 +243,9 @@ function fixture() {
 
 function member(id, employeeIds) { return { id, loginName: id, displayName: id, role: id === 'member-admin' ? 'admin' : 'member', enabled: true, authRef: id, sessionVersion: 1, employeeIds } }
 function route(id) { return { id, provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', credentialRef: 'ZENMUX_API_KEY', enabled: true } }
-function employee(id, modelRouteId, connectionId) { return { id, enabled: true, modelRouteId, skillIds: [id === 'employee-owner' ? 'skill-gearjob-work-order-read' : 'skill-peer'], connectionIds: [connectionId] } }
+function employee(id, modelRouteId, connectionId) { return { id, enabled: true, modelRouteId, skillIds: [id === 'employee-owner' ? 'skill-gearjob-work-order-read' : id === 'employee-owner-2' ? 'skill-owner-2' : 'skill-peer'], connectionIds: [connectionId] } }
 function skill(value = {}) { return { id: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', enabled: true, ...value } }
-function connection(id, workOrderId) { const target = catalog[0]; return { id, kind: target.kind, targetIdentity: target.targetIdentity, baseUrl: target.baseUrl, hostHeader: target.hostHeader, credentialRef: target.credentialRef, sourceSystem: target.sourceSystem, sourceInstance: target.sourceInstance, sourceEnvironment: target.sourceEnvironment, dataMode: target.dataMode, evidenceMode: target.evidenceMode, enabled: true, status: 'ready', revision: 1, skillIds: [id === 'connection-owner' ? 'skill-gearjob-work-order-read' : 'skill-peer'], allowedObjectIds: [workOrderId] } }
+function connection(id, workOrderId) { const target = id === 'connection-owner-2' ? catalog[1] : catalog[0]; return { id, kind: target.kind, targetIdentity: target.targetIdentity, baseUrl: target.baseUrl, hostHeader: target.hostHeader, credentialRef: target.credentialRef, sourceSystem: target.sourceSystem, sourceInstance: target.sourceInstance, sourceEnvironment: target.sourceEnvironment, dataMode: target.dataMode, evidenceMode: target.evidenceMode, enabled: true, status: 'ready', revision: 1, skillIds: [id === 'connection-owner' ? 'skill-gearjob-work-order-read' : id === 'connection-owner-2' ? 'skill-owner-2' : 'skill-peer'], allowedObjectIds: [workOrderId] } }
 function daily(time) { return { kind: 'daily-time', time, timeZone: 'Asia/Shanghai' } }
 function eventTrigger() { return { kind: 'gearjob-work-order-update', sourceId: 'source-test' } }
 function automationRule(id, status, trigger, extra = {}) {

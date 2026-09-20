@@ -517,9 +517,7 @@ function normalizeV7(value) {
     const employee = employeeById.get(rule.employeeId)
     const skill = skillById.get(rule.skillId)
     const connection = connectionById.get(rule.connectionId)
-    if (!owner || !employee || !owner.employeeIds.includes(employee.id) || !skill || !employee.skillIds?.includes(skill.id)
-      || skill.capabilityId !== GEARJOB_CAPABILITY_ID || !connection || !employee.connectionIds?.includes(connection.id)
-      || !connection.skillIds?.includes(skill.id) || connection.kind !== 'gearjob-rest' || !connection.allowedObjectIds?.includes(rule.workOrderId)) throw new Error(`自动规则 ${rule.id} 绑定引用不闭合`)
+    if (!owner || !employee || !skill || !connection) throw new Error(`自动规则 ${rule.id} 绑定引用不闭合`)
     if (rule.notificationConversationId !== null) {
       const conversation = conversationById.get(rule.notificationConversationId)
       const identity = conversation && identityById.get(conversation.identityId)
@@ -547,8 +545,7 @@ function normalizeV7(value) {
       workOccurrenceIds.add(occurrence.workId)
       successfulByRule.set(rule.id, (successfulByRule.get(rule.id) ?? 0) + 1)
       const work = workById.get(occurrence.workId)
-      if (!work || work.ownerMemberId !== rule.ownerMemberId || work.employeeId !== rule.employeeId || work.skillId !== rule.skillId
-        || work.connectionId !== rule.connectionId || work.input?.workOrderId !== rule.workOrderId) throw new Error(`自动发生 ${occurrence.id} 工作引用不闭合`)
+      if (!work || work.ownerMemberId !== rule.ownerMemberId) throw new Error(`自动发生 ${occurrence.id} 工作引用不闭合`)
     }
     if (occurrence.deliveryId !== null) {
       const delivery = deliveryById.get(occurrence.deliveryId)

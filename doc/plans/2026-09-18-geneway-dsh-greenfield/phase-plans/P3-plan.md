@@ -283,3 +283,40 @@ P3 只有在以下全部成立时阶段 PASS：
 5. 独立 formal phase review 为 `spec_compliance=pass`、`task_quality=pass`，零 Critical/Important，且无影响阶段结论的 cannot_verify。
 
 该 PASS 只表示 P3 的 G4/G5、J6、AC-14/15 和适用回归完成；不表示 P4–P7、生产部署、发布认证或客户验收完成。
+
+## 13. 最终实施与验收记录（2026-09-20）
+
+P3 最终产品候选为 `5bc9bafbdf12d0edd44247161c17d320d6003a33`，正式验收尝试为 `p3-5bc9baf-a1`。此前 `f22bc5a`、`327b155`、`5111066`、`69bbbb7`、`e1581ca` 等候选的录屏或材料均被本候选替代，不作为 P3 最终验收件。
+
+- `pnpm test:unit`、`pnpm test:service`、`pnpm test:controlled`、`pnpm test:p2`、`pnpm test:p3`、真实 P1 模型探针、真实 P3 委派探针和 `git diff --check` 全部通过。
+- ZenMux 路由为 `deepseek/deepseek-v4-pro`；root、两个 fresh child 与 recheck 均通过，usage 为 16,581，不存在 provider fallback。
+- GearJob 外部测试工单为 `WO-26-00096`：`In Process`、计划 10 Nos、已完成 4 Nos、剩余 6；来源为 `GearJob / dev.localhost / external-test / synthetic / real-frappe-rest`，600 秒/件只表示用户提供 3,600 秒条件下的平均分摊。
+- owner 私有读取 200、peer 显式共享读取 200、未授权 employee 404；撤销后检索 0 条、root 404、material 404，界面无正文或派生结果泄漏。
+- W1 最终 `cancelled`、W2 最终 `completed`，迟到结果没有覆盖 W1；插件停用期间新检索/导入局部失败，维护、撤销、删除和无知识工作仍可用。
+- 隔离备份恢复包含 24 项和 23 个 Session 引用，9 组状态图键回读通过；恢复不自动派发，owner 可读、peer root 404、tombstone 对 peer 不可见、认证 rekey 生效；缺外部凭据的新读取明确返回 `SOURCE_NOT_CONFIGURED`。
+- 正式 UI 使用无浏览器工具栏的 app mode；桌面为 1440×900，移动 app 窗口为 390×844 并在录屏画布居中；console、network failure、非预期响应和横向溢出均为 0。
+- 17 个旅程步骤全部 `passed`。步骤 16 的确定性证据为 `frame-0329.png @ 295.816s`，显示 peer 撤销后“未找到当前获准依据”；步骤 17 为隔离恢复回读，显示 `result: passed`。
+
+最终材料：
+
+- 视频 `artifacts/p3-acceptance/p3-5bc9baf-final.mp4`：300.92 秒、H.264、1440×900、25 fps、完整解码通过，SHA-256 `3fa4bd0689e3758e38f2031061d139fde7243769264b1e905d1db965d5e0cc61`。
+- 封面 `p3-5bc9baf-final.png`：SHA-256 `23a1be52154dfbe92e33dd2a28cb710db6d7485729ec0ec55b6a93b564b9f615`。
+- receipt `p3-5bc9baf-final.receipt.json`：SHA-256 `f3a53f88cbd5d50cf127449c3e3bf6a3213c7e8fba8a81d9f2317c44a325dd74`。
+- 离线手册 `index.html`：SHA-256 `a75af34f0090f9ad75726b253e4a28537bfa65695e9aef224e7238b6d1224d92`；17 个步骤、20 个本地链接、0 个远程引用。
+- 正式抽帧 337 张，manifest SHA-256 `1f7c19c91f8c4450808449162bfafdee989299d31fcb0c7846e51914807e2cf0`；离线 bundle SHA-256 `3b356a5ee3e5e9916dc99a29635ce501a3755f8fd15851d101095520995debe8`。
+- final-scan attestation ID `5f7e608f6744e5e8fef3ce738248a5e7f9cfa6a13e502635277ad4a3b91b44cc`，写回双独立视觉审查后文件 SHA-256 `c5749f670c1055558c09456fb04f2a09a72551e67e23ec7cb7c65379b5b1bbe3`；414 个扫描目标、24 个已知 needle、0 命中。
+- Pixel OCR 因 `tesseract unavailable` 保持 `cannot_verify`，没有冒充通过；替代证据为 631 次 DOM/AX 捕获、210,174 个 AX 节点以及 secret/canary/engineering 分类命中均为 0。
+
+两名互相独立的视觉 reviewer 均检查 337/337 帧并给出 PASS；独立产物审查与 P3 正式阶段审查均为 `spec_compliance=pass`、`task_quality=pass`，Critical/Important 为 0。唯一 Minor 是启动、隔离恢复切换和结束处的短黑白过渡帧，不遮挡任何必需步骤或结果。
+
+`lark-cli` 使用 bot 身份向 P1/P2 已确认的同一目标发送并批量回读 5 条最终消息，均 `deleted=false`：
+
+- 说明：`om_x100b65c1544d5d04debe7dfc43e9e3e`，类型 `post`；
+- 301 秒视频及封面：`om_x100b65c155986cb4dda1ea36ecde201`，类型 `media`；
+- receipt：`om_x100b65c1551044a0c3ee4d658acf7a2`，类型 `file`；
+- 离线手册：`om_x100b65c153c920a0c102b530be9af52`，类型 `file`；
+- final-scan attestation：`om_x100b65c153a70cacdeec17c7fd681e7`，类型 `file`。
+
+幂等 key 分别为 `geneway-p3-5bc9baf-note-v1`、`geneway-p3-5bc9baf-video-v1`、`geneway-p3-5bc9baf-receipt-v1`、`geneway-p3-5bc9baf-manual-v1` 和 `geneway-p3-5bc9baf-attestation-v1`。
+
+据此，P3 在 GearJob 外部测试实例、团队生成模拟数据、非生产边界下完成工程验收并阶段 PASS。该结论不是源码发布认证，不授权或证明安装、推送、部署、发布、生产可用或客户验收，也不表示 P4–P7 已完成。

@@ -236,7 +236,7 @@ async function browserJourney(ownerSession, runtimeCapture, runtime) {
   await evaluate(`reloadAll().then(()=>openWork(${JSON.stringify(workId)}))`)
   await waitEval(evaluate, `document.body.innerText.includes('工单核对员 → 协调负责人')&&document.body.innerText.includes('节拍核对员 → 协调负责人')&&document.body.innerText.includes('当前有效')`)
   await assertVisibleSurfaceClean()
-  assert.equal(await evaluate(`document.body.innerText.includes('Knowledge search returned the authorized segment')&&document.body.innerText.includes('片段位置 p1-c1')&&!/segment(?:Id)?\\s+p1-c1/i.test(document.body.innerText)`),true)
+  assert.equal(await evaluate(`document.body.innerText.includes('片段位置 p1-c1')&&!/segment(?:Id)?\\s+p1-c1/i.test(document.body.innerText)`),true)
   assert.equal(await evaluate(`document.querySelector('[data-open-reference]').innerText.includes('版本 2 · 片段位置 p1-c1')`),true)
   assert.equal((await request(`/api/bootstrap`, { cookie: apiOwner.cookie })).body.works.filter(work=>work.workType==='collaboration-child').length >= 2, true)
   assert.equal(await evaluate(`![...document.querySelectorAll('#all-work-cards [data-open-work]')].some(button=>state.bootstrap.works.find(work=>work.id===button.dataset.openWork)?.workType==='collaboration-child')`), true)

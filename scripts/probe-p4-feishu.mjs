@@ -172,7 +172,7 @@ async function run({ mode, canary }) {
     await ws.start({ eventDispatcher: dispatcher })
     const readyAt = await bounded(Promise.race([ready.promise, failure()]), 20_000, 'ready_timeout')
     console.log(JSON.stringify({ status: 'ready', mode, connection: ws.getConnectionStatus().state, readyMs: Math.round(readyAt - startedAt) }))
-    const inbound = await bounded(Promise.race([first.promise, failure()]), 5 * 60_000, 'canary_timeout')
+    const inbound = await bounded(Promise.race([first.promise, failure()]), 30 * 60_000, 'canary_timeout')
 
     if (mode === 'fast') {
       while (firstHandlerMs === undefined) await sleep(0)

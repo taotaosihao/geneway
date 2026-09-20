@@ -57,6 +57,28 @@ P4 不实现通用消息总线、分布式队列、通用审批引擎、跨渠�
 
 消融后复杂度结论：**PASS**。不得因此删除真实双渠道、手机 HTTPS、群聊权限、撤权、防重、恢复、视频或 Lark 交付。
 
+### 2.4 飞书 T0 长连接碰撞复核
+
+用户于 2026-09-20 授权 app `cli_aaae8b6cbdb89cc0` 用于飞书 T0，并明确本轮先跳过企业微信真实验证；微信义务因此保持 deferred，不从合同删除，也不允许 P4、G6、J7 或 AC-16 宣称完成。
+
+受控 probe 先证明 `im.message.receive_v1` 长连接可进入 `ready`；本机明确停止后，开放平台仍持续返回 `online_instance_cnt=1`，而本机 event bus 为 `not_running` 且无相关进程。新的 consumer 被拒绝，不能取得完整入站、ACK、重投或唯一消费证据。
+
+依 §2.2 第 5 项启动两名新的独立 Astra：
+
+- 工程视角：`/root/p4_feishu_t0_collision_engineering`；核对官方 cluster/transport 语义、连接归属与替代分支。
+- 产品/安全视角：`/root/p4_feishu_t0_collision_product`；核对产品身份、数据隔离、既有 Multica 影响与最小用户决定。
+
+两者独立收敛为 **CONSENSUS**：不能让 Geneway 与未知远端实例并行复用该 app；同 app 多长连接是集群分发而非广播，会随机分流事件，破坏完整性、ACK、重投和跨系统防重证据。webhook 是 app 级 transport/订阅配置，不是与未知长连接安全共存的旁路，也不能解决产品身份和数据隔离。
+
+最简安全裁决按顺序为：
+
+1. 定位现有在线实例的 owner/host/service；如果它将永久退出且 app 明确移交 Geneway 独占，由 owner 优雅停止并确认不会自动拉起，等待连接数归零后重跑 T0；当前任务不得强停未知实例。
+2. 若现有实例必须继续、owner 不明或不能可靠移交，使用独立 Geneway 飞书企业自建 app；这是推荐路径。
+3. 不为复用 app 临时新增跨服务消息总线；除非既有 runtime 已有经过认证、持久化并保留全部官方稳定 ID 与 ACK 语义的转发能力。
+4. 只有独立 app 的长连接本身失败、app owner 明确批准切换且 HTTPS challenge/验签边界就绪时，才再次复核 webhook。
+
+用户把 secret 直接提供到会话后，后续不得复述或写入仓库/state/log/report；正式测试或迁移完成后应轮换，并只从仓库外 `credentialRef` 使用。
+
 ## 3. 当前事实、已验证依赖与未知
 
 ### 3.1 已观察事实
@@ -67,6 +89,7 @@ P4 不实现通用消息总线、分布式队列、通用审批引擎、跨渠�
 - P3 已用 ZenMux 的 `deepseek/deepseek-v4-pro` 完成 root/child/recheck 真实调用。ZenMux 官方模型目录当前列出该精确 model id；P4 不更换 provider/model，不从 `~/.claude/setting.json` 复制或输出 API key。
 - P3 `lark-cli` 仅证明工程验收资料能够送达既有飞书会话；它不是 P4 产品 app、产品身份映射或产品消息适配器。
 - 当前依赖仅有 DSH 三包，没有飞书或微信 SDK。Ponytail 约束下仅在真实探针证明需要时增加一个官方 SDK；不为适配器框架引入额外依赖。
+- 用户提供的飞书 app `cli_aaae8b6cbdb89cc0` 机器人已激活，名称为 `IoT Deploy - Multica`；本机 credential 仅进入 `lark-cli` 加密存储。受控 T0 连接可进入 `ready`，但停止后开放平台持续报告另一个在线实例，归属未知；依据 §2.4 保持 hard stop。
 
 ### 3.2 外部事实与待验证假设
 
@@ -76,8 +99,8 @@ P4 不实现通用消息总线、分布式队列、通用审批引擎、跨渠�
 
 ### 3.3 必须由用户决定或提供的外部门
 
-1. 微信真实入口形态，以及可用账号/API/负责人；
-2. 产品飞书 app、租户、真实测试用户/私聊/群、权限和凭据引用；现有工程 bot 是否复用也必须明确授权；
+1. 微信真实入口形态，以及可用账号/API/负责人；用户已决定本轮企业微信真实验证 deferred，该义务不删除；
+2. 飞书 app 唯一事件 owner：确认现有 `IoT Deploy - Multica` 在线实例永久退出并独占移交 Geneway，或提供/授权创建独立 Geneway app；随后仍需真实测试用户/私聊/群、权限和凭据引用；
 3. 所选微信的真实测试对象与允许收发范围；
 4. 两渠道允许外发的数据范围；默认只允许当前 work 的获准结构化事实与保守提示，不允许任意知识正文或模型 explanation；
 5. 若要求群内直接显示业务详情，必须另行明确群接收范围和数据共享规则；默认保持 owner-only；

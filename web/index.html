@@ -54,7 +54,7 @@
     const operations={create:'创建',continue:'继续',refresh:'查询最新','follow-up':'追问','collaboration-root':'开始协作','collaboration-child':'执行计划步骤','collaboration-continue':'补充后继续','collaboration-continue-child':'继续计划步骤','collaboration-recheck':'按最新依据重新核对','collaboration-recheck-child':'重新核对受影响步骤'}
     const el=id=>document.getElementById(id)
     const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))
-    const cleanCopy=value=>esc(String(value??'暂无说明').replace(/^#{1,6}\s+/gm,'').replace(/\*\*([^*]+)\*\*/g,'$1').replace(/__([^_]+)__/g,'$1').replace(/`([^`]+)`/g,'$1').replace(/^[-*]\s+/gm,'• ').replace(/\brevision\s+(\d+)\b/gi,'版本 $1').replace(/\bsegment(?:Id)?\s*[:：]?\s*([\w-]+)/gi,'片段位置 $1'))
+    const cleanCopy=value=>esc(String(value??'暂无说明').replace(/^#{1,6}\s+/gm,'').replace(/\*\*([^*]+)\*\*/g,'$1').replace(/__([^_]+)__/g,'$1').replace(/`([^`]+)`/g,'$1').replace(/^[-*]\s+/gm,'• ').replace(/\brevision\s+(\d+)\b/gi,'版本 $1').replace(/\bsegment(?:Id)?\s*[:：]?\s*(p\d+-c\d+)\b/gi,'片段位置 $1'))
     const executionError=error=>{const code=Object.hasOwn(executionErrorMessages,error?.code)?error.code:'INTERNAL_ERROR';return esc(executionErrorMessages[code]||'服务暂时无法完成请求')}
     const active=status=>['accepted','running','cancel_requested'].includes(status)
     const attention=work=>['waiting_input','failed','interrupted','stale'].includes(work.collaboration?.status||work.status)||(work.status==='cancel_requested'&&Date.now()-Date.parse(work.executions?.at(-1)?.cancelRequestedAt)>=120000)

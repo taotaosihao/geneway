@@ -177,7 +177,9 @@ async function browserJourney(ownerSession, runtimeCapture, runtime) {
   const pressTab=async()=>{await send('Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9})}
   const tabTo=async selector=>{for(let index=0;index<120;index+=1){if(await evaluate(`document.activeElement?.matches(${JSON.stringify(selector)})`)){const focus=await evaluate(`({name:document.activeElement.getAttribute('aria-label')||document.activeElement.innerText||document.activeElement.labels?.[0]?.innerText||'',outline:getComputedStyle(document.activeElement).outlineWidth})`);assert.equal(Boolean(focus.name.trim())&&focus.outline!=='0px',true);return}await pressTab()}throw new Error(`keyboard focus target not reached: ${selector}`)}
   const keyboardActivate=async selector=>{await tabTo(selector);await send('Input.dispatchKeyEvent',{type:'rawKeyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13});await send('Input.dispatchKeyEvent',{type:'char',key:'Enter',code:'Enter',text:'\r',unmodifiedText:'\r',windowsVirtualKeyCode:13});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,nativeVirtualKeyCode:13})}
-  const assertVisibleSurfaceClean=async()=>{const dom=await evaluate(`document.body.innerText`),ax=await send('Accessibility.getFullAXTree'),axText=ax.nodes.flatMap(node=>[node.name?.value,node.description?.value,node.value?.value]).filter(value=>typeof value==='string').join('\n'),raw=dom+'\n'+axText,match=raw.match(/[0-9a-f]{8}-[0-9a-f-]{27,}|\b(?:collaboration-root|collaboration-recheck|collaboration-continue|read-order|check-cycle|employee-a|employee-b|session-|segment(?:id)?)\b|P3-(?:R\d+|REVOKED)-[0-9a-f]+|KNOWLEDGE-R\d+-CANARY/i);assert.equal(match,null,match?.[0])}
+  const visibleEngineeringPattern=/[0-9a-f]{8}-[0-9a-f-]{27,}|\b(?:collaboration-root|collaboration-recheck|collaboration-continue|read-order|check-cycle|employee-a|employee-b|session-)\b|\bsegmentId\b|\bsegment\s*[:：]?\s*p\d+-c\d+\b|P3-(?:R\d+|REVOKED)-[0-9a-f]+|KNOWLEDGE-R\d+-CANARY/i
+  assert.equal(visibleEngineeringPattern.test('segmentId p1-c1'),true);assert.equal(visibleEngineeringPattern.test('segment p1-c1'),true);assert.equal(visibleEngineeringPattern.test('Knowledge search returned the authorized segment'),false)
+  const assertVisibleSurfaceClean=async()=>{const dom=await evaluate(`document.body.innerText`),ax=await send('Accessibility.getFullAXTree'),axText=ax.nodes.flatMap(node=>[node.name?.value,node.description?.value,node.value?.value]).filter(value=>typeof value==='string').join('\n'),raw=dom+'\n'+axText,match=raw.match(visibleEngineeringPattern);assert.equal(match,null,match?.[0])}
   await send('Runtime.enable');await send('Network.enable');await send('Page.enable');await send('DOM.enable');await send('Log.enable')
   await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
   const setFile = async path => { const document = await send('DOM.getDocument'); const node = await send('DOM.querySelector', { nodeId: document.root.nodeId, selector: '#knowledge-file' }); await send('DOM.setFileInputFiles', { nodeId: node.nodeId, files: [path] }) }
@@ -234,6 +236,7 @@ async function browserJourney(ownerSession, runtimeCapture, runtime) {
   await evaluate(`reloadAll().then(()=>openWork(${JSON.stringify(workId)}))`)
   await waitEval(evaluate, `document.body.innerText.includes('工单核对员 → 协调负责人')&&document.body.innerText.includes('节拍核对员 → 协调负责人')&&document.body.innerText.includes('当前有效')`)
   await assertVisibleSurfaceClean()
+  assert.equal(await evaluate(`document.body.innerText.includes('Knowledge search returned the authorized segment')&&document.body.innerText.includes('片段位置 p1-c1')&&!/segment(?:Id)?\\s+p1-c1/i.test(document.body.innerText)`),true)
   assert.equal(await evaluate(`document.querySelector('[data-open-reference]').innerText.includes('版本 2 · 片段位置 p1-c1')`),true)
   assert.equal((await request(`/api/bootstrap`, { cookie: apiOwner.cookie })).body.works.filter(work=>work.workType==='collaboration-child').length >= 2, true)
   assert.equal(await evaluate(`![...document.querySelectorAll('#all-work-cards [data-open-work]')].some(button=>state.bootstrap.works.find(work=>work.id===button.dataset.openWork)?.workType==='collaboration-child')`), true)
@@ -341,7 +344,7 @@ async function startCapture() {
           : toolResults ? 'structured_output' : businessTool
     const input = serialized.match(/\\?"availableSeconds\\?":(\d+),\\?"quantity\\?":(\d+)/)
     const stepLabel=businessTool==='geneway_gearjob_read_work_order'?'工单事实核对':'节拍核对'
-    const args = tool === 'structured_output' ? { status: 'done', explanation: `${stepLabel} ${usesKnowledge && knowledgeRef ? '已引用当前获准知识' : '受控结果'} 已完成` }
+    const args = tool === 'structured_output' ? { status: 'done', explanation: `${stepLabel} ${usesKnowledge && knowledgeRef ? 'Knowledge search returned the authorized segment；segmentId p1-c1；segment p1-c1' : '受控结果'} 已完成` }
       : tool === 'geneway_collaboration_submit_summary' ? { resultRefs: summaryRefs }
         : tool === 'geneway_knowledge_search' ? { query: '浏览器当前依据' }
           : tool === 'geneway_knowledge_submit_references' ? { references: knowledgeRef ? [{ ...knowledgeRef, segmentId: 'p1-c1' }] : [] }

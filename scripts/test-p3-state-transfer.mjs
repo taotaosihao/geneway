@@ -119,7 +119,6 @@ async function completeV6Transfer() {
   const manifest = JSON.parse(await readFile(join(backup, 'manifest.json'), 'utf8'))
   assert.deepEqual(manifest.schema.sessionRefs, refs)
   for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.equal(manifest.schema[key], sourceState[key].length)
-  assert.match(manifest.schema.channelGraphSha256, /^[a-f0-9]{64}$/)
   assert.equal(manifest.entries.some(item => item.path.includes('session-unrelated')), false)
   assert.equal((await allText(backup)).includes('P3_ZENMUX_SECRET_CANARY'), false)
   assert.equal((await allText(backup)).includes('P3_GEARJOB_SECRET_CANARY'), false)

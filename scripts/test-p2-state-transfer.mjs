@@ -72,7 +72,6 @@ try {
     channelMessages: 0,
     deliveries: 0,
     linkCodes: 0,
-    channelGraphSha256: digest(Buffer.from('[]')),
     works: 5,
     sessionRefs: ['session-a', 'session-b', 'session-cycle'],
   })

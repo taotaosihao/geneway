@@ -281,23 +281,10 @@ function schemaSummary(state, sessionRefs) {
       channelMessages: count('channelMessages'),
       deliveries: count('deliveries'),
       linkCodes: count('linkCodes'),
-      channelGraphSha256: digest(Buffer.from(JSON.stringify(channelGraph(state)))),
     } : {}),
     works: count('works'),
     sessionRefs,
   }
-}
-
-function channelGraph(state) {
-  const rows = [
-    ...state.channelApps.map(item => ['app', item.id]),
-    ...state.channelIdentities.map(item => ['identity', item.id, item.channelAppId, item.memberId]),
-    ...state.channelConversations.map(item => ['conversation', item.id, item.channelAppId, item.identityId, item.memberId]),
-    ...state.channelMessages.map(item => ['message', item.id, item.channelAppId, item.conversationId ?? '', item.senderIdentityId ?? '', item.workId ?? '']),
-    ...state.deliveries.map(item => ['delivery', item.id, item.channelAppId, item.targetConversationId, item.targetIdentityId, item.workId, item.resultId ?? '', item.channelMessageId ?? '']),
-    ...state.linkCodes.map(item => ['link', item.id, item.channelAppId, item.memberId, item.matchedIdentityId ?? '', item.matchedConversationId ?? '']),
-  ]
-  return rows.map(row => row.join('\0')).sort()
 }
 
 function candidate() {

@@ -14,6 +14,7 @@
     "probe:p1-runtime": "node scripts/probe-p1-runtime.mjs",
     "probe:p3-delegation": "node scripts/probe-p3-delegation.mjs",
     "probe:p4-feishu": "node scripts/probe-p4-feishu.mjs",
+    "probe:p5-trigger": "node scripts/probe-p5-trigger.mjs",
     "test:unit": "node scripts/test-domain.mjs",
     "test:service": "node scripts/test-service.mjs && node scripts/test-shutdown.mjs",
     "test:controlled": "node scripts/test-controlled.mjs",

@@ -21,7 +21,7 @@
     "test:p2": "node scripts/test-p2-auth-store.mjs && node scripts/test-p2-runtime.mjs && node scripts/test-cycle-time.mjs && node scripts/test-p2-state-transfer.mjs && node scripts/test-p2-controlled-gearjob.mjs && node scripts/probe-p2-lifecycle.mjs && node scripts/test-p2-session.mjs && node scripts/test-p2-plugin-combo.mjs",
     "test:p3": "node scripts/test-p3-knowledge.mjs && node scripts/test-p3-runtime.mjs && node scripts/test-p3-http-ui.mjs && node scripts/test-p3-state-transfer.mjs",
     "test:p3-state-transfer": "node scripts/test-p3-state-transfer.mjs",
-    "test:p5": "node scripts/test-p5-automation.mjs && node scripts/test-p5-execution.mjs && node scripts/test-p5-timer.mjs && node scripts/test-p5-notification.mjs && node scripts/test-p3-state-transfer.mjs",
+    "test:p5": "node scripts/test-p5-automation.mjs && node scripts/test-p5-execution.mjs && node scripts/test-p5-timer.mjs && node scripts/test-p5-notification.mjs && node scripts/test-p5-http-ui.mjs && node scripts/test-p3-state-transfer.mjs",
     "test:p3-http": "node scripts/test-p3-http-ui.mjs",
     "test:p4-channel": "node scripts/test-p4-channel.mjs",
     "test:p4-channel-work": "node scripts/test-p4-channel-work.mjs",

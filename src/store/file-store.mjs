@@ -544,7 +544,10 @@ function normalizeV7(value) {
   const workOccurrenceIds = new Set(), deliveryOccurrenceIds = new Set(), successfulByRule = new Map()
   for (const occurrence of automationOccurrences) {
     const rule = ruleById.get(occurrence.ruleId)
-    if (!rule || rule.trigger.kind !== 'daily-time' || occurrence.ruleRevision > rule.revision || dailyAutomationOccurrenceKey(occurrence.ruleId, occurrence.scheduledDate) !== occurrence.occurrenceKey) throw new Error(`自动发生 ${occurrence.id} 规则引用不闭合`)
+    const identityClosed = occurrence.scheduledDate !== null
+      ? dailyAutomationOccurrenceKey(occurrence.ruleId, occurrence.scheduledDate) === occurrence.occurrenceKey
+      : occurrence.occurrenceKey.startsWith(`${occurrence.ruleId}:manual:`) && occurrence.occurrenceKey.length > `${occurrence.ruleId}:manual:`.length
+    if (!rule || rule.trigger.kind !== 'daily-time' || occurrence.ruleRevision > rule.revision || !identityClosed) throw new Error(`自动发生 ${occurrence.id} 规则引用不闭合`)
     if (occurrenceKeys.has(occurrence.occurrenceKey)) throw new Error(`自动发生 occurrenceKey 重复：${occurrence.occurrenceKey}`)
     occurrenceKeys.add(occurrence.occurrenceKey)
     if (occurrence.workId !== null) {
@@ -587,10 +590,10 @@ function normalizeAutomationOccurrence(occurrence) {
   if (!record(occurrence)) throw new Error('自动发生状态无效')
   exactKeys(occurrence, ['id', 'occurrenceKey', 'ruleId', 'ruleRevision', 'scheduledDate', 'workId', 'status', 'reason', 'deliveryId', 'createdAt'], '自动发生')
   const id = requiredText(occurrence.id, '自动发生 ID 无效')
-  for (const key of ['occurrenceKey', 'ruleId', 'scheduledDate']) requiredText(occurrence[key], `自动发生 ${id} ${key} 无效`)
+  for (const key of ['occurrenceKey', 'ruleId']) requiredText(occurrence[key], `自动发生 ${id} ${key} 无效`)
   isoTimestamp(occurrence.createdAt, `自动发生 ${id} createdAt`)
   if (!Number.isSafeInteger(occurrence.ruleRevision) || occurrence.ruleRevision < 1) throw new Error(`自动发生 ${id} ruleRevision 无效`)
-  if (!isDateOnly(occurrence.scheduledDate)) throw new Error(`自动发生 ${id} scheduledDate 无效`)
+  if (occurrence.scheduledDate !== null && !isDateOnly(occurrence.scheduledDate)) throw new Error(`自动发生 ${id} scheduledDate 无效`)
   if (occurrence.workId !== null) requiredText(occurrence.workId, `自动发生 ${id} workId 无效`)
   if (occurrence.deliveryId !== null) requiredText(occurrence.deliveryId, `自动发生 ${id} deliveryId 无效`)
   if (occurrence.status !== null && !['skipped', 'blocked'].includes(occurrence.status)) throw new Error(`自动发生 ${id} status 无效`)

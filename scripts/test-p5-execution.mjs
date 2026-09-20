@@ -15,6 +15,7 @@ const now = '2026-09-21T00:00:00.000Z'
 const catalog = [{ kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test' }]
 
 await atomicAndAdmissionChecks()
+await manualAdmissionChecks()
 await concurrencyAndCapacityChecks()
 await ownerLossBeforeDispatchChecks()
 await ownerLossAfterRunnerStartChecks()
@@ -25,6 +26,43 @@ await deadlineAndCancellationChecks()
 await closeTeardownChecks()
 await gearJobTimeoutChecks()
 console.log('P5 execution checks passed; external effects=0; real GearJob/ZenMux=not called')
+
+async function manualAdmissionChecks() {
+  const harness = await admissionHarness({ maxRuns: 3, rules: ['rule-a'] })
+  try {
+    const input = { expectedRevision: 1, clientRequestId: 'manual-1' }
+    const first = await harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', input)
+    const replay = await harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', input)
+    assert.equal(first.accepted, true); assert.equal(replay.deduplicated, true); assert.equal(replay.workId, first.workId)
+    let state = await harness.store.read(), occurrence = state.automationOccurrences[0]
+    assert.equal(occurrence.scheduledDate, null); assert.equal(occurrence.occurrenceKey, 'rule-a:manual:manual-1')
+    const overlap = await harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'manual-2' })
+    assert.equal(overlap.reason, 'overlap')
+    await assert.rejects(harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 2, clientRequestId: 'manual-stale' }), error => error.code === 'REVISION_CONFLICT')
+    await assert.rejects(harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'bad:value' }), error => error.code === 'INVALID_REQUEST')
+    await harness.store.update(value => ({ ...value, works: value.works.map(work => ({ ...work, status: 'completed', executions: work.executions.map(execution => ({ ...execution, status: 'completed' })) })) }))
+    const daily = await harness.automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21' })
+    assert.equal(daily.accepted, true, 'manual identity must not consume the daily date identity')
+    state = await harness.store.read()
+    assert.equal(state.automationOccurrences.some(item => item.occurrenceKey === 'rule-a:2026-09-21'), true)
+    await harness.store.update(value => ({ ...value, automationRules: value.automationRules.map(rule => ({ ...rule, status: 'paused' })) }))
+    await assert.rejects(harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'manual-paused' }), error => error.code === 'INVALID_STATE')
+  } finally { await harness.close() }
+
+  const budget = await admissionHarness({ maxRuns: 1, rules: ['rule-a'] })
+  try {
+    await budget.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'budget-1' })
+    await budget.store.update(value => ({ ...value, works: value.works.map(work => ({ ...work, status: 'completed', executions: work.executions.map(execution => ({ ...execution, status: 'completed' })) })) }))
+    const exhausted = await budget.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'budget-2' })
+    assert.equal(exhausted.reason, 'budget')
+  } finally { await budget.close() }
+
+  const capacity = await admissionHarness({ rules: ['rule-a', 'rule-b', 'rule-c'] })
+  try {
+    const outcomes = await Promise.all(['rule-a', 'rule-b', 'rule-c'].map((ruleId, index) => capacity.automation.acceptManualOccurrence({ id: 'member-owner' }, ruleId, { expectedRevision: 1, clientRequestId: `capacity-${index}` })))
+    assert.equal(outcomes.filter(item => item.accepted).length, 2); assert.equal(outcomes.find(item => item.reason)?.reason, 'capacity')
+  } finally { await capacity.close() }
+}
 
 async function atomicAndAdmissionChecks() {
   const root = await mkdtemp(join(tmpdir(), 'geneway-p5-execution-'))
@@ -103,6 +141,12 @@ async function ownerLossBeforeDispatchChecks() {
     async dispatchAutomationWork() { dispatches += 1 },
   }
   const automation = createAutomationService({ store, workService, clock: () => now, idFactory: () => 'owner-loss' })
+  await assert.rejects(automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'owner-before', ownerCheck: () => false }), error => error.code === 'OWNER_LOCK_LOST')
+  assert.equal(state.automationOccurrences.length, 0)
+  checks = 0
+  const manual = await automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'owner-after', ownerCheck: () => ++checks < 3 })
+  assert.equal(manual.dispatchError.code, 'OWNER_LOCK_LOST'); assert.equal(dispatches, 0); assert.equal(state.automationOccurrences[0].workId, manual.workId)
+  state = fixture({ rules: ['rule-a'] }); checks = 0
   const result = await automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21', ownerCheck: () => ++checks < 3 })
   assert.equal(result.dispatchError.code, 'OWNER_LOCK_LOST')
   assert.equal(dispatches, 0)

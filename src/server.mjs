@@ -12,7 +12,7 @@ import { readConnectionCatalog } from './connection-catalog.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 import { createFeishuRuntime } from '../plugins/feishu.mjs'
 import { ChannelServiceError, createChannelService } from './channel-service.mjs'
-import { createAutomationRuntime, createAutomationService } from './automation-service.mjs'
+import { AutomationServiceError, createAutomationRuntime, createAutomationService } from './automation-service.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
@@ -71,7 +71,7 @@ export async function start() {
     await automationRuntime.close().catch(() => undefined)
     throw error
   }
-  const server = createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntime, store, auth, index, trustedOrigin })
+  const server = createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntime, automation, automationRuntime, store, auth, index, trustedOrigin })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
   let shuttingDown = false
@@ -86,7 +86,7 @@ export async function start() {
   return server
 }
 
-export function createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntime, store, auth, index = '', trustedOrigin }) {
+export function createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntime, automation, automationRuntime, store, auth, index = '', trustedOrigin }) {
   if (!service || !store || !auth || !trustedOrigin) throw new Error('server dependencies are required')
   channel ??= createChannelService({ store, workService: service })
   const channelRuntimeReady = channelAppId => channelRuntime?.isAvailable?.(channelAppId) === true
@@ -124,6 +124,42 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       const context = await authenticated(request, store, auth)
       const actor = context.member
       if (request.method === 'GET' && url.pathname === '/api/bootstrap') { exactQuery(url); return sendJson(response, 200, await service.bootstrap(actor)) }
+      if (request.method === 'GET' && url.pathname === '/api/automations') {
+        exactQuery(url)
+        return sendJson(response, 200, automation ? { rules: await automation.listRules(actor), occurrences: await automation.listOccurrences(actor) } : { rules: [], occurrences: [] })
+      }
+      if (automation && request.method === 'POST' && url.pathname === '/api/automations') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
+        const rule = await automation.createRule(actor, body)
+        return sendJson(response, 200, rule)
+      }
+      const automationMatch = url.pathname.match(/^\/api\/automations\/([^/]+)(?:\/(enable|pause|resume|revoke|check-now))?$/)
+      if (automation && automationMatch && request.method === 'GET' && !automationMatch[2]) {
+        exactQuery(url)
+        const id = decode(automationMatch[1])
+        return sendJson(response, 200, { rule: await automation.getRule(actor, id), occurrences: await automation.listOccurrences(actor, id) })
+      }
+      if (automation && automationMatch && request.method === 'PATCH' && !automationMatch[2]) {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
+        const rule = await automation.updateRule(actor, decode(automationMatch[1]), body)
+        await automationRuntime?.refresh?.()
+        return sendJson(response, 200, rule)
+      }
+      if (automation && automationMatch && request.method === 'POST' && automationMatch[2]) {
+        exactQuery(url)
+        const action = automationMatch[2]
+        if (action === 'check-now') {
+          const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'clientRequestId'])
+          const result = await automationRuntime.checkNow(actor, decode(automationMatch[1]), body)
+          return sendJson(response, 200, { accepted: result.accepted, deduplicated: result.deduplicated, workId: result.workId ?? null, skipped: result.skipped ?? false, blocked: result.blocked ?? false, reason: result.reason ?? null })
+        }
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision'])
+        const rule = await automation[`${action}Rule`](actor, decode(automationMatch[1]), body)
+        await automationRuntime?.refresh?.()
+        return sendJson(response, 200, rule)
+      }
       if (request.method === 'GET' && url.pathname === '/api/confirmations') return sendJson(response, 200, await service.listConfirmations(actor))
       if (request.method === 'POST' && url.pathname === '/api/confirmations') {
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'label', 'value'])
@@ -358,6 +394,7 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
     } catch (error) {
       const result = serviceFailure(error)
       if (error instanceof ChannelServiceError) result.error.status = CHANNEL_ERROR_STATUS[error.code] ?? 500
+      else if (error instanceof AutomationServiceError) result.error.status = AUTOMATION_ERROR_STATUS[error.code] ?? 500
       else if (Number.isInteger(error?.status)) result.error.status = error.status
       return sendJson(response, result.error.status, { error: clientError(result.error) })
     }
@@ -367,6 +404,13 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
 const CHANNEL_ERROR_STATUS = {
   INVALID_REQUEST: 400, LINK_CODE_INVALID: 400, UNAUTHORIZED: 401, FORBIDDEN: 403,
   DELIVERY_FORBIDDEN: 403, NOT_FOUND: 404, CONFLICT: 409, INVALID_STATE: 409, UNAVAILABLE: 503,
+}
+
+const AUTOMATION_ERROR_STATUS = {
+  INVALID_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404,
+  REVISION_CONFLICT: 409, INVALID_STATE: 409, BUDGET_EXHAUSTED: 409,
+  SOURCE_NOT_CONFIGURED: 503,
+  OWNER_NOT_RUNNING: 503, OWNER_LOCK_LOST: 503,
 }
 
 function safeChannelState(value) {

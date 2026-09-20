@@ -7,6 +7,7 @@ import { createAutomationRuntime, createAutomationService } from '../src/automat
 await dueAndRollbackChecks()
 await sameDueChecks()
 await missedWindowAndNoBackfillChecks()
+await refreshChecks()
 await ownerLockChecks()
 await ownerLossCancellationChecks()
 console.log('P5 timer checks passed; owner contention=closed; external effects=0')
@@ -103,6 +104,29 @@ async function ownerLockChecks() {
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+}
+
+async function refreshChecks() {
+  let state = { automationRules: [], automationOccurrences: [] }
+  const timers = fakeTimers()
+  const runtime = createAutomationRuntime({
+    store: { async read() { return structuredClone(state) } },
+    automationService: { async acceptDailyOccurrence() {} },
+    workService: { async ensureReady() {}, async automationOwnerLost() {} },
+    dataRoot: '/tmp/geneway-p5-fake-owner', clock: () => '2026-09-20T23:59:30.000Z',
+    timerFactory: timers.set, clearTimer: timers.clear, lockFactory: fakeLock,
+  })
+  await runtime.start()
+  assert.equal(timers.pending.length, 0)
+  state = timerState()
+  await runtime.refresh()
+  assert.equal(timers.pending.length, 1)
+  assert.equal(timers.pending[0].delay, 30_000, 'HTTP rule writes must arm a newly enabled timer')
+  state.automationRules[0].trigger.time = '08:01'
+  await runtime.refresh()
+  assert.equal(timers.pending.length, 1, 'refresh must replace rather than duplicate the native timer')
+  assert.equal(timers.pending[0].delay, 90_000)
+  await runtime.close()
 }
 
 async function ownerLossCancellationChecks() {

@@ -57,58 +57,33 @@ export function createAutomationService({ store, workService = null, clock = () 
             return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
           }
         }
-        const prepared = workService?.prepareAutomationWork?.(state, rule, {
-          occurrenceKey,
-          acceptedAt: now,
-          workId: `work-${idFactory()}`,
-          executionId: `exec-${idFactory()}`,
-        })
-        if (!prepared?.ok) {
-          const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'blocked', 'auth-blocked')
-          admission = occurrenceAdmission(occurrence, state, false)
-          return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
-        }
-        const usedRuns = deriveUsedRuns(rule, state.automationOccurrences)
-        if (usedRuns >= rule.maxRuns) {
-          const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'skipped', 'budget')
-          admission = occurrenceAdmission(occurrence, state, false)
-          return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
-        }
-        if (activeAutomationWorkCount(state, rule.id)) {
-          const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'skipped', 'overlap')
-          admission = occurrenceAdmission(occurrence, state, false)
-          return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
-        }
-        if (activeAutomationWorkCount(state) >= 2) {
-          const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'skipped', 'capacity')
-          admission = occurrenceAdmission(occurrence, state, false)
-          return { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }
-        }
-        const occurrence = {
-          id: `occurrence-${idFactory()}`,
-          occurrenceKey,
-          ruleId: rule.id,
-          ruleRevision: rule.revision,
-          scheduledDate,
-          workId: prepared.workId,
-          status: null,
-          reason: null,
-          deliveryId: null,
-          createdAt: now,
-        }
-        admission = { accepted: true, deduplicated: false, occurrence, work: prepared.work, workId: prepared.workId, executionId: prepared.executionId, acceptedAt: prepared.acceptedAt }
-        return { ...state, works: [...state.works, prepared.work], automationOccurrences: [...state.automationOccurrences, occurrence] }
+        const accepted = admit(state, rule, { occurrenceKey, scheduledDate, now })
+        admission = accepted.admission
+        return accepted.state
       })
-      if (admission?.accepted && !admission.deduplicated) {
-        if (ownerCheck && !ownerCheck()) return { ...admission, dispatched: false, dispatchError: { code: 'OWNER_LOCK_LOST', message: 'automation owner lock 已失效' } }
-        try {
-          await workService?.dispatchAutomationWork?.(admission.workId, admission.executionId, admission.acceptedAt, { ownerCheck })
-          admission = { ...admission, dispatched: true }
-        } catch (error) {
-          admission = { ...admission, dispatched: false, dispatchError: { code: error?.code ?? 'INTERNAL_ERROR', message: error?.message ?? '自动工作派发失败' } }
-        }
-      }
-      return admission
+      return dispatchAdmission(admission, ownerCheck)
+    },
+
+    async acceptManualOccurrence(actor, id, input = {}) {
+      exactInput(input, ['expectedRevision', 'clientRequestId', 'ownerCheck'])
+      const clientRequestId = requestId(input.clientRequestId), occurrenceKey = `${required(id, 'ruleId')}:manual:${clientRequestId}`, ownerCheck = input.ownerCheck
+      if (ownerCheck !== undefined && typeof ownerCheck !== 'function') throw serviceError('INVALID_REQUEST', 'ownerCheck 无效')
+      await workService?.ensureReady?.()
+      if (ownerCheck && !ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
+      let admission
+      await store.update(state => {
+        if (ownerCheck && !ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
+        const member = requireMember(state, actor), rule = ownedRule(state, member, id)
+        const existing = state.automationOccurrences.find(item => item.occurrenceKey === occurrenceKey)
+        if (existing) { admission = occurrenceAdmission(existing, state); return state }
+        requireRevision(rule, input.expectedRevision)
+        if (rule.status !== 'active') throw serviceError('INVALID_STATE', '只有已启用规则可立即核对')
+        if (rule.trigger?.kind !== 'daily-time') throw serviceError('SOURCE_NOT_CONFIGURED', '事件来源暂不可用')
+        const accepted = admit(state, rule, { occurrenceKey, scheduledDate: null, now: timestamp(clock()) })
+        admission = accepted.admission
+        return accepted.state
+      })
+      return dispatchAdmission(admission, ownerCheck)
     },
 
     async listRules(actor) {
@@ -120,6 +95,12 @@ export function createAutomationService({ store, workService = null, clock = () 
       const state = await store.read(), member = requireMember(state, actor)
       const rule = ownedRule(state, member, id)
       return projectRule(state, rule, clock())
+    },
+
+    async listOccurrences(actor, id) {
+      const state = await store.read(), member = requireMember(state, actor)
+      const ruleIds = id ? new Set([ownedRule(state, member, id).id]) : new Set(state.automationRules.filter(rule => rule.ownerMemberId === member.id).map(rule => rule.id))
+      return state.automationOccurrences.filter(item => ruleIds.has(item.ruleId)).map(item => structuredClone(item))
     },
 
     async createRule(actor, input = {}) {
@@ -217,6 +198,28 @@ export function createAutomationService({ store, workService = null, clock = () 
     })
     return projectRule(await store.read(), updated, clock())
   }
+
+  function admit(state, rule, { occurrenceKey, scheduledDate, now }) {
+    const prepared = workService?.prepareAutomationWork?.(state, rule, { occurrenceKey, acceptedAt: now, workId: `work-${idFactory()}`, executionId: `exec-${idFactory()}` })
+    const reason = !prepared?.ok ? 'auth-blocked' : deriveUsedRuns(rule, state.automationOccurrences) >= rule.maxRuns ? 'budget' : activeAutomationWorkCount(state, rule.id) ? 'overlap' : activeAutomationWorkCount(state) >= 2 ? 'capacity' : null
+    if (reason) {
+      const occurrence = { id: `occurrence-${idFactory()}`, occurrenceKey, ruleId: rule.id, ruleRevision: rule.revision, scheduledDate, workId: null, status: reason === 'auth-blocked' ? 'blocked' : 'skipped', reason, deliveryId: null, createdAt: now }
+      return { state: { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }, admission: occurrenceAdmission(occurrence, state, false) }
+    }
+    const occurrence = { id: `occurrence-${idFactory()}`, occurrenceKey, ruleId: rule.id, ruleRevision: rule.revision, scheduledDate, workId: prepared.workId, status: null, reason: null, deliveryId: null, createdAt: now }
+    return { state: { ...state, works: [...state.works, prepared.work], automationOccurrences: [...state.automationOccurrences, occurrence] }, admission: { accepted: true, deduplicated: false, occurrence, work: prepared.work, workId: prepared.workId, executionId: prepared.executionId, acceptedAt: prepared.acceptedAt } }
+  }
+
+  async function dispatchAdmission(admission, ownerCheck) {
+    if (!admission?.accepted || admission.deduplicated) return admission
+    if (ownerCheck && !ownerCheck()) return { ...admission, dispatched: false, dispatchError: { code: 'OWNER_LOCK_LOST', message: 'automation owner lock 已失效' } }
+    try {
+      await workService?.dispatchAutomationWork?.(admission.workId, admission.executionId, admission.acceptedAt, { ownerCheck })
+      return { ...admission, dispatched: true }
+    } catch (error) {
+      return { ...admission, dispatched: false, dispatchError: { code: error?.code ?? 'INTERNAL_ERROR', message: error?.message ?? '自动工作派发失败' } }
+    }
+  }
 }
 
 export function createAutomationRuntime({ store, automationService, workService, dataRoot, clock = () => new Date().toISOString(), timerFactory = setTimeout, clearTimer = clearTimeout, lockFactory = acquireAutomationOwner, onError = () => undefined } = {}) {
@@ -226,6 +229,7 @@ export function createAutomationRuntime({ store, automationService, workService,
   let timer
   let tickPromise
   let running = false
+  let scheduleGeneration = 0
 
   return {
     async start() {
@@ -235,6 +239,7 @@ export function createAutomationRuntime({ store, automationService, workService,
       owner.lost?.then(async error => {
         if (!running) return
         running = false
+        scheduleGeneration += 1
         if (timer) clearTimer(timer)
         timer = undefined
         await workService.automationOwnerLost()
@@ -243,7 +248,7 @@ export function createAutomationRuntime({ store, automationService, workService,
       try {
         await workService.ensureReady()
         if (!running) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
-        await arm()
+        await arm(scheduleGeneration)
         if (!running) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
       } catch (error) {
         running = false
@@ -260,20 +265,34 @@ export function createAutomationRuntime({ store, automationService, workService,
     },
 
     async stop() { await stop() },
+    async checkNow(actor, id, input) {
+      if (!running) throw serviceError('OWNER_NOT_RUNNING', '自动执行入口暂不可用')
+      if (!automationService?.acceptManualOccurrence) throw serviceError('OWNER_NOT_RUNNING', '自动执行入口暂不可用')
+      return automationService.acceptManualOccurrence(actor, id, { ...input, ownerCheck: () => running })
+    },
+    async refresh() {
+      if (!running) return
+      const generation = ++scheduleGeneration
+      if (timer) clearTimer(timer)
+      timer = undefined
+      await tickPromise?.catch(() => undefined)
+      if (running) await arm(generation)
+    },
     ownsLock() { return running },
   }
 
   async function stop() {
     running = false
+    scheduleGeneration += 1
     if (timer) clearTimer(timer)
     timer = undefined
     await tickPromise?.catch(() => undefined)
   }
 
-  async function arm() {
-    if (!running) return
+  async function arm(generation = scheduleGeneration) {
+    if (!running || generation !== scheduleGeneration) return
     const state = await store.read()
-    if (!running) return
+    if (!running || generation !== scheduleGeneration) return
     const now = timestamp(clock())
     const candidates = state.automationRules
       .map(rule => ({ rule, dueAt: nextDailyOccurrence(rule, now, state.automationOccurrences) }))
@@ -284,10 +303,11 @@ export function createAutomationRuntime({ store, automationService, workService,
     const due = candidates.filter(candidate => candidate.dueAt === dueAt)
     const delay = Math.max(0, Date.parse(dueAt) - Date.parse(now))
     timer = timerFactory(() => {
+      if (!running || generation !== scheduleGeneration) return
       timer = undefined
       tickPromise = tickDue(due).catch(onError).finally(() => {
         tickPromise = undefined
-        if (running) void arm().catch(onError)
+        if (running) void arm(generation).catch(onError)
       })
     }, delay)
     timer?.unref?.()
@@ -540,6 +560,7 @@ function replaceById(items, value) { return items.map(item => item.id === value.
 function timestamp(value) { const result = typeof value === 'string' ? value : value instanceof Date ? value.toISOString() : ''; if (!result || !Number.isFinite(Date.parse(result))) throw serviceError('INTERNAL_ERROR', '时钟无效'); return result }
 function required(value, label) { const result = text(value); if (!result) throw serviceError('INVALID_REQUEST', `${label} 无效`); return result }
 function nullableText(value) { if (value === null) return null; return required(value, 'notificationConversationId') }
+function requestId(value) { const result = required(value, 'clientRequestId'); if (!/^[A-Za-z0-9._-]{1,128}$/.test(result)) throw serviceError('INVALID_REQUEST', 'clientRequestId 无效'); return result }
 function text(value) { return typeof value === 'string' && value.trim() ? value.trim() : undefined }
 function serviceError(code, message) { return new AutomationServiceError(code, message) }
 function parseInstant(value) { const time = typeof value === 'string' || value instanceof Date ? new Date(value) : null; return time && Number.isFinite(time.getTime()) ? time : null }

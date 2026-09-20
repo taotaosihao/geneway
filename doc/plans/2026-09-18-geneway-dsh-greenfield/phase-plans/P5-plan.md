@@ -1,6 +1,6 @@
 # P5 定时、事件与主动持续工作详细计划
 
-状态：**Team Astra 规划已收敛；Product Design 待用户绑定；实施准入等待 P4 顺序限制的用户决定。P5 尚未实施。**
+状态：**Team Astra 规划、Product Design、独立过度设计审查和正确性 phase review 均已通过；用户已批准 P5、跨阶段实施与 Docker bridge 窄回调。下一步为 P5-T0。**
 
 基线：`283771c5240799360f9c0d5f0d439e440fdaa4ad`（P4 飞书 runtime 切片）。P4 企业微信、真实手机 HTTPS 和阶段末真人验收仍为 deferred，P4 不是 PASS。
 
@@ -147,7 +147,7 @@ fake 时钟/SDK、受控 POST 和受控模型只补故障路径，不代替真�
 
 ## 9. 实施准入与完成边界
 
-P5 已完成独立过度设计审查；实施当前还需同一次用户回复闭合三个绑定：**批准当前 P5 C/D 产品设计；允许在 P4 企业微信/真实手机/最终验收保持 deferred、P4 仍不 PASS 的前提下先实施 P5 独立路径；允许 T0 为 GearJob 容器建立只绑 Docker bridge `172.20.0.1` 的固定路径 HMAC 回调窄入口。**
+2026-09-20 用户当前消息已同时批准 P5 C/D、允许 P4 仍非 PASS 时先实施 P5，并允许 T0 为 GearJob 容器建立只绑 Docker bridge `172.20.0.1` 的固定路径 HMAC 回调窄入口。这一授权不允许消费 default 队列历史 job、开放主 Web、修改 GearJob/Frappe 产品源码、生产写入、部署或发布。
 
 获得该决定后，按 T0→T1→T2→T3→T4/T5→T6→T7 执行；未获得时，停在本计划、Product Design 和只读发现，不启动外部探针、不改代码。
 

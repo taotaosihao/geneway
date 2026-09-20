@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 
-export const STATE_VERSION = 6
+export const STATE_VERSION = 7
 export const KNOWLEDGE_LIMITS = Object.freeze({
   maxMaterials: 100,
   maxBodyBytes: 32 * 1024,
@@ -40,6 +40,8 @@ const EMPTY_STATE = {
   channelMessages: [],
   deliveries: [],
   linkCodes: [],
+  automationRules: [],
+  automationOccurrences: [],
   works: [],
   reservations: {},
 }
@@ -79,10 +81,11 @@ export function migrateState(value) {
   if (value.version !== undefined && !Number.isInteger(value.version)) throw new Error('产品状态版本无效')
   const version = value.version ?? 3
   if (version > STATE_VERSION) throw new Error(`不支持未来产品状态版本：${version}`)
-  if (version === STATE_VERSION) return normalizeV6(value)
-  if (version === 5) return migrateV5(value)
-  if (version === 4) return migrateV5(migrateV4(value))
-  if (version === 3) return migrateV5(migrateV4(migrateV3(value)))
+  if (version === STATE_VERSION) return normalizeV7(value)
+  if (version === 6) return normalizeV7({ ...normalizeV6(value), version: STATE_VERSION, automationRules: [], automationOccurrences: [] })
+  if (version === 5) return migrateV6ToV7(migrateV5(value))
+  if (version === 4) return migrateV6ToV7(migrateV5(migrateV4(value)))
+  if (version === 3) return migrateV6ToV7(migrateV5(migrateV4(migrateV3(value))))
   throw new Error(`不支持产品状态版本：${version}`)
 }
 
@@ -131,7 +134,7 @@ function migrateV4(value) {
 function migrateV5(value) {
   return normalizeV6({
     ...normalizeV5(value),
-    version: STATE_VERSION,
+    version: 6,
     channelApps: [],
     channelIdentities: [],
     channelConversations: [],
@@ -139,6 +142,10 @@ function migrateV5(value) {
     deliveries: [],
     linkCodes: [],
   })
+}
+
+function migrateV6ToV7(value) {
+  return normalizeV7({ ...value, version: STATE_VERSION, automationRules: [], automationOccurrences: [] })
 }
 
 function migrateEmployee(employee) {
@@ -483,7 +490,138 @@ function normalizeV6(value) {
     if (linkCodes.some(item => item !== link && item.status === 'active' && item.memberId === link.memberId && item.channelAppId === link.channelAppId)) throw new Error('每名成员与渠道应用只能有一个活动关联码')
   }
 
-  return { ...common, version: STATE_VERSION, channelApps, channelIdentities, channelConversations, channelMessages, deliveries, linkCodes }
+  return { ...common, version: 6, channelApps, channelIdentities, channelConversations, channelMessages, deliveries, linkCodes }
+}
+
+function normalizeV7(value) {
+  const { automationRules: _automationRules, automationOccurrences: _automationOccurrences, ...legacy } = value
+  const common = normalizeV6({ ...legacy, version: 6 })
+  const automationRules = requiredArray(value, 'automationRules').map(normalizeAutomationRule)
+  const automationOccurrences = requiredArray(value, 'automationOccurrences').map(normalizeAutomationOccurrence)
+  uniqueIds(automationRules, '自动规则')
+  uniqueIds(automationOccurrences, '自动发生')
+  const occurrenceKeys = new Set()
+  const memberById = new Map(common.members.map(item => [item.id, item]))
+  const employeeById = new Map(common.employees.map(item => [item.id, item]))
+  const skillById = new Map(common.skills.map(item => [item.id, item]))
+  const connectionById = new Map(common.connections.map(item => [item.id, item]))
+  const conversationById = new Map(common.channelConversations.map(item => [item.id, item]))
+  const identityById = new Map(common.channelIdentities.map(item => [item.id, item]))
+  const appById = new Map(common.channelApps.map(item => [item.id, item]))
+  const workById = new Map(common.works.map(item => [item.id, item]))
+  const deliveryById = new Map(common.deliveries.map(item => [item.id, item]))
+  const ruleById = new Map(automationRules.map(item => [item.id, item]))
+
+  for (const rule of automationRules) {
+    const owner = memberById.get(rule.ownerMemberId)
+    const employee = employeeById.get(rule.employeeId)
+    const skill = skillById.get(rule.skillId)
+    const connection = connectionById.get(rule.connectionId)
+    if (!owner || !employee || !owner.employeeIds.includes(employee.id) || !skill || !employee.skillIds?.includes(skill.id)
+      || skill.capabilityId !== GEARJOB_CAPABILITY_ID || !connection || !employee.connectionIds?.includes(connection.id)
+      || !connection.skillIds?.includes(skill.id) || connection.kind !== 'gearjob-rest' || !connection.allowedObjectIds?.includes(rule.workOrderId)) throw new Error(`自动规则 ${rule.id} 绑定引用不闭合`)
+    if (rule.notificationConversationId !== null) {
+      const conversation = conversationById.get(rule.notificationConversationId)
+      const identity = conversation && identityById.get(conversation.identityId)
+      const app = conversation && appById.get(conversation.channelAppId)
+      if (!conversation || conversation.type !== 'private' || conversation.memberId !== owner.id
+        || !identity || identity.id !== conversation.identityId || identity.memberId !== owner.id || identity.channelAppId !== conversation.channelAppId
+        || !app || app.id !== conversation.channelAppId) throw new Error(`自动规则 ${rule.id} 通知会话引用不闭合`)
+    }
+    if (rule.status === 'revoked' ? !rule.revokedAt : rule.revokedAt !== null) throw new Error(`自动规则 ${rule.id} revokedAt 状态不闭合`)
+    const event = rule.trigger.kind === 'gearjob-work-order-update'
+    if (event && rule.effectiveFrom !== null) throw new Error(`自动规则 ${rule.id} event effectiveFrom 状态不闭合`)
+    if (!event && ((rule.status === 'draft' && rule.effectiveFrom !== null) || (['active', 'paused'].includes(rule.status) && !rule.effectiveFrom))) throw new Error(`自动规则 ${rule.id} effectiveFrom 状态不闭合`)
+    if (!event && rule.eventAcceptAfter !== null) throw new Error(`自动规则 ${rule.id} daily eventAcceptAfter 状态不闭合`)
+    if (event && rule.status === 'draft' && rule.eventAcceptAfter !== null) throw new Error(`自动规则 ${rule.id} draft eventAcceptAfter 状态不闭合`)
+    if (event && ['active', 'paused'].includes(rule.status) && rule.eventAcceptAfter === null) throw new Error(`自动规则 ${rule.id} active eventAcceptAfter 缺失`)
+  }
+  const workOccurrenceIds = new Set(), successfulByRule = new Map()
+  for (const occurrence of automationOccurrences) {
+    const rule = ruleById.get(occurrence.ruleId)
+    if (!rule || rule.trigger.kind !== 'daily-time' || occurrence.ruleRevision > rule.revision || dailyAutomationOccurrenceKey(occurrence.ruleId, occurrence.scheduledDate) !== occurrence.occurrenceKey) throw new Error(`自动发生 ${occurrence.id} 规则引用不闭合`)
+    if (occurrenceKeys.has(occurrence.occurrenceKey)) throw new Error(`自动发生 occurrenceKey 重复：${occurrence.occurrenceKey}`)
+    occurrenceKeys.add(occurrence.occurrenceKey)
+    if (occurrence.workId !== null) {
+      if (workOccurrenceIds.has(occurrence.workId)) throw new Error(`自动发生 ${occurrence.id} 工作引用重复`)
+      workOccurrenceIds.add(occurrence.workId)
+      successfulByRule.set(rule.id, (successfulByRule.get(rule.id) ?? 0) + 1)
+      const work = workById.get(occurrence.workId)
+      if (!work || work.ownerMemberId !== rule.ownerMemberId || work.employeeId !== rule.employeeId || work.skillId !== rule.skillId
+        || work.connectionId !== rule.connectionId || work.input?.workOrderId !== rule.workOrderId) throw new Error(`自动发生 ${occurrence.id} 工作引用不闭合`)
+    }
+    if (occurrence.deliveryId !== null) {
+      const delivery = deliveryById.get(occurrence.deliveryId)
+      if (!delivery || delivery.workId !== occurrence.workId) throw new Error(`自动发生 ${occurrence.id} 投递引用不闭合`)
+    }
+  }
+  for (const [ruleId, count] of successfulByRule) if (count > ruleById.get(ruleId).maxRuns) throw new Error(`自动规则 ${ruleId} 累计预算超限`)
+  return { ...common, version: STATE_VERSION, automationRules, automationOccurrences }
+}
+
+function normalizeAutomationRule(rule) {
+  if (!record(rule)) throw new Error('自动规则状态无效')
+  exactKeys(rule, ['id', 'ownerMemberId', 'revision', 'status', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId', 'effectiveFrom', 'eventAcceptAfter', 'createdAt', 'updatedAt', 'revokedAt'], '自动规则')
+  const id = requiredText(rule.id, '自动规则 ID 无效')
+  for (const key of ['ownerMemberId', 'employeeId', 'skillId', 'connectionId', 'workOrderId']) requiredText(rule[key], `自动规则 ${id} ${key} 无效`)
+  isoTimestamp(rule.createdAt, `自动规则 ${id} createdAt`)
+  isoTimestamp(rule.updatedAt, `自动规则 ${id} updatedAt`)
+  if (!Number.isSafeInteger(rule.revision) || rule.revision < 1 || !['draft', 'active', 'paused', 'revoked'].includes(rule.status)) throw new Error(`自动规则 ${id} revision 或状态无效`)
+  if (!Number.isSafeInteger(rule.maxRuns) || rule.maxRuns < 1 || rule.maxRuns > 10) throw new Error(`自动规则 ${id} maxRuns 无效`)
+  if (rule.notificationConversationId !== null) requiredText(rule.notificationConversationId, `自动规则 ${id} notificationConversationId 无效`)
+  if (rule.effectiveFrom !== null) isoTimestamp(rule.effectiveFrom, `自动规则 ${id} effectiveFrom`)
+  if (rule.eventAcceptAfter !== null) isoTimestamp(rule.eventAcceptAfter, `自动规则 ${id} eventAcceptAfter`)
+  if (rule.revokedAt !== null) isoTimestamp(rule.revokedAt, `自动规则 ${id} revokedAt`)
+  normalizeAutomationTrigger(rule.trigger, `自动规则 ${id} trigger`)
+  return rule
+}
+
+function normalizeAutomationOccurrence(occurrence) {
+  if (!record(occurrence)) throw new Error('自动发生状态无效')
+  exactKeys(occurrence, ['id', 'occurrenceKey', 'ruleId', 'ruleRevision', 'scheduledDate', 'workId', 'status', 'reason', 'deliveryId', 'createdAt'], '自动发生')
+  const id = requiredText(occurrence.id, '自动发生 ID 无效')
+  for (const key of ['occurrenceKey', 'ruleId', 'scheduledDate']) requiredText(occurrence[key], `自动发生 ${id} ${key} 无效`)
+  isoTimestamp(occurrence.createdAt, `自动发生 ${id} createdAt`)
+  if (!Number.isSafeInteger(occurrence.ruleRevision) || occurrence.ruleRevision < 1) throw new Error(`自动发生 ${id} ruleRevision 无效`)
+  if (!isDateOnly(occurrence.scheduledDate)) throw new Error(`自动发生 ${id} scheduledDate 无效`)
+  if (occurrence.workId !== null) requiredText(occurrence.workId, `自动发生 ${id} workId 无效`)
+  if (occurrence.deliveryId !== null) requiredText(occurrence.deliveryId, `自动发生 ${id} deliveryId 无效`)
+  if (occurrence.status !== null && !['skipped', 'blocked'].includes(occurrence.status)) throw new Error(`自动发生 ${id} status 无效`)
+  if (occurrence.reason !== null) requiredText(occurrence.reason, `自动发生 ${id} reason 无效`)
+  const successful = occurrence.workId !== null && occurrence.status === null && occurrence.reason === null
+  const terminal = occurrence.workId === null && occurrence.status !== null && occurrence.reason !== null
+  if (!successful && !terminal) throw new Error(`自动发生 ${id} 结果不闭合`)
+  return occurrence
+}
+
+function normalizeAutomationTrigger(trigger, label) {
+  if (!record(trigger)) throw new Error(`${label} 无效`)
+  if (trigger.kind === 'daily-time') {
+    exactKeys(trigger, ['kind', 'time', 'timeZone'], label)
+    if (typeof trigger.time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(trigger.time) || trigger.timeZone !== 'Asia/Shanghai') throw new Error(`${label} 每日上海时间无效`)
+    return trigger
+  }
+  if (trigger.kind === 'gearjob-work-order-update') {
+    exactKeys(trigger, ['kind', 'sourceId'], label)
+    requiredText(trigger.sourceId, `${label} sourceId 无效`)
+    return trigger
+  }
+  throw new Error(`${label} 类型不受支持`)
+}
+
+function isoTimestamp(value, label) {
+  if (typeof value !== 'string' || !value.trim() || !Number.isFinite(Date.parse(value))) throw new Error(`${label} 无效`)
+  return value
+}
+
+function dailyAutomationOccurrenceKey(ruleId, scheduledDate) {
+  return `${ruleId}:${scheduledDate}`
+}
+
+function isDateOnly(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\d$/.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return date.toISOString().slice(0, 10) === value
 }
 
 function normalizeChannelApp(app) {

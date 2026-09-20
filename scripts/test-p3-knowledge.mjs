@@ -18,10 +18,10 @@ function checkMigrations() {
   const v4 = v4Fixture()
   const migrated = migrateState(v4)
   const emptyChannels = Object.fromEntries(['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes'].map(key => [key, []]))
-  assert.equal(STATE_VERSION, 6)
-  assert.equal(migrated.version, 6)
+  assert.equal(STATE_VERSION, 7)
+  assert.equal(migrated.version, 7)
   assert.deepEqual(migrated.knowledgeMaterials, [])
-  assert.deepEqual(migrated, { ...v4, version: 6, knowledgeMaterials: [], ...emptyChannels })
+  assert.deepEqual(migrated, { ...v4, version: 7, knowledgeMaterials: [], ...emptyChannels, automationRules: [], automationOccurrences: [] })
   assert.equal(migrated.works[0].id, v4.works[0].id)
   assert.equal(migrated.works[0].results[0].id, v4.works[0].results[0].id)
   assert.equal(migrated.works[0].results[0].dshSessionRef, 'session-stable')
@@ -32,7 +32,7 @@ function checkMigrations() {
 
   const v5 = { ...v4, version: 5, knowledgeMaterials: [activeMaterial()] }
   const fromV5 = migrateState(v5)
-  assert.equal(fromV5.version, 6)
+  assert.equal(fromV5.version, 7)
   assert.deepEqual(fromV5.knowledgeMaterials, v5.knowledgeMaterials)
   for (const key of Object.keys(emptyChannels)) assert.deepEqual(fromV5[key], [])
   assert.deepEqual(migrateState(structuredClone(fromV5)), fromV5)
@@ -44,14 +44,14 @@ function checkMigrations() {
     modelRoutes: [], connections: [], skills: [], confirmations: [{ id: 'confirmation-legacy' }], works: [],
     reservations: { 'legacy-owner|keep': { workId: 'work-legacy', executionId: 'exec-legacy' } },
   })
-  assert.equal(v3.version, 6)
+  assert.equal(v3.version, 7)
   assert.equal(v3.members[0].id, 'member-admin')
   assert.equal(v3.confirmations[0].id, 'confirmation-legacy')
   assert.deepEqual(v3.reservations['member-admin|keep'], { workId: 'work-legacy', executionId: 'exec-legacy' })
   assert.deepEqual(v3.knowledgeMaterials, [])
   for (const key of Object.keys(emptyChannels)) assert.deepEqual(v3[key], [])
 
-  assert.throws(() => migrateState({ version: 7 }), /未来/)
+  assert.throws(() => migrateState({ version: 8 }), /未来/)
   assert.throws(() => migrateState({ version: '6' }), /版本无效/)
   assert.throws(() => migrateState({ ...migrated, knowledgeMaterials: {} }), /knowledgeMaterials/)
 

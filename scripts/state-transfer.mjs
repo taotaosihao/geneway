@@ -109,7 +109,7 @@ async function restore(inputArg, dataRootArg) {
     if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
     const stateFile = files.find(item => item.path === STATE_PATH)
     const sourceStateBuffer = await readFileFromStart(stateFile.file.handle)
-    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, STATE_VERSION], migrate: false })
+    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, STATE_VERSION], migrate: false })
     const sessionRefs = collectSessionRefs(sourceState)
     const expectedSchema = schemaSummary(sourceState, sessionRefs)
     if (JSON.stringify(manifest.schema) !== JSON.stringify(expectedSchema)) throw new Error('备份 schema 摘要不匹配')
@@ -201,6 +201,9 @@ function prepareRestoredState(sourceState) {
   const conversationIds = new Set(state.linkCodes.filter(link => closingLinks.has(link.id)).map(link => link.matchedConversationId).filter(Boolean))
   return migrateState({
     ...state,
+    automationRules: state.automationRules.map(rule => rule.status === 'active'
+      ? { ...rule, status: 'paused', revision: rule.revision + 1, updatedAt: timestamp }
+      : rule),
     channelApps: state.channelApps.map(app => app.enabled || app.status !== 'disabled'
       ? { ...app, enabled: false, status: 'disabled', revision: app.revision + 1, updatedAt: timestamp }
       : app),
@@ -281,6 +284,10 @@ function schemaSummary(state, sessionRefs) {
       channelMessages: count('channelMessages'),
       deliveries: count('deliveries'),
       linkCodes: count('linkCodes'),
+    } : {}),
+    ...(state.version >= 7 ? {
+      automationRules: count('automationRules'),
+      automationOccurrences: count('automationOccurrences'),
     } : {}),
     works: count('works'),
     sessionRefs,

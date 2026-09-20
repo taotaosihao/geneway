@@ -72,6 +72,8 @@ try {
     channelMessages: 0,
     deliveries: 0,
     linkCodes: 0,
+    automationRules: 0,
+    automationOccurrences: 0,
     works: 5,
     sessionRefs: ['session-a', 'session-b', 'session-cycle'],
   })
@@ -441,5 +443,7 @@ function fixtureState() {
     channelMessages: [],
     deliveries: [],
     linkCodes: [],
+    automationRules: [],
+    automationOccurrences: [],
   }
 }

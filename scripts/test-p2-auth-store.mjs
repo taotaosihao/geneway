@@ -25,9 +25,11 @@ function checkMigration() {
   const original = v3Fixture()
   const migrated = migrateState(original)
   const channelKeys = ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']
-  assert.equal(migrated.version, 6)
+  assert.equal(migrated.version, 7)
   assert.deepEqual(migrated.knowledgeMaterials, [])
   for (const key of channelKeys) assert.deepEqual(migrated[key], [])
+  assert.deepEqual(migrated.automationRules, [])
+  assert.deepEqual(migrated.automationOccurrences, [])
   assert.equal(migrated.members[0].id, 'member-admin')
   assert.equal(migrated.members[0].role, 'admin')
   assert.equal(migrated.members[0].displayName, '旧操作者')
@@ -85,7 +87,7 @@ function checkMigration() {
     assert.throws(() => migrateState({ version: 3, [key]: {} }), new RegExp(key))
   }
   assert.throws(() => migrateState({ version: 3, reservations: [] }), /reservations/)
-  assert.throws(() => migrateState({ version: 7 }), /未来/)
+  assert.throws(() => migrateState({ version: 8 }), /未来/)
   assert.throws(() => migrateState({ version: '6' }), /版本无效/)
   assert.throws(() => migrateState({ version: 2 }), /不支持产品状态版本/)
   assert.throws(() => migrateState({ ...original, employees: [{ ...original.employees[0], skillIds: {} }] }), /skillIds/)
@@ -138,7 +140,7 @@ async function checkMigrationFailureDoesNotWrite() {
 
   const damagedCurrent = migrateState(v3Fixture())
   damagedCurrent.knowledgeMaterials = {}
-  for (const [state, pattern] of [[{ ...v3Fixture(), works: {} }, /works/], [damagedCurrent, /knowledgeMaterials/], [{ version: 7 }, /未来/]]) {
+  for (const [state, pattern] of [[{ ...v3Fixture(), works: {} }, /works/], [damagedCurrent, /knowledgeMaterials/], [{ version: 8 }, /未来/]]) {
     const statePath = join(root, `failure-${Math.random()}.json`)
     const raw = JSON.stringify(state)
     await writeFile(statePath, raw, { mode: 0o600 })
@@ -153,9 +155,11 @@ async function checkMigrationFailureDoesNotWrite() {
   const store = createFileStore(statePath)
   await store.update(state => state)
   const persisted = JSON.parse(await readFile(statePath, 'utf8'))
-  assert.equal(persisted.version, 6)
+  assert.equal(persisted.version, 7)
   assert.deepEqual(persisted.knowledgeMaterials, [])
   for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.deepEqual(persisted[key], [])
+  assert.deepEqual(persisted.automationRules, [])
+  assert.deepEqual(persisted.automationOccurrences, [])
   assert.equal(JSON.stringify(persisted).includes('"observations"'), false)
   assert.equal(JSON.stringify(persisted).includes('"followUps"'), false)
 }

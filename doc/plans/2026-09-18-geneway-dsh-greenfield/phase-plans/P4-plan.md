@@ -40,6 +40,23 @@ P4 不实现通用消息总线、分布式队列、通用审批引擎、跨渠�
 6. v5 缺少身份、消息和投递事实，升 v6；不建独立通用许可表。发送依据直接记录在已验证渠道绑定或明确发送请求中，并在每次网络发送前调用同一授权检查。
 7. 微信未选定时只做渠道中立底座、Web/UI、恢复和已具备条件的飞书分支；不造占位微信适配器，不把待办链接当微信完成。两个真实渠道闭环前不得宣称 G6、AC-16/17 或 P4 PASS。
 
+### 2.3 独立过度设计审查与有界消融
+
+独立审查者：`/root/p4_overdesign_review`，`gpt-5.6-sol` / high，只读；未参与 P4 Astra 规划或 Team Sol 实现。首轮误把用户明确要求的 MP4/Lark 交付当成可删项，主代理依据当前用户目标纠正后，审查者重新完成收敛消融。
+
+| 争议复杂度 | 最小变体与证据 | 裁决 |
+|---|---|---|
+| 单一 v6 store 与六组渠道事实 | 合并 identity/conversation 或 message/delivery 会丢失群聊、解绑、入站防重、未知发送效果或一次性关联的独立生命周期；拆库/队列增加第二事实源 | 保留单 store 与六组有限事实 |
+| `reserved` 与七态 delivery | 删除 `reserved` 会使 work 已提交但 message 未落终态的崩溃间隙无法收敛；合并 `blocked/failed/unknown` 会允许越权或未知效果盲重试 | 全部保留 |
+| `authorizeDelivery` + `validateSendClaim` | 单次授权不能覆盖实际发送前发生的撤权；T1 测试已证明最终 claim 或同一服务内的即时失效转换共同阻断失效知识/app/identity | 保留；T3 验证真实 I/O 紧前调用 |
+| 手工 `bindMessageWork` | T2 `handleInbound` 已拥有唯一 message→work 映射并覆盖崩溃恢复，旧入口无生产调用 | 删除 |
+| `deliverLinkCode` callback | 只有测试实现；认证 Web 本就需要一次看到明文码，直接返回 code 而 state 只存 digest 更短 | 删除 callback，T5a 负责防日志/响应缓存 |
+| conversation/message/delivery 重复 provider | 历史 channelApp 被闭图强制保留且不可原地换 identity，provider 可由 channelAppId 派生 | 删除重复字段 |
+| `channelGraphSha256` | 完整 state entry 已有 bytes/SHA-256，restore 再运行 v6 全闭图 normalizer；局部图 hash 没有新增保证 | 删除 |
+| 验收材料 | 用户明确要求 MP4 + Lark；合同需要必要验证报告。offline HTML、完整帧目录、封面、独立 attestation 和 formal schema v2 只是重复包装 | 保留 MP4 + 一份去敏 verification report + 两类独立审查 + Lark 三项发送/回读；删除其余正式产物 |
+
+消融后复杂度结论：**PASS**。不得因此删除真实双渠道、手机 HTTPS、群聊权限、撤权、防重、恢复、视频或 Lark 交付。
+
 ## 3. 当前事实、已验证依赖与未知
 
 ### 3.1 已观察事实
@@ -155,8 +172,7 @@ UI 延续 WorkBuddy 层级，不另建“渠道运维平台”。工作详情在
 | P4-T5a 本地 HTTP/UI/移动 | server、`web/index.html`；单一 API/UI owner | A/C/D/E 可执行，T1/T2 | app 管理与本人关联/默认派发、状态、显式重试/取消 delivery、停止 work、服务端权限、桌面/390px；保持 loopback |
 | P4-T5b 真实手机 HTTPS | canonical origin、Secure Cookie、可信 TLS proxy boundary 与渠道内浏览器；同一 API/UI owner | 用户批准域名/TLS/网络暴露 | 应用仍 loopback；只信任明确代理来源；明文外网/伪造 forwarded header/origin mismatch 拒绝；真实手机完成全路径 |
 | P4-T6 恢复与组合门 | state-transfer、P4 tests/package scripts；integration owner | T1–T5 已集成 | secrets 不入备份、恢复不收发/不重放、插件缺失 Web 可用、P1–P3 回归 |
-| P4-T7 实际验收资料 | `scripts/accept-p4.mjs`、同候选 MP4/receipt/HTML/frames；acceptance owner | 全旅程通过并冻结候选 | 两真实渠道、Web/手机、权限变化、重复/失败/恢复全部同一候选 |
-| P4-T8 独立阶段审查 | formal schema v2 verdict；只读 reviewer | T7 | 零 Critical/Important，材料与候选一致，Lark 回读后 P4 才可关闭 |
+| P4-T7 实际验收与交付 | `scripts/accept-p4.mjs`、同候选 MP4 与一份去敏 verification report；acceptance owner | 全旅程通过并冻结候选 | 两真实渠道、Web/手机、权限变化、重复/失败/恢复全部同一候选；独立正确性和复杂度审查零阻断；Lark 说明/视频/report 回读后才可关闭 |
 
 T1、设计发现和不依赖外部账号的受控测试可以并行；store schema、work integration、`web/index.html` 各保持单一 writer。未经 T0 不锁定具体 SDK 行为；微信未决时 T4 为空缺而不是假实现。
 
@@ -210,13 +226,13 @@ GENEWAY_P1_PROBE_MODEL=true pnpm probe:p1-runtime
 git diff --check
 ```
 
-## 9. 视频、离线手册与 Lark 工程交付
+## 9. 视频、验证报告与 Lark 工程交付
 
 P4 有可验收界面，必须在功能、真实渠道、回归和 Design Review 全通过后冻结一个产品候选，再用同一候选录制正常速度 MP4。视频至少展示：两个真实渠道关联与各自 J7、Web 同 work、群聊边界、重复不重跑、发送前撤权、failed/unknown、390px 与真实手机补充/来源/回复/停止、恢复无重发。不得用静态动画、mock 消息或剪掉失败替代真实主链。
 
-receipt 保存 candidate、真实 provider/app 脱敏标识、外部 message/event ID 脱敏值、work/execution/result/delivery refs、权限正反例、回归、浏览器、恢复和秘密扫描。离线 HTML 将同次截图内联到逐步说明，使用相对视频链接，目录移动后可用。材料不得包含 app secret、access token、Cookie、关联码、grant 或 Session secret。
+一份去敏 verification report 保存 candidate、MP4 SHA-256、真实 provider/app 脱敏标识、外部 message/event ID 脱敏值、work/execution/result/delivery refs、权限正反例、回归、浏览器、恢复、秘密扫描、独立正确性审查和独立过度设计审查结论。材料不得包含 app secret、access token、Cookie、关联码、grant 或 Session secret。
 
-独立 reviewer 完整查看视频、手册、hash、receipt 和秘密扫描；formal phase reviewer 给出 schema v2 verdict。随后使用新的 P4 幂等 key 通过 `lark-cli` 发送说明、视频、receipt、手册和 attestation，并回读类型、消息 ID 与 `deleted=false`。该发送仍是工程验收材料交付，不等于 P4 产品飞书渠道本身。
+独立正确性 reviewer 完整查看视频、report、hash 和秘密扫描；独立过度设计 reviewer 确认最终候选没有重新引入已否定复杂度。随后使用新的 P4 幂等 key 通过 `lark-cli` 发送说明、视频和 verification report，并回读类型、消息 ID 与 `deleted=false`。视频制作临时帧可在确认 MP4 后删除，不作为正式交付物。该发送仍是工程验收材料交付，不等于 P4 产品飞书渠道本身。
 
 ## 10. 风险、恢复、停止和完成判定
 
@@ -227,4 +243,4 @@ receipt 保存 candidate、真实 provider/app 脱敏标识、外部 message/eve
 - 身份/群/外发范围发生产品语义变化，或需要通用队列/新存储/跨进程 worker：暂停受影响工作，由两名 Astra 原位复核本计划。
 - 任何 credential、关联码或私有正文进入日志、视频、备份或错误响应：停止验收，修复并重新冻结候选。
 
-P4 只有在两个真实渠道主链、Web/真实手机、权限/群聊/重复/失败/恢复、P1–P3 回归、Design Review、视频/手册、独立 phase review 和 Lark 回读全部通过后，才能标记 PASS。局部代码完成、一个渠道可用、受控 webhook、HTTP 200 或材料发送成功均不构成阶段完成。
+P4 只有在两个真实渠道主链、Web/真实手机、权限/群聊/重复/失败/恢复、P1–P3 回归、Design Review、MP4/verification report、独立正确性与过度设计审查和 Lark 回读全部通过后，才能标记 PASS。局部代码完成、一个渠道可用、受控 webhook、HTTP 200 或材料发送成功均不构成阶段完成。

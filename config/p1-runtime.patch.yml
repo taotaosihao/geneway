@@ -1,5 +1,5 @@
 # P1-compatible P2 product runtime: keep the DSH Agent/Session/JSONL kernel and
-# the two contracted native tools. The profile deliberately has no shell, filesystem, web, MCP,
+# the contracted native tools. The profile deliberately has no shell, filesystem, web, MCP,
 # subagent, telemetry, DeepSeek-default route, or session-log side channel.
 - id: session-log-deepseek
   disabled: true
@@ -103,5 +103,7 @@
       name: ../plugins/gearjob-work-order.mjs
     - id: cycle-time
       name: ../plugins/cycle-time.mjs
+    - id: work-order-device-correlation
+      name: ../plugins/work-order-device-correlation.mjs
     - id: execution-request-guard
       name: ../plugins/execution-request-guard.mjs

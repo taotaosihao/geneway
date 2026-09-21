@@ -11,11 +11,13 @@ import {
   getCapability,
   parseCapabilityToolResult,
   validateCapabilityInput,
+  WORK_ORDER_DEVICE_CORRELATION_CAPABILITY,
+  WORK_ORDER_DEVICE_CORRELATION_TOOL,
 } from './capabilities.mjs'
-import { connectionSnapshot } from './execution-grant.mjs'
+import { connectionSnapshot, correlationConnectionSnapshots, correlationMappingBinding } from './execution-grant.mjs'
 import { readRuntimeConfig, readSettings } from './runtime-config.mjs'
 
-export { GEARJOB_TOOL }
+export { GEARJOB_TOOL, WORK_ORDER_DEVICE_CORRELATION_TOOL }
 
 export function createDshRunner({ root = process.cwd(), config = readRuntimeConfig(process.env, root), harnessFactory = options => new DeepSeekHarness(options) } = {}) {
   const active = new Map()
@@ -186,7 +188,7 @@ export function parseRunResult(result, options = {}) {
 }
 
 function normalizedInput(capabilityId, options) {
-  const input = options.input ?? (capabilityId === 'gearjob-work-order-read' ? { workOrderId: options.workOrderId } : undefined)
+  const input = options.input ?? (['gearjob-work-order-read', WORK_ORDER_DEVICE_CORRELATION_CAPABILITY].includes(capabilityId) ? { workOrderId: options.workOrderId } : undefined)
   const validated = validateCapabilityInput(capabilityId, input)
   if (!validated.ok) throw runnerError(validated.error.code, validated.error.message)
   return validated.input
@@ -201,10 +203,17 @@ function sessionMetadata(value, { capability }) {
     if (!result[key]) throw runnerError('INVALID_REQUEST', `Session metadata 缺少 ${key}`)
   }
   if (result.skillId !== capability.skillId || result.capabilityId !== capability.id) throw runnerError('INVALID_REQUEST', 'Session metadata 与能力不匹配')
-  result.connectionId = metadata.connectionId === null ? null : text(metadata.connectionId)
-  result.connectionRevision = metadata.connectionRevision ?? null
-  if (capability.requiresConnection && (!result.connectionId || !Number.isSafeInteger(result.connectionRevision) || result.connectionRevision < 1)) throw runnerError('INVALID_REQUEST', 'Session metadata 连接版本无效')
-  if (!capability.requiresConnection && (result.connectionId !== null || result.connectionRevision !== null)) throw runnerError('INVALID_REQUEST', '无连接能力的 Session metadata 无效')
+  if (capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY) {
+    result.connectionIds = correlationMetadataMap(metadata.connectionIds, 'Session metadata 连接 identity 无效', text, true)
+    result.connectionRevisions = correlationMetadataMap(metadata.connectionRevisions, 'Session metadata 连接版本无效', value => Number.isSafeInteger(value) && value >= 1 ? value : undefined)
+    try { Object.assign(result, correlationMappingBinding(metadata.mappingRevision, metadata.mappingIdentity)) }
+    catch { throw runnerError('INVALID_REQUEST', 'Session metadata mapping 绑定无效') }
+  } else {
+    result.connectionId = metadata.connectionId === null ? null : text(metadata.connectionId)
+    result.connectionRevision = metadata.connectionRevision ?? null
+    if (capability.requiresConnection && (!result.connectionId || !Number.isSafeInteger(result.connectionRevision) || result.connectionRevision < 1)) throw runnerError('INVALID_REQUEST', 'Session metadata 连接版本无效')
+    if (!capability.requiresConnection && (result.connectionId !== null || result.connectionRevision !== null)) throw runnerError('INVALID_REQUEST', '无连接能力的 Session metadata 无效')
+  }
   if (!Array.isArray(metadata.confirmationRefs)) throw runnerError('INVALID_REQUEST', 'Session metadata confirmationRefs 无效')
   result.confirmationRefs = metadata.confirmationRefs.map(item => {
     if (!item || typeof item !== 'object' || Array.isArray(item) || !text(item.id) || !Number.isInteger(item.revision) || item.revision < 1) throw runnerError('INVALID_REQUEST', 'Session metadata confirmationRef 无效')
@@ -214,10 +223,15 @@ function sessionMetadata(value, { capability }) {
 }
 
 function executionGrant({ executionId, operation, capability, input, metadata, supplied = {}, config }) {
-  const connection = capability.requiresConnection ? connectionSnapshot(supplied.connection) : null
+  const correlation = capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY
+  const connections = correlation ? correlationConnectionSnapshots(supplied.connections) : undefined
+  const connection = !correlation && capability.requiresConnection ? connectionSnapshot(supplied.connection) : null
+  if (connections && (connections.gearJob.id !== metadata.connectionIds.gearJob || connections.gearJob.revision !== metadata.connectionRevisions.gearJob
+    || connections.hive.id !== metadata.connectionIds.hive || connections.hive.revision !== metadata.connectionRevisions.hive)) throw runnerError('INVALID_REQUEST', 'Session metadata 与双来源连接快照不匹配')
   if (connection && (connection.id !== metadata.connectionId || connection.revision !== metadata.connectionRevision)) throw runnerError('INVALID_REQUEST', 'Session metadata 与连接快照不匹配')
+  const { connection: _connection, connections: _connections, ...rest } = supplied
   return {
-    ...supplied,
+    ...rest,
     version: 2,
     executionId,
     memberId: metadata.ownerMemberId,
@@ -229,7 +243,7 @@ function executionGrant({ executionId, operation, capability, input, metadata, s
     operation,
     expectedTool: capability.toolName,
     input,
-    connection,
+    ...(correlation ? { connections, mappingRevision: metadata.mappingRevision, mappingIdentity: metadata.mappingIdentity } : { connection }),
     confirmationFingerprint: metadata.confirmationFingerprint,
     confirmationRefs: metadata.confirmationRefs,
     policyFile: supplied.policyFile ?? config.stateFile,
@@ -250,8 +264,10 @@ function deniedGrant(capability, operation, metadata, options, config) {
     modelRouteId: metadata.modelRouteId,
     operation,
     expectedTool: '__no_tool_allowed__',
-    input: capability.id === 'gearjob-work-order-read' ? { workOrderId: 'NO-TOOL' } : { availableSeconds: 0, quantity: 1 },
-    connection: capability.requiresConnection ? null : null,
+    input: ['gearjob-work-order-read', WORK_ORDER_DEVICE_CORRELATION_CAPABILITY].includes(capability.id) ? { workOrderId: 'NO-TOOL' } : { availableSeconds: 0, quantity: 1 },
+    ...(capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY
+      ? { connections: options.grant?.connections, mappingRevision: metadata.mappingRevision, mappingIdentity: metadata.mappingIdentity }
+      : { connection: null }),
     confirmationFingerprint: metadata.confirmationFingerprint,
     confirmationRefs: metadata.confirmationRefs,
     policyFile: options.grant?.policyFile ?? config.stateFile,
@@ -318,6 +334,14 @@ function text(value) {
 
 function runnerError(code, message) {
   return Object.assign(new Error(message), { code })
+}
+
+function correlationMetadataMap(value, message, normalize, distinct = false) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2
+    || !Object.hasOwn(value, 'gearJob') || !Object.hasOwn(value, 'hive')) throw runnerError('INVALID_REQUEST', message)
+  const gearJob = normalize(value.gearJob), hive = normalize(value.hive)
+  if (gearJob === undefined || hive === undefined || distinct && gearJob === hive) throw runnerError('INVALID_REQUEST', message)
+  return { gearJob, hive }
 }
 
 function cancelledError() {

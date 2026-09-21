@@ -2,6 +2,8 @@ import { calculateCycleTime } from './domain/cycle-time.mjs'
 
 export const GEARJOB_TOOL = 'geneway_gearjob_read_work_order'
 export const CYCLE_TIME_TOOL = 'geneway_calculate_cycle_time'
+export const WORK_ORDER_DEVICE_CORRELATION_TOOL = 'geneway_correlate_work_order_device'
+export const WORK_ORDER_DEVICE_CORRELATION_CAPABILITY = 'manufacturing-work-order-device-correlate'
 
 const capabilities = Object.freeze({
   'gearjob-work-order-read': Object.freeze({
@@ -34,6 +36,22 @@ const capabilities = Object.freeze({
     normalizePartialInput: normalizeCyclePartialInput,
     buildPrompt: cyclePrompt,
     parseResult: parseCycleResult,
+  }),
+  [WORK_ORDER_DEVICE_CORRELATION_CAPABILITY]: Object.freeze({
+    id: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY,
+    skillId: 'skill-manufacturing-work-order-device-correlate',
+    action: 'manufacturing.work-order-device.correlate',
+    toolName: WORK_ORDER_DEVICE_CORRELATION_TOOL,
+    pluginId: 'geneway-work-order-device-correlation',
+    pluginVersion: '1',
+    resultKind: 'manufacturing.work-order-device-correlation',
+    requiredInputs: Object.freeze(['workOrderId']),
+    requiresConnection: true,
+    connectionKind: null,
+    normalizeInput: normalizeGearJobInput,
+    normalizePartialInput: () => ({ ok: true, input: {}, missing: [] }),
+    buildPrompt: correlationPrompt,
+    parseResult: parseCorrelationResult,
   }),
 })
 
@@ -138,6 +156,17 @@ function cyclePrompt(capability, input, _previousFact, confirmations) {
   ].join('\n')
 }
 
+function correlationPrompt(capability, input, previousFact, confirmations) {
+  return [
+    '你是 Geneway 工单与设备只读关联说明员工。',
+    `必须且只能调用一次 ${capability.toolName}，参数必须精确为 ${JSON.stringify(input)}。`,
+    '工具返回后不得再次调用工具；只能依据结构化结果说明工单、唯一映射、设备采样时间、新鲜度、机器事实和未知项。',
+    '不得把 Hive status 解释为质量或停机原因，不得猜测缺失字段，不得执行写入。',
+    previousFact ? `上一条获准结构化事实仅供对照：${JSON.stringify(projectFact(previousFact))}` : '',
+    `当前有效确认：${JSON.stringify(confirmations)}`,
+  ].filter(Boolean).join('\n')
+}
+
 function parseGearJobResult(capability, value, input) {
   const allowed = ['ok', 'workOrderId', 'status', 'plannedQuantity', 'completedQuantity', 'unit', 'sourceTime', 'sourceRecordId', 'sourceRevision', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']
   exactKeys(value, allowed, 'GearJob 工具结果', true)
@@ -169,6 +198,29 @@ function parseCycleResult(capability, value, input) {
   return {
     kind: capability.resultKind,
     payload,
+    toolName: capability.toolName,
+    pluginId: capability.pluginId,
+    pluginVersion: capability.pluginVersion,
+  }
+}
+
+function parseCorrelationResult(capability, value, input) {
+  exactKeys(value, ['ok', 'workOrderId', 'queriedAt', 'connections', 'gearJob', 'hive', 'mapping', 'tenant', 'device', 'sample', 'status', 'recordId', 'eventId', 'freshness', 'machineFacts', 'unknowns'], '工单设备关联工具结果')
+  if (value.workOrderId !== input.workOrderId) throw capabilityError('TOOL_CHAIN_INVALID', '工具结果工单号不匹配')
+  requiredText(value.queriedAt, '工具结果缺少 queriedAt')
+  for (const key of ['connections', 'gearJob', 'hive', 'mapping', 'tenant', 'device', 'sample', 'freshness', 'machineFacts']) {
+    if (!plainObject(value[key])) throw capabilityError('TOOL_CHAIN_INVALID', `工具结果 ${key} 无效`)
+  }
+  if (!Array.isArray(value.unknowns) || value.unknowns.some(item => !text(item))) throw capabilityError('TOOL_CHAIN_INVALID', '工具结果 unknowns 无效')
+  requiredText(value.recordId, '工具结果缺少 recordId')
+  requiredText(value.eventId, '工具结果缺少 eventId')
+  if (!['string', 'number', 'boolean'].includes(typeof value.status)) throw capabilityError('TOOL_CHAIN_INVALID', '工具结果 status 无效')
+  const payload = structuredClone(value)
+  delete payload.ok
+  return {
+    kind: capability.resultKind,
+    payload,
+    source: structuredClone({ gearJob: value.gearJob, hive: value.hive }),
     toolName: capability.toolName,
     pluginId: capability.pluginId,
     pluginVersion: capability.pluginVersion,
@@ -228,6 +280,11 @@ function projectFact(value) {
     parseCapabilityToolResult('cycle-time-calculate', { ok: true, ...payload }, { availableSeconds: payload.availableSeconds, quantity: payload.quantity })
     return { kind: value.kind, payload }
   }
+  if (value.kind === 'manufacturing.work-order-device-correlation') {
+    if (!plainObject(value.payload)) throw capabilityError('INVALID_REQUEST', '工单设备关联结构化事实无效')
+    const parsed = parseCapabilityToolResult(WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, { ok: true, ...value.payload }, { workOrderId: value.payload.workOrderId })
+    return { kind: value.kind, payload: parsed.payload, ...(value.source ? { source: parsed.source } : {}) }
+  }
   throw capabilityError('INVALID_REQUEST', '结构化事实 kind 未获准')
 }
 
@@ -238,7 +295,7 @@ function requiredCapability(id) {
 }
 
 function allowedErrorCodes(capabilityId) {
-  return capabilityId === 'gearjob-work-order-read'
+  return capabilityId === 'gearjob-work-order-read' || capabilityId === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY
     ? new Set(['INVALID_REQUEST', 'SOURCE_NOT_CONFIGURED', 'FORBIDDEN', 'NOT_FOUND', 'CANCELLED', 'UPSTREAM_TIMEOUT', 'UPSTREAM_ERROR', 'INVALID_SOURCE'])
     : new Set(['INVALID_INPUT', 'MISSING_AVAILABLE_SECONDS', 'MISSING_QUANTITY', 'INVALID_AVAILABLE_SECONDS_TYPE', 'INVALID_QUANTITY_TYPE', 'NON_FINITE_AVAILABLE_SECONDS', 'NON_FINITE_QUANTITY', 'NEGATIVE_AVAILABLE_SECONDS', 'NON_POSITIVE_QUANTITY', 'NON_FINITE_RESULT', 'FORBIDDEN', 'CANCELLED'])
 }

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { getCapability, listCapabilities, validateCapabilityInput } from './capabilities.mjs'
+import { getCapability, listCapabilities, validateCapabilityInput, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
 import { createObservation } from './domain/work-order.mjs'
 import { assertTrustedConnection, CONNECTION_IDENTITY_FIELDS } from './connection-catalog.mjs'
+import { correlationMappingContext } from './execution-grant.mjs'
 import { currentKnowledgeReference, sweepKnowledgeDependencies } from './knowledge-service.mjs'
 
 export const ERROR_STATUS = {
@@ -150,7 +151,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         const workId = `work-${randomUUID()}`
         const work = {
           id: workId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
-          capabilityId: binding.capability.id, ...(binding.connection ? { connectionId: binding.connection.id } : {}),
+          capabilityId: binding.capability.id, ...workConnectionFields(binding),
           goal: clean(body.goal) ?? binding.capability.action, input: parsed.input, requiredInputs: parsed.missing,
           status: parsed.missing.length ? 'waiting_input' : 'accepted', acceptedAt: now, results: [], actions: [], executions: [],
         }
@@ -200,7 +201,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           const waiting = parsed.missing.length > 0
           childWorks.push({
             id: childWorkId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
-            capabilityId: binding.capability.id, ...(binding.connection ? { connectionId: binding.connection.id } : {}),
+            capabilityId: binding.capability.id, ...workConnectionFields(binding),
             goal: itemGoal, input: parsed.input, requiredInputs: parsed.missing, status: waiting ? 'waiting_input' : 'accepted', acceptedAt: now, results: [], actions: [],
             executions: waiting ? [] : [{ ...newExecution(executionId, 'collaboration-child', requestId, parsed.input, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: binding.employee.id }],
             workType: 'collaboration-child', parentWorkId: rootWorkId, rootWorkId, collaborationGeneration: generation, planItemId: itemId,
@@ -220,7 +221,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         const rootExecutionId = `exec-${randomUUID()}`
         const rootWork = {
           id: rootWorkId, ownerMemberId: member.id, employeeId: leader.employee.id, skillId: leader.skill.id,
-          capabilityId: leader.capability.id, ...(leader.connection ? { connectionId: leader.connection.id } : {}),
+          capabilityId: leader.capability.id, ...workConnectionFields(leader),
           goal, input: {}, requiredInputs: [], status: 'accepted', acceptedAt: now, results: [], actions: [],
           executions: [{ ...newExecution(rootExecutionId, 'collaboration-root', requestId, {}, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: leader.employee.id }],
           workType: 'collaboration', collaboration: { generation, cancelGeneration: 0, status: 'accepted', requestLimit: 12, requestCount: 0, childLimit: 4, maxConcurrentChildren: 2, rootTimeoutMs: 360_000, childTimeoutMs: 120_000, outputMaxTokens: 4096, childWorkIds: childWorks.map(work => work.id), summaryResultRefs: [], staleKnowledgeRefs: [], staleItemIds: [] },
@@ -677,7 +678,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     const execution = newExecution(executionId, 'automation', occurrenceKey, parsed.input, acceptedAt)
     const work = {
       id: workId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
-      capabilityId: binding.capability.id, ...(binding.connection ? { connectionId: binding.connection.id } : {}),
+      capabilityId: binding.capability.id, ...workConnectionFields(binding),
       goal: binding.capability.action, input: parsed.input, requiredInputs: [], status: 'accepted', acceptedAt,
       results: [], actions: [], executions: [execution],
     }
@@ -722,7 +723,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const runnerOptions = {
         executionId, operation, capabilityId: context.work.capabilityId, input: context.work.input,
         sessionId: sessionResult?.dshSessionRef, sessionMetadata: context.metadata,
-        grant: compact({ connection: context.connection, policyFile: policyPaths.stateFile, policyRoot: policyPaths.dataRoot, secretRoot: policyPaths.secretRoot }),
+        grant: compact({ ...grantConnectionFields(context), policyFile: policyPaths.stateFile, policyRoot: policyPaths.dataRoot, secretRoot: policyPaths.secretRoot }),
         confirmations: context.confirmations.map(item => ({ id: item.id, revision: item.revision, label: item.label, value: item.value })),
       }
       if (operation === 'follow-up') {
@@ -779,18 +780,17 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const confirmations = currentConfirmations(state, member.id, work.employeeId)
       const refs = confirmations.map(item => ({ id: item.id, revision: item.revision }))
       const fingerprint = confirmationFingerprint(confirmations)
+      const mappingContext = binding.capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY ? correlationMappingContext(work) : undefined
       context = {
-        work, connection: binding.connection ?? null, confirmations,
+        work, connection: binding.connection ?? null, connections: binding.connections, mappingContext, confirmations,
         metadata: {
           ownerMemberId: member.id, workId: work.id, employeeId: work.employeeId, skillId: work.skillId,
-          capabilityId: work.capabilityId, connectionId: binding.connection?.id ?? null,
-          connectionRevision: binding.connection?.revision ?? null, modelRouteId: binding.route.id,
+          capabilityId: work.capabilityId, ...sessionConnectionMetadata(binding, mappingContext), modelRouteId: binding.route.id,
           confirmationRefs: refs, confirmationFingerprint: fingerprint,
         },
       }
       const nextExecution = compact({ ...execution, dispatchedAt: clock(), contextConfirmationRefs: refs,
-        confirmationFingerprint: fingerprint, modelRouteId: binding.route.id, connectionId: binding.connection?.id,
-        connectionRevision: binding.connection?.revision })
+        confirmationFingerprint: fingerprint, modelRouteId: binding.route.id, ...sessionConnectionMetadata(binding, mappingContext) })
       return { ...state, works: replaceById(state.works, { ...work, executions: replaceById(work.executions, nextExecution) }) }
     })
     return context
@@ -931,6 +931,7 @@ function businessEnvelope(model, work, now) {
   const base = model.result
   const id = base.kind === 'gearjob.work-order.observation' ? `obs-${randomUUID()}` : `result-${randomUUID()}`
   let payload = base.payload
+  let createdAt = now
   if (base.kind === 'gearjob.work-order.observation') {
     payload = createObservation({ source: base.payload, queriedAt: now })
     payload.observationId = id
@@ -938,9 +939,10 @@ function businessEnvelope(model, work, now) {
     Object.assign(payload, compact({ explanation: clean(model.explanation), dshSessionRef: clean(model.dshSessionRef),
       continuedFromDshSessionRef: clean(model.continuedFromDshSessionRef), contextObservationId: clean(model.contextResultId ?? model.contextObservationId), continuity: clean(model.continuity) }))
   }
+  if (base.kind === 'manufacturing.work-order-device-correlation') createdAt = clean(payload.queriedAt)
   const result = compact({
     id, kind: base.kind, capabilityId: work.capabilityId, skillId: work.skillId, schemaVersion: 1,
-    input: structuredClone(work.input), payload, explanation: clean(model.explanation), source: base.source, createdAt: now,
+    input: structuredClone(work.input), payload, explanation: clean(model.explanation), source: base.source, createdAt,
     toolName: base.toolName, pluginId: base.pluginId, pluginVersion: base.pluginVersion, dshSessionRef: clean(model.dshSessionRef),
     continuedFromDshSessionRef: clean(model.continuedFromDshSessionRef), contextObservationId: clean(model.contextResultId ?? model.contextObservationId),
     continuity: clean(model.continuity), contextConfirmationRefs: model.contextConfirmationRefs ?? [],
@@ -961,6 +963,19 @@ function authorizedBinding(state, member, request, connectionCatalog) {
   const route = state.modelRoutes.find(item => item.id === employee.modelRouteId && item.enabled === true && item.provider === ZENMUX_PROVIDER && item.model === ZENMUX_MODEL && item.credentialRef === 'ZENMUX_API_KEY')
   if (!route) return failure('FORBIDDEN', '员工模型路由不可用')
   let connection
+  if (capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY) {
+    let ids
+    try { ids = correlationConnectionIds(request.connectionIds) } catch { return failure('INVALID_REQUEST', '必须精确选择 GearJob 与 Hive 连接') }
+    const connections = {
+      gearJob: state.connections.find(item => item.id === ids.gearJob && item.enabled === true && item.status === 'ready'),
+      hive: state.connections.find(item => item.id === ids.hive && item.enabled === true && item.status === 'ready'),
+    }
+    if (connections.gearJob?.kind !== 'gearjob-rest' || connections.hive?.kind !== 'hive-tenant-records'
+      || Object.values(connections).some(item => !employee.connectionIds?.includes(item.id) || !item.skillIds?.includes(skill.id))) return failure('FORBIDDEN', '双来源连接未获准或不可用')
+    if (connections.hive.allowedObjectIds?.length !== 1) return failure('FORBIDDEN', 'Hive 连接必须精确授权一个 device code')
+    try { for (const item of Object.values(connections)) assertTrustedConnection(connectionCatalog, item) } catch { return failure('FORBIDDEN', '连接目标未在主机可信目录登记') }
+    return { ok: true, member, employee, skill, capability, route, connections }
+  }
   if (capability.requiresConnection) {
     connection = state.connections.find(item => item.id === clean(request.connectionId) && item.enabled === true && item.status === 'ready')
     if (!connection || connection.kind !== capability.connectionKind || !employee.connectionIds?.includes(connection.id) || !connection.skillIds?.includes(skill.id)) return failure('FORBIDDEN', '连接未获准或不可用')
@@ -970,6 +985,7 @@ function authorizedBinding(state, member, request, connectionCatalog) {
 }
 
 function inputAllowed(binding, input) {
+  if (binding.capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY) return binding.connections.gearJob.allowedObjectIds?.includes(input.workOrderId)
   return !binding.capability.requiresConnection || input.workOrderId === undefined || binding.connection.allowedObjectIds?.includes(input.workOrderId)
 }
 
@@ -991,6 +1007,7 @@ function requestInput(body, capability) { if (body.input !== undefined) return b
 function businessResults(work) { return work.results.filter(item => item.kind !== 'assistant.follow-up') }
 function followUpFact(result) {
   if (result.kind === 'manufacturing.takt') return { kind: result.kind, payload: pick(result.payload, ['availableSeconds', 'quantity', 'secondsPerUnit', 'unit']) }
+  if (result.kind === 'manufacturing.work-order-device-correlation') return { kind: result.kind, payload: structuredClone(result.payload), source: structuredClone(result.source) }
   return compact({
     kind: result.kind,
     payload: pick(result.payload, ['workOrderId', 'status', 'plannedQuantity', 'completedQuantity', 'unit', 'sourceTime', 'sourceRecordId', 'sourceRevision', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']),
@@ -1041,8 +1058,9 @@ function connectionConfig(state, body, current, now, connectionCatalog) {
     status: 'unknown', skillIds: body.skillIds ?? current?.skillIds ?? [], revision: current ? current.revision + 1 : 1,
     updatedAt: now }
   if (current && CONNECTION_IDENTITY_FIELDS.some(key => result[key] !== current[key])) throw serviceError('INVALID_REQUEST', '连接目标/来源 identity 不可原地更换')
-  if (!result.id || !result.name || result.kind !== 'gearjob-rest' || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef) || !stringIds(result.allowedObjectIds) || !stringIds(result.skillIds) || typeof result.enabled !== 'boolean') throw serviceError('INVALID_REQUEST', '连接配置无效')
-  if (result.skillIds.some(id => !state.skills.some(item => item.id === id && getCapability(item.capabilityId)?.connectionKind === result.kind))) throw serviceError('INVALID_REQUEST', '连接 Skill 绑定无效')
+  if (!result.id || !result.name || !['gearjob-rest', 'hive-tenant-records'].includes(result.kind) || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef) || !stringIds(result.allowedObjectIds) || !stringIds(result.skillIds) || typeof result.enabled !== 'boolean') throw serviceError('INVALID_REQUEST', '连接配置无效')
+  if (result.kind === 'hive-tenant-records' && (!uuid(result.targetIdentity) || result.allowedObjectIds.length !== 1)) throw serviceError('INVALID_REQUEST', 'Hive 连接必须绑定 tenant UUID 与一个 device code')
+  if (result.skillIds.some(id => !state.skills.some(item => item.id === id && capabilityAcceptsConnectionKind(getCapability(item.capabilityId), result.kind)))) throw serviceError('INVALID_REQUEST', '连接 Skill 绑定无效')
   for (const key of ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']) if (!result[key]) throw serviceError('INVALID_REQUEST', `连接缺少 ${key}`)
   try { const url = new URL(result.baseUrl); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error() } catch { throw serviceError('INVALID_REQUEST', '连接地址无效') }
   try { Object.assign(result, assertTrustedConnection(connectionCatalog, result)) } catch { throw serviceError('FORBIDDEN', '连接目标未在主机可信目录登记') }
@@ -1086,6 +1104,7 @@ function projectResult(state, member, root, work, result) {
 }
 function publicMember(member) { return Object.fromEntries(['id', 'loginName', 'displayName', 'role', 'enabled', 'sessionVersion', 'employeeIds', 'createdAt', 'updatedAt'].filter(key => member[key] !== undefined).map(key => [key, structuredClone(member[key])])) }
 function simpleRef(value) { return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value) && value !== '.' && value !== '..' }
+function uuid(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) }
 function publicConnection(connection, catalog) {
   return pick(visibleConnection(connection, catalog), ['id', 'name', 'kind', 'targetIdentity', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'enabled', 'status', 'skillIds', 'revision', 'lastTest'])
 }
@@ -1096,6 +1115,30 @@ function visibleConnection(connection, catalog) {
   try { assertTrustedConnection(catalog, connection); return value } catch { return { ...value, status: 'unavailable' } }
 }
 function publicCapability(capability) { return { id: capability.id, skillId: capability.skillId, action: capability.action, requiredInputs: [...capability.requiredInputs], requiresConnection: capability.requiresConnection, resultKind: capability.resultKind } }
+function workConnectionFields(binding) {
+  return binding.connections
+    ? { connectionIds: { gearJob: binding.connections.gearJob.id, hive: binding.connections.hive.id } }
+    : binding.connection ? { connectionId: binding.connection.id } : {}
+}
+function grantConnectionFields(context) { return context.connections ? { connections: context.connections, ...context.mappingContext } : { connection: context.connection } }
+function sessionConnectionMetadata(binding, mappingContext) {
+  return binding.connections
+    ? {
+        connectionIds: { gearJob: binding.connections.gearJob.id, hive: binding.connections.hive.id },
+        connectionRevisions: { gearJob: binding.connections.gearJob.revision, hive: binding.connections.hive.revision },
+        ...mappingContext,
+      }
+    : { connectionId: binding.connection?.id ?? null, connectionRevision: binding.connection?.revision ?? null }
+}
+function correlationConnectionIds(value) {
+  if (!plainObject(value) || Object.keys(value).length !== 2 || !Object.hasOwn(value, 'gearJob') || !Object.hasOwn(value, 'hive')) throw new Error('invalid')
+  const gearJob = clean(value.gearJob), hive = clean(value.hive)
+  if (!gearJob || !hive || gearJob === hive) throw new Error('invalid')
+  return { gearJob, hive }
+}
+function capabilityAcceptsConnectionKind(capability, kind) {
+  return capability?.connectionKind === kind || capability?.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY && ['gearjob-rest', 'hive-tenant-records'].includes(kind)
+}
 function success(work, reservation) { return { ok: true, value: work, deduplicated: Boolean(reservation.deduplicated), accepted: Boolean(reservation.executionId && !reservation.deduplicated), active: Boolean(reservation.active) } }
 function newExecution(id, operation, clientRequestId, input, acceptedAt) { return { id, operation, clientRequestId, input: structuredClone(input), status: 'accepted', acceptedAt } }
 function activeExecution(work) { return [...work.executions].reverse().find(item => ACTIVE_EXECUTION.has(item.status)) }

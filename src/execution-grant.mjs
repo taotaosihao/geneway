@@ -2,7 +2,7 @@ import { constants } from 'node:fs'
 import { access, lstat, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { isAbsolute, parse, relative, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { getCapability, validateCapabilityInput } from './capabilities.mjs'
+import { getCapability, validateCapabilityInput, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
 
 const ACTIVE_EXECUTIONS = new Set(['accepted', 'running'])
 
@@ -73,6 +73,20 @@ export async function authorizeExecutionGrant(grant, { readState = readPolicySta
     return { member, employee, skill, route, work, execution }
   }
 
+  if (capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY) {
+    const ids = correlationConnectionIds(work.connectionIds)
+    const snapshots = correlationConnectionSnapshots(grant.connections)
+    const mapping = correlationMappingBinding(grant.mappingRevision, grant.mappingIdentity)
+    if (!isDeepStrictEqual(mapping, correlationMappingContext(work))) throw grantError('FORBIDDEN', '当前 mapping revision 或 identity 已变化')
+    const connections = {
+      gearJob: currentConnection(state, snapshots.gearJob, ids.gearJob, employee, skill, 'gearjob-rest'),
+      hive: currentConnection(state, snapshots.hive, ids.hive, employee, skill, 'hive-tenant-records'),
+    }
+    if (!connections.gearJob.allowedObjectIds?.includes(grant.input.workOrderId)) throw grantError('FORBIDDEN', '工单已不在当前连接允许范围内')
+    if (connections.hive.allowedObjectIds?.length !== 1) throw grantError('FORBIDDEN', 'Hive 连接必须精确授权一个 device code')
+    return { member, employee, skill, route, work, execution, connections }
+  }
+
   const current = state.connections?.find(item => item.id === grant.connection?.id)
   if (!current || current.enabled !== true || current.status !== 'ready') throw grantError('FORBIDDEN', '当前连接不可用')
   if (current.kind !== capability.connectionKind || work.connectionId !== current.id || !employee.connectionIds?.includes(current.id) || !current.skillIds?.includes(skill.id)) throw grantError('FORBIDDEN', '当前连接绑定已撤销')
@@ -107,6 +121,35 @@ export function connectionSnapshot(value) {
     dataMode: value.dataMode,
     evidenceMode: value.evidenceMode,
   })
+}
+
+export function correlationConnectionSnapshots(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2
+    || !Object.hasOwn(value, 'gearJob') || !Object.hasOwn(value, 'hive')) throw grantError('FORBIDDEN', '双来源连接快照无效')
+  const gearJob = connectionSnapshot(value.gearJob)
+  const hive = connectionSnapshot(value.hive)
+  if (gearJob.kind !== 'gearjob-rest' || hive.kind !== 'hive-tenant-records' || !uuid(hive.targetIdentity)) throw grantError('FORBIDDEN', '双来源连接角色无效')
+  return { gearJob, hive }
+}
+
+export function correlationMappingContext(work) {
+  const result = [...(work?.results ?? [])].reverse().find(item => item?.kind === 'manufacturing.work-order-device-correlation')
+  return result
+    ? correlationMappingBinding(result.payload?.gearJob?.sourceRevision, result.payload?.mapping)
+    : { mappingRevision: null, mappingIdentity: null }
+}
+
+export function correlationMappingBinding(mappingRevision, mappingIdentity) {
+  if (mappingRevision === null && mappingIdentity === null) return { mappingRevision: null, mappingIdentity: null }
+  const revision = text(mappingRevision)
+  if (!revision || !mappingIdentity || typeof mappingIdentity !== 'object' || Array.isArray(mappingIdentity)
+    || Object.keys(mappingIdentity).length !== 4) throw grantError('FORBIDDEN', 'mapping 绑定无效')
+  const identity = {}
+  for (const key of ['operation', 'workstation', 'mesUnitId', 'hiveUnitId']) {
+    identity[key] = text(mappingIdentity[key])
+    if (!identity[key]) throw grantError('FORBIDDEN', 'mapping 绑定无效')
+  }
+  return { mappingRevision: revision, mappingIdentity: identity }
 }
 
 export async function resolveCredentialFile(secretRoot, credentialRef) {
@@ -145,7 +188,11 @@ function validateGrantShape(grant) {
   const validated = validateCapabilityInput(grant.capabilityId, grant.input)
   if (!validated.ok || !isDeepStrictEqual(validated.input, grant.input)) throw grantError('FORBIDDEN', '工具授权输入无效')
   if (!text(grant.confirmationFingerprint) || !Array.isArray(grant.confirmationRefs) || grant.confirmationRefs.some(item => !item || !text(item.id) || !Number.isInteger(item.revision) || item.revision < 1)) throw grantError('FORBIDDEN', '工具授权确认信息无效')
-  if (capability.requiresConnection) connectionSnapshot(grant.connection)
+  if (capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY) {
+    correlationConnectionSnapshots(grant.connections)
+    correlationMappingBinding(grant.mappingRevision, grant.mappingIdentity)
+  }
+  else if (capability.requiresConnection) connectionSnapshot(grant.connection)
   else if (grant.connection !== null) throw grantError('FORBIDDEN', '无连接能力的授权结构无效')
   validatePolicyPaths(grant)
 }
@@ -194,6 +241,25 @@ function compact(value) {
 
 function compareRefs(left, right) {
   return String(left.id).localeCompare(String(right.id)) || left.revision - right.revision
+}
+
+function currentConnection(state, snapshot, id, employee, skill, kind) {
+  const current = state.connections?.find(item => item.id === snapshot.id)
+  if (!current || current.id !== id || current.enabled !== true || current.status !== 'ready'
+    || current.kind !== kind || !employee.connectionIds?.includes(current.id) || !current.skillIds?.includes(skill.id)) throw grantError('FORBIDDEN', '当前双来源连接绑定已撤销')
+  if (!isDeepStrictEqual(connectionSnapshot(current), snapshot)) throw grantError('FORBIDDEN', '当前连接 revision 或目标已变化')
+  return current
+}
+
+function correlationConnectionIds(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2) throw grantError('FORBIDDEN', '工作双来源连接无效')
+  const gearJob = text(value.gearJob), hive = text(value.hive)
+  if (!gearJob || !hive || gearJob === hive) throw grantError('FORBIDDEN', '工作双来源连接无效')
+  return { gearJob, hive }
+}
+
+function uuid(value) {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
 function text(value) {

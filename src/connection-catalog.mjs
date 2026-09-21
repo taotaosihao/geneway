@@ -57,8 +57,9 @@ function targetTuple(value) {
     dataMode: text(value?.dataMode),
     evidenceMode: text(value?.evidenceMode),
   }
-  if (result.kind !== 'gearjob-rest' || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef)
+  if (!['gearjob-rest', 'hive-tenant-records'].includes(result.kind) || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef)
     || ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode'].some(key => !result[key])) throw new Error('连接目标目录条目无效')
+  if (result.kind === 'hive-tenant-records' && !uuid(result.targetIdentity)) throw new Error('Hive 连接 targetIdentity 必须是 tenant UUID')
   return Object.freeze(result)
 }
 
@@ -74,4 +75,5 @@ function canonicalBaseUrl(value) {
 
 function text(value) { return typeof value === 'string' && value.trim() ? value.trim() : undefined }
 function simpleRef(value) { return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value) && value !== '.' && value !== '..' }
+function uuid(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) }
 function forbiddenTarget() { return Object.assign(new Error('连接目标未在主机可信目录登记'), { code: 'FORBIDDEN' }) }

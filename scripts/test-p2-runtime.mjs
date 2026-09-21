@@ -12,6 +12,8 @@ import {
   listCapabilities,
   sanitizeFollowUpContext,
   validateCapabilityInput,
+  WORK_ORDER_DEVICE_CORRELATION_CAPABILITY,
+  WORK_ORDER_DEVICE_CORRELATION_TOOL,
 } from '../src/capabilities.mjs'
 import { createDshRunner, parseRunResult } from '../src/dsh-runner.mjs'
 import { authorizeExecutionGrant, connectionSnapshot, consumeExecutionGrant, resolveCredentialFile } from '../src/execution-grant.mjs'
@@ -38,7 +40,21 @@ try {
 }
 
 function testCapabilities() {
-  assert.deepEqual(listCapabilities().map(item => item.id), ['gearjob-work-order-read', 'cycle-time-calculate'])
+  const capabilities = listCapabilities()
+  assert.deepEqual(capabilities.map(item => item.id), ['gearjob-work-order-read', 'cycle-time-calculate', WORK_ORDER_DEVICE_CORRELATION_CAPABILITY])
+  const correlation = capabilities.find(item => item.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY)
+  assert.deepEqual(Object.fromEntries(['id', 'skillId', 'action', 'toolName', 'pluginId', 'pluginVersion', 'resultKind', 'requiredInputs', 'requiresConnection', 'connectionKind'].map(key => [key, correlation[key]])), {
+    id: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY,
+    skillId: 'skill-manufacturing-work-order-device-correlate',
+    action: 'manufacturing.work-order-device.correlate',
+    toolName: WORK_ORDER_DEVICE_CORRELATION_TOOL,
+    pluginId: 'geneway-work-order-device-correlation',
+    pluginVersion: '1',
+    resultKind: 'manufacturing.work-order-device-correlation',
+    requiredInputs: ['workOrderId'],
+    requiresConnection: true,
+    connectionKind: null,
+  })
   assert.deepEqual(validateCapabilityInput('gearjob-work-order-read', {}, { allowMissing: true }).missing, ['workOrderId'])
   assert.equal(validateCapabilityInput('gearjob-work-order-read', { workOrderId: ' WO-1 ' }).input.workOrderId, 'WO-1')
   assert.equal(validateCapabilityInput('cycle-time-calculate', { availableSeconds: 'bad' }, { allowMissing: true }).error.code, 'INVALID_AVAILABLE_SECONDS_TYPE')

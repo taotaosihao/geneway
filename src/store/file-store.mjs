@@ -23,7 +23,12 @@ const CYCLE_CAPABILITY_ID = 'cycle-time-calculate'
 const CYCLE_SKILL_ID = 'skill-cycle-time-calculate'
 const CYCLE_TOOL_NAME = 'geneway_calculate_cycle_time'
 const CYCLE_PLUGIN_ID = 'geneway-cycle-time'
-const RESULT_KINDS = new Set(['gearjob.work-order.observation', 'manufacturing.takt', 'assistant.follow-up', 'assistant.collaboration-summary'])
+const CORRELATION_CAPABILITY_ID = 'manufacturing-work-order-device-correlate'
+const CORRELATION_SKILL_ID = 'skill-manufacturing-work-order-device-correlate'
+const CORRELATION_TOOL_NAME = 'geneway_correlate_work_order_device'
+const CORRELATION_PLUGIN_ID = 'geneway-work-order-device-correlation'
+const CORRELATION_RESULT_KIND = 'manufacturing.work-order-device-correlation'
+const RESULT_KINDS = new Set(['gearjob.work-order.observation', 'manufacturing.takt', CORRELATION_RESULT_KIND, 'assistant.follow-up', 'assistant.collaboration-summary'])
 
 const EMPTY_STATE = {
   version: STATE_VERSION,
@@ -600,6 +605,25 @@ function normalizeV7(value) {
 function normalizeV8(value) {
   const common = normalizeV7({ ...value, version: 7 })
   const works = common.works.map(work => {
+    const correlationResults = work.results.filter(result => result.kind === CORRELATION_RESULT_KIND)
+    if (work.capabilityId === CORRELATION_CAPABILITY_ID) {
+      const ids = exactRoleMap(work.connectionIds, `工作 ${work.id} connectionIds`, requiredText)
+      if (ids.gearJob === ids.hive) throw new Error(`工作 ${work.id} 双来源连接不可相同`)
+      if (work.connectionId !== undefined) throw new Error(`工作 ${work.id} 不得同时持有单连接`)
+      for (const result of correlationResults) {
+        if (result.skillId !== work.skillId || result.input.workOrderId !== work.input.workOrderId
+          || result.payload.connections.gearJob.id !== ids.gearJob || result.payload.connections.hive.id !== ids.hive) throw new Error(`工作 ${work.id} 关联结果与工作绑定不匹配`)
+      }
+      for (const execution of work.executions) {
+        const hasRevision = Object.hasOwn(execution, 'mappingRevision'), hasIdentity = Object.hasOwn(execution, 'mappingIdentity')
+        if (execution.dispatchedAt && (!hasRevision || !hasIdentity)) throw new Error(`工作 ${work.id} execution mapping 绑定缺失`)
+        if (hasRevision || hasIdentity) validateExecutionMappingBinding(execution.mappingRevision, execution.mappingIdentity, `工作 ${work.id} execution mapping`)
+      }
+    } else if (correlationResults.length) {
+      throw new Error(`工作 ${work.id} 不得保存工单设备关联结果`)
+    } else if (work.executions.some(execution => Object.hasOwn(execution, 'mappingRevision') || Object.hasOwn(execution, 'mappingIdentity'))) {
+      throw new Error(`工作 ${work.id} 非关联 execution 不得包含 mapping 绑定`)
+    }
     const actions = requiredArray(work, 'actions').map(action => normalizeAction(action, work))
     uniqueIds(actions, `工作 ${work.id} 的动作`)
     if (new Set(actions.map(action => action.proposalKey)).size !== actions.length) throw new Error(`工作 ${work.id} 的动作 proposalKey 重复`)
@@ -1245,6 +1269,8 @@ function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) 
     requiredText(result.pluginVersion, `结果 ${id} pluginVersion 无效`)
     if (result.source !== undefined) throw new Error(`结果 ${id} 节拍不得伪造来源`)
     if (result.inputProvenance !== undefined) validateQuantityProvenance(result.inputProvenance, result.input.quantity, `结果 ${id}`)
+  } else if (kind === CORRELATION_RESULT_KIND) {
+    normalizeCorrelationResult(result, id)
   } else if (result.inputProvenance !== undefined) {
     throw new Error(`结果 ${id} 不得包含输入来源`)
   }
@@ -1258,6 +1284,72 @@ function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) 
   }
   if (result.pluginVersion !== undefined) requiredText(result.pluginVersion, `结果 ${id} pluginVersion 无效`)
   return result
+}
+
+function normalizeCorrelationResult(result, id) {
+  exactKeys(result.input, ['workOrderId'], `结果 ${id} 输入`)
+  const workOrderId = requiredText(result.input.workOrderId, `结果 ${id} 工单号无效`)
+  if (result.capabilityId !== CORRELATION_CAPABILITY_ID || result.skillId !== CORRELATION_SKILL_ID
+    || result.toolName !== CORRELATION_TOOL_NAME || result.pluginId !== CORRELATION_PLUGIN_ID) throw new Error(`结果 ${id} 工单设备关联能力来源无效`)
+  exactKeys(result.payload, ['workOrderId', 'queriedAt', 'connections', 'gearJob', 'hive', 'mapping', 'tenant', 'device', 'sample', 'status', 'recordId', 'eventId', 'freshness', 'machineFacts', 'unknowns'], `结果 ${id} payload`)
+  if (requiredText(result.payload.workOrderId, `结果 ${id} payload 工单号无效`) !== workOrderId) throw new Error(`结果 ${id} payload 工单号不匹配`)
+  const queriedAt = isoTimestamp(result.payload.queriedAt, `结果 ${id} queriedAt 无效`)
+  if (queriedAt !== result.createdAt) throw new Error(`结果 ${id} createdAt 与 queriedAt 不匹配`)
+  const connections = exactRoleMap(result.payload.connections, `结果 ${id} connections`, (value, message) => {
+    if (!record(value)) throw new Error(message)
+    exactKeys(value, ['id', 'revision'], message)
+    const connectionId = requiredText(value.id, message)
+    if (!Number.isSafeInteger(value.revision) || value.revision < 1) throw new Error(message)
+    return { id: connectionId, revision: value.revision }
+  })
+  if (connections.gearJob.id === connections.hive.id) throw new Error(`结果 ${id} 双来源连接不可相同`)
+  for (const role of ['gearJob', 'hive']) {
+    const source = result.payload[role]
+    if (!record(source)) throw new Error(`结果 ${id} ${role} 来源无效`)
+    exactKeys(source, ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'sourceRevision', 'queriedAt'], `结果 ${id} ${role} 来源`)
+    for (const key of ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'sourceRevision']) requiredText(source[key], `结果 ${id} ${role} ${key} 无效`)
+    const sourceQueriedAt = isoTimestamp(source.queriedAt, `结果 ${id} ${role} queriedAt 无效`)
+    if (Date.parse(sourceQueriedAt) > Date.parse(queriedAt)) throw new Error(`结果 ${id} ${role} queriedAt 晚于结果查询时间`)
+  }
+  if (!record(result.source)) throw new Error(`结果 ${id} source 无效`)
+  exactKeys(result.source, ['gearJob', 'hive'], `结果 ${id} source`)
+  if (JSON.stringify(result.source.gearJob) !== JSON.stringify(result.payload.gearJob) || JSON.stringify(result.source.hive) !== JSON.stringify(result.payload.hive)) throw new Error(`结果 ${id} source 与 payload 不匹配`)
+  const mapping = result.payload.mapping
+  if (!record(mapping)) throw new Error(`结果 ${id} mapping 无效`)
+  exactKeys(mapping, ['operation', 'workstation', 'mesUnitId', 'hiveUnitId'], `结果 ${id} mapping`)
+  for (const key of ['operation', 'workstation', 'mesUnitId', 'hiveUnitId']) requiredText(mapping[key], `结果 ${id} mapping ${key} 无效`)
+  if (!record(result.payload.tenant) || Object.keys(result.payload.tenant).length !== 1 || !uuid(requiredText(result.payload.tenant.id, `结果 ${id} tenant 无效`))) throw new Error(`结果 ${id} tenant 无效`)
+  if (!record(result.payload.device)) throw new Error(`结果 ${id} device 无效`)
+  exactKeys(result.payload.device, ['id', 'code'], `结果 ${id} device`)
+  if (!uuid(requiredText(result.payload.device.id, `结果 ${id} device id 无效`)) || requiredText(result.payload.device.code, `结果 ${id} device code 无效`) !== mapping.hiveUnitId) throw new Error(`结果 ${id} device identity 无效`)
+  const sample = result.payload.sample
+  if (!record(sample)) throw new Error(`结果 ${id} sample 无效`)
+  exactKeys(sample, ['ts', 'platformReceivedAt', 'quality'], `结果 ${id} sample`)
+  isoTimestamp(sample.ts, `结果 ${id} sample ts 无效`)
+  if (sample.platformReceivedAt !== null || sample.quality !== null) throw new Error(`结果 ${id} quality 与 platformReceivedAt 必须保持 unknown`)
+  if (!scalar(result.payload.status)) throw new Error(`结果 ${id} status 无效`)
+  requiredText(result.payload.recordId, `结果 ${id} recordId 无效`)
+  requiredText(result.payload.eventId, `结果 ${id} eventId 无效`)
+  const freshness = result.payload.freshness
+  if (!record(freshness)) throw new Error(`结果 ${id} freshness 无效`)
+  exactKeys(freshness, ['ageSeconds', 'maxAgeSeconds', 'maxFutureSkewSeconds'], `结果 ${id} freshness`)
+  if (!Number.isFinite(freshness.ageSeconds) || freshness.maxAgeSeconds !== 120 || freshness.maxFutureSkewSeconds !== 5 || freshness.ageSeconds > 120 || freshness.ageSeconds < -5) throw new Error(`结果 ${id} freshness 无效`)
+  if (!record(result.payload.machineFacts)) throw new Error(`结果 ${id} machineFacts 无效`)
+  const machineFactKeys = new Set(['mode', 'machine_state', 'is_alive', 'is_online', 'alarm', 'alarm_code'])
+  for (const [key, value] of Object.entries(result.payload.machineFacts)) if (!machineFactKeys.has(key) || !scalar(value)) throw new Error(`结果 ${id} machineFacts 无效`)
+  if (!Array.isArray(result.payload.unknowns) || new Set(result.payload.unknowns).size !== result.payload.unknowns.length
+    || result.payload.unknowns.some(value => !['QUALITY_NOT_PROVIDED', 'PLATFORM_RECEIVED_AT_NOT_PROVIDED'].includes(value))) throw new Error(`结果 ${id} unknowns 无效`)
+  if (result.payload.unknowns.length !== 2 || !result.payload.unknowns.includes('QUALITY_NOT_PROVIDED')
+    || !result.payload.unknowns.includes('PLATFORM_RECEIVED_AT_NOT_PROVIDED')) throw new Error(`结果 ${id} unknowns 与 sample 不闭合`)
+}
+
+function validateExecutionMappingBinding(mappingRevision, mappingIdentity, label) {
+  if (mappingRevision === null && mappingIdentity === null) return
+  requiredText(mappingRevision, `${label} revision 无效`)
+  if (!record(mappingIdentity)) throw new Error(`${label} identity 无效`)
+  exactKeys(mappingIdentity, ['operation', 'workstation', 'mesUnitId', 'hiveUnitId'], `${label} identity`)
+  if (Object.keys(mappingIdentity).length !== 4) throw new Error(`${label} identity 无效`)
+  for (const key of ['operation', 'workstation', 'mesUnitId', 'hiveUnitId']) requiredText(mappingIdentity[key], `${label} ${key} 无效`)
 }
 
 function validateQuantityProvenance(value, quantity, label) {
@@ -1421,6 +1513,16 @@ function requiredRawText(value, message) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(message)
   return value
 }
+
+function exactRoleMap(value, label, normalize) {
+  if (!record(value)) throw new Error(`${label} 无效`)
+  exactKeys(value, ['gearJob', 'hive'], label)
+  if (!Object.hasOwn(value, 'gearJob') || !Object.hasOwn(value, 'hive')) throw new Error(`${label} 无效`)
+  return { gearJob: normalize(value.gearJob, `${label} gearJob 无效`), hive: normalize(value.hive, `${label} hive 无效`) }
+}
+
+function uuid(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) }
+function scalar(value) { return typeof value === 'string' && Boolean(value.trim()) || typeof value === 'number' && Number.isFinite(value) || typeof value === 'boolean' }
 
 function uniqueIds(items, label) {
   const ids = items.map(item => requiredText(item.id, `${label} ID 无效`))

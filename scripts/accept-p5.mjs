@@ -183,7 +183,7 @@ async function readback(statePath, dshPath, journey, config) {
   assert.match(delivery.providerMessageId, /^om_/)
   const dsh = await dshEvidence(dshPath, result.dshSessionRef); assert.ok(dsh.sessionCount >= 1 && dsh.eventCount >= execution.dshEventCount)
   assert.ok(Math.abs(Date.parse(localDateTimeIso(occurrence.scheduledDate, rule.trigger.time)) - Date.parse(journey.targetIso)) <= 60_000)
-  assert.ok(Date.parse(journey.targetIso) - Date.parse(journey.formReadyAt) >= 90_000)
+  assert.ok(Date.parse(journey.targetIso) - journey.formReadyAt >= 90_000)
   return { rule, occurrence, work, execution, result, delivery, conversation, route, dsh }
 }
 

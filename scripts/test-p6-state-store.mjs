@@ -36,6 +36,9 @@ function migrationAndValidationChecks() {
     [value => { value.receipt = receipt() }, /未回链 attempt/],
     [value => { value.decision = { ...decision('approved'), memberId: 'member-other' } }, /不是工作 owner/],
     [value => { value.decision = decision('approved'); value.attempt = { ...attempt(), unknownAt: recoveredAt } }, /unknown 不闭合/],
+    [value => { value.decision = decision('approved'); value.attempt = { ...attempt(), unknownAt: recoveredAt, unknownReason: 'RECOVERY_UNKNOWN', noEffectAt: recoveredAt, noEffectReason: 'DISPATCH_DEADLINE_EXPIRED' } }, /互斥/],
+    [value => { value.decision = decision('approved'); value.attempt = { ...attempt(), noEffectAt: recoveredAt, noEffectReason: 'NOT_ALLOWED' } }, /noEffectReason/],
+    [value => { value.decision = decision('approved'); value.attempt = { ...attempt(), noEffectAt: recoveredAt, noEffectReason: 'DISPATCH_DEADLINE_EXPIRED' }; value.receipt = receipt() }, /receipt 与 noEffect/],
   ]
   for (const [mutate, pattern] of invalid) {
     const candidate = action()
@@ -43,6 +46,7 @@ function migrationAndValidationChecks() {
     assert.throws(() => actionState(candidate), pattern)
   }
   assert.throws(() => actionState([action('duplicate-a'), { ...action('duplicate-b'), proposalKey: 'proposal-duplicate-a' }]), /proposalKey 重复/)
+  assert.throws(() => actionState([action('duplicate-a'), { ...action('duplicate-b'), requestKeys: ['request-duplicate-a'] }]), /requestKey 重复/)
 }
 
 async function immutableChecks() {
@@ -51,6 +55,7 @@ async function immutableChecks() {
   await store.update(() => actionState({ ...action(), decision: decision('approved'), attempt: attempt() }))
   for (const [mutate, pattern] of [
     [value => { value.works[0].actions[0].preview.payload.body = 'changed' }, /preview 不可改写/],
+    [value => { value.works[0].actions[0].requestKeys = ['request-changed'] }, /requestKeys 不可改写/],
     [value => { value.works[0].actions[0].proposalKey = 'proposal-changed' }, /proposalKey 不可改写/],
     [value => { value.works[0].actions[0].intent.targetKey = 'gearjob:changed' }, /intent 不可改写/],
     [value => { value.works[0].actions[0].decision.memberId = 'member-other' }, /decision memberId|approved decision/],
@@ -65,6 +70,27 @@ async function immutableChecks() {
     state.works[0].actions[0].attempt.unknownReason = 'RECOVERY_UNKNOWN'
     return state
   })
+  await store.update(state => {
+    state.works[0].actions[0].requestKeys.push('request-alias')
+    return state
+  })
+  await assert.rejects(store.update(state => {
+    state.works[0].actions[0].requestKeys.reverse()
+    return state
+  }), /requestKeys 不可改写/)
+
+  const noEffectPath = join(root, 'immutable-no-effect.json')
+  const noEffectStore = createFileStore(noEffectPath)
+  await noEffectStore.update(() => actionState({ ...action(), decision: decision('approved'), attempt: attempt() }))
+  await noEffectStore.update(state => {
+    state.works[0].actions[0].attempt.noEffectAt = recoveredAt
+    state.works[0].actions[0].attempt.noEffectReason = 'DISPATCH_DEADLINE_EXPIRED'
+    return state
+  })
+  await assert.rejects(noEffectStore.update(state => {
+    state.works[0].actions[0].attempt.noEffectReason = 'SOURCE_REVISION_CONFLICT'
+    return state
+  }), /attempt 不可改写/)
 
   const rejectedPath = join(root, 'immutable-rejected.json')
   const rejectedStore = createFileStore(rejectedPath)
@@ -121,6 +147,7 @@ async function recoveryChecks() {
   assert.equal(direct.works[0].actions[1].attempt.unknownReason, 'RECOVERY_UNKNOWN')
   assert.deepEqual(direct.works[0].actions[2], state.works[0].actions[2])
   assert.deepEqual(direct.works[0].actions[3], state.works[0].actions[3])
+  assert.deepEqual(direct.works[0].actions[4], state.works[0].actions[4])
   assert.deepEqual(recoverActionFacts(direct, '2026-09-21T09:00:00.000Z'), direct)
   assert.deepEqual(prepareRestoredState(state, recoveredAt), migrateState(direct))
 
@@ -188,6 +215,7 @@ function recoveryState() {
     { ...action('attempt'), decision: decision('approved'), attempt: attempt() },
     { ...action('receipt'), decision: decision('approved'), attempt: attempt(), receipt: receipt() },
     { ...action('unknown'), decision: decision('approved'), attempt: { ...attempt(), unknownAt: '2026-09-21T07:00:00.000Z', unknownReason: 'ALREADY_UNKNOWN' } },
+    { ...action('no-effect'), decision: decision('approved'), attempt: { ...attempt(), noEffectAt: '2026-09-21T07:00:00.000Z', noEffectReason: 'DISPATCH_DEADLINE_EXPIRED' } },
   ])
 }
 
@@ -201,6 +229,7 @@ function action(suffix = 'one') {
   const digest = currentDigest()
   return {
     id: `action-${suffix}`,
+    requestKeys: [`request-${suffix}`],
     proposalKey: `proposal-${suffix}`,
     intent: { kind: 'gearjob.work-order.comment', targetKey: 'gearjob:external-test:Work Order:WO-26-00096' },
     preview: {

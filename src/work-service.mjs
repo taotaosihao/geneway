@@ -48,7 +48,7 @@ export function recoverActionFacts(state, at) {
   const works = state.works.map(work => {
     let workChanged = false
     const actions = work.actions.map(action => {
-      if (action.receipt || action.attempt?.unknownAt) return action
+      if (action.receipt || action.attempt?.unknownAt || action.attempt?.noEffectAt) return action
       if (action.attempt) {
         changed = workChanged = true
         return { ...action, attempt: { ...action.attempt, unknownAt: at, unknownReason: 'RECOVERY_UNKNOWN' } }
@@ -982,6 +982,20 @@ function authorizedBinding(state, member, request, connectionCatalog) {
     try { assertTrustedConnection(connectionCatalog, connection) } catch { return failure('FORBIDDEN', '连接目标未在主机可信目录登记') }
   } else if (request.connectionId !== undefined && request.connectionId !== null && request.connectionId !== '') return failure('INVALID_REQUEST', '该能力不使用连接')
   return { ok: true, member, employee, skill, capability, route, connection }
+}
+
+export function authorizeWorkBinding(state, actor, workOrId, connectionCatalog = []) {
+  const member = requireMember(state, actor)
+  const work = typeof workOrId === 'string'
+    ? findOwned(state, member, workOrId)
+    : workOrId?.ownerMemberId === member.id ? workOrId : undefined
+  if (!work) throw serviceError('NOT_FOUND', '工作不存在')
+  const binding = authorizedBinding(state, member, work, connectionCatalog)
+  if (!binding.ok) throw serviceError(binding.error.code, binding.error.message)
+  const parsed = validateCapabilityInput(work.capabilityId, work.input)
+  if (!parsed.ok) throw serviceError(parsed.error.code, parsed.error.message)
+  if (!inputAllowed(binding, parsed.input)) throw serviceError('FORBIDDEN', '业务对象不在当前连接允许范围内')
+  return { member, work, binding, input: parsed.input }
 }
 
 function inputAllowed(binding, input) {

@@ -29,6 +29,9 @@ const CORRELATION_TOOL_NAME = 'geneway_correlate_work_order_device'
 const CORRELATION_PLUGIN_ID = 'geneway-work-order-device-correlation'
 const CORRELATION_RESULT_KIND = 'manufacturing.work-order-device-correlation'
 const RESULT_KINDS = new Set(['gearjob.work-order.observation', 'manufacturing.takt', CORRELATION_RESULT_KIND, 'assistant.follow-up', 'assistant.collaboration-summary'])
+const ACTION_INVALIDATION_REASONS = new Set(['RECOVERY_INVALIDATED', 'PREVIEW_SUPERSEDED', 'OWNER_REVOKED', 'PREVIEW_EXPIRED', 'PREVIEW_DIGEST_CHANGED', 'SOURCE_FACTS_CHANGED', 'SOURCE_RECHECK_FAILED', 'DISPATCH_DEADLINE_EXPIRED'])
+const ACTION_UNKNOWN_REASONS = new Set(['RECOVERY_UNKNOWN', 'ALREADY_UNKNOWN', 'ACTION_ID_CONFLICT', 'UPSTREAM_TIMEOUT', 'UPSTREAM_DISCONNECTED', 'UPSTREAM_RESULT_UNKNOWN', 'UPSTREAM_5XX', 'INVALID_SUCCESS_RESPONSE', 'READBACK_NOT_FOUND', 'READBACK_MISMATCH', 'READBACK_FAILED', 'READBACK_AUTHORIZATION_FAILED', 'RECEIPT_PERSIST_FAILED'])
+const ACTION_NO_EFFECT_REASONS = new Set(['DISPATCH_DEADLINE_EXPIRED', 'SOURCE_REVISION_CONFLICT', 'P6_SCOPE_UNAVAILABLE', 'CONNECTOR_AUTH_FAILED', 'INVALID_REQUEST', 'INVALID_COMMENT_ACTION'])
 
 const EMPTY_STATE = {
   version: STATE_VERSION,
@@ -626,6 +629,8 @@ function normalizeV8(value) {
     }
     const actions = requiredArray(work, 'actions').map(action => normalizeAction(action, work))
     uniqueIds(actions, `工作 ${work.id} 的动作`)
+    const requestKeys = actions.flatMap(action => action.requestKeys)
+    if (new Set(requestKeys).size !== requestKeys.length) throw new Error(`工作 ${work.id} 的动作 requestKey 重复`)
     if (new Set(actions.map(action => action.proposalKey)).size !== actions.length) throw new Error(`工作 ${work.id} 的动作 proposalKey 重复`)
     return { ...work, actions }
   })
@@ -634,8 +639,10 @@ function normalizeV8(value) {
 
 function normalizeAction(action, work) {
   if (!record(action)) throw new Error(`工作 ${work.id} 的动作状态无效`)
-  exactKeys(action, ['id', 'proposalKey', 'intent', 'preview', 'decision', 'attempt', 'receipt'], `工作 ${work.id} 的动作`)
+  exactKeys(action, ['id', 'requestKeys', 'proposalKey', 'intent', 'preview', 'decision', 'attempt', 'receipt'], `工作 ${work.id} 的动作`)
   const id = requiredText(action.id, `工作 ${work.id} 的动作 ID 无效`)
+  const requestKeys = uniqueTextArray(action.requestKeys, `动作 ${id} requestKeys`)
+  if (!requestKeys.length) throw new Error(`动作 ${id} requestKeys 无效`)
   const proposalKey = requiredText(action.proposalKey, `动作 ${id} proposalKey 无效`)
   const intent = action.intent
   if (!record(intent)) throw new Error(`动作 ${id} intent 无效`)
@@ -659,7 +666,8 @@ function normalizeAction(action, work) {
   if (decision && decision.memberId !== work.ownerMemberId) throw new Error(`动作 ${id} decision memberId 不是工作 owner`)
   if (attempt && (decision?.kind !== 'approved' || decision.invalidatedAt)) throw new Error(`动作 ${id} attempt 与批准不闭合`)
   if (receipt && !attempt) throw new Error(`动作 ${id} receipt 未回链 attempt`)
-  return { id, proposalKey, intent, preview, decision, attempt, receipt }
+  if (receipt && attempt?.noEffectAt) throw new Error(`动作 ${id} receipt 与 noEffect 互斥`)
+  return { id, requestKeys, proposalKey, intent, preview, decision, attempt, receipt }
 }
 
 function normalizeActionDecision(decision, id, digest) {
@@ -672,19 +680,24 @@ function normalizeActionDecision(decision, id, digest) {
   const invalidated = decision.invalidatedAt !== undefined || decision.invalidationReason !== undefined
   if (invalidated && (decision.invalidatedAt === undefined || decision.invalidationReason === undefined)) throw new Error(`动作 ${id} decision invalidation 不闭合`)
   if (decision.invalidatedAt !== undefined) isoTimestamp(decision.invalidatedAt, `动作 ${id} invalidatedAt`)
-  if (decision.invalidationReason !== undefined) requiredText(decision.invalidationReason, `动作 ${id} invalidationReason 无效`)
+  if (decision.invalidationReason !== undefined && !ACTION_INVALIDATION_REASONS.has(requiredText(decision.invalidationReason, `动作 ${id} invalidationReason 无效`))) throw new Error(`动作 ${id} invalidationReason 无效`)
   return decision
 }
 
 function normalizeActionAttempt(attempt, id, digest) {
   if (!record(attempt)) throw new Error(`动作 ${id} attempt 无效`)
-  exactKeys(attempt, ['previewDigest', 'preparedAt', 'unknownAt', 'unknownReason'], `动作 ${id} attempt`)
+  exactKeys(attempt, ['previewDigest', 'preparedAt', 'unknownAt', 'unknownReason', 'noEffectAt', 'noEffectReason'], `动作 ${id} attempt`)
   if (attempt.previewDigest !== digest) throw new Error(`动作 ${id} attempt digest 不闭合`)
   isoTimestamp(attempt.preparedAt, `动作 ${id} preparedAt`)
   const unknown = attempt.unknownAt !== undefined || attempt.unknownReason !== undefined
   if (unknown && (attempt.unknownAt === undefined || attempt.unknownReason === undefined)) throw new Error(`动作 ${id} unknown 不闭合`)
   if (attempt.unknownAt !== undefined) isoTimestamp(attempt.unknownAt, `动作 ${id} unknownAt`)
-  if (attempt.unknownReason !== undefined) requiredText(attempt.unknownReason, `动作 ${id} unknownReason 无效`)
+  if (attempt.unknownReason !== undefined && !ACTION_UNKNOWN_REASONS.has(requiredText(attempt.unknownReason, `动作 ${id} unknownReason 无效`))) throw new Error(`动作 ${id} unknownReason 无效`)
+  const noEffect = attempt.noEffectAt !== undefined || attempt.noEffectReason !== undefined
+  if (noEffect && (attempt.noEffectAt === undefined || attempt.noEffectReason === undefined)) throw new Error(`动作 ${id} noEffect 不闭合`)
+  if (unknown && noEffect) throw new Error(`动作 ${id} unknown 与 noEffect 互斥`)
+  if (attempt.noEffectAt !== undefined) isoTimestamp(attempt.noEffectAt, `动作 ${id} noEffectAt`)
+  if (attempt.noEffectReason !== undefined && !ACTION_NO_EFFECT_REASONS.has(requiredText(attempt.noEffectReason, `动作 ${id} noEffectReason 无效`))) throw new Error(`动作 ${id} noEffectReason 无效`)
   return attempt
 }
 
@@ -709,10 +722,12 @@ function assertActionFactsImmutable(current, next) {
     for (const action of work.actions) {
       const candidate = nextActionById.get(action.id)
       if (!candidate || JSON.stringify(candidate.preview) !== JSON.stringify(action.preview)) throw new Error(`动作 ${action.id} preview 不可改写`)
+      if (candidate.requestKeys.length < action.requestKeys.length
+        || action.requestKeys.some((key, index) => candidate.requestKeys[index] !== key)) throw new Error(`动作 ${action.id} requestKeys 不可改写`)
       if (candidate.proposalKey !== action.proposalKey) throw new Error(`动作 ${action.id} proposalKey 不可改写`)
       if (JSON.stringify(candidate.intent) !== JSON.stringify(action.intent)) throw new Error(`动作 ${action.id} intent 不可改写`)
       if (action.decision) assertMonotonicFact(action.decision, candidate.decision, action.decision.kind === 'approved' ? ['invalidatedAt', 'invalidationReason'] : [], `动作 ${action.id} decision`)
-      assertMonotonicFact(action.attempt, candidate.attempt, ['unknownAt', 'unknownReason'], `动作 ${action.id} attempt`)
+      assertMonotonicFact(action.attempt, candidate.attempt, ['unknownAt', 'unknownReason', 'noEffectAt', 'noEffectReason'], `动作 ${action.id} attempt`)
       if (action.receipt !== null && JSON.stringify(candidate.receipt) !== JSON.stringify(action.receipt)) throw new Error(`动作 ${action.id} receipt 不可改写`)
     }
   }

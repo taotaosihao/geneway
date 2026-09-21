@@ -11,12 +11,17 @@ import { readRuntimeConfig, readSettings, validateRuntimeConfig } from '../src/r
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const artifactRoot = resolve(root, 'artifacts', 'p5-acceptance')
 const FEISHU_CREDENTIAL_REF = 'FEISHU_P5_SECRET'
+const EVENT_HOST = '172.20.0.1'
+const EVENT_PORT = 39471
+const EVENT_SOURCE_ID = 'gearjob:dev.localhost'
+const EVENT_SOURCE_ADDRESS = '172.20.0.5'
+const GEARJOB_COMMIT = '9ea23fc0b0318a16ae0e60e3844f1263a3726aeb'
 const harnessCheck = process.argv.includes('--harness-check')
 const options = parseArgs(process.argv.slice(2))
 
 if (harnessCheck) {
   await checkHarness()
-  console.log(JSON.stringify({ ok: true, mode: 'harness-check', externalEffects: 0, checks: ['args', 'paths', 'absolute-outside', 'permissions', 'fixtures', 'enrollment', 'runtime-config', 'secret-scan', 'cleanup', 'terminal-order', 'media-plan', 'material-manifest', 'lark-readback', 'conditional-verdict'] }))
+  console.log(JSON.stringify({ ok: true, mode: 'harness-check', externalEffects: 0, checks: ['args', 'paths', 'absolute-outside', 'permissions', 'fixtures', 'enrollment', 'runtime-config', 'event-runtime', 'real-frappe-save', 'replay-conflict-window', 'restart-revocation', 'queue-isolation', 'tracked-clean-preflight', 'secret-scan', 'best-effort-cleanup-injection', 'media-plan', 'material-manifest', 'lark-readback', 'combined-verdict'] }))
 } else {
   await formalAcceptance(options)
 }
@@ -41,13 +46,14 @@ async function formalAcceptance(input) {
   const adminPassword = randomBytes(24).toString('base64url'), ownerPassword = randomBytes(24).toString('base64url')
   const secrets = [...config.secretNeedles, adminPassword, ownerPassword]
   const timers = new Set()
-  let server, chrome, xvfb, recorder, browser, sentReceipt, prepared, failure, cleanupError
+  let server, chrome, xvfb, recorder, browser, sentReceipt, prepared, failure, cleanupError, gearJob
   try {
     try {
       const enrollment = await readbackEnrollment(config)
       config.enrollment = enrollment.enrollment
       sentReceipt = enrollment.receipt
       await createFixture(paths, config, adminPassword, ownerPassword)
+      gearJob = await prepareGearJob(config, paths)
       xvfb = spawn('Xvfb', [display, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' })
       await alive(xvfb, 'Xvfb')
       try { server = await startServer(paths, origin, port, config) } catch (error) { server = error.process ?? server; throw error }
@@ -58,16 +64,27 @@ async function formalAcceptance(input) {
       await assertBrowserSurfaceClean(browser, secrets, 'pre-recording')
       recorder = startRecorder(display, join(stage, basename(config.record)))
       await alive(recorder.process, 'ffmpeg')
-      const journey = await runDailyJourney(browser, config, { stage, framesDir: join(stage, basename(artifacts.frames)), timers, recordingStartedAt: recorder.startedAt })
+      const restartRuntime = async () => {
+        await browser.send('Page.navigate', { url: 'about:blank' })
+        await browser.waitFor(`location.href==='about:blank'`)
+        await stop(server, 'SIGINT'); server = undefined
+        try { server = await startServer(paths, origin, port, config) } catch (error) { server = error.process ?? server; throw error }
+        await browser.send('Page.navigate', { url: origin })
+        await browser.waitFor(`location.origin===${JSON.stringify(origin)}&&document.readyState==='complete'&&!document.querySelector('#app').classList.contains('hidden')`)
+      }
+      const journey = await runCombinedJourney(browser, config, gearJob, restartRuntime, { stage, framesDir: join(stage, basename(artifacts.frames)), timers, recordingStartedAt: recorder.startedAt })
       await assertBrowserSurfaceClean(browser, secrets, 'post-journey')
       await stopRecorder(recorder); recorder = undefined
       const evidence = await readback(paths.state, paths.dsh, journey, config)
-      const expectedText = expectedDeliveryText(evidence.work, evidence.result)
-      sentReceipt = { messageId: shortHash(evidence.delivery.providerMessageId), chatId: shortHash(evidence.conversation.providerConversationId), textSha256: sha256(expectedText), deleted: false, msgType: 'unknown' }
-      sentReceipt = await verifyLark(config, evidence.delivery.providerMessageId, evidence.conversation.providerConversationId, expectedText)
+      const platform = []
+      for (const item of evidence.deliveries) {
+        const expectedText = expectedDeliveryText(item.work, item.result)
+        sentReceipt = { messageId: shortHash(item.delivery.providerMessageId), chatId: shortHash(item.conversation.providerConversationId), textSha256: sha256(expectedText), deleted: false, msgType: 'unknown' }
+        platform.push(await verifyLark(config, item.delivery.providerMessageId, item.conversation.providerConversationId, expectedText))
+      }
       assert.equal(browser.errors.console.length, 0); assert.equal(browser.errors.page.length, 0); assert.equal(browser.errors.network.length, 0)
       const media = await finishMedia(join(stage, basename(config.record)), join(stage, basename(artifacts.cover)), join(stage, basename(artifacts.frames)), journey.steps)
-      const report = { ...buildReport(candidate, config, journey, evidence, sentReceipt, media), reportFile: basename(artifacts.report) }
+      const report = { ...buildReport(candidate, config, journey, evidence, platform, media, gearJob), reportFile: basename(artifacts.report) }
       await writeFile(join(stage, 'report.json'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
       await writeFile(join(stage, basename(artifacts.report)), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
       await writeFile(join(stage, 'index.html'), manual(report), { mode: 0o600 })
@@ -79,10 +96,17 @@ async function formalAcceptance(input) {
       failure = error
     }
   } finally {
-    try { await cleanupRuntime({ browser, recorder, chrome, server, xvfb, timers, scratch, paths }) } catch (error) { cleanupError = error }
+    try { await cleanupGearJob(gearJob) } catch (error) { cleanupError = error }
+    try { await cleanupRuntime({ browser, recorder, chrome, server, xvfb, timers, scratch, paths }) } catch (error) { cleanupError ??= error }
   }
   if (!failure && !cleanupError) {
     try {
+      await assertPortAvailable(EVENT_HOST, EVENT_PORT)
+      prepared.report.gearJob.cleanup = gearJob.cleanup
+      prepared.report.gearJob.webhookRequestLogs = gearJob.requestLogs
+      await writeFile(join(stage, 'report.json'), JSON.stringify(prepared.report, null, 2) + '\n', { mode: 0o600 })
+      await writeFile(join(stage, basename(artifacts.report)), JSON.stringify(prepared.report, null, 2) + '\n', { mode: 0o600 })
+      await writeFile(join(stage, 'index.html'), manual(prepared.report), { mode: 0o600 })
       await assertCandidateTerminal(candidate)
       await scanLeaks([stage], secrets)
       await verifyOfflineBundle(stage, prepared.report)
@@ -100,7 +124,7 @@ async function formalAcceptance(input) {
     process.exitCode = 1
     return
   }
-  console.log(JSON.stringify({ ok: true, status: 'evidence-pending', candidate, verdict: prepared.report.verdict, report: artifacts.report, video: artifacts.video, manual: artifacts.manual, materials: 'evidence-ready/pending-delivery', note: 'T7a business passed; operation materials remain evidence-ready/pending delivery and are independently reviewed and delivered by the controller.' }))
+  console.log(JSON.stringify({ ok: true, status: 'evidence-pending', candidate, verdict: prepared.report.verdict, report: artifacts.report, video: artifacts.video, manual: artifacts.manual, materials: 'evidence-ready/pending-delivery', note: 'T7a and T7b business passed on one candidate; operation materials remain evidence-ready/pending delivery and are independently reviewed and delivered by the controller.' }))
 }
 
 async function configureProduct(browser, config, adminPassword, ownerPassword) {
@@ -123,7 +147,7 @@ async function configureProduct(browser, config, adminPassword, ownerPassword) {
   await waitFor(`state.channels.conversations.some(item=>item.id===${JSON.stringify(config.enrollment.conversationId)}&&item.identityId===${JSON.stringify(config.enrollment.identityId)}&&item.type==='private'&&item.status==='active')`)
 }
 
-async function runDailyJourney(browser, config, { stage, framesDir, timers, recordingStartedAt }) {
+async function runCombinedJourney(browser, config, gearJob, restartRuntime, { stage, framesDir, timers, recordingStartedAt }) {
   const { send, evaluate, waitFor } = browser
   const steps = [], screenshots = framesDir, elapsed = () => (Date.now() - recordingStartedAt) / 1000
   await mkdir(screenshots, { recursive: true, mode: 0o700 })
@@ -159,12 +183,100 @@ async function runDailyJourney(browser, config, { stage, framesDir, timers, reco
   const publicFacts = await evaluate(`(()=>{const occurrence=state.automationDetail.occurrences.find(item=>item.workId),work=state.bootstrap.works.find(item=>item.id===occurrence.workId),result=work.results.at(-1),delivery=state.channels.deliveries.find(item=>item.id===occurrence.deliveryId);return {ruleId:state.automationDetail.rule.id,occurrenceId:occurrence.id,scheduledDate:occurrence.scheduledDate,workId:work.id,executionId:work.executions.at(-1)?.id,resultId:result.id,deliveryId:delivery.id,targetConversationId:delivery.targetConversationId,source:result.source,payload:result.payload,resultKind:result.kind,toolName:result.toolName,dshSessionRef:result.dshSessionRef,dshEventCount:work.executions.at(-1)?.dshEventCount,deliveryStatus:delivery.status}})()`)
   assert.equal(publicFacts.source.sourceRecordId, `Work Order:${config.workOrderId}`); assert.equal(publicFacts.source.dataMode, 'synthetic')
   assert.ok(Math.abs(Date.parse(localDateTimeIso(publicFacts.scheduledDate, time)) - Date.parse(targetIso)) <= 60_000)
-  return { ruleId, targetIso, formReadyAt, steps, public: publicFacts }
+  const daily = { ruleId, targetIso, formReadyAt, public: publicFacts }
+  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+  await pointerClick(browser, '#new-automation')
+  await evaluate(`(()=>{const binding=document.querySelector('#automation-binding');binding.value=binding.querySelector('option:not([value=""])').value;binding.dispatchEvent(new Event('input'));const notice=document.querySelector('#automation-notification');notice.value=notice.querySelector('option:not([value=""])').value;notice.dispatchEvent(new Event('input'));const order=document.querySelector('#automation-order');order.value=${JSON.stringify(config.workOrderId)};order.dispatchEvent(new Event('input'));const trigger=document.querySelector('#automation-trigger');trigger.value='gearjob-work-order-update';trigger.dispatchEvent(new Event('input'));const budget=document.querySelector('#automation-budget');budget.value='3';budget.dispatchEvent(new Event('input'));document.querySelector('#automation-form').requestSubmit()})()`)
+  await waitFor(`state.automationDetail?.rule?.workOrderId===${JSON.stringify(config.workOrderId)}&&state.automationDetail.rule.trigger.kind==='gearjob-work-order-update'&&state.automationDetail.rule.status==='draft'`)
+  const eventRuleId = await evaluate(`state.automationDetail.rule.id`)
+  assert.equal(await evaluate(`document.querySelector('#automation-time-field').classList.contains('hidden')&&!document.querySelector('#automation-time').required`), true)
+  const eventEnableFacts = await mobilePreflightCheck(browser, '[data-rule-action="enable"]')
+  await tap(browser, '[data-rule-action="enable"]')
+  await waitFor(`state.automationDetail?.rule?.id===${JSON.stringify(eventRuleId)}&&state.automationDetail.rule.status==='active'`)
+  await captureStep('05', '390px 创建并启用 GearJob 事件规则', '验证真实移动端可配置事件来源并开始等待 after-commit Webhook', 'active + event source ready + no daily control', `(()=>({status:state.automationDetail.rule.status,kind:state.automationDetail.rule.trigger.kind,sourceId:state.automationDetail.rule.trigger.sourceId,overflow:document.documentElement.scrollWidth<=390,enablePreflight:${JSON.stringify(eventEnableFacts)}}))()`)
+  await startGearJobWorker(gearJob)
+  const first = await saveGearJobWorkOrder(gearJob)
+  await waitForEventCompletions(browser, eventRuleId, 1, timers)
+  await evaluate(`openAutomation(${JSON.stringify(eventRuleId)})`)
+  await captureStep('06', 'Frappe 正常保存提交触发事件主链', '验证 after-commit Webhook、GearJob 重读、DSH、ZenMux 和飞书闭环', 'one event occurrence + completed work + delivered result', `(()=>{const items=state.automationDetail.occurrences.filter(item=>item.event&&item.workId),item=items[0],work=state.bootstrap.works.find(value=>value.id===item.workId),delivery=state.channels.deliveries.find(value=>value.id===item.deliveryId);return {occurrences:items.length,sourceRevision:item.event.sourceRevision,status:work.status,deliveryStatus:delivery.status}})()`)
+  const firstEvent = await evaluate(`state.automationDetail.occurrences.find(item=>item.event?.sourceRevision===${JSON.stringify(first.modified)}).event`)
+  const raw = gearJobBody(config.workOrderId, first.modified)
+  assert.equal(sha256(raw), firstEvent.digest, 'reconstructed raw body must equal Frappe webhook bytes')
+  const beforeReplay = await eventCounts(browser, eventRuleId)
+  assert.equal((await postGearJobEvent(gearJob, raw)).status, 200)
+  assert.deepEqual(await eventCounts(browser, eventRuleId), beforeReplay)
+  const conflict = Buffer.from(raw.toString('utf8').replace('{"source"', '{ "source"'))
+  assert.equal((await postGearJobEvent(gearJob, conflict)).status, 409)
+  assert.deepEqual(await eventCounts(browser, eventRuleId), beforeReplay)
+  await evaluate(`document.querySelector('[data-rule-action="pause"]').scrollIntoView({block:'center'})`)
+  await mobilePreflightCheck(browser, '[data-rule-action="pause"]')
+  await tap(browser, '[data-rule-action="pause"]')
+  await waitFor(`state.automationDetail?.rule?.status==='paused'`)
+  await evaluate(`document.querySelector('[data-rule-action="resume"]').scrollIntoView({block:'center'})`)
+  await mobilePreflightCheck(browser, '[data-rule-action="resume"]')
+  await tap(browser, '[data-rule-action="resume"]')
+  await waitFor(`state.automationDetail?.rule?.status==='active'`)
+  const old = gearJobBody(config.workOrderId, gearJob.originalModified)
+  assert.equal((await postGearJobEvent(gearJob, old)).status, 200)
+  await waitFor(`reloadAll().then(()=>openAutomation(${JSON.stringify(eventRuleId)})).then(()=>state.automationDetail.occurrences.some(item=>item.event?.sourceRevision===${JSON.stringify(gearJob.originalModified)}&&item.status==='skipped'&&item.reason==='before-active-window'&&!item.workId))`)
+  await captureStep('07', '暂停并恢复后拒绝旧事件', '验证 active window 不把暂停期间旧事实补跑为工作', 'skipped before-active-window + no work', `(()=>{const item=state.automationDetail.occurrences.find(value=>value.event?.sourceRevision===${JSON.stringify(gearJob.originalModified)});return {status:item.status,reason:item.reason,workCreated:Boolean(item.workId),ruleStatus:state.automationDetail.rule.status}})()`)
+  const second = await saveGearJobWorkOrder(gearJob)
+  assert.ok(first.modified < second.modified)
+  await waitForEventCompletions(browser, eventRuleId, 2, timers)
+  await evaluate(`openAutomation(${JSON.stringify(eventRuleId)})`)
+  await captureStep('08', '恢复后新 Frappe 保存再次触发', '验证新 source revision 被正常受理且没有复用旧工作', 'two distinct completed works and deliveries', `(()=>{const items=state.automationDetail.occurrences.filter(item=>item.event&&item.workId),works=items.map(item=>state.bootstrap.works.find(value=>value.id===item.workId)),deliveries=items.map(item=>state.channels.deliveries.find(value=>value.id===item.deliveryId));return {accepted:items.length,sourceRevisions:items.map(item=>item.event.sourceRevision),workStatuses:works.map(item=>item.status),deliveryStatuses:deliveries.map(item=>item.status)}})()`)
+  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
+  const beforeRestart = await eventCounts(browser, eventRuleId)
+  await restartRuntime()
+  await pointerClick(browser, '[data-view="works"]')
+  await evaluate(`openAutomation(${JSON.stringify(eventRuleId)})`)
+  await waitFor(`state.automationDetail?.rule?.id===${JSON.stringify(eventRuleId)}&&state.automationDetail.rule.status==='active'`)
+  assert.deepEqual(await eventCounts(browser, eventRuleId), beforeRestart)
+  assert.equal((await postGearJobEvent(gearJob, raw)).status, 200)
+  assert.deepEqual(await eventCounts(browser, eventRuleId), beforeRestart)
+  await captureStep('09', '正常重启并重投已受理事件', '验证同一 state 的历史、活动规则和去重事实在正常重启后保持', 'history retained + active + replay 200 + no new work', `(()=>({status:state.automationDetail.rule.status,occurrences:state.automationDetail.occurrences.length,works:state.automationDetail.occurrences.filter(item=>item.workId).length}))()`)
+  const revokeClick = pointerClick(browser, '[data-rule-action="revoke"]')
+  await browser.waitForDialog()
+  await send('Page.handleJavaScriptDialog', { accept: true })
+  await revokeClick
+  await waitFor(`state.automationDetail?.rule?.status==='revoked'`)
+  const beforeRevokedSave = await eventCounts(browser, eventRuleId)
+  const third = await saveGearJobWorkOrder(gearJob)
+  assert.ok(second.modified < third.modified)
+  await waitGearJobRequestLogs(gearJob, 3, 30_000)
+  assert.deepEqual(await eventCounts(browser, eventRuleId), beforeRevokedSave)
+  await captureStep('10', '撤销规则后再次正常保存工单', '验证真实 Webhook 仍到达但已撤销规则不产生 occurrence、work 或 delivery', 'revoked + webhook ignored + zero new business records', `(()=>({status:state.automationDetail.rule.status,occurrences:state.automationDetail.occurrences.length,works:state.automationDetail.occurrences.filter(item=>item.workId).length,deliveries:state.automationDetail.occurrences.filter(item=>item.deliveryId).length}))()`)
+  gearJob.completedJourney = true
+  return { ruleId, targetIso, formReadyAt, daily, event: { ruleId: eventRuleId, firstModified: first.modified, secondModified: second.modified, thirdModified: third.modified, replayStatus: 200, conflictStatus: 409, restartReplayStatus: 200, revokedSaveIgnored: true, oldModified: gearJob.originalModified }, steps, public: publicFacts }
 }
+
+async function waitForEventCompletions(browser, ruleId, count, timers) {
+  const deadline = Date.now() + 4 * 60_000
+  while (Date.now() < deadline) {
+    const done = await browser.evaluate(`reloadAll().then(()=>openAutomation(${JSON.stringify(ruleId)})).then(()=>{const items=state.automationDetail?.occurrences?.filter(item=>item.event&&item.workId)||[];return items.filter(item=>state.bootstrap.works.find(value=>value.id===item.workId)?.status==='completed'&&state.channels.deliveries.find(value=>value.id===item.deliveryId)?.status==='delivered').length>=${count}})`)
+    if (done) return
+    await delay(2_000, timers)
+  }
+  throw new Error(`event work did not complete: ${count}`)
+}
+
+async function eventCounts(browser, ruleId) { await browser.evaluate(`reloadAll().then(()=>openAutomation(${JSON.stringify(ruleId)}))`); return browser.evaluate(`(()=>{const items=state.automationDetail.occurrences;return {occurrences:items.length,works:items.filter(item=>item.workId).length}})()`) }
+function gearJobBody(workOrderId, modified) { return Buffer.from(JSON.stringify({ source: EVENT_SOURCE_ID, event: 'on_update', doctype: 'Work Order', name: workOrderId, modified }).replaceAll('":', '": ').replaceAll(',"', ', "')) }
+async function postGearJobEvent(context, body) {
+  const code = `import base64,hashlib,hmac,os,urllib.request,urllib.error\nbody=base64.b64decode(os.environ['GW_BODY'])\nsecret=open(os.environ['GW_SECRET_FILE'],'rb').read().strip()\nsignature=base64.b64encode(hmac.new(secret,body,hashlib.sha256).digest()).decode()\nrequest=urllib.request.Request('http://172.20.0.1:39471/p5/gearjob/work-order',data=body,headers={'Content-Type':'application/json','X-Frappe-Webhook-Signature':signature},method='POST')\ntry:\n print(urllib.request.urlopen(request,timeout=5).status)\nexcept urllib.error.HTTPError as error:\n print(error.code)`
+  const status = Number(await capture('docker', ['exec', '-e', `GW_BODY=${body.toString('base64')}`, '-e', `GW_SECRET_FILE=${context.containerSecret}`, 'deploy-frappe-1', 'python', '-c', code]))
+  return { status }
+}
+async function gearJobRequestLogs(context) { const output = await gearJobConsole(`
+import json, os, frappe
+logs=frappe.get_all('Webhook Request Log',filters={'webhook':os.environ['GW_WEBHOOK']},fields=['response','error'])
+print('GW_ACCEPT_LOGS ' + json.dumps({'count':len(logs),'accepted':sum(bool(row.response) and json.loads(row.response).get('status') == 'accepted' for row in logs),'errors':sum(bool(row.error) for row in logs)}))
+`, { GW_WEBHOOK: context.webhook }); return parseConsoleJson(output, 'GW_ACCEPT_LOGS ') }
+async function waitGearJobRequestLogs(context, count, timeout) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { const summary = await gearJobRequestLogs(context); if (summary.count >= count) return summary; await new Promise(resolveWait => setTimeout(resolveWait, 250)) } throw new Error(`GearJob Webhook Request Log did not reach ${count}`) }
 
 async function readback(statePath, dshPath, journey, config) {
   const state = JSON.parse(await readFile(statePath, 'utf8'))
-  const rule = state.automationRules.find(item => item.id === journey.ruleId)
+  const rule = state.automationRules.find(item => item.id === journey.daily.ruleId)
   const occurrence = state.automationOccurrences.find(item => item.ruleId === rule?.id && item.workId)
   const work = state.works.find(item => item.id === occurrence?.workId)
   const result = work?.results?.at(-1)
@@ -184,7 +296,26 @@ async function readback(statePath, dshPath, journey, config) {
   const dsh = await dshEvidence(dshPath, result.dshSessionRef); assert.ok(dsh.sessionCount >= 1 && dsh.eventCount >= execution.dshEventCount)
   assert.ok(Math.abs(Date.parse(localDateTimeIso(occurrence.scheduledDate, rule.trigger.time)) - Date.parse(journey.targetIso)) <= 60_000)
   assert.ok(Date.parse(journey.targetIso) - journey.formReadyAt >= 90_000)
-  return { rule, occurrence, work, execution, result, delivery, conversation, route, dsh }
+  const eventRule = state.automationRules.find(item => item.id === journey.event.ruleId)
+  const eventOccurrences = state.automationOccurrences.filter(item => item.ruleId === eventRule?.id)
+  const accepted = eventOccurrences.filter(item => item.workId).sort((left, right) => left.event.sourceRevision.localeCompare(right.event.sourceRevision))
+  const skipped = eventOccurrences.find(item => item.event?.sourceRevision === journey.event.oldModified)
+  assert.ok(eventRule); assert.equal(eventRule.trigger.kind, 'gearjob-work-order-update'); assert.equal(eventRule.trigger.sourceId, EVENT_SOURCE_ID); assert.equal(eventRule.status, 'revoked')
+  assert.equal(accepted.length, 2); assert.deepEqual(accepted.map(item => item.event.sourceRevision), [journey.event.firstModified, journey.event.secondModified]); assert.ok(accepted.every(item => /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{6}$/.test(item.event.sourceRevision)))
+  assert.ok(skipped); assert.equal(skipped.status, 'skipped'); assert.equal(skipped.reason, 'before-active-window'); assert.equal(skipped.workId, null)
+  const eventDeliveries = []
+  for (const item of accepted) {
+    const eventWork = state.works.find(value => value.id === item.workId)
+    const eventResult = eventWork?.results?.at(-1)
+    const eventExecution = eventWork?.executions?.find(value => value.resultId === eventResult?.id) ?? eventWork?.executions?.at(-1)
+    const eventDelivery = state.deliveries.find(value => value.id === item.deliveryId)
+    const eventConversation = state.channelConversations.find(value => value.id === eventDelivery?.targetConversationId)
+    assert.ok(eventWork && eventResult && eventExecution && eventDelivery && eventConversation)
+    assert.equal(eventWork.status, 'completed'); assert.equal(eventDelivery.status, 'delivered'); assert.equal(eventResult.kind, 'gearjob.work-order.observation'); assert.equal(eventResult.toolName, 'geneway_gearjob_read_work_order'); assert.equal(eventResult.source.sourceRecordId, `Work Order:${config.workOrderId}`); assert.equal(eventResult.source.sourceRevision, item.event.sourceRevision); assert.equal(eventResult.source.sourceEnvironment, 'external-test'); assert.equal(eventResult.source.dataMode, 'synthetic'); assert.ok(eventResult.dshSessionRef); assert.ok(eventExecution.dshEventCount > 0)
+    const eventDsh = await dshEvidence(dshPath, eventResult.dshSessionRef); assert.ok(eventDsh.sessionCount >= 1 && eventDsh.eventCount >= eventExecution.dshEventCount)
+    eventDeliveries.push({ occurrence: item, work: eventWork, result: eventResult, execution: eventExecution, delivery: eventDelivery, conversation: eventConversation, dsh: eventDsh })
+  }
+  return { rule, occurrence, work, execution, result, delivery, conversation, route, dsh, event: { rule: eventRule, occurrences: eventOccurrences, accepted: eventDeliveries, skipped }, deliveries: [{ occurrence, work, result, execution, delivery, conversation, dsh }, ...eventDeliveries] }
 }
 
 async function verifyLark(config, messageId, chatId, expectedText) {
@@ -213,8 +344,171 @@ async function createFixture(paths, config, adminPassword, ownerPassword) {
   await writeFile(paths.catalog, JSON.stringify({ version: 1, targets: [{ kind: 'gearjob-rest', targetIdentity: 'gearjob-p5', baseUrl: config.gearJobUrl, hostHeader: config.gearJobHost, credentialRef: 'gearjob.json', sourceSystem: 'GearJob', sourceInstance: 'dev.localhost', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest' }] }) + '\n', { mode: 0o600 })
   await run(process.execPath, ['scripts/init-p2-auth.mjs', '--mode', 'bootstrap', '--state', paths.state, '--auth', paths.auth], { env: { ...process.env, GENEWAY_ADMIN_PASSWORD: adminPassword, GENEWAY_MEMBER_PASSWORD: ownerPassword } })
   await seedEnrollment(paths.state, config.enrollment, config.feishuAppId, config.feishuTenantId)
+  await writeFile(paths.eventSecret, randomBytes(48).toString('base64url'), { mode: 0o600 })
   for (const path of [paths.state, paths.auth, paths.catalog, join(paths.secrets, 'gearjob.json'), join(paths.secrets, FEISHU_CREDENTIAL_REF)]) assert.equal((await stat(path)).mode & 0o777, 0o600)
+  assert.equal((await stat(paths.eventSecret)).mode & 0o777, 0o600)
 }
+
+async function prepareGearJob(config, paths) {
+  const runId = `geneway-p5-${Date.now()}-${process.pid}`
+  const context = { runId, workOrderId: config.workOrderId, webhook: `Geneway P5 Acceptance ${runId}`, secretFile: paths.eventSecret, containerSecret: `/tmp/${runId}.secret`, workerPid: `/tmp/${runId}.worker.pid`, workerLog: `/tmp/${runId}.worker.log`, defaultBefore: '', longBefore: '', prepared: false, workerStarted: false }
+  try {
+    assert.equal(await capture('git', ['rev-parse', 'HEAD'], { cwd: '/home/gewu/work/gearjob' }), GEARJOB_COMMIT)
+    assert.equal(await capture('docker', ['exec', 'deploy-frappe-1', 'git', '-C', '/workspace/gearjob', 'rev-parse', 'HEAD']), GEARJOB_COMMIT)
+    await run('git', ['diff', '--quiet', '--exit-code'], { cwd: '/home/gewu/work/gearjob' })
+    await run('git', ['diff', '--cached', '--quiet', '--exit-code'], { cwd: '/home/gewu/work/gearjob' })
+    await run('docker', ['exec', 'deploy-frappe-1', 'git', '-C', '/workspace/gearjob', 'diff', '--quiet', '--exit-code'])
+    await run('docker', ['exec', 'deploy-frappe-1', 'git', '-C', '/workspace/gearjob', 'diff', '--cached', '--quiet', '--exit-code'])
+    const networks = JSON.parse(await capture('docker', ['inspect', 'deploy-frappe-1', '--format', '{{json .NetworkSettings.Networks}}']))
+    const network = Object.values(networks).find(item => item.IPAddress === EVENT_SOURCE_ADDRESS && item.Gateway === EVENT_HOST)
+    assert.ok(network, 'GearJob Docker bridge identity drifted')
+    context.defaultBefore = await redisQueue('default')
+    context.longBefore = await redisQueue('long')
+    assert.equal(context.longBefore, '', 'dedicated long queue must be empty before acceptance')
+    await run('docker', ['cp', paths.eventSecret, `deploy-frappe-1:${context.containerSecret}`])
+    await run('docker', ['exec', 'deploy-frappe-1', 'chmod', '600', context.containerSecret])
+    context.webhookMayExist = true
+    const output = await gearJobConsole(`
+import json, os, frappe
+from pathlib import Path
+frappe.set_user('Administrator')
+name = os.environ['GW_WO']
+webhook_name = os.environ['GW_WEBHOOK']
+assert frappe.db.exists('Work Order', name)
+assert not frappe.db.exists('Webhook', webhook_name)
+doc = frappe.get_doc('Work Order', name)
+secret = Path(os.environ['GW_SECRET_FILE']).read_text().strip()
+webhook = frappe.get_doc({'doctype':'Webhook','name':webhook_name,'webhook_doctype':'Work Order','webhook_docevent':'on_update','enabled':1,'condition':f'doc.name == {name!r}','request_url':'http://172.20.0.1:39471/p5/gearjob/work-order','timeout':5,'background_jobs_queue':'long','request_method':'POST','request_structure':'JSON','enable_security':1,'webhook_secret':secret,'webhook_headers':[{'key':'Content-Type','value':'application/json'}],'webhook_json':'{"source":"gearjob:dev.localhost","event":"on_update","doctype":"Work Order","name":"{{ doc.name }}","modified":"{{ doc.modified }}"}'})
+webhook.insert(ignore_permissions=True)
+frappe.db.commit()
+print('GW_ACCEPT_SETUP ' + json.dumps({'workOrder':name,'webhook':webhook.name,'originalQty':float(doc.qty),'originalModified':str(doc.modified),'timezone':frappe.get_system_settings('time_zone')}))
+`, { GW_WO: config.workOrderId, GW_WEBHOOK: context.webhook, GW_SECRET_FILE: context.containerSecret })
+    const setup = parseConsoleJson(output, 'GW_ACCEPT_SETUP ')
+    assert.equal(setup.workOrder, config.workOrderId); assert.equal(setup.webhook, context.webhook); assert.equal(setup.timezone, 'Asia/Chongqing'); assert.match(setup.originalModified, /\.\d{6}$/)
+    Object.assign(context, setup, { prepared: true })
+    return context
+  } catch (error) {
+    await cleanupGearJob(context).catch(() => undefined)
+    throw error
+  }
+}
+
+async function startGearJobWorker(context) {
+  context.workerLaunchAttempted = true
+  await run('docker', ['exec', '-d', '-e', `GW_PID_FILE=${context.workerPid}`, '-e', `GW_LOG_FILE=${context.workerLog}`, 'deploy-frappe-1', 'bash', '-lc', 'echo $$ > "$GW_PID_FILE"; cd /workspace/development/frappe-bench; exec bench --site dev.localhost worker --queue long > "$GW_LOG_FILE" 2>&1'])
+  for (let index = 0; index < 100; index += 1) {
+    const ready = await capture('docker', ['exec', 'deploy-frappe-1', 'sh', '-lc', 'test -s "$1" && kill -0 "$(cat "$1")" && echo ready', 'sh', context.workerPid]).catch(() => '')
+    if (ready === 'ready') { context.workerStarted = true; return }
+    await new Promise(resolveWait => setTimeout(resolveWait, 100))
+  }
+  throw new Error('GearJob long worker failed to start')
+}
+
+async function saveGearJobWorkOrder(context, delta = 1) {
+  const output = await gearJobConsole(`
+import json, os, frappe
+frappe.set_user('Administrator')
+doc = frappe.get_doc('Work Order', os.environ['GW_WO'])
+doc.qty = float(doc.qty) + float(os.environ['GW_DELTA'])
+doc.save(ignore_permissions=True)
+frappe.db.commit()
+print('GW_ACCEPT_UPDATE ' + json.dumps({'modified':str(doc.modified),'qty':float(doc.qty)}))
+`, { GW_WO: context.workOrderId, GW_DELTA: String(delta) })
+  const update = parseConsoleJson(output, 'GW_ACCEPT_UPDATE ')
+  assert.match(update.modified, /\.\d{6}$/)
+  context.lastModified = update.modified
+  return update
+}
+
+async function cleanupGearJob(context) {
+  if (!context) return
+  const hasDatabaseState = context.prepared || context.webhookMayExist
+  await bestEffortCleanup([
+    async () => {
+      if (!hasDatabaseState) return
+      await gearJobConsole(`
+import os, frappe
+frappe.set_user('Administrator')
+webhook = os.environ['GW_WEBHOOK']
+if frappe.db.exists('Webhook', webhook): frappe.delete_doc('Webhook', webhook, ignore_permissions=True, force=True)
+frappe.db.commit()
+print('GW_ACCEPT_WEBHOOK_REMOVED')
+`, { GW_WEBHOOK: context.webhook })
+    },
+    async () => { if (context.workerLaunchAttempted) await waitQueueEmpty('long', 30_000) },
+    async () => { if (context.workerLaunchAttempted) await run('docker', ['exec', 'deploy-frappe-1', 'sh', '-lc', 'test ! -s "$1" || kill -TERM "$(cat "$1")" 2>/dev/null || true', 'sh', context.workerPid]) },
+    async () => {
+      if (!context.workerLaunchAttempted) return
+      for (let index = 0; index < 100; index += 1) {
+        const running = await capture('docker', ['exec', 'deploy-frappe-1', 'sh', '-lc', 'test -s "$1" && kill -0 "$(cat "$1")" 2>/dev/null && echo yes || true', 'sh', context.workerPid])
+        if (!running) return
+        await new Promise(resolveWait => setTimeout(resolveWait, 100))
+      }
+      await run('docker', ['exec', 'deploy-frappe-1', 'sh', '-lc', 'test ! -s "$1" || kill -KILL "$(cat "$1")" 2>/dev/null || true', 'sh', context.workerPid])
+      const running = await capture('docker', ['exec', 'deploy-frappe-1', 'sh', '-lc', 'test -s "$1" && kill -0 "$(cat "$1")" 2>/dev/null && echo yes || true', 'sh', context.workerPid])
+      assert.equal(running, '', 'GearJob long worker did not stop')
+    },
+    async () => {
+      if (!context.workerLaunchAttempted) return
+      const log = await capture('docker', ['exec', 'deploy-frappe-1', 'sh', '-lc', 'test -f "$1" && cat "$1" || true', 'sh', context.workerLog])
+      const queued = (await redisQueue('long')).split('\n').filter(Boolean)
+      context.jobIds = [...new Set([...log.matchAll(/\((dev\.localhost\|\|[0-9a-f-]{36})\)/g)].map(match => match[1]).concat(queued))]
+      await cleanupRqJobs(context.jobIds)
+    },
+    async () => {
+      if (!hasDatabaseState) return
+      const summaryOutput = await gearJobConsole(`
+import json, os, frappe
+frappe.set_user('Administrator')
+webhook = os.environ['GW_WEBHOOK']
+name = os.environ['GW_WO']
+logs = frappe.get_all('Webhook Request Log', filters={'webhook':webhook}, fields=['response','error'])
+print('GW_ACCEPT_LOGS ' + json.dumps({'count':len(logs),'accepted':sum(bool(row.response) and json.loads(row.response).get('status') == 'accepted' for row in logs),'errors':sum(bool(row.error) for row in logs)}))
+if frappe.db.exists('Webhook', webhook): frappe.delete_doc('Webhook', webhook, ignore_permissions=True, force=True)
+for row in frappe.get_all('Webhook Request Log', filters={'webhook':webhook}, pluck='name'): frappe.delete_doc('Webhook Request Log', row, ignore_permissions=True, force=True)
+if os.environ.get('GW_ORIGINAL_QTY') and frappe.db.exists('Work Order', name):
+    doc = frappe.get_doc('Work Order', name)
+    if float(doc.qty) != float(os.environ['GW_ORIGINAL_QTY']):
+        doc.qty = float(os.environ['GW_ORIGINAL_QTY'])
+        doc.save(ignore_permissions=True)
+frappe.db.commit()
+print('GW_ACCEPT_CLEANUP_OK')
+`, { GW_WEBHOOK: context.webhook, GW_WO: context.workOrderId, GW_ORIGINAL_QTY: context.originalQty === undefined ? '' : String(context.originalQty) })
+      context.requestLogs = parseConsoleJson(summaryOutput, 'GW_ACCEPT_LOGS ')
+      if (context.completedJourney) assert.deepEqual(context.requestLogs, { count: 3, accepted: 2, errors: 0 })
+    },
+    async () => { await run('docker', ['exec', 'deploy-frappe-1', 'rm', '-f', context.containerSecret, context.workerPid, context.workerLog]) },
+    async () => {
+      if (!context.prepared) return
+      assert.equal(await redisQueue('default'), context.defaultBefore, 'default queue IDs changed')
+      assert.equal(await redisQueue('long'), '', 'long queue is not empty after acceptance')
+    },
+    async () => {
+      if (!context.prepared) return
+      const output = await gearJobConsole(`
+import json, os, frappe
+print('GW_ACCEPT_POST ' + json.dumps({'webhook':bool(frappe.db.exists('Webhook',os.environ['GW_WEBHOOK'])),'logs':frappe.db.count('Webhook Request Log',{'webhook':os.environ['GW_WEBHOOK']}),'qty':float(frappe.db.get_value('Work Order',os.environ['GW_WO'],'qty'))}))
+`, { GW_WEBHOOK: context.webhook, GW_WO: context.workOrderId })
+      const post = parseConsoleJson(output, 'GW_ACCEPT_POST ')
+      assert.deepEqual(post, { webhook: false, logs: 0, qty: context.originalQty })
+    },
+  ])
+  if (context.prepared) context.cleanup = { webhookRemoved: true, requestLogsRemoved: true, workOrderQuantityRestored: true, sourceRevisionAdvancedByAcceptance: true, workerStopped: true, generatedJobsRemoved: context.jobIds?.length ?? 0, secretRemoved: true, listenerStoppedByRuntimeCleanup: true, defaultQueueIdsUnchanged: true, longQueueEmpty: true }
+}
+
+async function bestEffortCleanup(actions) { let firstError; for (const action of actions) { try { await action() } catch (error) { firstError ??= error } } if (firstError) throw firstError }
+
+async function gearJobConsole(code, env = {}) {
+  const args = ['exec', '-i']
+  for (const [name, value] of Object.entries(env)) args.push('-e', `${name}=${value}`)
+  args.push('deploy-frappe-1', 'bash', '-lc', 'cd /workspace/development/frappe-bench && bench --site dev.localhost console')
+  return capture('docker', args, { input: `exec(${JSON.stringify(code)})\nexit()\n` })
+}
+
+function parseConsoleJson(output, marker) { const line = output.split(/\r?\n/).find(value => value.includes(marker)); if (!line) throw new Error(`GearJob console marker missing: ${marker.trim()}`); return JSON.parse(line.slice(line.indexOf(marker) + marker.length)) }
+async function redisQueue(name) { return capture('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', '--raw', 'LRANGE', `rq:queue:workspace-development-frappe-bench:${name}`, '0', '-1']) }
+async function waitQueueEmpty(name, timeout) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { if (await redisQueue(name) === '') return; await new Promise(resolveWait => setTimeout(resolveWait, 250)) } throw new Error(`${name} queue did not drain`) }
+async function cleanupRqJobs(ids) { const queue = 'rq:queue:workspace-development-frappe-bench:long'; for (const id of ids) { await run('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', 'LREM', queue, '0', id]); await run('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', 'DEL', `rq:job:${id}`]); const keys = (await capture('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', '--scan', '--pattern', 'rq:*long*'])).split('\n').filter(key => key && key !== queue); for (const key of keys) await run('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', 'ZREM', key, id]).catch(() => undefined) } }
 
 async function seedEnrollment(statePath, enrollment, providerAppId, providerTenantId) {
   const state = JSON.parse(await readFile(statePath, 'utf8')), now = new Date().toISOString()
@@ -225,7 +519,7 @@ async function seedEnrollment(statePath, enrollment, providerAppId, providerTena
 }
 
 async function startServer(paths, origin, port, config) {
-  const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, env: { ...process.env, GENEWAY_PORT: String(port), GENEWAY_STATE: paths.state, GENEWAY_AUTH_FILE: paths.auth, GENEWAY_CONNECTION_CATALOG: paths.catalog, GENEWAY_SECRET_ROOT: paths.secrets, GENEWAY_DSH_HOME: paths.dsh, GENEWAY_TRUSTED_ORIGIN: origin, GENEWAY_GEARJOB_BASE_URL: config.gearJobUrl, GENEWAY_GEARJOB_CREDENTIAL_FILE: join(paths.secrets, 'gearjob.json'), GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: config.workOrderId, GENEWAY_GEARJOB_HOST_HEADER: config.gearJobHost, GENEWAY_GEARJOB_TARGET_IDENTITY: 'gearjob-p5' }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, env: { ...process.env, GENEWAY_PORT: String(port), GENEWAY_STATE: paths.state, GENEWAY_AUTH_FILE: paths.auth, GENEWAY_CONNECTION_CATALOG: paths.catalog, GENEWAY_SECRET_ROOT: paths.secrets, GENEWAY_DSH_HOME: paths.dsh, GENEWAY_TRUSTED_ORIGIN: origin, GENEWAY_GEARJOB_BASE_URL: config.gearJobUrl, GENEWAY_GEARJOB_CREDENTIAL_FILE: join(paths.secrets, 'gearjob.json'), GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: config.workOrderId, GENEWAY_GEARJOB_HOST_HEADER: config.gearJobHost, GENEWAY_GEARJOB_TARGET_IDENTITY: 'gearjob-p5', GENEWAY_GEARJOB_EVENT_SECRET_FILE: paths.eventSecret, GENEWAY_GEARJOB_EVENT_SOURCE_ID: EVENT_SOURCE_ID, GENEWAY_GEARJOB_EVENT_SOURCE_ADDRESS: EVENT_SOURCE_ADDRESS, GENEWAY_GEARJOB_EVENT_HOST: EVENT_HOST, GENEWAY_GEARJOB_EVENT_PORT: String(EVENT_PORT) }, stdio: ['ignore', 'pipe', 'pipe'] })
   let error = ''; child.stderr.on('data', chunk => { error = (error + chunk).slice(-4_000) })
   for (let index = 0; index < 200; index += 1) { if (child.exitCode !== null) throw Object.assign(new Error(`Geneway failed: ${redact(error)}`), { process: child }); try { if ((await fetch(origin)).ok) return child } catch {}; await new Promise(resolveWait => setTimeout(resolveWait, 100)) }
   throw Object.assign(new Error('Geneway startup timed out'), { process: child })
@@ -234,15 +528,16 @@ async function startServer(paths, origin, port, config) {
 async function connectBrowser(port, origin) {
   const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(), target = targets.find(item => item.type === 'page' && item.url.startsWith(origin)) ?? targets.find(item => item.type === 'page')
   if (!target) throw new Error('Chrome page target unavailable')
-  const socket = new WebSocket(target.webSocketDebuggerUrl), pending = new Map(); let sequence = 0
+  const socket = new WebSocket(target.webSocketDebuggerUrl), pending = new Map(); let sequence = 0, dialogOpen = false, dialogWaiter
   const errors = { console: [], page: [], network: [] }
   await new Promise((resolveOpen, rejectOpen) => { socket.onopen = resolveOpen; socket.onerror = rejectOpen })
-  socket.onmessage = event => { const message = JSON.parse(event.data), request = pending.get(message.id); if (request) { pending.delete(message.id); return message.error ? request.reject(new Error(message.error.message)) : request.resolve(message.result) } if (message.method === 'Runtime.exceptionThrown') errors.page.push('exception'); if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') errors.console.push('console'); if (message.method === 'Network.loadingFailed' && !message.params.canceled) errors.network.push('network') }
+  socket.onmessage = event => { const message = JSON.parse(event.data), request = pending.get(message.id); if (request) { pending.delete(message.id); return message.error ? request.reject(new Error(message.error.message)) : request.resolve(message.result) } if (message.method === 'Page.javascriptDialogOpening') { dialogOpen = true; dialogWaiter?.(); dialogWaiter = undefined } if (message.method === 'Runtime.exceptionThrown') errors.page.push('exception'); if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') errors.console.push('console'); if (message.method === 'Network.loadingFailed' && !message.params.canceled) errors.network.push('network') }
   const send = (method, params = {}) => new Promise((resolveSend, rejectSend) => { const id = ++sequence; pending.set(id, { resolve: resolveSend, reject: rejectSend }); socket.send(JSON.stringify({ id, method, params })) })
   const evaluate = async expression => { const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, userGesture: true }); if (result.exceptionDetails) throw new Error('browser evaluation failed'); return result.result.value }
   const waitFor = async (expression, timeout = 30_000) => { const deadline = Date.now() + timeout; while (Date.now() < deadline) { if (await evaluate(expression).catch(() => false)) return; await new Promise(resolveWait => setTimeout(resolveWait, 250)) } throw new Error(`browser wait timed out: ${redact(expression.slice(0, 120))}`) }
+  const waitForDialog = async (timeout = 5_000) => { if (dialogOpen) { dialogOpen = false; return } await Promise.race([new Promise(resolveDialog => { dialogWaiter = () => { dialogOpen = false; resolveDialog() } }), new Promise((_resolve, rejectDialog) => setTimeout(() => rejectDialog(new Error('browser dialog timed out')), timeout))]) }
   await send('Runtime.enable'); await send('Network.enable'); await send('Page.enable'); await send('Accessibility.enable'); await send('Page.navigate', { url: origin }); await waitFor(`location.origin===${JSON.stringify(origin)}&&document.readyState==='complete'`)
-  return { socket, send, evaluate, waitFor, errors }
+  return { socket, send, evaluate, waitFor, waitForDialog, errors }
 }
 
 async function login(evaluate, waitFor, name, password) {
@@ -284,7 +579,7 @@ function safeRecord(value) { if (typeof value !== 'string' || !value.toLowerCase
 async function validateRecord(value) { const path = safeRecord(value); if (dirname(path) !== artifactRoot) throw new Error('--record must be a file directly under artifacts/p5-acceptance'); const artifacts = artifactPaths(path); for (const target of [artifacts.video, artifacts.report, artifacts.manual, artifacts.cover, failureReceiptPath(path)]) await ensurePromotionTarget(target); await ensurePromotionTarget(artifacts.frames, true); return path }
 async function privateFile(value, label) { if (!value || !isAbsolute(value)) throw new Error(`${label} path must be absolute`); const path = resolve(value), info = await lstat(path); if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o777) !== 0o600) throw new Error(`${label} must be a non-symlink 0600 regular file`); return path }
 function artifactPaths(record) { const dir = dirname(record), stem = basename(record).replace(/\.mp4$/i, ''); return { root: artifactRoot, video: record, report: join(dir, `${stem}.report.json`), manual: join(dir, `${stem}.html`), cover: join(dir, `${stem}.png`), frames: join(dir, `${stem}-frames`) } }
-function fixturePaths(path) { return { root: path, state: join(path, 'state.json'), auth: join(path, 'auth.json'), catalog: join(path, 'connections.json'), secrets: join(path, 'secrets'), dsh: join(path, 'dsh'), chrome: join(path, 'chrome'), lock: join(path, '.geneway-automation.lock') } }
+function fixturePaths(path) { return { root: path, state: join(path, 'state.json'), auth: join(path, 'auth.json'), catalog: join(path, 'connections.json'), secrets: join(path, 'secrets'), eventSecret: join(path, 'gearjob-event.secret'), dsh: join(path, 'dsh'), chrome: join(path, 'chrome'), lock: join(path, '.geneway-automation.lock') } }
 function chromeArgs(profile, port, origin) { return ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--disable-background-networking', '--password-store=basic', '--window-size=1440,900', '--window-position=0,0', '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, `--app=${origin}`] }
 function startRecorder(display, path) { return { process: spawn('ffmpeg', ['-y', '-video_size', '1440x900', '-framerate', '25', '-f', 'x11grab', '-i', `${display}.0`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', path], { stdio: ['pipe', 'ignore', 'pipe'] }), startedAt: Date.now() } }
 async function stopRecorder(recorder) { if (!recorder?.process || recorder.process.exitCode !== null) return; recorder.process.stdin.write('q'); const code = await new Promise(resolveExit => recorder.process.once('exit', resolveExit)); if (code !== 0) throw new Error('ffmpeg failed') }
@@ -312,11 +607,11 @@ async function scanLeaks(targets, secrets) { const needles = secrets.filter(valu
 async function listFiles(path) { try { const info = await lstat(path); if (info.isSymbolicLink()) throw new Error(`symlink is not an artifact: ${path}`); if (info.isFile()) return [path]; if (!info.isDirectory()) return []; const names = await readdir(path, { recursive: true, withFileTypes: true }); return names.filter(item => item.isFile()).map(item => join(item.parentPath ?? item.path, item.name)) } catch (error) { if (error.code === 'ENOENT') return []; throw error } }
 function isWithin(parent, candidate) { const child = relative(resolve(parent), resolve(candidate)); return child === '' || (!child.startsWith('..') && !isAbsolute(child)) }
 async function dshEvidence(path, sessionRef) { const files = await listFiles(path), sessions = files.filter(file => file.split('/').includes(sessionRef) || basename(file).includes(sessionRef)); const contents = await Promise.all(sessions.map(async file => file.endsWith('.zstd') ? capture('zstd', ['-dc', file]) : file.endsWith('.gz') ? capture('gzip', ['-dc', file]) : readFile(file, 'utf8'))); return { sessionCount: sessions.length, eventCount: contents.reduce((sum, raw) => sum + raw.split(/\r?\n/).filter(Boolean).length, 0), sessionHash: sessions[0] ? shortHash(sessions[0]) : undefined } }
-function manual(report) { const materials = report.verdict?.materials === 'passed' ? 'passed' : 'evidence-ready/pending delivery'; return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Geneway P5 T7a 验收</title><style>body{font:16px/1.6 system-ui;max-width:960px;margin:auto;padding:32px;color:#17352c}section{border:1px solid #ccdcd3;border-radius:12px;padding:18px;margin:18px 0}img{max-width:100%;height:auto}dt{font-weight:700}</style><h1>P5 T7a 每日自动工作验收</h1><p>结论：T7a business passed；操作材料 ${materials}；P5 conditional，GearJob 事件分支 unavailable。</p><p><a href="${basename(report.media.video)}">验收视频</a> · <a href="${basename(report.media.cover)}">封面</a> · <a href="${escapeHtml(report.reportFile ?? 'report.json')}">报告</a></p>${report.journey.steps.map(step => `<section><h2>步骤 ${escapeHtml(step.id)}：${escapeHtml(step.action)}</h2><dl><dt>目的</dt><dd>${escapeHtml(step.purpose)}</dd><dt>预期</dt><dd>${escapeHtml(step.expected)}</dd><dt>观察</dt><dd>${escapeHtml(JSON.stringify(step.observed))}</dd><dt>视频时间段</dt><dd>${step.startSeconds.toFixed(3)}s–${step.endSeconds.toFixed(3)}s</dd></dl><img src="${escapeHtml(step.image)}" alt="${escapeHtml(step.action)}"></section>`).join('')}</html>` }
+function manual(report) { const materials = report.verdict?.materials === 'passed' ? 'passed' : 'evidence-ready/pending delivery'; return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Geneway P5 组合验收</title><style>body{font:16px/1.6 system-ui;max-width:960px;margin:auto;padding:32px;color:#17352c}section{border:1px solid #ccdcd3;border-radius:12px;padding:18px;margin:18px 0}img{max-width:100%;height:auto}dt{font-weight:700}</style><h1>P5 定时与事件自动工作组合验收</h1><p>结论：T7a 与 T7b business passed；P5 conditional，待独立复核与材料交付；操作材料 ${materials}。P4 企业微信与真人最终验收仍 deferred。</p><p><a href="${basename(report.media.video)}">验收视频</a> · <a href="${basename(report.media.cover)}">封面</a> · <a href="${escapeHtml(report.reportFile ?? 'report.json')}">报告</a></p>${report.journey.steps.map(step => `<section><h2>步骤 ${escapeHtml(step.id)}：${escapeHtml(step.action)}</h2><dl><dt>目的</dt><dd>${escapeHtml(step.purpose)}</dd><dt>预期</dt><dd>${escapeHtml(step.expected)}</dd><dt>观察</dt><dd>${escapeHtml(JSON.stringify(step.observed))}</dd><dt>视频时间段</dt><dd>${step.startSeconds.toFixed(3)}s–${step.endSeconds.toFixed(3)}s</dd></dl><img src="${escapeHtml(step.image)}" alt="${escapeHtml(step.action)}"></section>`).join('')}</html>` }
 async function verifyOfflineBundle(stage, report) { const html = await readFile(join(stage, 'index.html'), 'utf8'); const links = [...html.matchAll(/(?:href|src)="([^"]+)"/g)].map(match => match[1]); assert.equal(links.some(link => /^[a-z]+:|^\/\//i.test(link)), false); const files = await listFiles(stage); for (const link of links) { const target = resolve(stage, link); assert.ok(isWithin(stage, target), `offline link escapes stage: ${link}`); const info = await lstat(target); assert.equal(info.isFile(), true, `offline link missing: ${link}`); if (/\.png$/i.test(target) || /\.mp4$/i.test(target)) await run('ffmpeg', ['-v', 'error', '-i', target, '-f', 'null', '-']) } assert.ok(files.some(file => file.endsWith('.mp4'))); assert.equal(report.media.steps.length, report.journey.steps.length); const movable = await mkdtemp(join(tmpdir(), 'geneway-p5-bundle-')); try { for (const file of files) { const target = join(movable, relative(stage, file)); await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await copyFile(file, target) } for (const link of links) assert.equal(await access(join(movable, link)).then(() => true).catch(() => false), true) } finally { await rm(movable, { recursive: true, force: true }) } }
 function stringsFrom(value, found = []) { if (typeof value === 'string') found.push(value); else if (Array.isArray(value)) for (const item of value) stringsFrom(item, found); else if (value && typeof value === 'object') for (const item of Object.values(value)) stringsFrom(item, found); return found }
 async function checkHarness() {
-  const scratch = await mkdtemp(join(tmpdir(), 'geneway-p5-harness-check-')); try { await chmod(scratch, 0o700); const paths = fixturePaths(scratch); await mkdir(paths.secrets, { recursive: true, mode: 0o700 }); await writeFile(paths.state, '{}', { mode: 0o600 }); assert.equal((await stat(paths.state)).mode & 0o777, 0o600); assert.deepEqual(parseArgs(['--', '--record', 'artifacts/p5-acceptance/demo.mp4', '--lark-profile', 'safe', '--enrollment-user-id', 'ou_test', '--enrollment-message-id', 'om_test', '--enrollment-chat-id', 'oc_test']), { record: 'artifacts/p5-acceptance/demo.mp4', larkProfile: 'safe', enrollmentUserId: 'ou_test', enrollmentMessageId: 'om_test', enrollmentChatId: 'oc_test' }); assert.match(FEISHU_CREDENTIAL_REF, /^[A-Z][A-Z0-9_]{2,127}$/); assert.doesNotMatch(readbackEnrollment.toString(), /messages-send/); assert.match(readbackEnrollment.toString(), /messages-mget|verifyLark/); assert.match(readbackEnrollment.toString(), /chat_mode.*p2p/); assert.ok(safeRecord('artifacts/p5-acceptance/demo.mp4').endsWith('.mp4')); assert.throws(() => safeRecord('/tmp/escape.mp4')); assert.throws(() => safeRecord('../escape.mp4')); await assert.rejects(validateRecord('artifacts/p5-acceptance/nested/demo.mp4'), /directly under/); assert.match(validateRecord.toString(), /artifacts\.video.*artifacts\.report.*artifacts\.manual.*artifacts\.cover.*failureReceiptPath/); assert.match(ensurePromotionTarget.toString(), /fresh non-existing/); const canary = 'HARNESS_SECRET_CANARY'; const clean = join(scratch, 'clean.txt'); await writeFile(clean, 'safe', { mode: 0o600 }); await scanLeaks([clean], [canary]); const dirty = join(scratch, 'dirty.txt'); await writeFile(dirty, canary, { mode: 0o600 }); await assert.rejects(scanLeaks([dirty], [canary]), /secret leak/); assert.deepEqual(fixturePaths('/tmp/p5').state, '/tmp/p5/state.json'); assert.deepEqual(chromeArgs('/tmp/profile', 9222, 'http://127.0.0.1:3471').some(value => value.includes('9222')), true); assert.ok(nextSafeMinute(new Date(0), 90_000).getTime() >= 90_000); const report = { media: { video: 'demo.mp4', cover: 'demo.png', steps: ['screenshots/step-01.png'] }, journey: { steps: [{ id: '01', action: 'x', purpose: 'y', expected: 'z', observed: {}, startSeconds: 0, endSeconds: 1, image: 'screenshots/step-01.png' }] } }; assert.match(manual(report), /screenshots\/step-01\.png/); assert.equal(report.verdict?.materials, undefined); const order = ['stop-ws', 'stop-chrome', 'stop-server', 'stop-timer', 'stop-ffmpeg', 'reacquire-lock', 'residual-sweep', 'scratch-cleanup', 'candidate-check', 'artifact-scan', 'promote', 'output']; assert.ok(order.indexOf('output') > order.indexOf('artifact-scan')); const verdict = { t7a: 'business-passed', materials: 'evidence-ready/pending-delivery', p5: 'conditional', t7b: 'unavailable' }; assert.equal(verdict.t7a, 'business-passed'); assert.equal(verdict.materials, 'evidence-ready/pending-delivery'); assert.notEqual(verdict.p5, 'passed') } finally { await rm(scratch, { recursive: true, force: true }); await assert.rejects(stat(scratch), error => error.code === 'ENOENT') }
+  const scratch = await mkdtemp(join(tmpdir(), 'geneway-p5-harness-check-')); try { await chmod(scratch, 0o700); const paths = fixturePaths(scratch); await mkdir(paths.secrets, { recursive: true, mode: 0o700 }); await writeFile(paths.state, '{}', { mode: 0o600 }); assert.equal((await stat(paths.state)).mode & 0o777, 0o600); assert.deepEqual(parseArgs(['--', '--record', 'artifacts/p5-acceptance/demo.mp4', '--lark-profile', 'safe', '--enrollment-user-id', 'ou_test', '--enrollment-message-id', 'om_test', '--enrollment-chat-id', 'oc_test']), { record: 'artifacts/p5-acceptance/demo.mp4', larkProfile: 'safe', enrollmentUserId: 'ou_test', enrollmentMessageId: 'om_test', enrollmentChatId: 'oc_test' }); assert.match(FEISHU_CREDENTIAL_REF, /^[A-Z][A-Z0-9_]{2,127}$/); assert.doesNotMatch(readbackEnrollment.toString(), /messages-send/); assert.match(readbackEnrollment.toString(), /messages-mget|verifyLark/); assert.match(readbackEnrollment.toString(), /chat_mode.*p2p/); assert.match(startServer.toString(), /GENEWAY_GEARJOB_EVENT_SECRET_FILE.*EVENT_SOURCE_ID.*EVENT_SOURCE_ADDRESS.*EVENT_HOST.*EVENT_PORT/); assert.match(prepareGearJob.toString(), /GEARJOB_COMMIT.*diff.*--cached.*deploy-frappe-1.*Asia\/Chongqing/s); assert.match(saveGearJobWorkOrder.toString(), /doc\.save\(ignore_permissions=True\).*frappe\.db\.commit\(\)/s); const combinedSource = runCombinedJourney.toString(); for (const pattern of [/restartRuntime/, /restartReplayStatus/, /data-rule-action=\\?"revoke/, /thirdModified/]) assert.match(combinedSource, pattern); assert.match(cleanupGearJob.toString(), /bestEffortCleanup.*default queue IDs changed.*long queue is not empty.*GW_ACCEPT_POST/s); const cleanupEffects = []; await assert.rejects(bestEffortCleanup([async () => { cleanupEffects.push('early'); throw new Error('injected-cleanup-failure') }, async () => { cleanupEffects.push('worker-stop') }, async () => { cleanupEffects.push('secret-remove') }]), /injected-cleanup-failure/); assert.deepEqual(cleanupEffects, ['early', 'worker-stop', 'secret-remove']); assert.ok(safeRecord('artifacts/p5-acceptance/demo.mp4').endsWith('.mp4')); assert.throws(() => safeRecord('/tmp/escape.mp4')); assert.throws(() => safeRecord('../escape.mp4')); await assert.rejects(validateRecord('artifacts/p5-acceptance/nested/demo.mp4'), /directly under/); assert.match(validateRecord.toString(), /artifacts\.video.*artifacts\.report.*artifacts\.manual.*artifacts\.cover.*failureReceiptPath/); assert.match(ensurePromotionTarget.toString(), /fresh non-existing/); const canary = 'HARNESS_SECRET_CANARY'; const clean = join(scratch, 'clean.txt'); await writeFile(clean, 'safe', { mode: 0o600 }); await scanLeaks([clean], [canary]); const dirty = join(scratch, 'dirty.txt'); await writeFile(dirty, canary, { mode: 0o600 }); await assert.rejects(scanLeaks([dirty], [canary]), /secret leak/); assert.deepEqual(fixturePaths('/tmp/p5').eventSecret, '/tmp/p5/gearjob-event.secret'); assert.deepEqual(chromeArgs('/tmp/profile', 9222, 'http://127.0.0.1:3471').some(value => value.includes('9222')), true); assert.ok(nextSafeMinute(new Date(0), 90_000).getTime() >= 90_000); const report = { media: { video: 'demo.mp4', cover: 'demo.png', steps: ['screenshots/step-01.png'] }, journey: { steps: [{ id: '01', action: 'x', purpose: 'y', expected: 'z', observed: {}, startSeconds: 0, endSeconds: 1, image: 'screenshots/step-01.png' }] } }; assert.match(manual(report), /screenshots\/step-01\.png/); assert.equal(report.verdict?.materials, undefined); const verdict = { t7a: 'business-passed', t7b: 'business-passed', p5: 'conditional', materials: 'evidence-ready/pending-delivery' }; assert.equal(verdict.t7a, 'business-passed'); assert.equal(verdict.t7b, 'business-passed'); assert.notEqual(verdict.p5, 'passed'); assert.equal(verdict.materials, 'evidence-ready/pending-delivery') } finally { await rm(scratch, { recursive: true, force: true }); await assert.rejects(stat(scratch), error => error.code === 'ENOENT') }
 }
 function findObjects(value, predicate, found = []) { if (Array.isArray(value)) for (const item of value) findObjects(item, predicate, found); else if (value && typeof value === 'object') { if (predicate(value)) found.push(value); for (const item of Object.values(value)) findObjects(item, predicate, found) } return found }
 function stringValue(value, keys) { for (const key of keys) if (typeof value?.[key] === 'string') { try { const parsed = JSON.parse(value[key]); return typeof parsed?.text === 'string' ? parsed.text : value[key] } catch { return value[key] } } return '' }
@@ -328,12 +623,16 @@ function nextSafeMinute(now, marginMs) { const target = new Date(Math.ceil((now.
 function timeInZone(value, timeZone) { const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(value).filter(item => item.type === 'hour' || item.type === 'minute').map(item => [item.type, item.value])); return `${parts.hour === '24' ? '00' : parts.hour}:${parts.minute}` }
 function localDateTimeIso(date, time) { return new Date(Date.parse(`${date}T${time}:00.000Z`) - 8 * 60 * 60_000).toISOString() }
 function expectedDeliveryText(work, result) { const fact = result.payload ?? {}, source = result.source ?? fact; return [`工单：${fact.workOrderId ?? work.input?.workOrderId ?? '未知'}`, `状态：${fact.status ?? work.status}`, `计划/完成量：${fact.plannedQuantity ?? '未知'}/${fact.completedQuantity ?? '未知'}${fact.unit ? ` ${fact.unit}` : ''}`, `来源：${source.sourceSystem ?? '未知'} / ${source.sourceInstance ?? '未知'} / ${source.sourceEnvironment ?? '未知'} / ${source.dataMode ?? '未知'} / ${source.evidenceMode ?? '未知'}`, `Web：/works/${encodeURIComponent(work.id)}`].join('\n') }
-function buildReport(candidate, config, journey, evidence, platform, media) { return { format: 'geneway-p5-t7a-report', version: 2, createdAt: new Date().toISOString(), candidate, verdict: { t7a: 'business-passed', materials: 'evidence-ready/pending-delivery', p5: 'conditional', t7b: 'unavailable', claim: 'T7a business passed; operation materials evidence-ready/pending delivery. GearJob event branch remains unavailable; this is not overall P5 PASS.' }, fixture: { workOrderIdHash: shortHash(config.workOrderId), sourceEnvironment: evidence.result.source.sourceEnvironment, dataMode: evidence.result.source.dataMode, production: false }, enrollment: { status: 'provider-readback', verificationMethod: 'lark-cli-direct-message', memberIdHash: shortHash(evidence.rule.ownerMemberId), identityHash: shortHash(config.enrollment.providerUserId), conversationHash: shortHash(config.enrollment.providerConversationId), verificationRefHash: shortHash(config.enrollment.verificationRef), finalUserAssociation: 'not-claimed' }, journey: { scheduledDate: evidence.occurrence.scheduledDate, targetIso: journey.targetIso, ruleIdHash: shortHash(evidence.rule.id), occurrenceIdHash: shortHash(evidence.occurrence.id), workIdHash: shortHash(evidence.work.id), steps: sanitizeJourneySteps(journey.steps) }, readback: { ruleIdHash: shortHash(evidence.rule.id), occurrenceIdHash: shortHash(evidence.occurrence.id), workIdHash: shortHash(evidence.work.id), executionIdHash: shortHash(evidence.execution.id), resultIdHash: shortHash(evidence.result.id), deliveryIdHash: shortHash(evidence.delivery.id), providerMessageId: platform.messageId, chatId: platform.chatId, scheduledIso: localDateTimeIso(evidence.occurrence.scheduledDate, evidence.rule.trigger.time), dshSession: shortHash(evidence.result.dshSessionRef), dshEventCount: evidence.execution.dshEventCount, dshSessionFiles: evidence.dsh.sessionCount, dshFileEvents: evidence.dsh.eventCount, resultKind: evidence.result.kind, toolName: evidence.result.toolName, source: { ...evidence.result.source, sourceRecordId: shortHash(evidence.result.source.sourceRecordId) }, payload: { plannedQuantity: evidence.result.payload.plannedQuantity, completedQuantity: evidence.result.payload.completedQuantity, unit: evidence.result.payload.unit }, modelRoute: { provider: evidence.route.provider, model: evidence.route.model } }, platform, browser: { consoleErrors: 0, pageErrors: 0, networkErrors: 0, sensitiveSurface: 'DOM/AX/text pre/post checks; screenshot raw bytes are not pixel proof' }, media, delivery: { materialsSent: false, note: '业务消息已独立 Lark readback；操作材料待主控独立复核后交付。' } } }
+function buildReport(candidate, config, journey, evidence, platform, media, gearJob) {
+  const eventReadback = evidence.event.accepted.map((item, index) => ({ occurrenceIdHash: shortHash(item.occurrence.id), workIdHash: shortHash(item.work.id), resultIdHash: shortHash(item.result.id), deliveryIdHash: shortHash(item.delivery.id), sourceRevision: item.occurrence.event.sourceRevision, digestHash: shortHash(item.occurrence.event.digest), dshSession: shortHash(item.result.dshSessionRef), dshEventCount: item.execution.dshEventCount, dshSessionFiles: item.dsh.sessionCount, providerMessageId: platform[index + 1].messageId }))
+  return { format: 'geneway-p5-combined-report', version: 3, createdAt: new Date().toISOString(), candidate, verdict: { t7a: 'business-passed', t7b: 'business-passed', p5: 'conditional', materials: 'evidence-ready/pending-delivery', p4: 'deferred-wecom-and-final-user-acceptance', claim: 'T7a daily timer and T7b real Frappe after-commit event passed on the same frozen candidate, including normal restart and revocation; P5 final PASS remains pending independent review and material delivery.' }, fixture: { workOrderIdHash: shortHash(config.workOrderId), sourceEnvironment: evidence.result.source.sourceEnvironment, dataMode: evidence.result.source.dataMode, production: false }, enrollment: { status: 'provider-readback', verificationMethod: 'lark-cli-direct-message', memberIdHash: shortHash(evidence.rule.ownerMemberId), identityHash: shortHash(config.enrollment.providerUserId), conversationHash: shortHash(config.enrollment.providerConversationId), verificationRefHash: shortHash(config.enrollment.verificationRef), finalUserAssociation: 'not-claimed' }, journey: { scheduledDate: evidence.occurrence.scheduledDate, targetIso: journey.targetIso, dailyRuleIdHash: shortHash(evidence.rule.id), eventRuleIdHash: shortHash(evidence.event.rule.id), steps: sanitizeJourneySteps(journey.steps) }, readback: { daily: { occurrenceIdHash: shortHash(evidence.occurrence.id), workIdHash: shortHash(evidence.work.id), executionIdHash: shortHash(evidence.execution.id), resultIdHash: shortHash(evidence.result.id), deliveryIdHash: shortHash(evidence.delivery.id), scheduledIso: localDateTimeIso(evidence.occurrence.scheduledDate, evidence.rule.trigger.time), dshSession: shortHash(evidence.result.dshSessionRef), dshEventCount: evidence.execution.dshEventCount, providerMessageId: platform[0].messageId }, event: { accepted: eventReadback, replay: { status: journey.event.replayStatus, newWork: false }, conflictingDigest: { status: journey.event.conflictStatus, newWork: false }, beforeActiveWindow: { sourceRevision: journey.event.oldModified, status: evidence.event.skipped.status, reason: evidence.event.skipped.reason, workCreated: false }, restart: { historyRetained: true, ruleStatus: 'active', replayStatus: journey.event.restartReplayStatus, newWork: false }, revocation: { ruleStatus: evidence.event.rule.status, sourceRevision: journey.event.thirdModified, webhookIgnored: journey.event.revokedSaveIgnored, newOccurrence: false, newWork: false, newDelivery: false }, sourcePrecision: 'six-microsecond-digits', sourceTimezone: 'Asia/Chongqing/+08:00' }, resultKind: evidence.result.kind, toolName: evidence.result.toolName, source: { ...evidence.result.source, sourceRecordId: shortHash(evidence.result.source.sourceRecordId) }, payload: { plannedQuantity: evidence.result.payload.plannedQuantity, completedQuantity: evidence.result.payload.completedQuantity, unit: evidence.result.payload.unit }, modelRoute: { provider: evidence.route.provider, model: evidence.route.model } }, gearJob: { commit: GEARJOB_COMMIT, container: 'deploy-frappe-1', site: 'dev.localhost', bridge: `${EVENT_SOURCE_ADDRESS}->${EVENT_HOST}:${EVENT_PORT}`, queue: 'long', defaultQueueIdsBeforeHash: shortHash(gearJob.defaultBefore), longQueueInitiallyEmpty: gearJob.longBefore === '', runtimeCompatibilityPatch: false, webhookRequestLogs: gearJob.requestLogs, cleanup: null }, platform, browser: { consoleErrors: 0, pageErrors: 0, networkErrors: 0, sensitiveSurface: 'DOM/AX/text pre/post checks; screenshot raw bytes are not pixel proof' }, media, delivery: { materialsSent: false, note: '业务消息已逐条 Lark provider readback；组合操作材料待主控独立复核后交付。' } }
+}
 function sanitizeJourneySteps(steps) { return steps.map(step => ({ ...step, observed: sanitizeValue(step.observed) })) }
 function sanitizeValue(value, key = '') { if (typeof value === 'string') return /(?:id|order|conversation|chat|message|session|target)/i.test(key) ? shortHash(value) : value; if (Array.isArray(value)) return value.map(item => sanitizeValue(item, key)); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [childKey, sanitizeValue(child, childKey)])); return value }
 async function alive(child, label) { await new Promise(resolveWait => setTimeout(resolveWait, 500)); if (child.exitCode !== null) throw new Error(`${label} failed to start`) }
 async function waitHttp(url, timeout) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { try { if ((await fetch(url)).ok) return } catch {}; await new Promise(resolveWait => setTimeout(resolveWait, 100)) } throw new Error(`timeout waiting for ${url}`) }
 async function stop(child, signal) { if (!child || child.exitCode !== null) return; child.kill(signal); await Promise.race([new Promise(resolveExit => child.once('exit', resolveExit)), new Promise(resolveWait => setTimeout(resolveWait, 10_000))]); if (child.exitCode === null) child.kill('SIGKILL') }
-async function capture(command, args, options = {}) { const child = spawn(command, args, { cwd: root, env: options.env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'] }); let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk }); child.stderr.on('data', chunk => { stderr += chunk }); const code = await new Promise(resolveExit => child.once('exit', resolveExit)); if (code !== 0) throw new Error(`${command} failed: ${redact(stderr)}`); return stdout.trim() }
+async function capture(command, args, options = {}) { const child = spawn(command, args, { cwd: options.cwd ?? root, env: options.env ?? process.env, stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] }); let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk }); child.stderr.on('data', chunk => { stderr += chunk }); if (options.input !== undefined) child.stdin.end(options.input); const code = await new Promise(resolveExit => child.once('exit', resolveExit)); if (code !== 0) throw new Error(`${command} failed: ${redact(stderr)}`); return stdout.trim() }
 async function run(command, args, options = {}) { await capture(command, args, options) }
 async function freePort() { const server = createNodeServer(); await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen)); const port = server.address().port; await new Promise(resolveClose => server.close(resolveClose)); return port }
+async function assertPortAvailable(host, port) { const server = createNodeServer(); await new Promise((resolveListen, rejectListen) => { server.once('error', rejectListen); server.listen(port, host, resolveListen) }); await new Promise(resolveClose => server.close(resolveClose)) }

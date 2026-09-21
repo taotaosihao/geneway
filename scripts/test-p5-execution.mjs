@@ -185,7 +185,7 @@ async function atomicAndAdmissionChecks() {
           id: workId, ownerMemberId: rule.ownerMemberId, employeeId: rule.employeeId, skillId: rule.skillId,
           capabilityId: 'gearjob-work-order-read', connectionId: rule.connectionId, goal: 'gearjob.work-order.read',
           input: { workOrderId: rule.workOrderId }, requiredInputs: [], status: 'accepted', acceptedAt: options.acceptedAt,
-          results: [], executions: [{ id: executionId, operation: 'automation', clientRequestId: options.occurrenceKey, input: { workOrderId: rule.workOrderId }, status: 'accepted', acceptedAt: options.acceptedAt }],
+          results: [], actions: [], executions: [{ id: executionId, operation: 'automation', clientRequestId: options.occurrenceKey, input: { workOrderId: rule.workOrderId }, status: 'accepted', acceptedAt: options.acceptedAt }],
         } }
       },
       async dispatchAutomationWork(workId, executionId) { calls.push(`dispatch:${workId}:${executionId}`) },
@@ -240,7 +240,7 @@ async function ownerLossBeforeDispatchChecks() {
   const store = { async read() { return structuredClone(state) }, async update(mutator) { state = migrateState(await mutator(structuredClone(state))); return structuredClone(state) } }
   const workService = {
     async ensureReady() {},
-    prepareAutomationWork(_state, rule, options) { return { ok: true, workId: options.workId, executionId: options.executionId, acceptedAt: options.acceptedAt, work: { id: options.workId, ownerMemberId: rule.ownerMemberId, employeeId: rule.employeeId, skillId: rule.skillId, capabilityId: 'gearjob-work-order-read', connectionId: rule.connectionId, input: { workOrderId: rule.workOrderId }, status: 'accepted', acceptedAt: options.acceptedAt, results: [], executions: [{ id: options.executionId, operation: 'automation', status: 'accepted' }] } } },
+    prepareAutomationWork(_state, rule, options) { return { ok: true, workId: options.workId, executionId: options.executionId, acceptedAt: options.acceptedAt, work: { id: options.workId, ownerMemberId: rule.ownerMemberId, employeeId: rule.employeeId, skillId: rule.skillId, capabilityId: 'gearjob-work-order-read', connectionId: rule.connectionId, input: { workOrderId: rule.workOrderId }, status: 'accepted', acceptedAt: options.acceptedAt, results: [], actions: [], executions: [{ id: options.executionId, operation: 'automation', status: 'accepted' }] } } },
     async dispatchAutomationWork() { dispatches += 1 },
   }
   const automation = createAutomationService({ store, workService, clock: () => now, idFactory: () => 'owner-loss' })
@@ -419,7 +419,7 @@ async function admissionHarness({ maxRuns = 3, rules, includeManualWork = false 
   const root = await mkdtemp(join(tmpdir(), 'geneway-p5-admission-'))
   const statePath = join(root, 'state.json')
   const initial = fixture({ maxRuns, rules })
-  if (includeManualWork) initial.works.push({ id: 'manual-work', ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', input: { workOrderId: 'WO-1' }, status: 'running', results: [], executions: [{ id: 'manual-exec', operation: 'create', status: 'running' }] })
+  if (includeManualWork) initial.works.push({ id: 'manual-work', ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', input: { workOrderId: 'WO-1' }, status: 'running', results: [], actions: [], executions: [{ id: 'manual-exec', operation: 'create', status: 'running' }] })
   await writeFile(statePath, JSON.stringify(initial, null, 2) + '\n', { mode: 0o600 })
   const store = createFileStore(statePath)
   let sequence = 0
@@ -456,7 +456,7 @@ async function requestGuardChecks() {
     assert.equal(reads.length, 2)
     const state = fixture({ rules: ['rule-a'] })
     const rule = state.automationRules[0]
-    const work = { id: 'work-1', ownerMemberId: rule.ownerMemberId, employeeId: rule.employeeId, skillId: rule.skillId, capabilityId: 'gearjob-work-order-read', connectionId: rule.connectionId, input: { workOrderId: rule.workOrderId }, status: 'running', results: [], executions: [{ id: 'exec-1', operation: 'automation', status: 'running' }] }
+    const work = { id: 'work-1', ownerMemberId: rule.ownerMemberId, employeeId: rule.employeeId, skillId: rule.skillId, capabilityId: 'gearjob-work-order-read', connectionId: rule.connectionId, input: { workOrderId: rule.workOrderId }, status: 'running', results: [], actions: [], executions: [{ id: 'exec-1', operation: 'automation', status: 'running' }] }
     state.works.push(work)
     state.automationOccurrences.push({ id: 'occurrence-1', occurrenceKey: dailyOccurrenceKey(rule.id, '2026-09-21'), ruleId: rule.id, ruleRevision: rule.revision, scheduledDate: '2026-09-21', workId: work.id, status: null, reason: null, deliveryId: null, createdAt: now })
     grant.connection = connectionSnapshot(state.connections[0])

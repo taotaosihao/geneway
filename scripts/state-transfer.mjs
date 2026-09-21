@@ -5,8 +5,10 @@ import { basename, dirname, join, posix, relative, resolve, sep } from 'node:pat
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import { migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
+import { recoverActionFacts } from '../src/work-service.mjs'
 
-const root = dirname(dirname(fileURLToPath(import.meta.url)))
+const scriptPath = fileURLToPath(import.meta.url)
+const root = dirname(dirname(scriptPath))
 const command = process.argv[2]
 const args = parseArgs(process.argv.slice(3))
 const MANIFEST_VERSION = 2
@@ -14,11 +16,13 @@ const STATE_PATH = 'state.json'
 const SESSION_PATH = /^dsh\/sessions\/[^/]+\/([^/]+)\/session\.v[1-9]\d*\.jsonl(?:\.(?:gz|zstd))?$/
 const ACTIVE_STATUS = new Set(['accepted', 'running', 'cancel_requested'])
 
-if (command === 'backup') await backup(args.output)
-else if (command === 'restore') await restore(args.input, args.dataRoot)
-else {
-  console.error('用法：node scripts/state-transfer.mjs backup --output <空目录> | restore --input <备份目录> --data-root <空目录>')
-  process.exitCode = 2
+if (resolve(process.argv[1] ?? '') === scriptPath) {
+  if (command === 'backup') await backup(args.output)
+  else if (command === 'restore') await restore(args.input, args.dataRoot)
+  else {
+    console.error('用法：node scripts/state-transfer.mjs backup --output <空目录> | restore --input <备份目录> --data-root <空目录>')
+    process.exitCode = 2
+  }
 }
 
 async function backup(outputArg) {
@@ -109,7 +113,7 @@ async function restore(inputArg, dataRootArg) {
     if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
     const stateFile = files.find(item => item.path === STATE_PATH)
     const sourceStateBuffer = await readFileFromStart(stateFile.file.handle)
-    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, STATE_VERSION], migrate: false })
+    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, STATE_VERSION], migrate: false })
     const sessionRefs = collectSessionRefs(sourceState)
     const expectedSchema = schemaSummary(sourceState, sessionRefs)
     if (JSON.stringify(manifest.schema) !== JSON.stringify(expectedSchema)) throw new Error('备份 schema 摘要不匹配')
@@ -193,13 +197,12 @@ function interruptActiveForBackup(state, interruptedAt) {
   return changed ? { ...state, works } : state
 }
 
-function prepareRestoredState(sourceState) {
+export function prepareRestoredState(sourceState, timestamp = new Date().toISOString()) {
   const state = sourceState.version === STATE_VERSION ? structuredClone(sourceState) : migrateState(structuredClone(sourceState))
-  const timestamp = new Date().toISOString()
   const closingLinks = new Set(state.linkCodes.filter(link => ['active', 'matched'].includes(link.status)).map(link => link.id))
   const identityIds = new Set(state.linkCodes.filter(link => closingLinks.has(link.id)).map(link => link.matchedIdentityId).filter(Boolean))
   const conversationIds = new Set(state.linkCodes.filter(link => closingLinks.has(link.id)).map(link => link.matchedConversationId).filter(Boolean))
-  return migrateState({
+  return migrateState(recoverActionFacts({
     ...state,
     automationRules: state.automationRules.map(rule => rule.status === 'active'
       ? { ...rule, status: 'paused', revision: rule.revision + 1, updatedAt: timestamp }
@@ -217,7 +220,7 @@ function prepareRestoredState(sourceState) {
       ? { ...delivery, status: 'unknown', error: { code: 'RECOVERY_UNKNOWN', message: '发送效果待核对' }, updatedAt: timestamp }
       : delivery),
     linkCodes: state.linkCodes.map(link => closingLinks.has(link.id) ? { ...link, status: 'cancelled', updatedAt: timestamp } : link),
-  })
+  }, timestamp))
 }
 
 function parseManifest(buffer) {

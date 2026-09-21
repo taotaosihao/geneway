@@ -25,7 +25,7 @@ function checkMigration() {
   const original = v3Fixture()
   const migrated = migrateState(original)
   const channelKeys = ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']
-  assert.equal(migrated.version, 7)
+  assert.equal(migrated.version, 8)
   assert.deepEqual(migrated.knowledgeMaterials, [])
   for (const key of channelKeys) assert.deepEqual(migrated[key], [])
   assert.deepEqual(migrated.automationRules, [])
@@ -87,7 +87,7 @@ function checkMigration() {
     assert.throws(() => migrateState({ version: 3, [key]: {} }), new RegExp(key))
   }
   assert.throws(() => migrateState({ version: 3, reservations: [] }), /reservations/)
-  assert.throws(() => migrateState({ version: 8 }), /未来/)
+  assert.throws(() => migrateState({ version: 9 }), /未来/)
   assert.throws(() => migrateState({ version: '6' }), /版本无效/)
   assert.throws(() => migrateState({ version: 2 }), /不支持产品状态版本/)
   assert.throws(() => migrateState({ ...original, employees: [{ ...original.employees[0], skillIds: {} }] }), /skillIds/)
@@ -124,6 +124,7 @@ function checkMigration() {
       input: { availableSeconds: 3600, quantity: 60 }, payload: { availableSeconds: 3600, quantity: 60, secondsPerUnit: 60, unit: 'seconds/unit' },
       createdAt: '2026-09-19T00:00:00.000Z', toolName: 'geneway_calculate_cycle_time', pluginId: 'geneway-cycle-time', pluginVersion: '2', dshSessionRef: 'session-cycle', contextConfirmationRefs: [],
     }],
+    actions: [],
     executions: [{ id: 'exec-cycle', resultId: 'result-cycle' }],
   }]
   assert.equal(migrateState(cycleState).works[0].results[0].payload.secondsPerUnit, 60)
@@ -140,7 +141,7 @@ async function checkMigrationFailureDoesNotWrite() {
 
   const damagedCurrent = migrateState(v3Fixture())
   damagedCurrent.knowledgeMaterials = {}
-  for (const [state, pattern] of [[{ ...v3Fixture(), works: {} }, /works/], [damagedCurrent, /knowledgeMaterials/], [{ version: 8 }, /未来/]]) {
+  for (const [state, pattern] of [[{ ...v3Fixture(), works: {} }, /works/], [damagedCurrent, /knowledgeMaterials/], [{ version: 9 }, /未来/]]) {
     const statePath = join(root, `failure-${Math.random()}.json`)
     const raw = JSON.stringify(state)
     await writeFile(statePath, raw, { mode: 0o600 })
@@ -155,7 +156,8 @@ async function checkMigrationFailureDoesNotWrite() {
   const store = createFileStore(statePath)
   await store.update(state => state)
   const persisted = JSON.parse(await readFile(statePath, 'utf8'))
-  assert.equal(persisted.version, 7)
+  assert.equal(persisted.version, 8)
+  assert.ok(persisted.works.every(work => Array.isArray(work.actions)))
   assert.deepEqual(persisted.knowledgeMaterials, [])
   for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.deepEqual(persisted[key], [])
   assert.deepEqual(persisted.automationRules, [])

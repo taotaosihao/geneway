@@ -419,7 +419,7 @@ function fixtureState() {
     works: [
       {
         id: 'work-gear', ownerMemberId: 'member-user', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', status: 'waiting_input',
-        results: [gearObservation, followUp],
+        results: [gearObservation, followUp], actions: [],
         executions: [
           { id: 'execution-a', status: 'completed', dshSessionRef: 'session-a', resultId: 'result-observation' },
           { id: 'execution-b', status: 'interrupted', dshSessionRef: 'session-b', continuedFromDshSessionRef: 'session-a', resultId: 'result-follow-up' },
@@ -427,11 +427,11 @@ function fixtureState() {
       },
       {
         id: 'work-cycle', ownerMemberId: 'member-admin', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', status: 'completed',
-        results: [cycle], executions: [{ id: 'execution-cycle', status: 'completed', dshSessionRef: 'session-cycle', resultId: 'result-cycle' }],
+        results: [cycle], actions: [], executions: [{ id: 'execution-cycle', status: 'completed', dshSessionRef: 'session-cycle', resultId: 'result-cycle' }],
       },
       ...['accepted', 'running', 'cancel_requested'].map((status, index) => ({
         id: `work-active-${index}`, ownerMemberId: 'member-user', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate',
-        status, input: { availableSeconds: 3600, quantity: 60 }, results: [],
+        status, input: { availableSeconds: 3600, quantity: 60 }, results: [], actions: [],
         executions: [{ id: `execution-active-${index}`, operation: 'create', clientRequestId: `active-${index}`, status, acceptedAt: '2026-09-19T04:00:00.000Z' }],
       })),
     ],

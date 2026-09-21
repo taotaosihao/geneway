@@ -1,9 +1,9 @@
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 
-export const STATE_VERSION = 7
+export const STATE_VERSION = 8
 export const KNOWLEDGE_LIMITS = Object.freeze({
   maxMaterials: 100,
   maxBodyBytes: 32 * 1024,
@@ -46,34 +46,54 @@ const EMPTY_STATE = {
   reservations: {},
 }
 
-export function createFileStore(filePath) {
+const DEFAULT_FS_OPS = { mkdir, open, readFile, rename, unlink }
+
+export function createFileStore(filePath, fsOps = {}) {
+  const io = { ...DEFAULT_FS_OPS, ...fsOps }
   let pending = Promise.resolve()
+  const readState = async () => {
+    try {
+      return migrateState(JSON.parse(await io.readFile(filePath, 'utf8')))
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+      return structuredClone(EMPTY_STATE)
+    }
+  }
 
   return {
     async read() {
-      try {
-        return migrateState(JSON.parse(await readFile(filePath, 'utf8')))
-      } catch (error) {
-        if (error?.code !== 'ENOENT') throw error
-        return structuredClone(EMPTY_STATE)
-      }
+      let barrier
+      do {
+        barrier = pending
+        await barrier
+      } while (barrier !== pending)
+      return readState()
     },
 
     update(mutator, options = {}) {
       const operation = pending.then(async () => {
-        const current = await this.read()
+        const current = await readState()
+        const immutableBaseline = structuredClone(current)
         const next = migrateState(await mutator(current))
-        await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
+        assertActionFactsImmutable(immutableBaseline, next)
+        await io.mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
         const fileName = filePath.split('/').pop()
         const tempPath = join(dirname(filePath), `.${fileName}.${process.pid}.tmp`)
-        let committed = false
+        let tempHandle, committed = false
         try {
-          await writeFile(tempPath, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 })
+          tempHandle = await io.open(tempPath, 'w', 0o600)
+          await tempHandle.writeFile(JSON.stringify(next, null, 2) + '\n')
+          await tempHandle.sync()
+          await tempHandle.close()
+          tempHandle = undefined
           await options.beforeCommit?.()
-          await rename(tempPath, filePath)
+          await io.rename(tempPath, filePath)
           committed = true
+          const directoryHandle = await io.open(dirname(filePath), 'r')
+          try { await directoryHandle.sync() } finally { await directoryHandle.close() }
         } finally {
-          if (!committed) await unlink(tempPath).catch(() => undefined)
+          await tempHandle?.close().catch(() => undefined)
+          if (!committed) await io.unlink(tempPath).catch(() => undefined)
         }
         return next
       })
@@ -88,11 +108,12 @@ export function migrateState(value) {
   if (value.version !== undefined && !Number.isInteger(value.version)) throw new Error('产品状态版本无效')
   const version = value.version ?? 3
   if (version > STATE_VERSION) throw new Error(`不支持未来产品状态版本：${version}`)
-  if (version === STATE_VERSION) return normalizeV7(value)
-  if (version === 6) return normalizeV7({ ...normalizeV6(value), version: STATE_VERSION, automationRules: [], automationOccurrences: [] })
-  if (version === 5) return migrateV6ToV7(migrateV5(value))
-  if (version === 4) return migrateV6ToV7(migrateV5(migrateV4(value)))
-  if (version === 3) return migrateV6ToV7(migrateV5(migrateV4(migrateV3(value))))
+  if (version === STATE_VERSION) return normalizeV8(value)
+  if (version === 7) return migrateV7ToV8(normalizeV7(value))
+  if (version === 6) return migrateV7ToV8(migrateV6ToV7(value))
+  if (version === 5) return migrateV7ToV8(migrateV6ToV7(migrateV5(value)))
+  if (version === 4) return migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(value))))
+  if (version === 3) return migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(migrateV3(value)))))
   throw new Error(`不支持产品状态版本：${version}`)
 }
 
@@ -152,7 +173,11 @@ function migrateV5(value) {
 }
 
 function migrateV6ToV7(value) {
-  return normalizeV7({ ...value, version: STATE_VERSION, automationRules: [], automationOccurrences: [] })
+  return normalizeV7({ ...normalizeV6(value), version: 7, automationRules: [], automationOccurrences: [] })
+}
+
+function migrateV7ToV8(value) {
+  return normalizeV8({ ...value, version: STATE_VERSION, works: value.works.map(work => ({ ...work, actions: [] })) })
 }
 
 function migrateEmployee(employee) {
@@ -569,7 +594,116 @@ function normalizeV7(value) {
   }
   for (const delivery of common.deliveries) if (delivery.contentKey.startsWith('automation.') && !deliveryOccurrenceIds.has(delivery.id)) throw new Error(`自动投递 ${delivery.id} 未由发生回链`)
   for (const [ruleId, count] of successfulByRule) if (count > ruleById.get(ruleId).maxRuns) throw new Error(`自动规则 ${ruleId} 累计预算超限`)
-  return { ...common, version: STATE_VERSION, automationRules, automationOccurrences }
+  return { ...common, version: 7, automationRules, automationOccurrences }
+}
+
+function normalizeV8(value) {
+  const common = normalizeV7({ ...value, version: 7 })
+  const works = common.works.map(work => {
+    const actions = requiredArray(work, 'actions').map(action => normalizeAction(action, work))
+    uniqueIds(actions, `工作 ${work.id} 的动作`)
+    if (new Set(actions.map(action => action.proposalKey)).size !== actions.length) throw new Error(`工作 ${work.id} 的动作 proposalKey 重复`)
+    return { ...work, actions }
+  })
+  return { ...common, version: STATE_VERSION, works }
+}
+
+function normalizeAction(action, work) {
+  if (!record(action)) throw new Error(`工作 ${work.id} 的动作状态无效`)
+  exactKeys(action, ['id', 'proposalKey', 'intent', 'preview', 'decision', 'attempt', 'receipt'], `工作 ${work.id} 的动作`)
+  const id = requiredText(action.id, `工作 ${work.id} 的动作 ID 无效`)
+  const proposalKey = requiredText(action.proposalKey, `动作 ${id} proposalKey 无效`)
+  const intent = action.intent
+  if (!record(intent)) throw new Error(`动作 ${id} intent 无效`)
+  exactKeys(intent, ['kind', 'targetKey'], `动作 ${id} intent`)
+  requiredText(intent.kind, `动作 ${id} intent kind 无效`)
+  requiredText(intent.targetKey, `动作 ${id} intent targetKey 无效`)
+  const preview = action.preview
+  if (!record(preview)) throw new Error(`动作 ${id} preview 无效`)
+  exactKeys(preview, ['digest', 'resultId', 'target', 'payload', 'expectedRevision', 'createdAt', 'expiresAt'], `动作 ${id} preview`)
+  if (!/^[a-f0-9]{64}$/.test(requiredText(preview.digest, `动作 ${id} preview digest 无效`))) throw new Error(`动作 ${id} preview digest 无效`)
+  if (!work.results.some(result => result.id === requiredText(preview.resultId, `动作 ${id} resultId 无效`))) throw new Error(`动作 ${id} 引用不存在的结果`)
+  if (!record(preview.target) || !record(preview.payload)) throw new Error(`动作 ${id} target 或 payload 无效`)
+  requiredText(preview.expectedRevision, `动作 ${id} expectedRevision 无效`)
+  const createdAt = isoTimestamp(preview.createdAt, `动作 ${id} createdAt`)
+  const expiresAt = isoTimestamp(preview.expiresAt, `动作 ${id} expiresAt`)
+  if (expiresAt <= createdAt) throw new Error(`动作 ${id} expiresAt 无效`)
+
+  const decision = action.decision === null ? null : normalizeActionDecision(action.decision, id, preview.digest)
+  const attempt = action.attempt === null ? null : normalizeActionAttempt(action.attempt, id, preview.digest)
+  const receipt = action.receipt === null ? null : normalizeActionReceipt(action.receipt, id, preview.digest)
+  if (decision && decision.memberId !== work.ownerMemberId) throw new Error(`动作 ${id} decision memberId 不是工作 owner`)
+  if (attempt && (decision?.kind !== 'approved' || decision.invalidatedAt)) throw new Error(`动作 ${id} attempt 与批准不闭合`)
+  if (receipt && !attempt) throw new Error(`动作 ${id} receipt 未回链 attempt`)
+  return { id, proposalKey, intent, preview, decision, attempt, receipt }
+}
+
+function normalizeActionDecision(decision, id, digest) {
+  if (!record(decision)) throw new Error(`动作 ${id} decision 无效`)
+  exactKeys(decision, ['kind', 'memberId', 'previewDigest', 'decidedAt', 'invalidatedAt', 'invalidationReason'], `动作 ${id} decision`)
+  if (!['approved', 'rejected', 'revoked', 'expired'].includes(decision.kind)) throw new Error(`动作 ${id} decision kind 无效`)
+  requiredText(decision.memberId, `动作 ${id} decision memberId 无效`)
+  if (decision.previewDigest !== digest) throw new Error(`动作 ${id} decision digest 不闭合`)
+  isoTimestamp(decision.decidedAt, `动作 ${id} decidedAt`)
+  const invalidated = decision.invalidatedAt !== undefined || decision.invalidationReason !== undefined
+  if (invalidated && (decision.invalidatedAt === undefined || decision.invalidationReason === undefined)) throw new Error(`动作 ${id} decision invalidation 不闭合`)
+  if (decision.invalidatedAt !== undefined) isoTimestamp(decision.invalidatedAt, `动作 ${id} invalidatedAt`)
+  if (decision.invalidationReason !== undefined) requiredText(decision.invalidationReason, `动作 ${id} invalidationReason 无效`)
+  return decision
+}
+
+function normalizeActionAttempt(attempt, id, digest) {
+  if (!record(attempt)) throw new Error(`动作 ${id} attempt 无效`)
+  exactKeys(attempt, ['previewDigest', 'preparedAt', 'unknownAt', 'unknownReason'], `动作 ${id} attempt`)
+  if (attempt.previewDigest !== digest) throw new Error(`动作 ${id} attempt digest 不闭合`)
+  isoTimestamp(attempt.preparedAt, `动作 ${id} preparedAt`)
+  const unknown = attempt.unknownAt !== undefined || attempt.unknownReason !== undefined
+  if (unknown && (attempt.unknownAt === undefined || attempt.unknownReason === undefined)) throw new Error(`动作 ${id} unknown 不闭合`)
+  if (attempt.unknownAt !== undefined) isoTimestamp(attempt.unknownAt, `动作 ${id} unknownAt`)
+  if (attempt.unknownReason !== undefined) requiredText(attempt.unknownReason, `动作 ${id} unknownReason 无效`)
+  return attempt
+}
+
+function normalizeActionReceipt(receipt, id, digest) {
+  if (!record(receipt)) throw new Error(`动作 ${id} receipt 无效`)
+  exactKeys(receipt, ['previewDigest', 'upstreamRecordId', 'recordedAt'], `动作 ${id} receipt`)
+  if (receipt.previewDigest !== digest) throw new Error(`动作 ${id} receipt digest 不闭合`)
+  requiredText(receipt.upstreamRecordId, `动作 ${id} upstreamRecordId 无效`)
+  isoTimestamp(receipt.recordedAt, `动作 ${id} recordedAt`)
+  return receipt
+}
+
+function assertActionFactsImmutable(current, next) {
+  const nextWorkById = new Map(next.works.map(work => [work.id, work]))
+  for (const work of current.works) {
+    const nextWork = nextWorkById.get(work.id)
+    if (!nextWork) {
+      if (work.actions.length) throw new Error(`工作 ${work.id} 的动作不可删除`)
+      continue
+    }
+    const nextActionById = new Map(nextWork.actions.map(action => [action.id, action]))
+    for (const action of work.actions) {
+      const candidate = nextActionById.get(action.id)
+      if (!candidate || JSON.stringify(candidate.preview) !== JSON.stringify(action.preview)) throw new Error(`动作 ${action.id} preview 不可改写`)
+      if (candidate.proposalKey !== action.proposalKey) throw new Error(`动作 ${action.id} proposalKey 不可改写`)
+      if (JSON.stringify(candidate.intent) !== JSON.stringify(action.intent)) throw new Error(`动作 ${action.id} intent 不可改写`)
+      if (action.decision) assertMonotonicFact(action.decision, candidate.decision, action.decision.kind === 'approved' ? ['invalidatedAt', 'invalidationReason'] : [], `动作 ${action.id} decision`)
+      assertMonotonicFact(action.attempt, candidate.attempt, ['unknownAt', 'unknownReason'], `动作 ${action.id} attempt`)
+      if (action.receipt !== null && JSON.stringify(candidate.receipt) !== JSON.stringify(action.receipt)) throw new Error(`动作 ${action.id} receipt 不可改写`)
+    }
+  }
+}
+
+function assertMonotonicFact(current, next, additions, label) {
+  if (current === null) return
+  if (next === null) throw new Error(`${label} 不可删除`)
+  const currentBase = { ...current }, nextBase = { ...next }
+  for (const key of additions) {
+    delete currentBase[key]
+    delete nextBase[key]
+    if (current[key] !== undefined && next[key] !== current[key]) throw new Error(`${label} 不可改写`)
+  }
+  if (JSON.stringify(currentBase) !== JSON.stringify(nextBase)) throw new Error(`${label} 不可改写`)
 }
 
 function normalizeAutomationRule(rule) {

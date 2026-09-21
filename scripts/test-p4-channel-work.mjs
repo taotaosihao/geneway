@@ -179,6 +179,7 @@ async function commandBranches() {
   const gate = active.runner.holdNext()
   await active.workService.followUp(active.owner, created.workId, '已在执行的追问', { clientRequestId: 'direct-active' })
   await waitWork(active, created.workId, work => work.status === 'running')
+  await waitUntil(() => active.runner.calls.length === 2)
   const beforeCalls = active.runner.calls.length
   const notApplied = await active.channelService.handleInbound(inbound('active-follow', `补充 ${created.workId} 不应应用`))
   assert.equal(notApplied.kind, 'not-applied')
@@ -376,7 +377,7 @@ function catalogTarget() {
 }
 
 function fixtureWork(id, ownerMemberId) {
-  return { id, ownerMemberId, employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', goal: 'fixture', input: { workOrderId: 'WO-1' }, requiredInputs: [], status: 'completed', acceptedAt: '2026-09-20T00:00:00.000Z', results: [], executions: [] }
+  return { id, ownerMemberId, employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', goal: 'fixture', input: { workOrderId: 'WO-1' }, requiredInputs: [], status: 'completed', acceptedAt: '2026-09-20T00:00:00.000Z', results: [], actions: [], executions: [] }
 }
 
 function stubRunner() {

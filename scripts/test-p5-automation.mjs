@@ -198,7 +198,7 @@ async function derivedChecks() {
   assert.equal(nextDailyOccurrence(effectiveTomorrow, '2026-09-20T01:00:00.000Z', []), '2026-09-22T00:00:00.000Z')
   assert.equal(nextDailyOccurrence(rule, '2026-09-22T01:00:00.000Z', []), '2026-09-23T00:00:00.000Z')
   assert.equal(nextDailyOccurrence(rule, '2026-09-19T23:00:00.000Z', [{ ruleId: rule.id, scheduledDate: '2026-09-20', workId: 'work-back' }]), '2026-09-21T00:00:00.000Z')
-  const work = { id: 'work-1', ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', input: { workOrderId: 'WO-1' }, status: 'completed', results: [], executions: [] }
+  const work = { id: 'work-1', ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', input: { workOrderId: 'WO-1' }, status: 'completed', results: [], actions: [], executions: [] }
   state.current = migrateState({ ...state.current, works: [work], automationRules: [{ ...state.current.automationRules[0], status: 'revoked', effectiveFrom: state.current.automationRules[0].effectiveFrom, revokedAt: state.clock, revision: 7 }], automationOccurrences: [{ id: 'occurrence-1', occurrenceKey: dailyOccurrenceKey(state.current.automationRules[0].id, '2026-09-20'), ruleId: state.current.automationRules[0].id, ruleRevision: 7, scheduledDate: '2026-09-20', workId: 'work-1', status: null, reason: null, deliveryId: null, createdAt: state.clock }] })
   assert.equal(deriveUsedRuns(state.current.automationRules[0], state.current.automationOccurrences), 1)
   await assert.rejects(store.update(current => ({ ...current, automationOccurrences: [{ ...current.automationOccurrences[0], status: 'skipped', reason: 'bad' }] })), /结果不闭合/)
@@ -214,11 +214,12 @@ async function migrationChecks() {
       if (version < 6) for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) delete value[key]
     }
     const migrated = migrateState(value)
-    assert.equal(migrated.version, 7)
+    assert.equal(migrated.version, 8)
+    assert.ok(migrated.works.every(work => Array.isArray(work.actions)))
     assert.deepEqual(migrated.automationRules, [])
     assert.deepEqual(migrated.automationOccurrences, [])
   }
-  assert.throws(() => migrateState({ version: 8 }), /未来/)
+  assert.throws(() => migrateState({ version: 9 }), /未来/)
   const broken = fixture().current
   broken.automationRules = [{ ...broken.automationRules[0], id: 'bad' }]
   assert.throws(() => migrateState(broken), /自动规则/)
@@ -303,7 +304,7 @@ function fixture() {
   const identity = { id: 'identity-owner', channelAppId: app.id, providerUserId: 'user-owner', memberId: 'member-owner', verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }
   const conversation = { id: 'conversation-owner', channelAppId: app.id, providerConversationId: 'conversation', identityId: identity.id, memberId: 'member-owner', type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }
   const value = migrateState({
-    version: 7,
+    version: 8,
     members: [member('member-owner', ['employee-owner', 'employee-owner-2']), member('member-peer', ['employee-peer']), member('member-admin', [])],
     modelRoutes: [route('route-owner'), route('route-owner-2'), route('route-peer')],
     employees: [employee('employee-owner', 'route-owner', 'connection-owner'), employee('employee-owner-2', 'route-owner-2', 'connection-owner-2'), employee('employee-peer', 'route-peer', 'connection-peer')],
@@ -330,7 +331,7 @@ function automationRule(id, status, trigger, extra = {}) {
     createdAt: now, updatedAt: now, revokedAt: status === 'revoked' ? now : null, ...extra,
   }
 }
-function workRecord(id) { return { id, ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', input: { workOrderId: 'WO-1' }, status: 'completed', results: [], executions: [] } }
+function workRecord(id) { return { id, ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', input: { workOrderId: 'WO-1' }, status: 'completed', results: [], actions: [], executions: [] } }
 function deliveryRecord(id, workId) { return { id, channelAppId: 'app-owner', requestId: `request-${id}`, workId, targetConversationId: 'conversation-owner', targetIdentityId: 'identity-owner', contentScope: 'result', contentKey: 'work.accepted', status: 'pending', attempts: 0, createdAt: now, updatedAt: now } }
 function occurrenceRecord(id, rule, scheduledDate, workId, deliveryId = null, status = null) { return { id, occurrenceKey: dailyOccurrenceKey(rule.id, scheduledDate), ruleId: rule.id, ruleRevision: rule.revision, scheduledDate, event: null, workId, status, reason: status ? 'test-reason' : null, deliveryId, createdAt: now } }
 function eventOccurrenceRecord(id, rule, workId, deliveryId = null, status = null) { const event = { sourceId: rule.trigger.sourceId, sourceRevision: '2026-09-20 09:00:00.000001', digest: '1'.repeat(64) }; return { id, occurrenceKey: eventOccurrenceKey(rule.id, event.sourceId, event.sourceRevision, rule.workOrderId), ruleId: rule.id, ruleRevision: rule.revision, scheduledDate: null, event, workId, status, reason: status ? 'test-reason' : null, deliveryId, createdAt: now } }

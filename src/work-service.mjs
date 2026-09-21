@@ -42,6 +42,27 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
 })
 const GENERIC_ERROR = Object.freeze({ code: 'INTERNAL_ERROR', message: '服务暂时无法完成请求' })
 
+export function recoverActionFacts(state, at) {
+  let changed = false
+  const works = state.works.map(work => {
+    let workChanged = false
+    const actions = work.actions.map(action => {
+      if (action.receipt || action.attempt?.unknownAt) return action
+      if (action.attempt) {
+        changed = workChanged = true
+        return { ...action, attempt: { ...action.attempt, unknownAt: at, unknownReason: 'RECOVERY_UNKNOWN' } }
+      }
+      if (action.decision?.kind === 'approved' && !action.decision.invalidatedAt) {
+        changed = workChanged = true
+        return { ...action, decision: { ...action.decision, invalidatedAt: at, invalidationReason: 'RECOVERY_INVALIDATED' } }
+      }
+      return action
+    })
+    return workChanged ? { ...work, actions } : work
+  })
+  return changed ? { ...state, works } : state
+}
+
 export function createWorkService({ store, runner = null, collaborationRunner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [], idFactory = randomUUID, onAutomationTerminal } = {}) {
   if (!store) throw new Error('store is required')
   const active = new Map()
@@ -131,7 +152,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           id: workId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
           capabilityId: binding.capability.id, ...(binding.connection ? { connectionId: binding.connection.id } : {}),
           goal: clean(body.goal) ?? binding.capability.action, input: parsed.input, requiredInputs: parsed.missing,
-          status: parsed.missing.length ? 'waiting_input' : 'accepted', acceptedAt: now, results: [], executions: [],
+          status: parsed.missing.length ? 'waiting_input' : 'accepted', acceptedAt: now, results: [], actions: [], executions: [],
         }
         let executionId
         if (!parsed.missing.length) {
@@ -180,7 +201,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           childWorks.push({
             id: childWorkId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
             capabilityId: binding.capability.id, ...(binding.connection ? { connectionId: binding.connection.id } : {}),
-            goal: itemGoal, input: parsed.input, requiredInputs: parsed.missing, status: waiting ? 'waiting_input' : 'accepted', acceptedAt: now, results: [],
+            goal: itemGoal, input: parsed.input, requiredInputs: parsed.missing, status: waiting ? 'waiting_input' : 'accepted', acceptedAt: now, results: [], actions: [],
             executions: waiting ? [] : [{ ...newExecution(executionId, 'collaboration-child', requestId, parsed.input, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: binding.employee.id }],
             workType: 'collaboration-child', parentWorkId: rootWorkId, rootWorkId, collaborationGeneration: generation, planItemId: itemId,
             ...(knowledgeQuery ? { knowledgeQuery } : {}),
@@ -200,7 +221,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         const rootWork = {
           id: rootWorkId, ownerMemberId: member.id, employeeId: leader.employee.id, skillId: leader.skill.id,
           capabilityId: leader.capability.id, ...(leader.connection ? { connectionId: leader.connection.id } : {}),
-          goal, input: {}, requiredInputs: [], status: 'accepted', acceptedAt: now, results: [],
+          goal, input: {}, requiredInputs: [], status: 'accepted', acceptedAt: now, results: [], actions: [],
           executions: [{ ...newExecution(rootExecutionId, 'collaboration-root', requestId, {}, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: leader.employee.id }],
           workType: 'collaboration', collaboration: { generation, cancelGeneration: 0, status: 'accepted', requestLimit: 12, requestCount: 0, childLimit: 4, maxConcurrentChildren: 2, rootTimeoutMs: 360_000, childTimeoutMs: 120_000, outputMaxTokens: 4096, childWorkIds: childWorks.map(work => work.id), summaryResultRefs: [], staleKnowledgeRefs: [], staleItemIds: [] },
           plan: { revision: 1, items: planItems }, handoffs: [],
@@ -658,7 +679,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       id: workId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
       capabilityId: binding.capability.id, ...(binding.connection ? { connectionId: binding.connection.id } : {}),
       goal: binding.capability.action, input: parsed.input, requiredInputs: [], status: 'accepted', acceptedAt,
-      results: [], executions: [execution],
+      results: [], actions: [], executions: [execution],
     }
     return { ok: true, work, workId, executionId, acceptedAt }
   }
@@ -872,16 +893,17 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       recoveryPromise = (async () => {
         await store.update(state => {
           let changed = false
+          const now = clock()
           const works = state.works.map(work => {
             if (!ACTIVE_EXECUTION.has(work.status) && !work.executions.some(item => ACTIVE_EXECUTION.has(item.status))) return work
             changed = true
-            const now = clock()
             const interrupted = { ...work, status: 'interrupted', executions: work.executions.map(execution => ACTIVE_EXECUTION.has(execution.status)
               ? { ...execution, status: 'interrupted', interruptedAt: now, error: { code: 'PROCESS_RESTARTED', message: '进程重启时未完成' } } : execution) }
             if (!work.collaboration) return interrupted
             return { ...interrupted, collaboration: { ...work.collaboration, status: 'interrupted' }, plan: { ...work.plan, items: work.plan.items.map(item => ['not_started', 'running', 'waiting_input'].includes(item.status) ? { ...item, status: 'interrupted' } : item) } }
           })
-          return changed ? { ...state, works } : state
+          const recoveredState = recoverActionFacts({ ...state, works }, now)
+          return changed || recoveredState !== state ? recoveredState : state
         })
         recovered = true
       })().finally(() => { recoveryPromise = undefined })

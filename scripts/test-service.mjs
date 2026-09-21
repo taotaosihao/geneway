@@ -287,16 +287,16 @@ async function checkCloseSettlement(cancelRequested) {
   const base = createFileStore(join(root, `close-${cancelRequested ? 'cancel' : 'active'}.json`))
   await base.update(seedState)
   const gate = deferred()
-  let executionId
   const localRunner = {
     configured: true,
-    async run(args) { executionId = args.executionId; await gate.promise; throw Object.assign(new Error('aborted'), { name: 'AbortError' }) },
+    async run() { await gate.promise; throw Object.assign(new Error('aborted'), { name: 'AbortError' }) },
     async cancel() { gate.release() },
     async close() {},
   }
   const localService = createWorkService({ store: base, runner: localRunner })
   const actor = { id: 'member-alice' }
   const created = await localService.createWork(actor, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 60, quantity: 1 }, clientRequestId: `close-${cancelRequested}` })
+  const executionId = created.value.executions[0].id
   await waitFor(localService, actor, created.value.id, work => work.status === 'running')
   if (cancelRequested) await localService.cancel(actor, created.value.id)
   await localService.close()

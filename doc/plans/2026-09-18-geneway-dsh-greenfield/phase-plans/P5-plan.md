@@ -1,6 +1,6 @@
 # P5 定时、事件与主动持续工作详细计划
 
-状态：**GearJob `9ea23fc0` 已用正常新进程完成无临时修补的 T0 复验，`P5_T0_live_event_source_gate` 与 `T7b_external_event_source_prerequisite` 均为 `PASS`。T7a 每日定时主链已在 `9373dc8` 通过并交付材料；T3b/T7b 现为 `IMPLEMENTATION_READY`。P5 仍非 PASS：事件实现后必须冻结新候选，并在同一候选重新组合验证 T7a 与 T7b。**
+状态：**P5 PASS。冻结候选 `9808772cc5b1a4a8487c969ddcc0f7e9e179eb77` 已在同一正式运行中通过 T7a 真实每日定时与 T7b 真实 GearJob after-commit 事件主链；真实 ZenMux DeepSeek、DSH、GearJob synthetic external-test、飞书业务回读、恢复/重放/冲突/撤销和清理边界均成立。最终 MP4/report/离线手册已通过独立正确性、视觉可操作性与 Astra/Ponytail 复审，并用 Geneway 产品飞书 app 发送后逐条回读。P4 企业微信与真人最终验收仍为 deferred，P5 PASS 不推导部署、发布或生产验收。**
 
 基线：`283771c5240799360f9c0d5f0d439e440fdaa4ad`（P4 飞书 runtime 切片）。P4 企业微信、真实手机 HTTPS 和阶段末真人验收仍为 deferred，P4 不是 PASS。
 
@@ -163,6 +163,20 @@ T7a 每日定时主链已在候选 `9373dc88da42f76767e9c4ba9a68237f6f8d0225` �
 - 飞书材料用 Geneway 产品 app `cli_aaae8b6cbdb89cc0` 发往已验证 p2p chat，并批量回读 4 条均 `deleted=false`：说明 `om_x100b643fe43568acb3c498727351298`，视频 `om_x100b643fe5b1d0a4b1c638d86ab13dc`，report `om_x100b643fe51494a0b3190dda7ab8f8e`，手册 `om_x100b643fe2fe90acb2c7cbea798425a`。
 
 该记录只证明 T7a 每日 timer 主链；`p5` 仍为 `conditional`，T7b 事件主链未跑完，不得宣布 P5 PASS。
+
+### 7.2 T7a + T7b 最终组合验收
+
+最终冻结候选 `9808772cc5b1a4a8487c969ddcc0f7e9e179eb77` 在同一正式运行中完成 T7a 与 T7b：
+
+- 每日规则经 390px 真实触摸启用，真实墙钟发生后读取 GearJob `WO-26-00096` 外部测试数据，ZenMux `deepseek/deepseek-v4-pro` 通过 DSH 产生结果并向本人已验证飞书私聊投递。
+- 事件规则经 390px 真实创建和启用；两次标准 Frappe `doc.save()+commit` 经 after-commit Webhook 形成两个独立 completed work 与 delivered delivery。同 raw body 重投为 `200`/零新 work，同身份异 digest 为 `409`，暂停期旧事件为 `before-active-window`，正常重启保留历史且重投去重，撤销后第三次真实保存不新增 occurrence/work/delivery。
+- GearJob 候选为 `9ea23fc0b0318a16ae0e60e3844f1263a3726aeb`，无 runtime compatibility patch。Webhook Request Log 聚合为 3 次、2 次 accepted、0 errors；验收后 Webhook/Request Log/事件 secret/worker/listener 已清理，Work Order 数量恢复，long 队列为空，default 队列精确保持原 4 项。
+- 视频：`artifacts/p5-acceptance/p5-9808772-final.mp4`，H.264/yuv420p，1440×900，25fps，41.56 秒，SHA-256 `8561e62fd7a5cd47ffe0571a7557185295e7d9729329f105642c2d775d319bcf`。它以 10 个真实动作短片 + 10 个已验证检查点展示 183.12 秒原始运行，明确标注剪辑与长等待压缩。
+- 报告：`artifacts/p5-acceptance/p5-9808772-final.report.json`，SHA-256 `bd36258f137022570cdd21976f89e4bcd8432d845059fd987c58163a9bee3e76`；离线手册：`artifacts/p5-acceptance/p5-9808772-final.html`，SHA-256 `a640ee19a423a49390725ceac5effc528d80ac264c193a52679ffac1d6954ed6`；封面 SHA-256 `e6687cd5fd89d439a458d6acbe3bceeee75e08f0fa620fff2a2c90e15879ea4a`。
+- `design-review-p5-final/verdict.json` 为 `passed`；独立 evidence、visual/browser 与 Astra/Ponytail 材料复审均为 PASS。旧 `e3d2a1d` 视频已废弃，不参与最终结论。
+- 最终材料以 `geneway-product` profile 通过 Geneway app `cli_aaae8b6cbdb89cc0` 发往已验证 p2p chat；说明、视频、report、手册回读类型分别为 `text/media/file/file`，四条均 `deleted=false`。交付回执为 workflow artifact `p5-final-delivery-receipt.json`。
+
+因此 P5 技术验收为 PASS。这一结论仅关闭 P5 G7/J8/AC-18 的当前 external-test/synthetic 范围；不关闭 P4 企业微信和真人最终验收，不授权 push、部署、发布或生产写入。
 
 每个任务仅一个 Team Sol 写入者；store、work-service、server、channel-service 不允许重叠写入。每个切片修复后回原独立 reviewer 复审。
 

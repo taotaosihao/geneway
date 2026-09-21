@@ -1,14 +1,14 @@
 # P6 制造业务关联与有限真实写入详细计划
 
-状态：**`PLANNED / NOT_IMPLEMENTATION_READY`**。两名独立 Team Astra planner 已完成首轮和交叉复议，结论为 `CONSENSUS_WITH_LIMITED_RESERVATION`。当前只允许继续只读核验、计划、Product Design 和过度设计审查；P5 尚未 PASS，且第二来源、精确业务对象、写动作和外部权限均未获得 P6 专项授权，因此不得开始 P6 产品实施或真实业务写入。
+状态：**`T0 IN PROGRESS / IMPLEMENTATION GATED`**。P5 已在 `9808772` 技术 PASS，`P5 → P6` 顺序门已关闭。两名原 Team Astra planner 及 P5 后产品/工程复算均收敛为 GearJob Work Order + 隔离 Hive tenant integration API，以及仅限本地 synthetic Work Order 的纯文本、未发布、无 mention 生产跟进 Comment。现行 `user-message:geneway-goal-delegated-product-decisions` 已将中间产品决策委托给多 agent 共识与正式 reviewer，用户仅做阶段最终验收；因此该窄 synthetic 动作决定在 T0 契约证明后可绑定 C/D，但不延伸到非 synthetic/生产对象、真实客户数据外发、权限提升、部署或发布。P6 产品实施仍等待 GearJob 窄写契约、当前 A/C/D/E 身份与正式复审闭合。
 
-基线：`b26a9589f2a0d777b2876e52bd1a2ec44b90e52d`。本计划不修改 GearJob、Hive 或 Kivo，不读取新凭据，不授权网络暴露、部署、发布或生产写入。
+基线：Geneway `5d78d8e9f6da663f0901f4308890c339c6d9095a`（P5 最终文档收口）；GearJob `9ea23fc0b0318a16ae0e60e3844f1263a3726aeb`；Hive `7dd2dfc9d381bbee8158fb5de0c06a4b7a6fc2e5`。用户已授权仅限 GearJob synthetic 对象的最小上游窄契约依赖修改；Hive 不改源码，Kivo 不使用。Geneway P6 产品代码仍为 implementation gated。本计划不授权非 synthetic/生产数据、权限提升、公网暴露、部署或发布。
 
 ## 1. 目标、关键旅程与完成边界
 
 P6 交付 G8、J9、AC-19 和 AC-20：成员从现有工作详情核对一张明确工单及其明确关联设备的两类真实来源事实，得到具有来源、时间、新鲜度和未知项的结构化关联结果；随后查看一项精确上游业务动作的完整预览，在认证 Web 中批准或拒绝。批准后由确定性服务复核当前权限和前置条件，执行一次有稳定业务身份的真实写入，并从上游回读同一记录后才显示成功。
 
-首选发现方向为 **GearJob Work Order + Hive 设备遥测**；Kivo 设备监控/业务历史为备选。首选写动作候选为向明确授权的 GearJob Work Order 追加一条生产跟进 Comment。两者都不是已选实现：T0 必须先证明真实实例、对象映射、时间语义、数据外发范围、Comment 业务用途、可见范围、通知/关注副作用、最小权限、幂等身份和唯一回读能力；不满足时保持阻塞，不自动换成 ToDo、报警确认或其他“容易调用”的接口。
+当前唯一方向为 **GearJob Work Order + 隔离 Hive `records:read` 设备遥测**，不引入 Kivo 第三来源。唯一写动作为向获准 synthetic GearJob Work Order 追加一条纯文本、未发布、无 mention 的生产跟进 Comment。T0 必须证明真实实例、唯一对象映射、时间语义、Comment 可见范围与已知 `_comments`/realtime 副作用、最小权限、幂等身份、绕过防护和唯一回读；不满足时保持阻塞，不自动换成 ToDo、报警确认或其他“容易调用”的接口。
 
 P6 不实现：模型自动批准、定时/事件自动写入、通用 Workflow/DSL、审批中心、动作队列、事件总线、分布式事务、任意第三方写适配、生产数量/状态/库存/财务变更、设备控制、批量跨工单写入或自动删除上游记录补偿。
 
@@ -25,22 +25,22 @@ P6 不实现：模型自动批准、定时/事件自动写入、通用 Workflow/
 
 ### 2.2 收敛结论
 
-1. Comment 是**推荐核验候选**，不是已批准动作。计划冻结“真实可核查业务记录”这一结果，不在 T0 前冻结具体 DocType/API。
+1. 首轮的 Comment “推荐核验候选”状态已由 §6.1 实况 T0 和有效中间决策委托取代；当前固定为 synthetic Work Order 的窄 Comment 合同，但仍须运行证明 HMAC、guard、幂等、冲突和回读后才能作为 P6 产品依赖。
 2. 首条旅程使用一个固定双来源原生工具。它在一次工具调用内部执行两个白名单只读请求和确定性映射/新鲜度计算；不放宽普通 runner 的恰好一次工具约束，也不为本场景强制创建两个 P3 协作子工作。若实际权限证明没有一名员工可合法同时读取两源，再重规划为协作方案。
 3. 两条连接、映射 revision 和对象范围必须进入执行授权、每次真实读取前复权及 Session 上下文失效判断；不能把第二连接藏入可变全局配置。
 4. 模型只解释结构化关联结果并提出建议。预览、批准、claim、上游写入和回读由确定性 action service 所有；渠道或自动规则只能产生待批准提案并引导到 Web。
 5. 预览必须有明确有效期，但当前不冻结 10 分钟或任何数值。来源新鲜度、预览有效期和批准到派发期限是三项不同约束；T0 后由多 agent 按实际契约收敛。
 6. 真实写 I/O 前必须可靠持久化动作身份、批准绑定和 attempt。当前 `writeFile → rename` 不足以证明掉电后不会遗失防重事实；最小方向是在唯一 file-store 内完成临时文件 sync、rename 和父目录 sync，并用故障注入证明失败时写 I/O 为 0。不增加第二日志或数据库。
 7. 必要的 compare-and-write 只保护该动作真正依赖的业务前置条件，不机械绑定整个工单 `modified`。若上游无原子前置校验，Geneway 的先读后写不能冒充原子保护。
-8. `P4 → P5` 的顺序例外不自动覆盖 `P5 → P6`。持续完整合同授权允许 P6 只读规划与正式产品设计，但当前不授权 P6 代码实施、新来源读取或真实写入。
+8. P5 已 PASS，`P5 → P6` 顺序前置已关闭。P4 企业微信/真人验收 deferred 不阻塞 P6 独立 Web 技术路径，但 P6 不得据此宣称 P4 或完整合同 PASS。
 
-收敛状态为 `CONSENSUS_WITH_LIMITED_RESERVATION`；唯一保留项是具体第二源、动作类型、对象和外部权限需由真实接口与授权决定，而不是由规划者猜定。
+首轮收敛状态为 `CONSENSUS_WITH_LIMITED_RESERVATION`；其中第二源、动作类型、synthetic 对象和中间授权现已由 §6.1 取代。当前剩余的实施门是 GearJob 窄合同运行证据、A/C/D/E 新身份绑定和正式 reviewer PASS。
 
 ### 2.3 独立 Astra 过度设计审查与有界消融
 
 独立 reviewer `/root/p6_astra_overdesign_review` 使用 `gpt-6-astra`，未参与双 planner 或主控写作。审查结论 **PASS**，选择的最简完整变体为：一个具体双来源原生工具 + 现有 `work/results` + 内嵌 `work.actions` + 同进程窄 action service + 一个获准上游 adapter + 原 file-store 的可靠提交与恢复扩展。
 
-有界消融结果：优先复用上游可靠映射，只在上游无可核验关系且业务确需时创建最小 `sourceMappings`；不建独立动作表、数据库、审批中心、队列、P3 子工作或后台 TTL 调度；预览到期只在预览/批准/派发时按事实判断；T0–T6 是依赖检查点，不生成七套材料链，测试随实现落地并复用一个最终验收包。保留三类不同防重身份、批准绑定、派发前复权、reliable attempt、unknown、上游回读和恢复零自动写入，因为删除任一项都会破坏 AC-19/20、安全或数据完整性。
+有界消融结果：优先复用上游可靠映射，只在上游无可核验关系且业务确需时创建最小 `sourceMappings`；该通用分支已由 §6.1 真实映射证据关闭，当前候选不创建 `sourceMappings`。不建独立动作表、数据库、审批中心、队列、P3 子工作或后台 TTL 调度；预览到期只在预览/批准/派发时按事实判断；T0–T6 是依赖检查点，不生成七套材料链，测试随实现落地并复用一个最终验收包。保留三类不同防重身份、批准绑定、派发前复权、reliable attempt、unknown、上游回读和恢复零自动写入，因为删除任一项都会破坏 AC-19/20、安全或数据完整性。
 
 ## 3. 产品旅程与界面语义
 
@@ -59,17 +59,13 @@ P6 不实现：模型自动批准、定时/事件自动写入、通用 Workflow/
 
 ## 4. 两类来源、映射与新鲜度
 
-### 4.1 首选候选：GearJob + Hive
+### 4.1 当前固定来源：GearJob + Hive
 
-候选映射链：GearJob instance → Work Order → operation/workstation → MES Unit → `hive_unit_id` → Hive tenant/device UUID。源码存在映射载体和遥测入口只是线索；T0 必须在获准测试对象上证明每一跳，不得用同名、最近记录、IP 或模型推断补齐。
+已验证映射链：GearJob instance → `WO-26-00096` → `GW-P6-OP-01` / `GW-P6-WS-01` → enabled `MES Unit GW-P6-CNC-01` → `hive_unit_id/device_code GW-P6-CNC-01` → Hive tenant `0561b9fa-...` / device UUID `bc392c8f-...`。运行时必须逐跳重新读取并要求唯一，不得用同名、最近记录、IP 或模型推断补齐。
 
-完整对象身份包含 source system、instance/environment/tenant、object type 和 object ID。不同实例同名工单、同名设备或同 IP 均不是同一对象。一对多是合法可能性；首条验收必须选择明确工序/设备，不能任选一个代表整张工单。
+完整对象身份包含 source system、instance/environment/tenant、object type 和 object ID。不同实例同名工单、同名设备或同 IP 均不是同一对象。当前候选只接受上述唯一工序/设备；若真实证据使该映射失效，重新规划与复审，不在本计划中自动切换 Kivo 或增加映射权威。
 
-### 4.2 备选：GearJob + Kivo
-
-仅当 Kivo 目标服务、组织权限和工单→device 映射比 Hive 更明确时选择。若 Kivo 页面只是投影同一 Hive 采样，不能把 Hive 与 Kivo 重复算成两个独立事实源。
-
-### 4.3 时间与未知语义
+### 4.2 时间与未知语义
 
 - 分开保存业务记录修改时间、设备采样时间、平台接收时间和查询时间。
 - Work Order `modified` 不是设备采集时间；新查询时间不证明旧采样新鲜。
@@ -81,7 +77,7 @@ P6 不实现：模型自动批准、定时/事件自动写入、通用 Workflow/
 
 P6 拟将 state v7 升为 v8，仍使用唯一 `state.json`：
 
-- `sourceMappings[]`：只在上游没有可直接信任的稳定映射时增加。保存两连接、精确对象、映射依据、revision、有效范围、维护者与时间；历史结果保存解释当时映射所需的最小快照。
+- 不增加 `sourceMappings[]`。每个历史联合结果只保存解释当次关联所需的两连接、精确对象、operation/workstation/MES Unit/hive unit/device UUID 和各源 revision/time 最小快照。
 - 联合观察继续存入现有 `work.results[]`：两源身份/revision/time/query/coverage、mapping identity、确定性结论与未知项，以及模型 explanation。
 - 每个 work 可有最小 `actions[]`：intent、不可变 preview、批准/拒绝/撤销/过期决定、attempt 和 receipt。owner 从 work 继承，不复制第二份 owner/work 状态。
 
@@ -100,21 +96,32 @@ UI 状态由上述事实派生为待批准、已拒绝、已撤销、已过期�
 
 ## 6. T0 只读发现与真实授权门
 
-T0 在任何实现前核验：
+T0 在任何 Geneway P6 产品实现前核验。GearJob 最小窄契约的实现与 synthetic runtime probe 属于已单独授权的 T0 依赖工作，不代表 C/D/E、T1–T6 或 Geneway 产品代码获准。T0 要求：
 
 1. 第二来源精确实例、tenant/org、只读身份、对象集合、API 版本、稳定 ID、时间、质量码、分页/覆盖和模型外发范围。
 2. 工单到设备的真实映射依据及一对多语义；两个 API 是否确为独立事实。
-3. Comment/其他候选的业务用途、DocType/字段、纯文本边界、权限、realtime/mention/follow/通知/钩子副作用。
+3. 已选 Comment 的业务用途、DocType/字段、纯文本边界、权限、realtime/mention/follow/通知/钩子副作用。
 4. 上游唯一动作身份、相同 key 不同 payload 行为、保留期、按 key 唯一查询、读取一致性和 unknown 判定。
 5. 动作真正依赖的业务前置条件能否由上游原子校验。
 
-当前允许的仅是获准源码和已知环境元数据的只读核验。真实 Hive/Kivo 调用、使用新凭据、读取新业务数据、写探针、网络暴露、修改其他仓库和任何真实业务写入都需要各自现行授权。若已有 API 不满足身份、对象限制、幂等和回读，提出一个具体动作的上游窄 API及单独授权；不得直写数据库或注入运行时补丁。
+当前授权覆盖获准源码/环境核验、隔离本地 Hive synthetic tenant/device/telemetry/`records:read` 凭据、GearJob synthetic 对象和经多 agent 共识绑定的窄 Comment 验收写入。真实客户/生产 Hive/Kivo/GearJob 数据、非 synthetic 对象、真实制造数据外发、权限提升、公网暴露、部署和发布仍需要各自现行授权。若已有 API 不满足身份、对象限制、幂等和回读，只实现一个具体动作的上游窄 API；不得直写数据库、注入运行时补丁或开放通用写入。
+
+### 6.1 P5 后 T0 实况与冻结方向
+
+2026-09-21 以独立 Compose project `geneway-p6-hive` 启动本机 Hive backend/PostgreSQL/TDengine/Redis/NATS/EMQX，所有业务数据使用新 volume 和专用 `geneway-p6` tenant；backend 仅绑 `127.0.0.1:18000`，未复用现场 tenant、旧凭据或客户数据。Hive 代码未修改；已有未跟踪工作保留。
+
+- Hive 真实 API：专用 tenant `0561b9fa-2b58-4831-a09f-45c1d1b1e082`，device code `GW-P6-CNC-01`，device UUID `bc392c8f-9214-4416-b7c0-5cef15cd8aee`。`records:read` API credential 只存于仓库外 `0600` 文件。`GET /tenant-integrations/devices` 精确回读 code/UUID，`GET /devices/{uuid}/latest` 回读 `ts/status/data/record_id/event_id`；source environment 为 `external-test`，data mode 为 `synthetic`。
+- GearJob 真实映射：现有 synthetic `WO-26-00096` 经正常 Frappe 文档保存新增唯一 operation `GW-P6-OP-01` / workstation `GW-P6-WS-01`；唯一 enabled `MES Unit` 为 `GW-P6-CNC-01`，`hive_unit_id=GW-P6-CNC-01`。Work Order REST 回读唯一 operation/workstation；现有服务身份对通用 MES Unit REST 为 403，不得通过扩大通用权限解决。
+- 第二来源因此冻结为 Hive tenant integration customer pull API，映射为 `Work Order operation row → workstation → exact enabled MES Unit → hive_unit_id/device_code → tenant-scoped Hive device UUID`。零/多 operation、零/多 enabled MES Unit、零/多 Hive device、latest 缺失/未来/过期均 fail closed；不新建 `sourceMappings[]`。
+- 写动作冻结为向该 synthetic Work Order 写入一条纯文本、未发布、无 mention/附件/外链的生产跟进 Comment。已知业务后果仅为 Work Order 时间线/`_comments` 更新与正常 `docinfo_update` realtime；不改数量、状态、库存、计划或设备。
+- 通用 Frappe `add_comment` 对拥有对象只读权的用户可直接 `ignore_permissions` 插入，是 P6 批准绕过。最小 GearJob 契约必须同时包含：复用现有 0600 secret/HMAC 的 P6 专用 audience/step；精确 Work Order 映射 GET；稳定 action key 的幂等 Comment POST 与 GET 回读；同 key/异 payload 409；以及精确服务用户的 Comment doc-event guard。不授予通用 Comment/MES Unit 权限，不加 DocType、迁移、UI、队列或通用写适配器。
+- 中间产品决策授权复议结论为 `APPROVAL_DELEGATION_VALID`：当上述 GearJob 契约经两名独立 planner 收敛、实況 T0 验证和未参与实现的正式 reviewer PASS 后，可绑定当前 C/D 与 synthetic Comment 动作；用户仅做阶段最终验收。
 
 ## 7. 实施任务、依赖与唯一写入
 
 | 任务 | 产物 | 依赖 / 通过条件 |
 |---|---|---|
-| P6-T0 决策与接口核验 | 两源和动作契约的只读证据；不写产品 | P6 顺序准入只约束后续代码；真实 API 核验还需对应读取/写探针授权 |
+| P6-T0 决策与接口核验 | Hive synthetic 真实 API/映射证据 + GearJob 窄 Comment 合同及运行探针 | Hive 读取/造数与 GearJob synthetic 映射已获准并完成；GearJob 最小跨仓修改和 synthetic Comment 写探针已获准，仍须真实运行通过 HMAC/guard/幂等/回读门 |
 | P6-T1 v8 与可靠提交 | store、state-transfer、迁移/故障测试 | T0 冻结身份和动作协议；fsync失败时外部写0，恢复零重放 |
 | P6-T2 双来源关联 | 一个具体第二来源插件、固定关联工具、capability/binding/grant 窄扩展 | T0、T1；两连接逐次复权、映射/时间 fail closed、一个 typed result |
 | P6-T3 动作服务 | 最小 action service + 已选上游窄 adapter | T0 写契约、T1/T2、明确写授权；批准绑定、派发前复权、幂等、回读、unknown |
@@ -142,15 +149,15 @@ T0 在任何实现前核验：
 
 ## 9. Product Design 与实施准入
 
-P6 Product Design 位于 workflow artifact `product-design-p6/`。在第二来源、动作契约、权限和阶段顺序仍未闭合时，C/D/E 必须保持 draft/non-executable；界面明确显示“真实写入尚未配置”，不能用 fixture 创造可批准能力。
+P6 Product Design 位于 workflow artifact `product-design-p6/`。P5 顺序、Hive synthetic 第二来源、精确映射和窄 Comment 业务方向已闭合；C/D/E 仍保持 draft/non-executable，直到 GearJob HMAC/幂等/回读/guard 合同有真实运行证据、当前 identities 重算并经独立正式 reviewer 绑定。在此之前界面仍显示“真实写入尚未配置”，不能用 fixture 创造可批准能力。
 
 只有以下条件同时成立才进入 P6 代码实施：
 
-1. P5 PASS，或有明确覆盖 `P5 → P6` 的阶段顺序例外；
-2. 第二来源、对象、数据外发和只读 API 已获准；
-3. 具体业务写动作、对象范围、批准人、写身份和真实验收已获准；
+1. P5 PASS（已满足：`9808772`）；
+2. 第二来源、对象、数据外发和只读 API 已获准（已满足：隔离 Hive `geneway-p6` synthetic tenant + `records:read`）；
+3. 具体业务写动作、对象范围、批准人、写身份和真实验收已获准（方向已由有效中间决策委托闭合：当前 work owner + `WO-26-00096` + 窄 Comment；运行准入等待 T0 契约实证）；
 4. T0 证明幂等/查询/副作用和必要前置条件可满足，或另行授权上游窄 API；
 5. 当前 A/C/D/E identities 和批准绑定有效；
 6. 独立过度设计 reviewer 完成有界消融且无阻塞项。
 
-P6 的规划、局部工程或真实验收均不关闭 P4/P5 缺口，不授权部署、发布、生产写入或客户接受。
+P6 的规划、局部工程或真实验收均不关闭 P4 企业微信、真实手机/真人最终验收或其他全合同缺口，不授权部署、发布、生产写入或客户接受。P5 external-test/synthetic 技术 PASS 保持有效。

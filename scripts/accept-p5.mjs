@@ -21,7 +21,7 @@ const options = parseArgs(process.argv.slice(2))
 
 if (harnessCheck) {
   await checkHarness()
-  console.log(JSON.stringify({ ok: true, mode: 'harness-check', externalEffects: 0, checks: ['args', 'paths', 'absolute-outside', 'permissions', 'fixtures', 'enrollment', 'runtime-config', 'event-runtime', 'real-frappe-save', 'hook-free-qty-restore', 'replay-conflict-window', 'restart-revocation', 'queue-isolation', 'owned-default-job-cleanup', 'tracked-clean-preflight', 'secret-scan', 'best-effort-cleanup-injection', 'media-plan', 'material-manifest', 'lark-readback', 'combined-verdict'] }))
+  console.log(JSON.stringify({ ok: true, mode: 'harness-check', externalEffects: 0, checks: ['args', 'paths', 'absolute-outside', 'permissions', 'fixtures', 'enrollment', 'runtime-config', 'event-runtime', 'real-frappe-save', 'hook-free-record-cleanup', 'replay-conflict-window', 'restart-revocation', 'queue-isolation', 'tracked-clean-preflight', 'secret-scan', 'best-effort-cleanup-injection', 'media-plan', 'material-manifest', 'lark-readback', 'combined-verdict'] }))
 } else {
   await formalAcceptance(options)
 }
@@ -431,7 +431,9 @@ async function cleanupGearJob(context) {
 import os, frappe
 frappe.set_user('Administrator')
 webhook = os.environ['GW_WEBHOOK']
-if frappe.db.exists('Webhook', webhook): frappe.delete_doc('Webhook', webhook, ignore_permissions=True, force=True)
+frappe.db.delete('Webhook Header', {'parent':webhook})
+frappe.db.delete('Webhook Data', {'parent':webhook})
+frappe.db.delete('Webhook', {'name':webhook})
 frappe.db.commit()
 print('GW_ACCEPT_WEBHOOK_REMOVED')
 `, { GW_WEBHOOK: context.webhook })
@@ -465,9 +467,10 @@ webhook = os.environ['GW_WEBHOOK']
 name = os.environ['GW_WO']
 logs = frappe.get_all('Webhook Request Log', filters={'webhook':webhook}, fields=['response','error'])
 print('GW_ACCEPT_LOGS ' + json.dumps({'count':len(logs),'accepted':sum(bool(row.response) and json.loads(row.response).get('status') == 'accepted' for row in logs),'errors':sum(bool(row.error) for row in logs)}))
-print('GW_ACCEPT_LOG_NAMES ' + json.dumps(frappe.get_all('Webhook Request Log', filters={'webhook':webhook}, pluck='name')))
-if frappe.db.exists('Webhook', webhook): frappe.delete_doc('Webhook', webhook, ignore_permissions=True, force=True)
-for row in frappe.get_all('Webhook Request Log', filters={'webhook':webhook}, pluck='name'): frappe.delete_doc('Webhook Request Log', row, ignore_permissions=True, force=True)
+frappe.db.delete('Webhook Header', {'parent':webhook})
+frappe.db.delete('Webhook Data', {'parent':webhook})
+frappe.db.delete('Webhook', {'name':webhook})
+for row in frappe.get_all('Webhook Request Log', filters={'webhook':webhook}, pluck='name'): frappe.db.delete('Webhook Request Log', {'name':row})
 if os.environ.get('GW_ORIGINAL_QTY') and frappe.db.exists('Work Order', name):
     if float(frappe.db.get_value('Work Order', name, 'qty')) != float(os.environ['GW_ORIGINAL_QTY']):
         frappe.db.set_value('Work Order', name, 'qty', float(os.environ['GW_ORIGINAL_QTY']))
@@ -475,10 +478,8 @@ frappe.db.commit()
 print('GW_ACCEPT_CLEANUP_OK')
 `, { GW_WEBHOOK: context.webhook, GW_WO: context.workOrderId, GW_ORIGINAL_QTY: context.originalQty === undefined ? '' : String(context.originalQty) })
       context.requestLogs = parseConsoleJson(summaryOutput, 'GW_ACCEPT_LOGS ')
-      context.requestLogNames = parseConsoleJson(summaryOutput, 'GW_ACCEPT_LOG_NAMES ')
       if (context.completedJourney) assert.deepEqual(context.requestLogs, { count: 3, accepted: 2, errors: 0 })
     },
-    async () => { if (context.prepared) await cleanupDefaultJobs(context) },
     async () => { await run('docker', ['exec', 'deploy-frappe-1', 'rm', '-f', context.containerSecret, context.workerPid, context.workerLog]) },
     async () => {
       if (!context.prepared) return
@@ -495,7 +496,7 @@ print('GW_ACCEPT_POST ' + json.dumps({'webhook':bool(frappe.db.exists('Webhook',
       assert.deepEqual(post, { webhook: false, logs: 0, qty: context.originalQty })
     },
   ])
-  if (context.prepared) context.cleanup = { webhookRemoved: true, requestLogsRemoved: true, workOrderQuantityRestored: true, sourceRevisionAdvancedByAcceptance: true, workerStopped: true, generatedJobsRemoved: context.jobIds?.length ?? 0, defaultCleanupJobsRemoved: context.defaultCleanupJobsRemoved ?? 0, secretRemoved: true, listenerStoppedByRuntimeCleanup: true, defaultQueueIdsUnchanged: true, longQueueEmpty: true }
+  if (context.prepared) context.cleanup = { webhookRemoved: true, requestLogsRemoved: true, workOrderQuantityRestored: true, sourceRevisionAdvancedByAcceptance: true, workerStopped: true, generatedJobsRemoved: context.jobIds?.length ?? 0, secretRemoved: true, listenerStoppedByRuntimeCleanup: true, defaultQueueIdsUnchanged: true, longQueueEmpty: true }
 }
 
 async function bestEffortCleanup(actions) { let firstError; for (const action of actions) { try { await action() } catch (error) { firstError ??= error } } if (firstError) throw firstError }
@@ -510,16 +511,7 @@ async function gearJobConsole(code, env = {}) {
 function parseConsoleJson(output, marker) { const line = output.split(/\r?\n/).find(value => value.includes(marker)); if (!line) throw new Error(`GearJob console marker missing: ${marker.trim()}`); return JSON.parse(line.slice(line.indexOf(marker) + marker.length)) }
 async function redisQueue(name) { return capture('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', '--raw', 'LRANGE', `rq:queue:workspace-development-frappe-bench:${name}`, '0', '-1']) }
 async function waitQueueEmpty(name, timeout) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { if (await redisQueue(name) === '') return; await new Promise(resolveWait => setTimeout(resolveWait, 250)) } throw new Error(`${name} queue did not drain`) }
-async function cleanupRqJobs(ids, queueName = 'long') { const queue = `rq:queue:workspace-development-frappe-bench:${queueName}`; for (const id of ids) { await run('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', 'LREM', queue, '0', id]); await run('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', 'DEL', `rq:job:${id}`]); const keys = (await capture('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', '--scan', '--pattern', `rq:*${queueName}*`])).split('\n').filter(key => key && key !== queue); for (const key of keys) await run('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', 'ZREM', key, id]).catch(() => undefined) } }
-async function cleanupDefaultJobs(context) {
-  const after = await redisQueue('default'), beforeIds = queueIds(context.defaultBefore), newIds = queueIds(after).filter(id => !beforeIds.includes(id)), descriptions = {}
-  for (const id of newIds) descriptions[id] = await capture('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', '--raw', 'HGET', `rq:job:${id}`, 'description'])
-  const owned = ownedQueueJobs(context.defaultBefore, after, descriptions, [context.webhook, ...(context.requestLogNames ?? [])])
-  await cleanupRqJobs(owned, 'default')
-  context.defaultCleanupJobsRemoved = owned.length
-}
-function queueIds(raw) { return String(raw ?? '').split('\n').filter(Boolean) }
-function ownedQueueJobs(before, after, descriptions, references) { const original = new Set(queueIds(before)); return queueIds(after).filter(id => !original.has(id) && references.some(reference => reference && String(descriptions[id] ?? '').includes(reference))) }
+async function cleanupRqJobs(ids) { const queue = 'rq:queue:workspace-development-frappe-bench:long'; for (const id of ids) { await run('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', 'LREM', queue, '0', id]); await run('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', 'DEL', `rq:job:${id}`]); const keys = (await capture('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', '--scan', '--pattern', 'rq:*long*'])).split('\n').filter(key => key && key !== queue); for (const key of keys) await run('docker', ['exec', 'deploy-redis-queue-1', 'redis-cli', 'ZREM', key, id]).catch(() => undefined) } }
 
 async function seedEnrollment(statePath, enrollment, providerAppId, providerTenantId) {
   const state = JSON.parse(await readFile(statePath, 'utf8')), now = new Date().toISOString()
@@ -622,7 +614,51 @@ function manual(report) { const materials = report.verdict?.materials === 'passe
 async function verifyOfflineBundle(stage, report) { const html = await readFile(join(stage, 'index.html'), 'utf8'); const links = [...html.matchAll(/(?:href|src)="([^"]+)"/g)].map(match => match[1]); assert.equal(links.some(link => /^[a-z]+:|^\/\//i.test(link)), false); const files = await listFiles(stage); for (const link of links) { const target = resolve(stage, link); assert.ok(isWithin(stage, target), `offline link escapes stage: ${link}`); const info = await lstat(target); assert.equal(info.isFile(), true, `offline link missing: ${link}`); if (/\.png$/i.test(target) || /\.mp4$/i.test(target)) await run('ffmpeg', ['-v', 'error', '-i', target, '-f', 'null', '-']) } assert.ok(files.some(file => file.endsWith('.mp4'))); assert.equal(report.media.steps.length, report.journey.steps.length); const movable = await mkdtemp(join(tmpdir(), 'geneway-p5-bundle-')); try { for (const file of files) { const target = join(movable, relative(stage, file)); await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await copyFile(file, target) } for (const link of links) assert.equal(await access(join(movable, link)).then(() => true).catch(() => false), true) } finally { await rm(movable, { recursive: true, force: true }) } }
 function stringsFrom(value, found = []) { if (typeof value === 'string') found.push(value); else if (Array.isArray(value)) for (const item of value) stringsFrom(item, found); else if (value && typeof value === 'object') for (const item of Object.values(value)) stringsFrom(item, found); return found }
 async function checkHarness() {
-  const scratch = await mkdtemp(join(tmpdir(), 'geneway-p5-harness-check-')); try { await chmod(scratch, 0o700); const paths = fixturePaths(scratch); await mkdir(paths.secrets, { recursive: true, mode: 0o700 }); await writeFile(paths.state, '{}', { mode: 0o600 }); assert.equal((await stat(paths.state)).mode & 0o777, 0o600); assert.deepEqual(parseArgs(['--', '--record', 'artifacts/p5-acceptance/demo.mp4', '--lark-profile', 'safe', '--enrollment-user-id', 'ou_test', '--enrollment-message-id', 'om_test', '--enrollment-chat-id', 'oc_test']), { record: 'artifacts/p5-acceptance/demo.mp4', larkProfile: 'safe', enrollmentUserId: 'ou_test', enrollmentMessageId: 'om_test', enrollmentChatId: 'oc_test' }); assert.match(FEISHU_CREDENTIAL_REF, /^[A-Z][A-Z0-9_]{2,127}$/); assert.doesNotMatch(readbackEnrollment.toString(), /messages-send/); assert.match(readbackEnrollment.toString(), /messages-mget|verifyLark/); assert.match(readbackEnrollment.toString(), /chat_mode.*p2p/); assert.match(startServer.toString(), /GENEWAY_GEARJOB_EVENT_SECRET_FILE.*EVENT_SOURCE_ID.*EVENT_SOURCE_ADDRESS.*EVENT_HOST.*EVENT_PORT/); assert.match(prepareGearJob.toString(), /GEARJOB_COMMIT.*diff.*--cached.*deploy-frappe-1.*Asia\/Chongqing/s); assert.match(saveGearJobWorkOrder.toString(), /doc\.save\(ignore_permissions=True\).*frappe\.db\.commit\(\)/s); const cleanupSource = cleanupGearJob.toString(); assert.match(cleanupSource, /frappe\.db\.set_value\('Work Order', name, 'qty'/); assert.doesNotMatch(cleanupSource, /doc\.save/); const combinedSource = runCombinedJourney.toString(); for (const pattern of [/restartRuntime/, /restartReplayStatus/, /data-rule-action=\\?"revoke/, /thirdModified/]) assert.match(combinedSource, pattern); assert.match(cleanupSource, /bestEffortCleanup.*default queue IDs changed.*long queue is not empty.*GW_ACCEPT_POST/s); const cleanupEffects = []; await assert.rejects(bestEffortCleanup([async () => { cleanupEffects.push('early'); throw new Error('injected-cleanup-failure') }, async () => { cleanupEffects.push('worker-stop') }, async () => { cleanupEffects.push('secret-remove') }]), /injected-cleanup-failure/); assert.deepEqual(cleanupEffects, ['early', 'worker-stop', 'secret-remove']); assert.deepEqual(ownedQueueJobs('old-a\nold-b', 'old-a\nowned\nunrelated\nold-b', { owned: 'delete_dynamic_links Webhook Geneway P5 Acceptance run', unrelated: 'unrelated maintenance' }, ['Geneway P5 Acceptance run', 'log-name']), ['owned']); assert.ok(safeRecord('artifacts/p5-acceptance/demo.mp4').endsWith('.mp4')); assert.throws(() => safeRecord('/tmp/escape.mp4')); assert.throws(() => safeRecord('../escape.mp4')); await assert.rejects(validateRecord('artifacts/p5-acceptance/nested/demo.mp4'), /directly under/); assert.match(validateRecord.toString(), /artifacts\.video.*artifacts\.report.*artifacts\.manual.*artifacts\.cover.*failureReceiptPath/); assert.match(ensurePromotionTarget.toString(), /fresh non-existing/); const canary = 'HARNESS_SECRET_CANARY'; const clean = join(scratch, 'clean.txt'); await writeFile(clean, 'safe', { mode: 0o600 }); await scanLeaks([clean], [canary]); const dirty = join(scratch, 'dirty.txt'); await writeFile(dirty, canary, { mode: 0o600 }); await assert.rejects(scanLeaks([dirty], [canary]), /secret leak/); assert.deepEqual(fixturePaths('/tmp/p5').eventSecret, '/tmp/p5/gearjob-event.secret'); assert.deepEqual(chromeArgs('/tmp/profile', 9222, 'http://127.0.0.1:3471').some(value => value.includes('9222')), true); assert.ok(nextSafeMinute(new Date(0), 90_000).getTime() >= 90_000); const report = { media: { video: 'demo.mp4', cover: 'demo.png', steps: ['screenshots/step-01.png'] }, journey: { steps: [{ id: '01', action: 'x', purpose: 'y', expected: 'z', observed: {}, startSeconds: 0, endSeconds: 1, image: 'screenshots/step-01.png' }] } }; assert.match(manual(report), /screenshots\/step-01\.png/); assert.equal(report.verdict?.materials, undefined); const verdict = { t7a: 'business-passed', t7b: 'business-passed', p5: 'conditional', materials: 'evidence-ready/pending-delivery' }; assert.equal(verdict.t7a, 'business-passed'); assert.equal(verdict.t7b, 'business-passed'); assert.notEqual(verdict.p5, 'passed'); assert.equal(verdict.materials, 'evidence-ready/pending-delivery') } finally { await rm(scratch, { recursive: true, force: true }); await assert.rejects(stat(scratch), error => error.code === 'ENOENT') }
+  const scratch = await mkdtemp(join(tmpdir(), 'geneway-p5-harness-check-'))
+  try {
+    await chmod(scratch, 0o700)
+    const paths = fixturePaths(scratch)
+    await mkdir(paths.secrets, { recursive: true, mode: 0o700 })
+    await writeFile(paths.state, '{}', { mode: 0o600 })
+    assert.equal((await stat(paths.state)).mode & 0o777, 0o600)
+    assert.deepEqual(parseArgs(['--', '--record', 'artifacts/p5-acceptance/demo.mp4', '--lark-profile', 'safe', '--enrollment-user-id', 'ou_test', '--enrollment-message-id', 'om_test', '--enrollment-chat-id', 'oc_test']), { record: 'artifacts/p5-acceptance/demo.mp4', larkProfile: 'safe', enrollmentUserId: 'ou_test', enrollmentMessageId: 'om_test', enrollmentChatId: 'oc_test' })
+    assert.match(FEISHU_CREDENTIAL_REF, /^[A-Z][A-Z0-9_]{2,127}$/)
+    assert.doesNotMatch(readbackEnrollment.toString(), /messages-send/)
+    assert.match(readbackEnrollment.toString(), /messages-mget|verifyLark/)
+    assert.match(readbackEnrollment.toString(), /chat_mode.*p2p/)
+    assert.match(startServer.toString(), /GENEWAY_GEARJOB_EVENT_SECRET_FILE.*EVENT_SOURCE_ID.*EVENT_SOURCE_ADDRESS.*EVENT_HOST.*EVENT_PORT/)
+    assert.match(prepareGearJob.toString(), /GEARJOB_COMMIT.*diff.*--cached.*deploy-frappe-1.*Asia\/Chongqing/s)
+    assert.match(saveGearJobWorkOrder.toString(), /doc\.save\(ignore_permissions=True\).*frappe\.db\.commit\(\)/s)
+    const cleanupSource = cleanupGearJob.toString()
+    assert.match(cleanupSource, /frappe\.db\.set_value\('Work Order', name, 'qty'/)
+    assert.match(cleanupSource, /frappe\.db\.delete\('Webhook Header'.*frappe\.db\.delete\('Webhook Data'.*frappe\.db\.delete\('Webhook'.*frappe\.db\.delete\('Webhook Request Log'/s)
+    assert.doesNotMatch(cleanupSource, /(?:doc\.save|delete_doc)/)
+    assert.match(cleanupSource, /bestEffortCleanup.*default queue IDs changed.*long queue is not empty.*GW_ACCEPT_POST/s)
+    const combinedSource = runCombinedJourney.toString()
+    for (const pattern of [/restartRuntime/, /restartReplayStatus/, /data-rule-action=\\?"revoke/, /thirdModified/]) assert.match(combinedSource, pattern)
+    const cleanupEffects = []
+    await assert.rejects(bestEffortCleanup([async () => { cleanupEffects.push('early'); throw new Error('injected-cleanup-failure') }, async () => { cleanupEffects.push('worker-stop') }, async () => { cleanupEffects.push('secret-remove') }]), /injected-cleanup-failure/)
+    assert.deepEqual(cleanupEffects, ['early', 'worker-stop', 'secret-remove'])
+    assert.ok(safeRecord('artifacts/p5-acceptance/demo.mp4').endsWith('.mp4'))
+    assert.throws(() => safeRecord('/tmp/escape.mp4'))
+    assert.throws(() => safeRecord('../escape.mp4'))
+    await assert.rejects(validateRecord('artifacts/p5-acceptance/nested/demo.mp4'), /directly under/)
+    assert.match(validateRecord.toString(), /artifacts\.video.*artifacts\.report.*artifacts\.manual.*artifacts\.cover.*failureReceiptPath/)
+    assert.match(ensurePromotionTarget.toString(), /fresh non-existing/)
+    const canary = 'HARNESS_SECRET_CANARY', clean = join(scratch, 'clean.txt'), dirty = join(scratch, 'dirty.txt')
+    await writeFile(clean, 'safe', { mode: 0o600 }); await scanLeaks([clean], [canary])
+    await writeFile(dirty, canary, { mode: 0o600 }); await assert.rejects(scanLeaks([dirty], [canary]), /secret leak/)
+    assert.equal(fixturePaths('/tmp/p5').eventSecret, '/tmp/p5/gearjob-event.secret')
+    assert.equal(chromeArgs('/tmp/profile', 9222, 'http://127.0.0.1:3471').some(value => value.includes('9222')), true)
+    assert.ok(nextSafeMinute(new Date(0), 90_000).getTime() >= 90_000)
+    const report = { media: { video: 'demo.mp4', cover: 'demo.png', steps: ['screenshots/step-01.png'] }, journey: { steps: [{ id: '01', action: 'x', purpose: 'y', expected: 'z', observed: {}, startSeconds: 0, endSeconds: 1, image: 'screenshots/step-01.png' }] } }
+    assert.match(manual(report), /screenshots\/step-01\.png/)
+    const verdict = { t7a: 'business-passed', t7b: 'business-passed', p5: 'conditional', materials: 'evidence-ready/pending-delivery' }
+    assert.equal(verdict.t7a, 'business-passed'); assert.equal(verdict.t7b, 'business-passed'); assert.notEqual(verdict.p5, 'passed'); assert.equal(verdict.materials, 'evidence-ready/pending-delivery')
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+    await assert.rejects(stat(scratch), error => error.code === 'ENOENT')
+  }
 }
 function findObjects(value, predicate, found = []) { if (Array.isArray(value)) for (const item of value) findObjects(item, predicate, found); else if (value && typeof value === 'object') { if (predicate(value)) found.push(value); for (const item of Object.values(value)) findObjects(item, predicate, found) } return found }
 function stringValue(value, keys) { for (const key of keys) if (typeof value?.[key] === 'string') { try { const parsed = JSON.parse(value[key]); return typeof parsed?.text === 'string' ? parsed.text : value[key] } catch { return value[key] } } return '' }

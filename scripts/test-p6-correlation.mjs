@@ -100,10 +100,41 @@ async function capabilityAndSourceChecks() {
   assert.equal(futureBoundary.freshness.ageSeconds, -5)
   await assert.rejects(correlate({ latest: latestBody('2026-09-21T10:00:05.001Z') }), error => error.code === 'INVALID_SOURCE')
   await assert.rejects(correlate({ latest: latestBody('2026-09-21T09:57:59.999Z') }), error => error.code === 'INVALID_SOURCE')
+  const previousTz = process.env.TZ
+  process.env.TZ = 'Asia/Shanghai'
+  try {
+    assert.equal(new Date('2026-09-21 10:54:30.497').toISOString(), '2026-09-21T02:54:30.497Z', 'native parsing demonstrates the eight-hour ambiguity')
+    const clock = '2026-09-21T10:54:38.000Z'
+    const naiveUtc = await correlate({ clock, latest: latestBody('2026-09-21 10:54:30.497') })
+    const explicitUtc = await correlate({ clock, latest: latestBody('2026-09-21T10:54:30.497Z') })
+    const explicitOffset = await correlate({ clock, latest: latestBody('2026-09-21T18:54:30.497+08:00') })
+    assert.equal(naiveUtc.sample.ts, '2026-09-21T10:54:30.497Z')
+    assert.equal(explicitUtc.sample.ts, naiveUtc.sample.ts)
+    assert.equal(explicitOffset.sample.ts, naiveUtc.sample.ts)
+    assert.equal((await correlate({ clock, latest: latestBody('2026-09-21 10:54:30.4') })).sample.ts, '2026-09-21T10:54:30.400Z')
+    assert.equal((await correlate({ clock, latest: latestBody('2026-09-21 10:54:30.497123') })).sample.ts, '2026-09-21T10:54:30.497Z')
+    assert.equal((await correlate({ clock, latest: latestBody('2026-09-21 10:52:38.000') })).freshness.ageSeconds, 120)
+    assert.equal((await correlate({ clock, latest: latestBody('2026-09-21 10:54:43.000') })).freshness.ageSeconds, -5)
+    for (const ts of ['2026-09-21T10:54:30.497', '2026/09/21 10:54:30.497', '2026-09-21 10:54:30', '2026-09-21 10:54:30.497Z', '2026-02-30 10:54:30.497', '2026-09-21T10:54:30.497+24:00']) {
+      await assert.rejects(correlate({ clock, latest: latestBody(ts) }), error => error.code === 'INVALID_SOURCE')
+    }
+  } finally {
+    if (previousTz === undefined) delete process.env.TZ
+    else process.env.TZ = previousTz
+  }
   const quality = await correlate({ latest: { ...latestBody(), record: { ...latestBody().record, quality: 'good', platform_received_at: '2026-09-21T09:58:01.000Z', platformReceivedAt: 'not-an-instant' } } })
   assert.deepEqual(quality.sample, { ts: '2026-09-21T09:58:00.000Z', platformReceivedAt: null, quality: null })
   assert.deepEqual(quality.unknowns, ['QUALITY_NOT_PROVIDED', 'PLATFORM_RECEIVED_AT_NOT_PROVIDED'])
   await assert.rejects(correlate({ latest: { ...latestBody(), record: { ...latestBody().record, quality: 'bad' } } }), error => error.code === 'INVALID_SOURCE')
+  const emptyAlarmCode = await correlate({ latest: { ...latestBody(), record: { ...latestBody().record, data: { ...latestBody().record.data, alarm_code: '' } } } })
+  assert.equal(emptyAlarmCode.machineFacts.alarm_code, '')
+  for (const data of [
+    { ...latestBody().record.data, alarm_code: '\u0000' },
+    { ...latestBody().record.data, mode: '' },
+    { ...latestBody().record.data, mode: 'AUTO\n' },
+    { ...latestBody().record.data, alarm_code: [] },
+    { ...latestBody().record.data, alarm_code: Number.POSITIVE_INFINITY },
+  ]) await assert.rejects(correlate({ latest: { ...latestBody(), record: { ...latestBody().record, data } } }), error => error.code === 'INVALID_SOURCE')
   await assert.rejects(correlate({ latest: { ...latestBody(), record: { ...latestBody().record, data: { mode: { raw: 'RAW-CANARY' } } } } }), error => error.code === 'INVALID_SOURCE' && !error.message.includes('RAW-CANARY'))
 
   for (const revokeAt of [2, 3]) {
@@ -206,6 +237,12 @@ async function serviceAndStoreChecks() {
   assert.throws(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, results: [{ ...savedWork.results[0], payload: { ...savedWork.results[0].payload, raw: 'RAW-CANARY' } }] }) }), /未声明字段 raw/)
   assert.throws(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, results: [{ ...savedWork.results[0], payload: { ...savedWork.results[0].payload, machineFacts: { axes: 'RAW-CANARY' } } }] }) }), /machineFacts/)
   assert.throws(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, results: savedWork.results.map((result, index) => index ? result : { ...result, payload: { ...result.payload, sample: { ...result.payload.sample, quality: 'good' }, unknowns: [] } }) }) }), /必须保持 unknown/)
+  const withEmptyAlarmCode = { ...savedWork.results[0], payload: { ...savedWork.results[0].payload, machineFacts: { ...savedWork.results[0].payload.machineFacts, alarm_code: '' } } }
+  assert.doesNotThrow(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, results: savedWork.results.map((result, index) => index ? result : withEmptyAlarmCode) }) }))
+  for (const [key, value] of [['alarm_code', '\u0000'], ['alarm_code', []], ['alarm_code', Number.POSITIVE_INFINITY], ['mode', ''], ['mode', 'AUTO\n']]) {
+    const invalid = { ...withEmptyAlarmCode, payload: { ...withEmptyAlarmCode.payload, machineFacts: { ...withEmptyAlarmCode.payload.machineFacts, [key]: value } } }
+    assert.throws(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, results: savedWork.results.map((result, index) => index ? result : invalid) }) }), /machineFacts/)
+  }
 }
 
 async function runnerChecks() {
@@ -261,7 +298,7 @@ async function correlate(options = {}) {
   })
   return readWorkOrderDeviceCorrelation({
     workOrderId: 'WO-1', connections: correlationConnections(1), secretRoot, signal: options.signal,
-    clock: () => new Date(queriedAt), fetchImpl,
+    clock: () => new Date(options.clock ?? queriedAt), fetchImpl,
     authorize: async () => { authorizationCount += 1; (options.auth ?? []).push(authorizationCount); await options.authorize?.(authorizationCount) },
   })
 }

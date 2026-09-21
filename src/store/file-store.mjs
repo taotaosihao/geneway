@@ -1336,7 +1336,7 @@ function normalizeCorrelationResult(result, id) {
   if (!Number.isFinite(freshness.ageSeconds) || freshness.maxAgeSeconds !== 120 || freshness.maxFutureSkewSeconds !== 5 || freshness.ageSeconds > 120 || freshness.ageSeconds < -5) throw new Error(`结果 ${id} freshness 无效`)
   if (!record(result.payload.machineFacts)) throw new Error(`结果 ${id} machineFacts 无效`)
   const machineFactKeys = new Set(['mode', 'machine_state', 'is_alive', 'is_online', 'alarm', 'alarm_code'])
-  for (const [key, value] of Object.entries(result.payload.machineFacts)) if (!machineFactKeys.has(key) || !scalar(value)) throw new Error(`结果 ${id} machineFacts 无效`)
+  for (const [key, value] of Object.entries(result.payload.machineFacts)) if (!machineFactKeys.has(key) || !machineFactScalar(key, value)) throw new Error(`结果 ${id} machineFacts 无效`)
   if (!Array.isArray(result.payload.unknowns) || new Set(result.payload.unknowns).size !== result.payload.unknowns.length
     || result.payload.unknowns.some(value => !['QUALITY_NOT_PROVIDED', 'PLATFORM_RECEIVED_AT_NOT_PROVIDED'].includes(value))) throw new Error(`结果 ${id} unknowns 无效`)
   if (result.payload.unknowns.length !== 2 || !result.payload.unknowns.includes('QUALITY_NOT_PROVIDED')
@@ -1523,6 +1523,10 @@ function exactRoleMap(value, label, normalize) {
 
 function uuid(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) }
 function scalar(value) { return typeof value === 'string' && Boolean(value.trim()) || typeof value === 'number' && Number.isFinite(value) || typeof value === 'boolean' }
+function machineFactScalar(key, value) {
+  if (typeof value === 'string') return !/[\u0000-\u001f\u007f]/.test(value) && (Boolean(value.trim()) || key === 'alarm_code' && value === '')
+  return typeof value === 'number' && Number.isFinite(value) || typeof value === 'boolean'
+}
 
 function uniqueIds(items, label) {
   const ids = items.map(item => requiredText(item.id, `${label} ID 无效`))

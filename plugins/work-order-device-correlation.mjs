@@ -210,7 +210,7 @@ function machineFacts(data) {
   const result = {}
   for (const key of MACHINE_FACT_KEYS) {
     if (data[key] === undefined || data[key] === null) continue
-    if (!scalar(data[key])) throw sourceError('INVALID_SOURCE', `Hive machineFacts ${key} 无效`)
+    if (!machineFactScalar(key, data[key])) throw sourceError('INVALID_SOURCE', `Hive machineFacts ${key} 无效`)
     result[key] = data[key]
   }
   return result
@@ -295,10 +295,35 @@ function sha256(value) { return createHash('sha256').update(value).digest('hex')
 function secretText(value) { if (typeof value !== 'string' || !value.trim()) throw new Error('secret'); return value.trim() }
 function exactText(value, code, message) { if (typeof value !== 'string' || !value.trim() || /[\u0000-\u001f\u007f]/.test(value)) throw sourceError(code, message); return value.trim() }
 function positiveRevision(value) { if (!Number.isSafeInteger(value) || value < 1) throw sourceError('FORBIDDEN', '连接 revision 无效'); return value }
-function parsedInstant(value, message) { const date = new Date(value); if (typeof value !== 'string' || !value.trim() || !Number.isFinite(date.getTime())) throw sourceError('INVALID_SOURCE', message); return date }
+function parsedInstant(value, message) {
+  if (typeof value !== 'string') throw sourceError('INVALID_SOURCE', message)
+  const naive = value.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\.(\d{1,6})$/)
+  const explicit = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(Z|([+-])(\d{2}):(\d{2}))$/)
+  const match = naive ?? explicit
+  if (!match) throw sourceError('INVALID_SOURCE', message)
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number)
+  if (!validDateTime(year, month, day, hour, minute, second)) throw sourceError('INVALID_SOURCE', message)
+  const millisecond = Number((match[7] ?? '').padEnd(3, '0').slice(0, 3))
+  let offsetMinutes = 0
+  if (explicit && match[8] !== 'Z') {
+    const offsetHour = Number(match[10]), offsetMinute = Number(match[11])
+    if (offsetHour > 23 || offsetMinute > 59) throw sourceError('INVALID_SOURCE', message)
+    offsetMinutes = (match[9] === '+' ? 1 : -1) * (offsetHour * 60 + offsetMinute)
+  }
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, second, millisecond) - offsetMinutes * 60_000)
+}
+function validDateTime(year, month, day, hour, minute, second) {
+  if (year < 1000 || month < 1 || month > 12 || day < 1 || hour > 23 || minute > 59 || second > 59) return false
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  return day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+}
 function instant(value, code, message) { const date = value instanceof Date ? value : new Date(value); if (!Number.isFinite(date.getTime())) throw sourceError(code, message); return date.toISOString() }
 function plainObject(value) { return Boolean(value && typeof value === 'object' && !Array.isArray(value)) }
 function scalar(value) { return typeof value === 'string' && Boolean(value.trim()) || typeof value === 'number' && Number.isFinite(value) || typeof value === 'boolean' }
+function machineFactScalar(key, value) {
+  if (typeof value === 'string') return !/[\u0000-\u001f\u007f]/.test(value) && (Boolean(value.trim()) || key === 'alarm_code' && value === '')
+  return typeof value === 'number' && Number.isFinite(value) || typeof value === 'boolean'
+}
 function uuid(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) }
 function sourceError(code, message) { return Object.assign(new Error(message), { code }) }
 function abortError(signal) { return signal?.reason?.code === 'UPSTREAM_TIMEOUT' ? sourceError('UPSTREAM_TIMEOUT', '来源查询超时') : sourceError('CANCELLED', '本次执行已停止') }

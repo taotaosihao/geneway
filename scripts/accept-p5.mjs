@@ -140,6 +140,7 @@ async function runDailyJourney(browser, config, { stage, framesDir, timers, reco
   const ruleId = await evaluate(`state.automationDetail.rule.id`)
   await captureStep('01', '创建每日规则草稿', '验证表单可保存并绑定目标', 'draft + daily-time + Asia/Shanghai', `(()=>{const rule=state.automationDetail.rule;return {status:rule.status,kind:rule.trigger.kind,time:rule.trigger.time,timeZone:rule.trigger.timeZone,targetIso:${JSON.stringify(targetIso)}}})()`)
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+  await evaluate(`document.querySelector('[data-rule-action="enable"]').scrollIntoView({block:'center'})`)
   const mobileFacts = await mobilePreflightCheck(browser, '[data-rule-action="enable"]')
   await captureStep('02', '390px 启用前几何、导航遮挡、焦点与可访问性检查', '确认真实移动端操作目标可见可操作', 'button visible, unobscured, focusable, AX exposed', `(${JSON.stringify(mobileFacts)})`)
   await tap(browser, '[data-rule-action="enable"]')

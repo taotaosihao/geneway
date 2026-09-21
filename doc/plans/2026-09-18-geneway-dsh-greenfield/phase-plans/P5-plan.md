@@ -1,6 +1,6 @@
 # P5 定时、事件与主动持续工作详细计划
 
-状态：**P5-T0 探针代码与受控真实拓扑已通过独立复核，但未修补 GearJob 常态事件 runtime 为 `BLOCKED_EXTERNAL_RUNTIME`；双 Astra 已收敛为 `READY_PARTIAL`，当前 D 已依据用户对中间产品决策的多 agent 委托完成 Flow Approval 绑定。可继续 v7、权限/预算、每日定时和对应 UI；真实事件启用及完整 P5 完成门保持阻塞。**
+状态：**GearJob `9ea23fc0` 已用正常新进程完成无临时修补的 T0 复验，`P5_T0_live_event_source_gate` 与 `T7b_external_event_source_prerequisite` 均为 `PASS`。T7a 每日定时主链已在 `9373dc8` 通过并交付材料；T3b/T7b 现为 `IMPLEMENTATION_READY`。P5 仍非 PASS：事件实现后必须冻结新候选，并在同一候选重新组合验证 T7a 与 T7b。**
 
 基线：`283771c5240799360f9c0d5f0d439e440fdaa4ad`（P4 飞书 runtime 切片）。P4 企业微信、真实手机 HTTPS 和阶段末真人验收仍为 deferred，P4 不是 PASS。
 
@@ -22,6 +22,8 @@ P5 不实现：通用 Workflow/DSL、事件总线、第二任务队列、模型�
 - 工程/安全：`/root/p5_astra_engineering_plan`，`gpt-6-astra` / high，只读。
 
 两者先独立检查合同、P1–P4 代码/计划、store/work/channel/runtime/backup 和本机 Frappe Webhook，再交换关于定时语义、预算、真实事件、恢复与 P4 顺序限制的实质分歧。
+
+T0 阻塞解除后，`/root/p5_t7b_product_plan` 与 `/root/p5_t7b_engineering_plan` 又以当前代码、GearJob `9ea23fc0`、无临时修补 T0 证据和 T7a 制品为输入独立复算 T3b/T7b。两者收敛为：复用现有 automation/work/channel 单事实链，只增加一个原生窄 receiver 和 occurrence 上的事件事实；不增加队列、事件总线、通用 webhook 框架、第二持久层或 GearJob 改造。
 
 ### 2.2 主控裁决
 
@@ -113,7 +115,7 @@ v7 backup/restore 明确保留 v4/v5/v6/v7 读入；恢复时仅 `active→pause
 ## 5. 职责、运行 owner 与可靠性
 
 - `src/automation-service.mjs`：规则管理、时间计算、发生身份、重叠/容量/预算、work 原子关联、通知意图；同一文件内保留最小 timer owner，不拆调度平台。
-- `plugins/gearjob-events.mjs`：仅在外部 runtime 修复且 T0 无临时修补复验通过后实施；对原始字节验签、封闭字段解析和窄 HTTP 回调，不运行模型。当前产品 runtime 不注册该入口。
+- `plugins/gearjob-events.mjs`：T0 无临时修补复验已通过；按完整 runtime 配置启用后，对原始字节验签、封闭字段解析和窄 HTTP 回调，不运行模型。未完整配置时不注册入口，事件规则同样不可创建或启用。
 - work service/runner/execution grant 继续拥有受理、模型、工具 I/O 和取消。
 - channel service/Feishu runtime 继续拥有通知创建、当前授权、claim、平台 I/O 和结果。自动通知调用现有 `createDelivery`，不伪造入站渠道消息。
 
@@ -127,7 +129,7 @@ v7 backup/restore 明确保留 v4/v5/v6/v7 读入；恢复时仅 `active→pause
 
 1. 先显示需本人处理的授权、来源、预算、中断或通知异常；正常等待/执行/完成留在常规动态。
 2. 规则卡显示目标、触发、下次时间/事件等待、状态、累计已用/上限、最近结果和通知状态。
-3. 当前创建时选本人获准员工、Skill、GearJob 连接和工单，只能选“每日上海时间”，设 1–10 次累计预算，通知只可选 Web 或本人已验证私聊。“GearJob 工单更新”显示“事件来源暂不可用”，不可创建或启用，服务端直接请求也拒绝。
+3. 当前创建时选本人获准员工、Skill、GearJob 连接和工单，可选“每日上海时间”或已配置的“GearJob 工单更新”，设 1–10 次累计预算，通知只可选 Web 或本人已验证私聊。事件 receiver 未完整配置或启动失败时，事件选项显示不可用，服务端直接请求同样拒绝；每日规则不受影响。
 4. 保存后先为草稿，用明确“启用规则”开始接受发生。
 5. 详情区分“停止本次运行”“暂停未来触发”“取消待发通知”和“撤销规则”，并说明各自范围。
 6. 发生历史分开计划时间/事件时间、接收时间、真实查询时间、work/result 和 delivery；高频跳过在 UI 聚合计数，底层去重事实保留。
@@ -140,7 +142,7 @@ v7 backup/restore 明确保留 v4/v5/v6/v7 读入；恢复时仅 `active→pause
 
 | 任务 | 产物 | 依赖 / 通过条件 |
 |---|---|---|
-| P5-T0 触发探针 | `scripts/probe-p5-trigger.mjs`；真 Frappe Webhook 和定时 owner 边界 | 接口/拓扑条件性结论已取得；未修补事件 runtime 保持 `BLOCKED_EXTERNAL_RUNTIME` |
+| P5-T0 触发探针 | `scripts/probe-p5-trigger.mjs`；真 Frappe Webhook 和定时 owner 边界 | GearJob `9ea23fc0` 正常新进程、无临时修补复验 PASS |
 | P5-T1 v7 与时间纯策略 | store、`automation-service` 纯管理/发生部分、迁移测试 | 已确认的 T0 接口结论；唯一性、owner、revision、日期、预算、闭图；事件 schema 可校验但不可创建/启用 |
 | P5-T2 原子 work 与权限 | work-service、execution-grant、runner 必要原生 guard | T1；occurrence 原子产生 workId，模型 `agent/request`/工具前撤权，整次 120s 与并发 2 |
 | P5-T3a timer | automation runtime、每日 owner、关闭清理 | T1–T2；真实时钟、无产品队列、重叠/漏触发/关闭；首次真实读取前验证未修补环境的 GearJob REST |
@@ -191,6 +193,43 @@ fake 时钟/SDK、受控 POST 和受控模型只补故障路径，不代替真�
 
 2026-09-20 用户当前消息已同时批准 P5 C/D、允许 P4 仍非 PASS 时先实施 P5，并允许 T0 为 GearJob 容器建立只绑 Docker bridge `172.20.0.1` 的固定路径 HMAC 回调窄入口。这一授权不允许消费 default 队列历史 job、开放主 Web、修改 GearJob/Frappe 产品源码、生产写入、部署或发布。
 
-当前依赖图为：T0 接口结论 → T1 → T2 → T3a 定时 → 对应 T4/T5/T6 → T7a；外部 GearJob 常态故障解除 → T0 无临时修补复验 → T3b 事件 → 对应 T4/T5/T6 → T7b。只有 T7a、T7b 和原有同候选组合门全部通过，才判断 P5 PASS。当前事件分支 blocked 不构成 T1/T2/定时的工程依赖，也不得降低最终完成条件。
+当前依赖图为：T0 PASS → T1/T2 → T3a 定时与 T3b 事件 → 对应 T4/T5/T6 → 同候选 T7a+T7b。只有 T7a、T7b 和原有组合门全部通过，才判断 P5 PASS；`9373dc8` 的 T7a 是可信历史证据，但不能代替事件代码最终候选上的重跑。
 
 P5 只有在真定时、真 GearJob 事件、真模型/工具、真通知、Web/移动操作、权限/预算/重投/恢复、P1–P4 回归、Design Review、独立正确性/复杂度复审和 MP4/report/Lark 回读均通过后才能 PASS。P5 技术完成不会关闭 P4 缺口。
+
+## 10. T0 解除后的 T3b/T7b 唯一实施补充
+
+### 10.1 单一事件事实与 active window
+
+- 事件 occurrence 继续留在 v7 的 `automationOccurrences[]`，只增加可空 `event`：`sourceId`、完整六位微秒 `sourceRevision` 和 raw-body `digest`。可比较的事件时间按固定 GearJob `+08:00` 语义从 `sourceRevision` 严格派生，不持久第二份时间权威；daily/manual 的 `event` 必须为 `null`，不新增事件表或第二状态机。
+- 稳定身份为 `ruleId + sourceId + on_update + Work Order + workOrderId + sourceRevision`，不含 digest 或 rule revision。digest 只用于判定同身份同内容 replay 与同身份异内容 conflict。
+- `eventAcceptAfter` 仅在首次启用、恢复、事件 source 或目标工单变化时更新；通知目标或累计预算变化不重置窗口。
+- `sourceRevision < eventAcceptAfter` 记录 `skipped: before-active-window`；源时间无法按已验证的 GearJob `+08:00`、六位微秒语义比较时记录 `blocked: source-time-unverifiable`。不得以接收时间替代来源时间。
+
+### 10.2 runtime 可用性与窄 receiver
+
+- 事件能力的唯一 runtime 事实来自同一进程的完整 receiver 配置；未配置时 UI 禁用、API 返回 `SOURCE_NOT_CONFIGURED`。不得无条件开放事件选项或硬编码“已就绪”。
+- secret file、exact source ID、exact source address、非 wildcard bridge host 和 port 必须全有或全无；callback path 是代码内唯一常量 `/p5/gearjob/work-order`，不提供环境覆盖。secret 为仓库外 `0600` 普通文件，主 Web 继续只绑 loopback。
+- receiver 只接受 exact `POST application/json`，body 最大 16 KiB、5 秒读取超时，以原始字节验证 base64 HMAC-SHA256，UTF-8 fatal decode，字段严格为 `source,event,doctype,name,modified`。
+- 输入、来源和认证错误返回明确 4xx；同身份异 digest 返回 409；只有 occurrence/work 已安全持久或明确 replay/ignored 才返回 2xx；store、owner、runtime 或其他无法证明安全受理的失败返回 503 供 Frappe 重投。
+- 生命周期顺序为 automation owner 取锁后启动 receiver；关闭时先停止新入站，再停 automation/channel/work 并释放 owner。第二实例、半启动和 listener 残留均为失败。
+
+### 10.3 UI 与恢复
+
+- 仍复用“全部工作 → 自动工作”，不增加导航或运维页。事件创建时隐藏每日时间且取消其 required；source 由服务端能力提供，不允许自由文本。
+- 事件详情显示“GearJob 工单更新”和“等待 GearJob 更新”，不显示每日时间或“现在核对一次”；历史明确分开事件时间、接收时间、查询时间、work 和通知状态，不能把事件标成“本人发起”。
+- 390×844 必须真实完成事件规则创建/启用或暂停/恢复，主操作不被底栏遮挡、无横向滚动、草稿与焦点不被轮询覆盖。
+- restore 保留 event facts，`active→paused`，accepted/running work→interrupted，sending delivery→unknown，启动后零自动重放和零自动补发。
+
+### 10.4 冻结、复审与组合验收
+
+1. 先完成确定性 event schema、去重/conflict、active-window、权限、receiver 信任边界、lifecycle、UI 和 restore 测试；`pnpm test:p5` 必须继续包含 P1–P4 受影响回归，`accept:p5 --harness-check` 保持外部效果为 0。
+2. 由独立 correctness reviewer 和独立 Astra/Ponytail reviewer 对同一实现候选复审；过度设计消融不得删除 HMAC、来源地址、完整来源时间、持久后 ACK、当前权限或恢复零重放。
+3. 冻结一个新 commit 后，先验证 GearJob commit/runtime、container/site/bridge/source timezone/queue 未漂移；只对漂移前提重验 T0。
+4. 同一候选、成员和 synthetic Work Order 上重跑 T7a 真墙钟，并跑 T7b：浏览器创建并启用事件规则，Frappe 正常 document save + commit 产生 after-commit Webhook，Geneway 持久 occurrence/work，DSH 工具重新读取 GearJob 当前事实，ZenMux DeepSeek 分析并保存 result，飞书本人私聊投递并 provider readback。
+5. 用相同 raw body 补充 replay、同身份异 digest、暂停/恢复旧事件、撤权和重启边界；这些受控请求不冒充真实 Frappe 主链。
+6. 最终只发送一套组合 MP4/report/离线手册：明确 `T7a`、`T7b`、P5 总结论和 P4 企业微信/真人验收 deferred。候选或 tracked tree 漂移即组合验收作废。
+
+### 10.5 停止条件
+
+若需要 wildcard listener、防火墙/公网/反向代理、消费 default 历史队列、再次修改 GearJob/Frappe、直接 POST 代替真实主链、轮询代替事件、临时 Pipeline patch、部署、push 或发布，停止相应路径并回到授权边界；不得降低验收标准绕过。

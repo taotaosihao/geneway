@@ -72,7 +72,7 @@ async function formalAcceptance(input) {
         await browser.send('Page.navigate', { url: origin })
         await browser.waitFor(`location.origin===${JSON.stringify(origin)}&&document.readyState==='complete'&&!document.querySelector('#app').classList.contains('hidden')`)
       }
-      const journey = await runCombinedJourney(browser, config, gearJob, restartRuntime, { stage, framesDir: join(stage, basename(artifacts.frames)), timers, recordingStartedAt: recorder.startedAt })
+      const journey = await runCombinedJourney(browser, config, gearJob, restartRuntime, { stage, framesDir: join(stage, basename(artifacts.frames)), timers, recordingStartedAt: recorder.startedAt, secrets })
       await assertBrowserSurfaceClean(browser, secrets, 'post-journey')
       await stopRecorder(recorder); recorder = undefined
       const evidence = await readback(paths.state, paths.dsh, journey, config)
@@ -147,11 +147,12 @@ async function configureProduct(browser, config, adminPassword, ownerPassword) {
   await waitFor(`state.channels.conversations.some(item=>item.id===${JSON.stringify(config.enrollment.conversationId)}&&item.identityId===${JSON.stringify(config.enrollment.identityId)}&&item.type==='private'&&item.status==='active')`)
 }
 
-async function runCombinedJourney(browser, config, gearJob, restartRuntime, { stage, framesDir, timers, recordingStartedAt }) {
+async function runCombinedJourney(browser, config, gearJob, restartRuntime, { stage, framesDir, timers, recordingStartedAt, secrets }) {
   const { send, evaluate, waitFor } = browser
   const steps = [], screenshots = framesDir, elapsed = () => (Date.now() - recordingStartedAt) / 1000
   await mkdir(screenshots, { recursive: true, mode: 0o700 })
   const captureStep = async (id, action, purpose, expected, observedExpression) => {
+    await assertBrowserSurfaceClean(browser, secrets, `checkpoint-${id}`)
     const startSeconds = elapsed(), image = await send('Page.captureScreenshot', { format: 'png', fromSurface: true })
     const file = join(screenshots, `step-${id}.png`); await writeFile(file, Buffer.from(image.data, 'base64'), { mode: 0o600 })
     const observed = await evaluate(observedExpression); steps.push({ id, action, purpose, expected, observed, startSeconds, endSeconds: elapsed(), image: `${basename(screenshots)}/step-${id}.png` })
@@ -169,7 +170,7 @@ async function runCombinedJourney(browser, config, gearJob, restartRuntime, { st
   await captureStep('02', '390px 启用前几何、导航遮挡、焦点与可访问性检查', '确认真实移动端操作目标可见可操作', 'button visible, unobscured, focusable, AX exposed', `(${JSON.stringify(mobileFacts)})`)
   await tap(browser, '[data-rule-action="enable"]')
   await waitFor(`state.automationDetail?.rule?.id===${JSON.stringify(ruleId)}&&state.automationDetail.rule.status==='active'`)
-  await captureStep('03', '390px 真实触摸启用规则', '验证移动端触摸路径改变规则状态', 'active and no horizontal overflow', `(()=>({status:state.automationDetail.rule.status,overflow:document.documentElement.scrollWidth<=390}))()`)
+  await captureStep('03', '390px 真实触摸启用规则', '验证移动端触摸路径改变规则状态', 'active and no horizontal overflow', `(()=>({status:state.automationDetail.rule.status,fitsViewport:document.documentElement.scrollWidth<=390}))()`)
   const deadline = Date.now() + 4 * 60_000
   while (Date.now() < deadline) {
     const done = await evaluate(`reloadAll().then(()=>openAutomation(${JSON.stringify(ruleId)})).then(()=>{const item=state.automationDetail?.occurrences?.find(value=>value.workId),work=item&&state.bootstrap.works.find(value=>value.id===item.workId),delivery=item&&state.channels.deliveries.find(value=>value.id===item.deliveryId);return work?.status==='completed'&&delivery?.status==='delivered'})`)
@@ -194,7 +195,7 @@ async function runCombinedJourney(browser, config, gearJob, restartRuntime, { st
   const eventEnableFacts = await mobilePreflightCheck(browser, '[data-rule-action="enable"]')
   await tap(browser, '[data-rule-action="enable"]')
   await waitFor(`state.automationDetail?.rule?.id===${JSON.stringify(eventRuleId)}&&state.automationDetail.rule.status==='active'`)
-  await captureStep('05', '390px 创建并启用 GearJob 事件规则', '验证真实移动端可配置事件来源并开始等待 after-commit Webhook', 'active + event source ready + no daily control', `(()=>({status:state.automationDetail.rule.status,kind:state.automationDetail.rule.trigger.kind,sourceId:state.automationDetail.rule.trigger.sourceId,overflow:document.documentElement.scrollWidth<=390,enablePreflight:${JSON.stringify(eventEnableFacts)}}))()`)
+  await captureStep('05', '390px 创建并启用 GearJob 事件规则', '验证真实移动端可配置事件来源并开始等待 after-commit Webhook', 'active + event source ready + no daily control', `(()=>({status:state.automationDetail.rule.status,kind:state.automationDetail.rule.trigger.kind,sourceId:state.automationDetail.rule.trigger.sourceId,fitsViewport:document.documentElement.scrollWidth<=390,enablePreflight:${JSON.stringify(eventEnableFacts)}}))()`)
   await startGearJobWorker(gearJob)
   const first = await saveGearJobWorkOrder(gearJob)
   await waitForEventCompletions(browser, eventRuleId, 1, timers)
@@ -335,7 +336,29 @@ async function finishMedia(video, cover, framesDir, steps) {
   assert.equal(stream?.codec_name, 'h264'); assert.equal(stream?.pix_fmt, 'yuv420p'); assert.equal(stream?.width, 1440); assert.equal(stream?.height, 900); assert.ok(Number(probe.format?.duration) > 0)
   const screenshots = (await listFiles(framesDir)).sort(); assert.equal(screenshots.length, steps.length); assert.ok(screenshots.every(path => path.endsWith('.png'))); await copyFile(screenshots[0], cover); await chmod(cover, 0o600)
   for (const image of screenshots) await run('ffmpeg', ['-v', 'error', '-i', image, '-f', 'null', '-'])
-  return { video: basename(video), cover: basename(cover), steps: screenshots.map(path => relative(dirname(video), path)), codec: 'h264', width: 1440, height: 900, fullDecode: true, pixelSecretBoundary: 'PNG bytes are not proof of pixel secrecy; DOM/AX/text checks ran before and after recording.' }
+  const rawDuration = Number(probe.format.duration), rawVideo = `${video}.raw-${process.pid}.mp4`, manifest = `${video}.concat-${process.pid}.txt`, segments = `${video}.segments-${process.pid}`, holdSeconds = 3.2, actionSeconds = 1
+  await rename(video, rawVideo)
+  try {
+    await mkdir(segments, { mode: 0o700 })
+    const quote = path => `'${path.replaceAll("'", "'\\''")}'`
+    const segmentFiles = []
+    for (const [index, step] of steps.entries()) {
+      const image = screenshots[index], imageProbe = JSON.parse(await capture('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width', '-of', 'json', image])), mobile = imageProbe.streams?.[0]?.width === 390
+      const action = join(segments, `${step.id}-action.mp4`), checkpoint = join(segments, `${step.id}-checkpoint.mp4`), start = Math.max(0, step.startSeconds - actionSeconds / 2), duration = Math.min(actionSeconds, rawDuration - start)
+      const fit = `scale=1440:900:force_original_aspect_ratio=decrease,pad=1440:900:(ow-iw)/2:(oh-ih)/2:color=white`, chromeFree = `crop=${mobile ? 390 : 990}:844:0:56`
+      const bar = `drawbox=x=0:y=0:w=iw:h=64:color=black@0.78:t=fill`
+      await run('ffmpeg', ['-v', 'error', '-ss', String(start), '-i', rawVideo, '-t', String(duration), '-vf', `${chromeFree},${fit},${bar},drawtext=text='EDITED LIVE ACTION ${step.id}/${steps.length}  raw around ${step.startSeconds.toFixed(3)}s':x=24:y=24:fontsize=24:fontcolor=white`, '-r', '25', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', action])
+      await run('ffmpeg', ['-v', 'error', '-loop', '1', '-i', image, '-t', String(holdSeconds), '-vf', `${fit},${bar},drawtext=text='VERIFIED CHECKPOINT ${step.id}/${steps.length}  raw t=${step.startSeconds.toFixed(3)}s  idle waits compressed':x=24:y=24:fontsize=24:fontcolor=white`, '-r', '25', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', checkpoint])
+      segmentFiles.push(action, checkpoint)
+    }
+    await writeFile(manifest, segmentFiles.map(path => `file ${quote(path)}`).join('\n') + '\n', { mode: 0o600 })
+    await run('ffmpeg', ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', manifest, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', video])
+  } finally {
+    await rm(manifest, { force: true }); await rm(segments, { recursive: true, force: true })
+  }
+  await run('ffmpeg', ['-v', 'error', '-i', video, '-f', 'null', '-'])
+  await rm(rawVideo, { force: true })
+  return { video: basename(video), cover: basename(cover), steps: screenshots.map(path => relative(dirname(video), path)), codec: 'h264', width: 1440, height: 900, fullDecode: true, presentation: { source: 'cropped-live-action-clips+verified-checkpoints', rawDurationSeconds: rawDuration, idleWaitsCompressed: true, actionClipSeconds: actionSeconds, checkpointHoldSeconds: holdSeconds }, pixelSecretBoundary: 'Action clips crop browser chrome from the validated raw recording; every result hold derives from a DOM/AX/text-checked Page.captureScreenshot checkpoint.' }
 }
 
 async function createFixture(paths, config, adminPassword, ownerPassword) {
@@ -610,7 +633,7 @@ async function scanLeaks(targets, secrets) { const needles = secrets.filter(valu
 async function listFiles(path) { try { const info = await lstat(path); if (info.isSymbolicLink()) throw new Error(`symlink is not an artifact: ${path}`); if (info.isFile()) return [path]; if (!info.isDirectory()) return []; const names = await readdir(path, { recursive: true, withFileTypes: true }); return names.filter(item => item.isFile()).map(item => join(item.parentPath ?? item.path, item.name)) } catch (error) { if (error.code === 'ENOENT') return []; throw error } }
 function isWithin(parent, candidate) { const child = relative(resolve(parent), resolve(candidate)); return child === '' || (!child.startsWith('..') && !isAbsolute(child)) }
 async function dshEvidence(path, sessionRef) { const files = await listFiles(path), sessions = files.filter(file => file.split('/').includes(sessionRef) || basename(file).includes(sessionRef)); const contents = await Promise.all(sessions.map(async file => file.endsWith('.zstd') ? capture('zstd', ['-dc', file]) : file.endsWith('.gz') ? capture('gzip', ['-dc', file]) : readFile(file, 'utf8'))); return { sessionCount: sessions.length, eventCount: contents.reduce((sum, raw) => sum + raw.split(/\r?\n/).filter(Boolean).length, 0), sessionHash: sessions[0] ? shortHash(sessions[0]) : undefined } }
-function manual(report) { const materials = report.verdict?.materials === 'passed' ? 'passed' : 'evidence-ready/pending delivery'; return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Geneway P5 组合验收</title><style>body{font:16px/1.6 system-ui;max-width:960px;margin:auto;padding:32px;color:#17352c}section{border:1px solid #ccdcd3;border-radius:12px;padding:18px;margin:18px 0}img{max-width:100%;height:auto}dt{font-weight:700}</style><h1>P5 定时与事件自动工作组合验收</h1><p>结论：T7a 与 T7b business passed；P5 conditional，待独立复核与材料交付；操作材料 ${materials}。P4 企业微信与真人最终验收仍 deferred。</p><p><a href="${basename(report.media.video)}">验收视频</a> · <a href="${basename(report.media.cover)}">封面</a> · <a href="${escapeHtml(report.reportFile ?? 'report.json')}">报告</a></p>${report.journey.steps.map(step => `<section><h2>步骤 ${escapeHtml(step.id)}：${escapeHtml(step.action)}</h2><dl><dt>目的</dt><dd>${escapeHtml(step.purpose)}</dd><dt>预期</dt><dd>${escapeHtml(step.expected)}</dd><dt>观察</dt><dd>${escapeHtml(JSON.stringify(step.observed))}</dd><dt>视频时间段</dt><dd>${step.startSeconds.toFixed(3)}s–${step.endSeconds.toFixed(3)}s</dd></dl><img src="${escapeHtml(step.image)}" alt="${escapeHtml(step.action)}"></section>`).join('')}</html>` }
+function manual(report) { const materials = report.verdict?.materials === 'passed' ? 'passed' : 'evidence-ready/pending delivery'; return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Geneway P5 组合验收</title><style>body{font:16px/1.6 system-ui;max-width:960px;margin:auto;padding:32px;color:#17352c}section{border:1px solid #ccdcd3;border-radius:12px;padding:18px;margin:18px 0}img{max-width:100%;height:auto}dt{font-weight:700}</style><h1>P5 定时与事件自动工作组合验收</h1><p>结论：T7a 与 T7b business passed；P5 conditional，待独立复核与材料交付；操作材料 ${materials}。P4 企业微信与真人最终验收仍 deferred。</p><p>原始真实运行 ${Number(report.media.presentation?.rawDurationSeconds ?? 0).toFixed(3)} 秒；验收视频压缩长时闲等待，并将每个原始检查点保留 ${report.media.presentation?.checkpointHoldSeconds ?? 0} 秒以便人工复核。</p><p><a href="${basename(report.media.video)}">验收视频</a> · <a href="${basename(report.media.cover)}">封面</a> · <a href="${escapeHtml(report.reportFile ?? 'report.json')}">报告</a></p>${report.journey.steps.map(step => `<section><h2>步骤 ${escapeHtml(step.id)}：${escapeHtml(step.action)}</h2><dl><dt>目的</dt><dd>${escapeHtml(step.purpose)}</dd><dt>预期</dt><dd>${escapeHtml(step.expected)}</dd><dt>观察</dt><dd>${escapeHtml(JSON.stringify(step.observed))}</dd><dt>原始检查点</dt><dd>${step.startSeconds.toFixed(3)}s</dd></dl><img src="${escapeHtml(step.image)}" alt="${escapeHtml(step.action)}"></section>`).join('')}</html>` }
 async function verifyOfflineBundle(stage, report) { const html = await readFile(join(stage, 'index.html'), 'utf8'); const links = [...html.matchAll(/(?:href|src)="([^"]+)"/g)].map(match => match[1]); assert.equal(links.some(link => /^[a-z]+:|^\/\//i.test(link)), false); const files = await listFiles(stage); for (const link of links) { const target = resolve(stage, link); assert.ok(isWithin(stage, target), `offline link escapes stage: ${link}`); const info = await lstat(target); assert.equal(info.isFile(), true, `offline link missing: ${link}`); if (/\.png$/i.test(target) || /\.mp4$/i.test(target)) await run('ffmpeg', ['-v', 'error', '-i', target, '-f', 'null', '-']) } assert.ok(files.some(file => file.endsWith('.mp4'))); assert.equal(report.media.steps.length, report.journey.steps.length); const movable = await mkdtemp(join(tmpdir(), 'geneway-p5-bundle-')); try { for (const file of files) { const target = join(movable, relative(stage, file)); await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await copyFile(file, target) } for (const link of links) assert.equal(await access(join(movable, link)).then(() => true).catch(() => false), true) } finally { await rm(movable, { recursive: true, force: true }) } }
 function stringsFrom(value, found = []) { if (typeof value === 'string') found.push(value); else if (Array.isArray(value)) for (const item of value) stringsFrom(item, found); else if (value && typeof value === 'object') for (const item of Object.values(value)) stringsFrom(item, found); return found }
 async function checkHarness() {

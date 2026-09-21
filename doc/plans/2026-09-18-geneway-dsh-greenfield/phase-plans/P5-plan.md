@@ -88,6 +88,17 @@ T0 必须证明：
 
 因此 T0 不能直接启动 default worker：先审计/隔离现有积压，为 P5 Webhook 选专用测试队列并只启消费该队列的 worker。回调优先建立一个只绑 `172.20.0.1:<明确端口>`、只接受固定 P5 路径/方法、限定 GearJob 来源并强制 raw-body HMAC 的窄 listener；主认证 Web 继续 loopback。这一 bridge 监听是实施前需用户明确允许的本地网络边界，不由“测试环境”自动推导。
 
+### 3.3 2026-09-21 正常 GearJob runtime 复验结论
+
+用户批准 GearJob 最小修改后，GearJob 侧仅修正 `read_only_cache.py` 对 `redis.client.Pipeline` 原方法保存的继承判断，提交 `9ea23fc0`，未重构队列或 Frappe 行为。随后在无临时 patch 的全新进程中重跑 P5-T0：
+
+- 证据根：`/home/gewu/.codex/workflow/artifacts/20260919-006-geneway-dsh-greenfield/p5-t0-live/gw-p5-t0-fixed-20260921-121346`。
+- `RUNTIME_COMPATIBILITY_PATCH=false`，真实 Work Order `WO-26-00103`、真实 Frappe Webhook、真实 `long` worker、Docker bridge `172.20.0.5 -> 172.20.0.1:39471`。
+- 首次持久化事件返回 503 后，同一身份重投命中 replay；3 个唯一 occurrence、4 次请求、3 次 accepted、1 次 replay；rollback 恢复后零事件；default 队列精确 job ID 不变，`long` 队列最终为空。
+- source `modified` 六位小数严格递增；worker、receiver、listener、secret、Webhook、Work Order、Request Log 均已清理。
+
+独立 verifier 结论为 `P5_T0_live_event_source_gate: PASS`、`T7b_external_event_source_prerequisite: PASS`。这解除“外部 GearJob runtime 无法验证”的阻塞；但 P5-T3b/T7b 仍必须在 Geneway 产品事件路径中实现并跑完整业务旅程后，才可宣称事件分支或 P5 总体验收通过。
+
 ## 4. v7 唯一事实模型
 
 P5 将 state v6 升为 v7，只增加：
@@ -138,6 +149,18 @@ v7 backup/restore 明确保留 v4/v5/v6/v7 读入；恢复时仅 `active→pause
 | P5-T5 API/UI | server、`web/index.html` | A/C/D/E；创建/修改/启用/暂停/恢复/撤销/发生/停止/通知恢复 |
 | P5-T6 恢复与回归 | state-transfer、`test:p5`、P1–P4 受影响回归 | v4–v7、restore paused、零补跑/外发、秘密零泄漏 |
 | P5-T7 真实验收 | `accept:p5`、Design Review、MP4 + 去敏 report + Lark 回读 | T7a 定时主链和 T7b 无临时修补的真 GearJob 事件必须在同候选组合通过；真模型、真通知及独立复审不变 |
+
+### 7.1 T7a 正式验收记录
+
+T7a 每日定时主链已在候选 `9373dc88da42f76767e9c4ba9a68237f6f8d0225` 通过并交付材料：
+
+- 报告：`artifacts/p5-acceptance/p5-9373dc8-final.report.json`，SHA-256 `414d0edc613fd3ebf3daaac0e960874dd4433db58d9b586b328158181076ed7d`。
+- 视频：`artifacts/p5-acceptance/p5-9373dc8-final.mp4`，H.264，1440×900，146.72 秒，SHA-256 `eeaee5fb29bef363f481ab51dd1d14b12ad87aee77d8b30c9055a51ed7278290`。
+- 封面：`artifacts/p5-acceptance/p5-9373dc8-final.png`，SHA-256 `a56f620063263957bfa102baa7b853e6c04c17f3335e1f04c21bad726575ee48`。
+- 离线手册：`artifacts/p5-acceptance/p5-9373dc8-final.html`，SHA-256 `3f0687698b32ac5c5abf720d783a6041d74919447dfe0ba32c881e466ff63e7b`。
+- 飞书材料用 Geneway 产品 app `cli_aaae8b6cbdb89cc0` 发往已验证 p2p chat，并批量回读 4 条均 `deleted=false`：说明 `om_x100b643fe43568acb3c498727351298`，视频 `om_x100b643fe5b1d0a4b1c638d86ab13dc`，report `om_x100b643fe51494a0b3190dda7ab8f8e`，手册 `om_x100b643fe2fe90acb2c7cbea798425a`。
+
+该记录只证明 T7a 每日 timer 主链；`p5` 仍为 `conditional`，T7b 事件主链未跑完，不得宣布 P5 PASS。
 
 每个任务仅一个 Team Sol 写入者；store、work-service、server、channel-service 不允许重叠写入。每个切片修复后回原独立 reviewer 复审。
 

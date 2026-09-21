@@ -120,7 +120,7 @@ async function configureProduct(browser, config, adminPassword, ownerPassword) {
   await evaluate(`document.querySelector('#logout').click()`)
   await waitFor(`!document.querySelector('#login-shell').classList.contains('hidden')`)
   await login(evaluate, waitFor, 'member', ownerPassword)
-  assert.equal(await evaluate(`state.channels.conversations.some(item=>item.type==='private'&&item.status==='active'&&item.memberId==='member-user')`), true, 'formal mode requires a verified enrollment preflight')
+  await waitFor(`state.channels.conversations.some(item=>item.id===${JSON.stringify(config.enrollment.conversationId)}&&item.identityId===${JSON.stringify(config.enrollment.identityId)}&&item.type==='private'&&item.status==='active')`)
 }
 
 async function runDailyJourney(browser, config, { stage, framesDir, timers, recordingStartedAt }) {

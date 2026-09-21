@@ -190,6 +190,7 @@ async function runCombinedJourney(browser, config, gearJob, restartRuntime, { st
   await waitFor(`state.automationDetail?.rule?.workOrderId===${JSON.stringify(config.workOrderId)}&&state.automationDetail.rule.trigger.kind==='gearjob-work-order-update'&&state.automationDetail.rule.status==='draft'`)
   const eventRuleId = await evaluate(`state.automationDetail.rule.id`)
   assert.equal(await evaluate(`document.querySelector('#automation-time-field').classList.contains('hidden')&&!document.querySelector('#automation-time').required`), true)
+  await evaluate(`document.querySelector('[data-rule-action="enable"]').scrollIntoView({block:'center'})`)
   const eventEnableFacts = await mobilePreflightCheck(browser, '[data-rule-action="enable"]')
   await tap(browser, '[data-rule-action="enable"]')
   await waitFor(`state.automationDetail?.rule?.id===${JSON.stringify(eventRuleId)}&&state.automationDetail.rule.status==='active'`)

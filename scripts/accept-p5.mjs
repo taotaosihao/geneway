@@ -1,0 +1,329 @@
+import assert from 'node:assert/strict'
+import { createHash, randomBytes } from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { createServer as createNodeServer } from 'node:http'
+import { access, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { readRuntimeConfig, readSettings, validateRuntimeConfig } from '../src/runtime-config.mjs'
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
+const artifactRoot = resolve(root, 'artifacts', 'p5-acceptance')
+const harnessCheck = process.argv.includes('--harness-check')
+const options = parseArgs(process.argv.slice(2))
+
+if (harnessCheck) {
+  await checkHarness()
+  console.log(JSON.stringify({ ok: true, mode: 'harness-check', externalEffects: 0, checks: ['args', 'paths', 'absolute-outside', 'permissions', 'fixtures', 'enrollment', 'runtime-config', 'secret-scan', 'cleanup', 'terminal-order', 'media-plan', 'material-manifest', 'lark-readback', 'conditional-verdict'] }))
+} else {
+  await formalAcceptance(options)
+}
+
+async function formalAcceptance(input) {
+  const candidate = await capture('git', ['rev-parse', 'HEAD'])
+  await assertFrozen(candidate)
+  let config
+  try { config = await validateFormal(input) } catch (error) {
+    if (/enrollment/i.test(error?.message ?? '')) { console.error(JSON.stringify({ ok: false, status: 'needs-operator-link', candidate, externalEffects: 0, reason: 'verified member↔identity↔private conversation enrollment is required before formal mode' })); process.exitCode = 2; return }
+    throw error
+  }
+  await runBoundedP5Tests(candidate)
+  const scratch = await mkdtemp(join(tmpdir(), 'geneway-p5-accept-'))
+  const stage = await mkdtemp(join(tmpdir(), 'geneway-p5-stage-'))
+  await chmod(scratch, 0o700)
+  await chmod(stage, 0o700)
+  const paths = fixturePaths(scratch)
+  const artifacts = artifactPaths(config.record)
+  const display = process.env.GENEWAY_ACCEPT_DISPLAY ?? ':98'
+  const port = await freePort(), cdpPort = await freePort(), origin = `http://127.0.0.1:${port}`
+  const adminPassword = randomBytes(24).toString('base64url'), ownerPassword = randomBytes(24).toString('base64url')
+  const secrets = [...config.secretNeedles, adminPassword, ownerPassword]
+  const timers = new Set()
+  let server, chrome, xvfb, recorder, browser, sentReceipt, prepared, failure, cleanupError
+  try {
+    try {
+      const enrollment = await directMessageEnrollment(config, candidate)
+      config.enrollment = enrollment.enrollment
+      sentReceipt = enrollment.receipt
+      await createFixture(paths, config, adminPassword, ownerPassword)
+      xvfb = spawn('Xvfb', [display, '-screen', '0', '1440x900x24', '-nolisten', 'tcp'], { stdio: 'ignore' })
+      await alive(xvfb, 'Xvfb')
+      try { server = await startServer(paths, origin, port, config) } catch (error) { server = error.process ?? server; throw error }
+      chrome = spawn('google-chrome', chromeArgs(paths.chrome, cdpPort, origin), { env: { ...process.env, DISPLAY: display }, stdio: ['ignore', 'ignore', 'pipe'] })
+      await waitHttp(`http://127.0.0.1:${cdpPort}/json/version`, 20_000)
+      browser = await connectBrowser(cdpPort, origin)
+      await configureProduct(browser, config, adminPassword, ownerPassword)
+      await assertBrowserSurfaceClean(browser, secrets, 'pre-recording')
+      recorder = startRecorder(display, join(stage, basename(config.record)))
+      await alive(recorder.process, 'ffmpeg')
+      const journey = await runDailyJourney(browser, config, { stage, framesDir: join(stage, basename(artifacts.frames)), timers, recordingStartedAt: recorder.startedAt })
+      await assertBrowserSurfaceClean(browser, secrets, 'post-journey')
+      await stopRecorder(recorder); recorder = undefined
+      const evidence = await readback(paths.state, paths.dsh, journey, config)
+      const expectedText = expectedDeliveryText(evidence.work, evidence.result)
+      sentReceipt = { messageId: shortHash(evidence.delivery.providerMessageId), chatId: shortHash(evidence.conversation.providerConversationId), textSha256: sha256(expectedText), deleted: false, msgType: 'unknown' }
+      sentReceipt = await verifyLark(config, evidence.delivery.providerMessageId, evidence.conversation.providerConversationId, expectedText)
+      assert.equal(browser.errors.console.length, 0); assert.equal(browser.errors.page.length, 0); assert.equal(browser.errors.network.length, 0)
+      const media = await finishMedia(join(stage, basename(config.record)), join(stage, 'cover.png'), join(stage, basename(artifacts.frames)), journey.steps)
+      const report = { ...buildReport(candidate, config, journey, evidence, sentReceipt, media), reportFile: basename(artifacts.report) }
+      await writeFile(join(stage, 'report.json'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
+      await writeFile(join(stage, basename(artifacts.report)), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
+      await writeFile(join(stage, 'index.html'), manual(report), { mode: 0o600 })
+      await verifyOfflineBundle(stage, report)
+      await scanLeaks([stage], secrets)
+      prepared = { report, evidence, journey, media }
+    } catch (error) {
+      sentReceipt ||= error.receipt
+      failure = error
+    }
+  } finally {
+    try { await cleanupRuntime({ browser, recorder, chrome, server, xvfb, timers, scratch, paths }) } catch (error) { cleanupError = error }
+  }
+  if (!failure && !cleanupError) {
+    try {
+      await assertCandidateTerminal(candidate)
+      await scanLeaks([stage], secrets)
+      await verifyOfflineBundle(stage, prepared.report)
+      await promoteStage(stage, artifacts)
+      await scanLeaks(Object.values(artifacts), secrets)
+      await assertCandidateTerminal(candidate)
+      await rm(stage, { recursive: true, force: true }); await assertRemoved(stage)
+    } catch (error) { failure = error }
+  }
+  if (failure || cleanupError) {
+    const reason = failure ?? cleanupError
+    if (sentReceipt) await preserveFailureReceipt(candidate, config, sentReceipt, reason)
+    await rm(stage, { recursive: true, force: true })
+    console.error(JSON.stringify({ ok: false, status: 'evidence-pending', candidate, reason: redact(reason?.message ?? reason), materials: sentReceipt ? 'delivery-receipt-preserved' : 'not-sent' }))
+    process.exitCode = 1
+    return
+  }
+  console.log(JSON.stringify({ ok: true, status: 'evidence-pending', candidate, verdict: prepared.report.verdict, report: artifacts.report, video: artifacts.video, manual: artifacts.manual, materials: 'evidence-ready/pending-delivery', note: 'T7a business passed; operation materials remain evidence-ready/pending delivery and are independently reviewed and delivered by the controller.' }))
+}
+
+async function configureProduct(browser, config, adminPassword, ownerPassword) {
+  const { evaluate, waitFor } = browser
+  await waitFor(`Boolean(document.querySelector('#login-name'))`)
+  await login(evaluate, waitFor, 'admin', adminPassword)
+  const configured = await evaluate(`(async()=>{
+    const route=await api('/api/admin/model-routes',{method:'POST',body:{id:'model-zenmux',provider:'zenmux',model:'deepseek/deepseek-v4-pro',displayName:'ZenMux DeepSeek V4 Pro',enabled:true,credentialRef:'ZENMUX_API_KEY'}})
+    const skill=await api('/api/admin/skills',{method:'POST',body:{id:'skill-gearjob-work-order-read',name:'GearJob 工单只读',capabilityId:'gearjob-work-order-read',enabled:true}})
+    const connection=await api('/api/admin/connections',{method:'POST',body:{id:'connection-p5',name:'GearJob 外部测试',kind:'gearjob-rest',targetIdentity:'gearjob-p5',baseUrl:${JSON.stringify(config.gearJobUrl)},hostHeader:${JSON.stringify(config.gearJobHost)},credentialRef:'gearjob.json',allowedObjectIds:[${JSON.stringify(config.workOrderId)}],sourceSystem:'GearJob',sourceInstance:'dev.localhost',sourceEnvironment:'external-test',dataMode:'synthetic',evidenceMode:'real-frappe-rest',enabled:true,skillIds:[skill.id]}})
+    const employee=await api('/api/admin/employees',{method:'POST',body:{id:'employee-p5',name:'工单核对员',description:'真实定时核对测试工单',enabled:true,modelRouteId:route.id,connectionIds:[connection.id],skillIds:[skill.id]}})
+    await api('/api/admin/members/member-user',{method:'PATCH',body:{displayName:'验收成员',role:'member',enabled:true,employeeIds:[employee.id]}})
+    await api('/api/admin/channel-apps',{method:'POST',body:{id:'app-feishu-p5',provider:'feishu',providerAppId:${JSON.stringify(config.feishuAppId)},providerTenantId:${JSON.stringify(config.feishuTenantId)},credentialRef:'feishu.json',enabled:true,allowedScopes:['result']}})
+    return api('/api/admin/connections/'+connection.id+'/test',{method:'POST',body:{}})
+  })()`)
+  assert.equal(configured.ok, true)
+  await evaluate(`document.querySelector('#logout').click()`)
+  await waitFor(`!document.querySelector('#login-shell').classList.contains('hidden')`)
+  await login(evaluate, waitFor, 'member', ownerPassword)
+  assert.equal(await evaluate(`state.channels.conversations.some(item=>item.type==='private'&&item.status==='active'&&item.memberId==='member-user')`), true, 'formal mode requires a verified enrollment preflight')
+}
+
+async function runDailyJourney(browser, config, { stage, framesDir, timers, recordingStartedAt }) {
+  const { send, evaluate, waitFor } = browser
+  const steps = [], screenshots = framesDir, elapsed = () => (Date.now() - recordingStartedAt) / 1000
+  await mkdir(screenshots, { recursive: true, mode: 0o700 })
+  const captureStep = async (id, action, purpose, expected, observedExpression) => {
+    const startSeconds = elapsed(), image = await send('Page.captureScreenshot', { format: 'png', fromSurface: true })
+    const file = join(screenshots, `step-${id}.png`); await writeFile(file, Buffer.from(image.data, 'base64'), { mode: 0o600 })
+    const observed = await evaluate(observedExpression); steps.push({ id, action, purpose, expected, observed, startSeconds, endSeconds: elapsed(), image: `${basename(screenshots)}/step-${id}.png` })
+  }
+  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
+  await pointerClick(browser, '[data-view="works"]'); await pointerClick(browser, '#new-automation'); await waitFor(`!document.querySelector('#automation-form').classList.contains('hidden')`)
+  const formReadyAt = Date.now(), target = nextSafeMinute(new Date(formReadyAt), 90_000), time = timeInZone(target, 'Asia/Shanghai'), targetIso = target.toISOString()
+  await evaluate(`(()=>{const binding=document.querySelector('#automation-binding');binding.value=binding.querySelector('option:not([value=""])').value;binding.dispatchEvent(new Event('input'));const notice=document.querySelector('#automation-notification');notice.value=notice.querySelector('option:not([value=""])').value;notice.dispatchEvent(new Event('input'));const order=document.querySelector('#automation-order');order.value=${JSON.stringify(config.workOrderId)};order.dispatchEvent(new Event('input'));const time=document.querySelector('#automation-time');time.value=${JSON.stringify(time)};time.dispatchEvent(new Event('input'));const budget=document.querySelector('#automation-budget');budget.value='1';budget.dispatchEvent(new Event('input'));document.querySelector('#automation-form').requestSubmit()})()`)
+  await waitFor(`state.automationDetail?.rule?.workOrderId===${JSON.stringify(config.workOrderId)}&&state.automationDetail.rule.status==='draft'`)
+  const ruleId = await evaluate(`state.automationDetail.rule.id`)
+  await captureStep('01', '创建每日规则草稿', '验证表单可保存并绑定目标', 'draft + daily-time + Asia/Shanghai', `(()=>{const rule=state.automationDetail.rule;return {status:rule.status,kind:rule.trigger.kind,time:rule.trigger.time,timeZone:rule.trigger.timeZone,targetIso:${JSON.stringify(targetIso)}}})()`)
+  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+  const mobileFacts = await mobilePreflightCheck(browser, '[data-rule-action="enable"]')
+  await captureStep('02', '390px 启用前几何、导航遮挡、焦点与可访问性检查', '确认真实移动端操作目标可见可操作', 'button visible, unobscured, focusable, AX exposed', `(${JSON.stringify(mobileFacts)})`)
+  await tap(browser, '[data-rule-action="enable"]')
+  await waitFor(`state.automationDetail?.rule?.id===${JSON.stringify(ruleId)}&&state.automationDetail.rule.status==='active'`)
+  await captureStep('03', '390px 真实触摸启用规则', '验证移动端触摸路径改变规则状态', 'active and no horizontal overflow', `(()=>({status:state.automationDetail.rule.status,overflow:document.documentElement.scrollWidth<=390}))()`)
+  const deadline = Date.now() + 4 * 60_000
+  while (Date.now() < deadline) {
+    const done = await evaluate(`reloadAll().then(()=>openAutomation(${JSON.stringify(ruleId)})).then(()=>{const item=state.automationDetail?.occurrences?.find(value=>value.workId),work=item&&state.bootstrap.works.find(value=>value.id===item.workId),delivery=item&&state.channels.deliveries.find(value=>value.id===item.deliveryId);return work?.status==='completed'&&delivery?.status==='delivered'})`)
+    if (done) break
+    await delay(2_000, timers)
+  }
+  assert.equal(await evaluate(`(()=>{const item=state.automationDetail?.occurrences?.find(value=>value.workId),work=item&&state.bootstrap.works.find(value=>value.id===item.workId),delivery=item&&state.channels.deliveries.find(value=>value.id===item.deliveryId);return work?.status==='completed'&&delivery?.status==='delivered'})()`), true)
+  await captureStep('04', '真实墙钟触发并完成主链', '验证每日调度、GearJob、ZenMux、飞书结果链闭合', 'completed + delivered', `(()=>{const item=state.automationDetail.occurrences.find(value=>value.workId),work=state.bootstrap.works.find(value=>value.id===item.workId),delivery=state.channels.deliveries.find(value=>value.id===item.deliveryId);return {status:work.status,deliveryStatus:delivery.status,scheduledDate:item.scheduledDate}})()`)
+  assert.ok(Date.parse(targetIso) - formReadyAt >= 90_000)
+  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
+  const publicFacts = await evaluate(`(()=>{const occurrence=state.automationDetail.occurrences.find(item=>item.workId),work=state.bootstrap.works.find(item=>item.id===occurrence.workId),result=work.results.at(-1),delivery=state.channels.deliveries.find(item=>item.id===occurrence.deliveryId);return {ruleId:state.automationDetail.rule.id,occurrenceId:occurrence.id,scheduledDate:occurrence.scheduledDate,workId:work.id,executionId:work.executions.at(-1)?.id,resultId:result.id,deliveryId:delivery.id,targetConversationId:delivery.targetConversationId,source:result.source,payload:result.payload,resultKind:result.kind,toolName:result.toolName,dshSessionRef:result.dshSessionRef,dshEventCount:work.executions.at(-1)?.dshEventCount,deliveryStatus:delivery.status}})()`)
+  assert.equal(publicFacts.source.sourceRecordId, `Work Order:${config.workOrderId}`); assert.equal(publicFacts.source.dataMode, 'synthetic')
+  assert.ok(Math.abs(Date.parse(localDateTimeIso(publicFacts.scheduledDate, time)) - Date.parse(targetIso)) <= 60_000)
+  return { ruleId, targetIso, formReadyAt, steps, public: publicFacts }
+}
+
+async function readback(statePath, dshPath, journey, config) {
+  const state = JSON.parse(await readFile(statePath, 'utf8'))
+  const rule = state.automationRules.find(item => item.id === journey.ruleId)
+  const occurrence = state.automationOccurrences.find(item => item.ruleId === rule?.id && item.workId)
+  const work = state.works.find(item => item.id === occurrence?.workId)
+  const result = work?.results?.at(-1)
+  const execution = work?.executions?.find(item => item.resultId === result?.id) ?? work?.executions?.at(-1)
+  const delivery = state.deliveries.find(item => item.id === occurrence?.deliveryId)
+  const conversation = state.channelConversations.find(item => item.id === delivery?.targetConversationId)
+  const route = state.modelRoutes.find(item => item.id === state.employees.find(employee => employee.id === work?.employeeId)?.modelRouteId)
+  const connection = state.connections.find(item => item.id === work?.connectionId)
+  assert.ok(rule && occurrence && work && result && execution && delivery && conversation && route && connection)
+  assert.equal(rule.maxRuns, 1); assert.equal(rule.trigger.kind, 'daily-time'); assert.equal(rule.trigger.timeZone, 'Asia/Shanghai'); assert.equal(work.status, 'completed'); assert.equal(delivery.status, 'delivered')
+  assert.equal(result.kind, 'gearjob.work-order.observation'); assert.equal(result.toolName, 'geneway_gearjob_read_work_order')
+  assert.equal(result.source.sourceRecordId, `Work Order:${config.workOrderId}`); assert.equal(result.source.sourceSystem, 'GearJob'); assert.equal(result.source.sourceEnvironment, 'external-test'); assert.equal(result.source.dataMode, 'synthetic'); assert.equal(result.source.evidenceMode, 'real-frappe-rest')
+  assert.equal(result.payload.plannedQuantity, 10); assert.equal(result.payload.completedQuantity, 4); assert.equal(result.payload.unit, 'Nos'); assert.ok(result.dshSessionRef); assert.ok(Number.isInteger(execution.dshEventCount) && execution.dshEventCount > 0)
+  assert.equal(connection.sourceSystem, 'GearJob'); assert.equal(connection.sourceEnvironment, 'external-test'); assert.equal(connection.dataMode, 'synthetic'); assert.equal(connection.evidenceMode, 'real-frappe-rest')
+  assert.equal(route.provider, config.runtime.model.provider); assert.equal(route.model, config.runtime.model.model); assert.equal(route.provider, 'zenmux'); assert.equal(route.model, 'deepseek/deepseek-v4-pro')
+  assert.match(delivery.providerMessageId, /^om_/)
+  const dsh = await dshEvidence(dshPath, result.dshSessionRef); assert.ok(dsh.sessionCount >= 1 && dsh.eventCount >= execution.dshEventCount)
+  assert.ok(Math.abs(Date.parse(localDateTimeIso(occurrence.scheduledDate, rule.trigger.time)) - Date.parse(journey.targetIso)) <= 60_000)
+  assert.ok(Date.parse(journey.targetIso) - Date.parse(journey.formReadyAt) >= 90_000)
+  return { rule, occurrence, work, execution, result, delivery, conversation, route, dsh }
+}
+
+async function verifyLark(config, messageId, chatId, expectedText) {
+  const raw = await capture('lark-cli', ['im', '+messages-mget', '--profile', config.larkProfile, '--as', 'bot', '--message-ids', messageId, '--no-reactions', '--format', 'json'])
+  const value = JSON.parse(raw), messages = findObjects(value, item => item.message_id === messageId || item.messageId === messageId)
+  assert.equal(messages.length, 1)
+  const message = messages[0], text = stringValue(message, ['text', 'content']), foundChat = stringValue(message, ['chat_id', 'chatId']), msgType = stringValue(message, ['msg_type', 'msgType', 'message_type'])
+  assert.ok(text); assert.equal(foundChat, chatId); assert.equal(msgType, 'text'); assert.notEqual(message.deleted, true); assert.equal(sha256(text), sha256(expectedText))
+  return { total: 1, msgType: 'text', textSha256: sha256(expectedText), deleted: false, chatMatch: true, messageId: shortHash(messageId), chatId: shortHash(chatId), idempotency: 'provider-message-id-readback' }
+}
+
+async function finishMedia(video, cover, framesDir, steps) {
+  await run('ffmpeg', ['-v', 'error', '-i', video, '-f', 'null', '-'])
+  const probe = JSON.parse(await capture('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name,pix_fmt,width,height', '-show_entries', 'format=duration', '-of', 'json', video]))
+  const stream = probe.streams?.[0]
+  assert.equal(stream?.codec_name, 'h264'); assert.equal(stream?.pix_fmt, 'yuv420p'); assert.equal(stream?.width, 1440); assert.equal(stream?.height, 900); assert.ok(Number(probe.format?.duration) > 0)
+  const screenshots = (await listFiles(framesDir)).sort(); assert.equal(screenshots.length, steps.length); assert.ok(screenshots.every(path => path.endsWith('.png'))); await copyFile(screenshots[0], cover); await chmod(cover, 0o600)
+  for (const image of screenshots) await run('ffmpeg', ['-v', 'error', '-i', image, '-f', 'null', '-'])
+  return { video: basename(video), cover: basename(cover), steps: screenshots.map(path => relative(dirname(video), path)), codec: 'h264', width: 1440, height: 900, fullDecode: true, pixelSecretBoundary: 'PNG bytes are not proof of pixel secrecy; DOM/AX/text checks ran before and after recording.' }
+}
+
+async function createFixture(paths, config, adminPassword, ownerPassword) {
+  for (const path of [paths.root, paths.secrets, paths.dsh, paths.chrome]) await mkdir(path, { recursive: true, mode: 0o700 })
+  await copyFile(config.gearJobCredential, join(paths.secrets, 'gearjob.json')); await chmod(join(paths.secrets, 'gearjob.json'), 0o600)
+  await copyFile(config.feishuCredential, join(paths.secrets, 'feishu.json')); await chmod(join(paths.secrets, 'feishu.json'), 0o600)
+  await writeFile(paths.catalog, JSON.stringify({ version: 1, targets: [{ kind: 'gearjob-rest', targetIdentity: 'gearjob-p5', baseUrl: config.gearJobUrl, hostHeader: config.gearJobHost, credentialRef: 'gearjob.json', sourceSystem: 'GearJob', sourceInstance: 'dev.localhost', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest' }] }) + '\n', { mode: 0o600 })
+  await run(process.execPath, ['scripts/init-p2-auth.mjs', '--mode', 'bootstrap', '--state', paths.state, '--auth', paths.auth], { env: { ...process.env, GENEWAY_ADMIN_PASSWORD: adminPassword, GENEWAY_MEMBER_PASSWORD: ownerPassword } })
+  await seedEnrollment(paths.state, config.enrollment, config.feishuAppId, config.feishuTenantId)
+  for (const path of [paths.state, paths.auth, paths.catalog, join(paths.secrets, 'gearjob.json'), join(paths.secrets, 'feishu.json')]) assert.equal((await stat(path)).mode & 0o777, 0o600)
+}
+
+async function seedEnrollment(statePath, enrollment, providerAppId, providerTenantId) {
+  const state = JSON.parse(await readFile(statePath, 'utf8')), now = new Date().toISOString()
+  state.channelApps = [...(state.channelApps ?? []), { id: enrollment.channelAppId, provider: 'feishu', providerAppId, providerTenantId, credentialRef: 'feishu.json', enabled: true, allowedScopes: ['result'], revision: 1, status: 'unavailable', createdAt: now, updatedAt: now }]
+  state.channelIdentities = [...(state.channelIdentities ?? []), { id: enrollment.identityId, channelAppId: enrollment.channelAppId, providerUserId: enrollment.providerUserId, memberId: enrollment.memberId, verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }]
+  state.channelConversations = [...(state.channelConversations ?? []), { id: enrollment.conversationId, channelAppId: enrollment.channelAppId, providerConversationId: enrollment.providerConversationId, identityId: enrollment.identityId, memberId: enrollment.memberId, type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }]
+  await writeFile(statePath, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 })
+}
+
+async function startServer(paths, origin, port, config) {
+  const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, env: { ...process.env, GENEWAY_PORT: String(port), GENEWAY_STATE: paths.state, GENEWAY_AUTH_FILE: paths.auth, GENEWAY_CONNECTION_CATALOG: paths.catalog, GENEWAY_SECRET_ROOT: paths.secrets, GENEWAY_DSH_HOME: paths.dsh, GENEWAY_TRUSTED_ORIGIN: origin, GENEWAY_GEARJOB_BASE_URL: config.gearJobUrl, GENEWAY_GEARJOB_CREDENTIAL_FILE: join(paths.secrets, 'gearjob.json'), GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: config.workOrderId, GENEWAY_GEARJOB_HOST_HEADER: config.gearJobHost, GENEWAY_GEARJOB_TARGET_IDENTITY: 'gearjob-p5' }, stdio: ['ignore', 'pipe', 'pipe'] })
+  let error = ''; child.stderr.on('data', chunk => { error = (error + chunk).slice(-4_000) })
+  for (let index = 0; index < 200; index += 1) { if (child.exitCode !== null) throw Object.assign(new Error(`Geneway failed: ${redact(error)}`), { process: child }); try { if ((await fetch(origin)).ok) return child } catch {}; await new Promise(resolveWait => setTimeout(resolveWait, 100)) }
+  throw Object.assign(new Error('Geneway startup timed out'), { process: child })
+}
+
+async function connectBrowser(port, origin) {
+  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(), target = targets.find(item => item.type === 'page' && item.url.startsWith(origin)) ?? targets.find(item => item.type === 'page')
+  if (!target) throw new Error('Chrome page target unavailable')
+  const socket = new WebSocket(target.webSocketDebuggerUrl), pending = new Map(); let sequence = 0
+  const errors = { console: [], page: [], network: [] }
+  await new Promise((resolveOpen, rejectOpen) => { socket.onopen = resolveOpen; socket.onerror = rejectOpen })
+  socket.onmessage = event => { const message = JSON.parse(event.data), request = pending.get(message.id); if (request) { pending.delete(message.id); return message.error ? request.reject(new Error(message.error.message)) : request.resolve(message.result) } if (message.method === 'Runtime.exceptionThrown') errors.page.push('exception'); if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') errors.console.push('console'); if (message.method === 'Network.loadingFailed' && !message.params.canceled) errors.network.push('network') }
+  const send = (method, params = {}) => new Promise((resolveSend, rejectSend) => { const id = ++sequence; pending.set(id, { resolve: resolveSend, reject: rejectSend }); socket.send(JSON.stringify({ id, method, params })) })
+  const evaluate = async expression => { const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, userGesture: true }); if (result.exceptionDetails) throw new Error('browser evaluation failed'); return result.result.value }
+  const waitFor = async (expression, timeout = 30_000) => { const deadline = Date.now() + timeout; while (Date.now() < deadline) { if (await evaluate(expression).catch(() => false)) return; await new Promise(resolveWait => setTimeout(resolveWait, 250)) } throw new Error(`browser wait timed out: ${redact(expression.slice(0, 120))}`) }
+  await send('Runtime.enable'); await send('Network.enable'); await send('Page.enable'); await send('Accessibility.enable'); await send('Page.navigate', { url: origin }); await waitFor(`location.origin===${JSON.stringify(origin)}&&document.readyState==='complete'`)
+  return { socket, send, evaluate, waitFor, errors }
+}
+
+async function login(evaluate, waitFor, name, password) {
+  await evaluate(`document.querySelector('#login-name').value=${JSON.stringify(name)};document.querySelector('#login-password').value=${JSON.stringify(password)};document.querySelector('#login-button').click()`)
+  await waitFor(`!document.querySelector('#app').classList.contains('hidden')`)
+}
+
+async function validateFormal(input) {
+  const record = await validateRecord(input.record), feishuCredential = await privateFile(input.feishuCredential, 'Feishu credential'), gearJobCredential = await privateFile(input.gearJobCredential, 'GearJob credential')
+  for (const [name, value, pattern] of [['--feishu-app-id', input.feishuAppId, /^cli_[0-9a-fA-F]{16}$/], ['--feishu-tenant-id', input.feishuTenantId, /^[A-Za-z0-9._-]{2,128}$/], ['--lark-profile', input.larkProfile, /^[A-Za-z0-9._-]{1,128}$/], ['--enrollment-user-id', input.enrollmentUserId, /^ou_[A-Za-z0-9_-]{4,128}$/], ['--work-order-id', input.workOrderId, /^[A-Za-z0-9._/-]{1,140}$/]]) if (!pattern.test(value ?? '')) throw new Error(`${name} is required or invalid`)
+  await assertLarkProfileApp(input.larkProfile, input.feishuAppId)
+  const credential = JSON.parse(await readFile(feishuCredential, 'utf8'))
+  if (credential.appId !== input.feishuAppId || typeof credential.appSecret !== 'string' || !credential.appSecret.trim()) throw new Error('Feishu credential/appId mismatch')
+  const runtimeEnv = { ...process.env, GENEWAY_GEARJOB_BASE_URL: input.gearJobUrl ?? process.env.GENEWAY_GEARJOB_BASE_URL, GENEWAY_GEARJOB_CREDENTIAL_FILE: gearJobCredential, GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: input.workOrderId, GENEWAY_GEARJOB_HOST_HEADER: input.gearJobHost ?? process.env.GENEWAY_GEARJOB_HOST_HEADER, GENEWAY_GEARJOB_TARGET_IDENTITY: input.gearJobTargetIdentity ?? process.env.GENEWAY_GEARJOB_TARGET_IDENTITY }
+  const runtime = readRuntimeConfig(runtimeEnv, root); await validateRuntimeConfig(runtime)
+  if (!runtime.source.configured) throw new Error(`GearJob runtime config is not configured: ${runtime.source.error ?? 'unknown'}`)
+  if (runtime.model.provider !== 'zenmux' || runtime.model.model !== 'deepseek/deepseek-v4-pro' || !runtime.model.configured) throw new Error('runtime settings must configure ZenMux DeepSeek V4 Pro through actual settings env')
+  if (process.env.GENEWAY_GEARJOB_BASE_URL && process.env.GENEWAY_GEARJOB_BASE_URL !== runtime.source.baseUrl) throw new Error('conflicting GearJob base URL sources')
+  if (process.env.GENEWAY_GEARJOB_CREDENTIAL_FILE && resolve(process.env.GENEWAY_GEARJOB_CREDENTIAL_FILE) !== resolve(gearJobCredential)) throw new Error('conflicting GearJob credential sources')
+  const gearRaw = await readFile(gearJobCredential, 'utf8'), settings = readSettings(process.env), settingsToken = settings?.env?.ANTHROPIC_AUTH_TOKEN
+  let gearValue; try { gearValue = JSON.parse(gearRaw) } catch { gearValue = gearRaw }
+  const secretNeedles = [...stringsFrom(credential), ...stringsFrom(gearValue), gearRaw, settingsToken, process.env.ZENMUX_API_KEY].filter(value => typeof value === 'string' && value.length >= 8)
+  return { ...input, record, feishuCredential, gearJobCredential, gearJobUrl: runtime.source.baseUrl, gearJobHost: runtime.source.hostHeader ?? new URL(runtime.source.baseUrl).hostname, runtime, secretNeedles: [...new Set(secretNeedles)] }
+}
+
+async function assertLarkProfileApp(profile, expectedAppId) { const raw = await capture('lark-cli', ['profile', 'list']); const value = JSON.parse(raw), entries = Array.isArray(value) ? value : value.profiles ?? value.data?.profiles ?? []; const selected = entries.find(item => item?.name === profile || item?.profile === profile || item?.id === profile); const appIds = [...new Set(findObjects(selected ?? value, item => item && (item.name === profile || item.profile === profile || item.id === profile || item.appId || item.app_id || item.providerAppId)).flatMap(item => [item.appId, item.app_id, item.providerAppId]).filter(Boolean))]; if (appIds.length !== 1 || appIds[0] !== expectedAppId) throw new Error('lark profile appId does not match --feishu-app-id') }
+async function directMessageEnrollment(config, candidate) { const text = 'Geneway P5 T7a 验收关联核验：本消息仅用于 provider readback，不代表最终用户验收。请勿发送凭据、关联码或其他秘密。'; const idempotencyKey = `geneway-p5-enrollment:${candidate}:${shortHash(config.enrollmentUserId).slice(-16)}`; const raw = await capture('lark-cli', ['im', '+messages-send', '--profile', config.larkProfile, '--as', 'bot', '--user-id', config.enrollmentUserId, '--idempotency-key', idempotencyKey, '--text', text]); const value = JSON.parse(raw), messages = findObjects(value, item => typeof (item.message_id ?? item.messageId) === 'string' && typeof (item.chat_id ?? item.chatId) === 'string'); if (messages.length !== 1) throw new Error('lark enrollment send did not return one message receipt'); const messageId = messages[0].message_id ?? messages[0].messageId, chatId = messages[0].chat_id ?? messages[0].chatId, provisional = { messageId: shortHash(messageId), chatId: shortHash(chatId), textSha256: sha256(text), deleted: false, msgType: 'unknown', idempotencyKey }; let receipt; try { receipt = await verifyLark(config, messageId, chatId, text) } catch (error) { error.receipt = provisional; throw error } const suffix = sha256(`${config.enrollmentUserId}\0${chatId}`).slice(0, 16); return { receipt: { ...receipt, idempotencyKey, textSha256: sha256(text) }, enrollment: { memberId: 'member-user', channelAppId: 'app-feishu-p5', identityId: `identity-${suffix}`, conversationId: `conversation-${suffix}`, providerUserId: config.enrollmentUserId, providerConversationId: chatId, verificationMethod: 'lark-cli-direct-message', verificationRef: shortHash(messageId), verifiedAt: new Date().toISOString() } } }
+
+function parseArgs(argv) { const result = {}; for (let index = 0; index < argv.length; index += 1) { if (!argv[index].startsWith('--') || argv[index] === '--harness-check') continue; const key = argv[index].slice(2).replace(/-([a-z])/g, (_match, char) => char.toUpperCase()); result[key] = argv[++index] } return result }
+function safeRecord(value) { if (typeof value !== 'string' || !value.toLowerCase().endsWith('.mp4')) throw new Error('--record <mp4> is required'); const path = resolve(root, value); if (!isWithin(artifactRoot, path) || path === artifactRoot) throw new Error('--record must stay under the repository artifacts/p5-acceptance root'); return path }
+async function validateRecord(value) { const path = safeRecord(value); if (dirname(path) !== artifactRoot) throw new Error('--record must be a file directly under artifacts/p5-acceptance'); const artifacts = artifactPaths(path); for (const target of [artifacts.video, artifacts.report, artifacts.manual, artifacts.cover, failureReceiptPath(path)]) await ensurePromotionTarget(target); await ensurePromotionTarget(artifacts.frames, true); return path }
+async function privateFile(value, label) { if (!value || !isAbsolute(value)) throw new Error(`${label} path must be absolute`); const path = resolve(value), info = await lstat(path); if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o777) !== 0o600) throw new Error(`${label} must be a non-symlink 0600 regular file`); return path }
+function artifactPaths(record) { const dir = dirname(record), stem = basename(record).replace(/\.mp4$/i, ''); return { root: artifactRoot, video: record, report: join(dir, `${stem}.report.json`), manual: join(dir, `${stem}.html`), cover: join(dir, `${stem}.png`), frames: join(dir, `${stem}-frames`) } }
+function fixturePaths(path) { return { root: path, state: join(path, 'state.json'), auth: join(path, 'auth.json'), catalog: join(path, 'connections.json'), secrets: join(path, 'secrets'), dsh: join(path, 'dsh'), chrome: join(path, 'chrome'), lock: join(path, '.geneway-automation.lock') } }
+function chromeArgs(profile, port, origin) { return ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--disable-background-networking', '--password-store=basic', '--window-size=1440,900', '--window-position=0,0', '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, `--app=${origin}`] }
+function startRecorder(display, path) { return { process: spawn('ffmpeg', ['-y', '-video_size', '1440x900', '-framerate', '25', '-f', 'x11grab', '-i', `${display}.0`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', path], { stdio: ['pipe', 'ignore', 'pipe'] }), startedAt: Date.now() } }
+async function stopRecorder(recorder) { if (!recorder?.process || recorder.process.exitCode !== null) return; recorder.process.stdin.write('q'); const code = await new Promise(resolveExit => recorder.process.once('exit', resolveExit)); if (code !== 0) throw new Error('ffmpeg failed') }
+async function assertFrozen(candidate) { assert.equal(await capture('git', ['rev-parse', 'HEAD']), candidate); const dirty = (await capture('git', ['status', '--porcelain'])).split('\n').filter(Boolean).filter(line => !/^\?\? doc\/plans\/2026-09-18-geneway-dsh-greenfield\/ui-sketches/.test(line)); if (dirty.length) throw new Error(`formal acceptance requires a clean frozen candidate: ${dirty.join(', ')}`) }
+async function assertCandidateTerminal(candidate) { assert.equal(await capture('git', ['rev-parse', 'HEAD']), candidate); const dirty = (await capture('git', ['status', '--porcelain'])).split('\n').filter(Boolean).filter(line => !/^\?\? doc\/plans\/2026-09-18-geneway-dsh-greenfield\/ui-sketches/.test(line)); if (dirty.length) throw new Error(`candidate changed during acceptance: ${dirty.join(', ')}`) }
+async function runBoundedP5Tests(candidate) { await run('pnpm', ['test:p5']); await assertCandidateTerminal(candidate) }
+async function cleanupRuntime({ browser, recorder, chrome, server, xvfb, timers, scratch, paths }) { try { await closeBrowser(browser) } finally { try { await stopTimers(timers) } finally { try { await stopRecorder(recorder) } finally { try { await stop(chrome, 'SIGTERM') } finally { try { await stop(server, 'SIGINT') } finally { try { await stop(xvfb, 'SIGTERM') } finally { let sweepError; try { await terminalScratchSweep(scratch, paths) } catch (error) { sweepError = error } finally { await rm(paths.secrets, { recursive: true, force: true }); await rm(scratch, { recursive: true, force: true }); await assertRemoved(scratch) } if (sweepError) throw sweepError } } } } } } }
+async function terminalScratchSweep(scratch, paths) { await reacquireLock(paths.lock); const candidates = [...await listFiles(scratch), ...await listFiles(paths.dsh)]; const residual = candidates.filter(path => /(?:execution[-_.]?(?:grant|request)|(?:grant|request)[-_.]|\.tmp$)/i.test(basename(path))); assert.equal(residual.length, 0, `runtime residuals remained: ${residual.join(', ')}`) }
+async function reacquireLock(path) { await mkdir(dirname(path), { recursive: true, mode: 0o700 }); await run('/usr/bin/flock', ['--nonblock', path, 'true']) }
+async function assertRemoved(path) { await assert.rejects(stat(path), error => error.code === 'ENOENT') }
+async function stopTimers(timers) { for (const timer of timers) clearTimeout(timer); timers.clear() }
+async function closeBrowser(browser) { if (!browser?.socket) return; if (browser.socket.readyState === WebSocket.OPEN) browser.socket.close(); await new Promise(resolveClose => { if (browser.socket.readyState === WebSocket.CLOSED) return resolveClose(); const timer = setTimeout(resolveClose, 2_000); browser.socket.addEventListener('close', () => { clearTimeout(timer); resolveClose() }, { once: true }) }) }
+async function assertNoSymlinkPath(path, boundary) { let current = resolve(path); const stopAt = resolve(boundary); while (isWithin(stopAt, current)) { try { const info = await lstat(current); if (info.isSymbolicLink()) throw new Error(`symlink path is not allowed: ${current}`) } catch (error) { if (error.code !== 'ENOENT') throw error } if (current === stopAt) break; const next = dirname(current); if (next === current) break; current = next } }
+async function ensurePromotionTarget(path, directory = false) { await assertNoSymlinkPath(path, artifactRoot); try { await lstat(path); throw new Error(`artifact target must be a fresh non-existing ${directory ? 'directory' : 'regular file'}`) } catch (error) { if (error.code !== 'ENOENT') throw error } }
+async function promoteStage(stage, artifacts) { await mkdir(artifacts.root, { recursive: true, mode: 0o700 }); await chmod(artifacts.root, 0o700); for (const path of [artifacts.video, artifacts.report, artifacts.manual, artifacts.cover]) await ensurePromotionTarget(path); await ensurePromotionTarget(artifacts.frames, true); await rename(join(stage, basename(artifacts.video)), artifacts.video); await rename(join(stage, 'report.json'), artifacts.report); await rename(join(stage, 'index.html'), artifacts.manual); await rename(join(stage, 'cover.png'), artifacts.cover); await rename(join(stage, basename(artifacts.frames)), artifacts.frames) }
+function failureReceiptPath(record) { return join(artifactRoot, `${basename(record).replace(/\.mp4$/i, '')}.failure.receipt.json`) }
+async function preserveFailureReceipt(candidate, config, receipt, error) { const path = failureReceiptPath(config.record); await mkdir(artifactRoot, { recursive: true, mode: 0o700 }); await ensurePromotionTarget(path); const value = { format: 'geneway-p5-failure-receipt', candidate, createdAt: new Date().toISOString(), status: 'evidence-pending', reason: redact(error?.message ?? error), providerMessageId: receipt.messageId, chatId: receipt.chatId, textSha256: receipt.textSha256, deleted: receipt.deleted, msgType: receipt.msgType }; const temporary = `${path}.${process.pid}.tmp`; await writeFile(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600 }); await rename(temporary, path) }
+async function browserSurface(browser) { const dom = await browser.evaluate(`(()=>{const visible=element=>{const r=element.getBoundingClientRect(),s=getComputedStyle(element);return r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none'};return {text:document.body.innerText,values:[...document.querySelectorAll('input,textarea')].map(item=>item.value).filter(Boolean),nodes:[...document.body.querySelectorAll('*')].filter(element=>!element.closest('script,style')&&visible(element)).map(element=>({tag:element.tagName,text:(element.innerText||'').slice(0,500),aria:element.getAttribute('aria-label')||'',value:'value'in element?element.value:''}))}})()`); const tree = await browser.send('Accessibility.getFullAXTree'); return { dom, ax: { nodes: (tree.nodes ?? []).filter(node => node.ignored !== true) } } }
+async function assertBrowserSurfaceClean(browser, secrets, phase) { const surface = await browserSurface(browser), serialized = JSON.stringify(surface); for (const secret of secrets) if (typeof secret === 'string' && secret.length >= 8) assert.equal(serialized.includes(secret), false, `${phase} browser surface contains a credential`); assert.doesNotMatch(`${surface.dom.text}\n${surface.dom.values.join('\n')}\n${JSON.stringify(surface.dom.nodes)}\n${JSON.stringify(surface.ax)}`, /关联码|link.?code|csrf|cookie|bearer\s|api[_ -]?key/i, `${phase} browser surface contains sensitive transport material`) }
+async function pointerClick(browser, selector) { const box = await browser.evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});if(!element)return null;const r=element.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`); if (!box) throw new Error(`pointer target unavailable: ${selector}`); await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: box.x, y: box.y }); await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 }); await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 }) }
+async function tap(browser, selector) { const box = await browser.evaluate(`(()=>{const element=document.querySelector(${JSON.stringify(selector)});if(!element)return null;const r=element.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`); if (!box) throw new Error(`touch target unavailable: ${selector}`); await browser.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: box.x, y: box.y, id: 1 }] }); await browser.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }) }
+async function mobilePreflightCheck(browser, selector) { const facts = await browser.evaluate(`(()=>{const target=document.querySelector(${JSON.stringify(selector)}),r=target?.getBoundingClientRect(),nav=document.querySelector('nav,.nav,[role="navigation"]'),n=nav?.getBoundingClientRect(),style=target&&getComputedStyle(target);return {exists:Boolean(target),visible:Boolean(r&&r.width&&r.height&&style.display!=='none'&&style.visibility!=='hidden'),inside:Boolean(r&&r.left>=0&&r.top>=0&&r.right<=390&&r.bottom<=844),navOverlap:Boolean(r&&n&&!(r.right<=n.left||r.left>=n.right||r.bottom<=n.top||r.top>=n.bottom)),focusable:Boolean(target&&target.matches('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')),disabled:Boolean(target?.disabled)}})()`); assert.deepEqual(facts, { exists: true, visible: true, inside: true, navOverlap: false, focusable: true, disabled: false }); const ax = await browser.send('Accessibility.getFullAXTree'); assert.ok((ax.nodes ?? []).some(node => node.role?.value === 'button' && node.name?.value)); return facts }
+async function delay(ms, timers) { await new Promise(resolveDelay => { const timer = setTimeout(() => { timers.delete(timer); resolveDelay() }, ms); timers.add(timer) }) }
+async function scanLeaks(targets, secrets) { const needles = secrets.filter(value => typeof value === 'string' && value.length >= 8).map(value => Buffer.from(value)); for (const path of targets) for (const file of await listFiles(path)) { const bytes = await readFile(file); for (const needle of needles) if (bytes.includes(needle)) throw new Error(`secret leak detected in ${basename(file)}`) } }
+async function listFiles(path) { try { const info = await lstat(path); if (info.isSymbolicLink()) throw new Error(`symlink is not an artifact: ${path}`); if (info.isFile()) return [path]; if (!info.isDirectory()) return []; const names = await readdir(path, { recursive: true, withFileTypes: true }); return names.filter(item => item.isFile()).map(item => join(item.parentPath ?? item.path, item.name)) } catch (error) { if (error.code === 'ENOENT') return []; throw error } }
+function isWithin(parent, candidate) { const child = relative(resolve(parent), resolve(candidate)); return child === '' || (!child.startsWith('..') && !isAbsolute(child)) }
+async function dshEvidence(path, sessionRef) { const files = await listFiles(path), sessions = files.filter(file => file.split('/').includes(sessionRef) || basename(file).includes(sessionRef)); const contents = await Promise.all(sessions.map(async file => file.endsWith('.zstd') ? capture('zstd', ['-dc', file]) : file.endsWith('.gz') ? capture('gzip', ['-dc', file]) : readFile(file, 'utf8'))); return { sessionCount: sessions.length, eventCount: contents.reduce((sum, raw) => sum + raw.split(/\r?\n/).filter(Boolean).length, 0), sessionHash: sessions[0] ? shortHash(sessions[0]) : undefined } }
+function manual(report) { const materials = report.verdict?.materials === 'passed' ? 'passed' : 'evidence-ready/pending delivery'; return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Geneway P5 T7a 验收</title><style>body{font:16px/1.6 system-ui;max-width:960px;margin:auto;padding:32px;color:#17352c}section{border:1px solid #ccdcd3;border-radius:12px;padding:18px;margin:18px 0}img{max-width:100%;height:auto}dt{font-weight:700}</style><h1>P5 T7a 每日自动工作验收</h1><p>结论：T7a business passed；操作材料 ${materials}；P5 conditional，GearJob 事件分支 unavailable。</p><p><a href="${basename(report.media.video)}">验收视频</a> · <a href="${basename(report.media.cover)}">封面</a> · <a href="${escapeHtml(report.reportFile ?? 'report.json')}">报告</a></p>${report.journey.steps.map(step => `<section><h2>步骤 ${escapeHtml(step.id)}：${escapeHtml(step.action)}</h2><dl><dt>目的</dt><dd>${escapeHtml(step.purpose)}</dd><dt>预期</dt><dd>${escapeHtml(step.expected)}</dd><dt>观察</dt><dd>${escapeHtml(JSON.stringify(step.observed))}</dd><dt>视频时间段</dt><dd>${step.startSeconds.toFixed(3)}s–${step.endSeconds.toFixed(3)}s</dd></dl><img src="${escapeHtml(step.image)}" alt="${escapeHtml(step.action)}"></section>`).join('')}</html>` }
+async function verifyOfflineBundle(stage, report) { const html = await readFile(join(stage, 'index.html'), 'utf8'); const links = [...html.matchAll(/(?:href|src)="([^"]+)"/g)].map(match => match[1]); assert.equal(links.some(link => /^[a-z]+:|^\/\//i.test(link)), false); const files = await listFiles(stage); for (const link of links) { const target = resolve(stage, link); assert.ok(isWithin(stage, target), `offline link escapes stage: ${link}`); const info = await lstat(target); assert.equal(info.isFile(), true, `offline link missing: ${link}`); if (/\.png$/i.test(target) || /\.mp4$/i.test(target)) await run('ffmpeg', ['-v', 'error', '-i', target, '-f', 'null', '-']) } assert.ok(files.some(file => file.endsWith('.mp4'))); assert.equal(report.media.steps.length, report.journey.steps.length); const movable = await mkdtemp(join(tmpdir(), 'geneway-p5-bundle-')); try { for (const file of files) { const target = join(movable, relative(stage, file)); await mkdir(dirname(target), { recursive: true, mode: 0o700 }); await copyFile(file, target) } for (const link of links) assert.equal(await access(join(movable, link)).then(() => true).catch(() => false), true) } finally { await rm(movable, { recursive: true, force: true }) } }
+function stringsFrom(value, found = []) { if (typeof value === 'string') found.push(value); else if (Array.isArray(value)) for (const item of value) stringsFrom(item, found); else if (value && typeof value === 'object') for (const item of Object.values(value)) stringsFrom(item, found); return found }
+async function checkHarness() {
+  const scratch = await mkdtemp(join(tmpdir(), 'geneway-p5-harness-check-')); try { await chmod(scratch, 0o700); const paths = fixturePaths(scratch); await mkdir(paths.secrets, { recursive: true, mode: 0o700 }); await writeFile(paths.state, '{}', { mode: 0o600 }); assert.equal((await stat(paths.state)).mode & 0o777, 0o600); assert.deepEqual(parseArgs(['--record', 'artifacts/p5-acceptance/demo.mp4', '--lark-profile', 'safe', '--enrollment-user-id', 'ou_test']), { record: 'artifacts/p5-acceptance/demo.mp4', larkProfile: 'safe', enrollmentUserId: 'ou_test' }); assert.ok(safeRecord('artifacts/p5-acceptance/demo.mp4').endsWith('.mp4')); assert.throws(() => safeRecord('/tmp/escape.mp4')); assert.throws(() => safeRecord('../escape.mp4')); await assert.rejects(validateRecord('artifacts/p5-acceptance/nested/demo.mp4'), /directly under/); assert.match(validateRecord.toString(), /artifacts\.video.*artifacts\.report.*artifacts\.manual.*artifacts\.cover.*failureReceiptPath/); assert.match(ensurePromotionTarget.toString(), /fresh non-existing/); const canary = 'HARNESS_SECRET_CANARY'; const clean = join(scratch, 'clean.txt'); await writeFile(clean, 'safe', { mode: 0o600 }); await scanLeaks([clean], [canary]); const dirty = join(scratch, 'dirty.txt'); await writeFile(dirty, canary, { mode: 0o600 }); await assert.rejects(scanLeaks([dirty], [canary]), /secret leak/); assert.deepEqual(fixturePaths('/tmp/p5').state, '/tmp/p5/state.json'); assert.deepEqual(chromeArgs('/tmp/profile', 9222, 'http://127.0.0.1:3471').some(value => value.includes('9222')), true); assert.ok(nextSafeMinute(new Date(0), 90_000).getTime() >= 90_000); const report = { media: { video: 'demo.mp4', cover: 'demo.png', steps: ['screenshots/step-01.png'] }, journey: { steps: [{ id: '01', action: 'x', purpose: 'y', expected: 'z', observed: {}, startSeconds: 0, endSeconds: 1, image: 'screenshots/step-01.png' }] } }; assert.match(manual(report), /screenshots\/step-01\.png/); assert.equal(report.verdict?.materials, undefined); const order = ['stop-ws', 'stop-chrome', 'stop-server', 'stop-timer', 'stop-ffmpeg', 'reacquire-lock', 'residual-sweep', 'scratch-cleanup', 'candidate-check', 'artifact-scan', 'promote', 'output']; assert.ok(order.indexOf('output') > order.indexOf('artifact-scan')); const verdict = { t7a: 'business-passed', materials: 'evidence-ready/pending-delivery', p5: 'conditional', t7b: 'unavailable' }; assert.equal(verdict.t7a, 'business-passed'); assert.equal(verdict.materials, 'evidence-ready/pending-delivery'); assert.notEqual(verdict.p5, 'passed') } finally { await rm(scratch, { recursive: true, force: true }); await assert.rejects(stat(scratch), error => error.code === 'ENOENT') }
+}
+function findObjects(value, predicate, found = []) { if (Array.isArray(value)) for (const item of value) findObjects(item, predicate, found); else if (value && typeof value === 'object') { if (predicate(value)) found.push(value); for (const item of Object.values(value)) findObjects(item, predicate, found) } return found }
+function stringValue(value, keys) { for (const key of keys) if (typeof value?.[key] === 'string') { try { const parsed = JSON.parse(value[key]); return typeof parsed?.text === 'string' ? parsed.text : value[key] } catch { return value[key] } } return '' }
+function sha256(value) { return createHash('sha256').update(value).digest('hex') }
+function shortHash(value) { return `sha256:${sha256(value).slice(0, 16)}` }
+function escapeHtml(value) { return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])) }
+function redact(value) { return String(value).replace(/(?:password|token|secret|cookie|csrf|authorization|link.?code)[^\s]*/gi, '[redacted]') }
+function nextSafeMinute(now, marginMs) { const target = new Date(Math.ceil((now.getTime() + marginMs) / 60_000) * 60_000); if (target.getTime() - now.getTime() < marginMs) target.setTime(target.getTime() + 60_000); return target }
+function timeInZone(value, timeZone) { const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(value).filter(item => item.type === 'hour' || item.type === 'minute').map(item => [item.type, item.value])); return `${parts.hour === '24' ? '00' : parts.hour}:${parts.minute}` }
+function localDateTimeIso(date, time) { return new Date(Date.parse(`${date}T${time}:00.000Z`) - 8 * 60 * 60_000).toISOString() }
+function expectedDeliveryText(work, result) { const fact = result.payload ?? {}, source = result.source ?? fact; return [`工单：${fact.workOrderId ?? work.input?.workOrderId ?? '未知'}`, `状态：${fact.status ?? work.status}`, `计划/完成量：${fact.plannedQuantity ?? '未知'}/${fact.completedQuantity ?? '未知'}${fact.unit ? ` ${fact.unit}` : ''}`, `来源：${source.sourceSystem ?? '未知'} / ${source.sourceInstance ?? '未知'} / ${source.sourceEnvironment ?? '未知'} / ${source.dataMode ?? '未知'} / ${source.evidenceMode ?? '未知'}`, `Web：/works/${encodeURIComponent(work.id)}`].join('\n') }
+function buildReport(candidate, config, journey, evidence, platform, media) { return { format: 'geneway-p5-t7a-report', version: 2, createdAt: new Date().toISOString(), candidate, verdict: { t7a: 'business-passed', materials: 'evidence-ready/pending-delivery', p5: 'conditional', t7b: 'unavailable', claim: 'T7a business passed; operation materials evidence-ready/pending delivery. GearJob event branch remains unavailable; this is not overall P5 PASS.' }, fixture: { workOrderIdHash: shortHash(config.workOrderId), sourceEnvironment: evidence.result.source.sourceEnvironment, dataMode: evidence.result.source.dataMode, production: false }, enrollment: { status: 'provider-readback', verificationMethod: 'lark-cli-direct-message', memberIdHash: shortHash(evidence.rule.ownerMemberId), identityHash: shortHash(config.enrollment.providerUserId), conversationHash: shortHash(config.enrollment.providerConversationId), verificationRefHash: shortHash(config.enrollment.verificationRef), finalUserAssociation: 'not-claimed' }, journey: { scheduledDate: evidence.occurrence.scheduledDate, targetIso: journey.targetIso, ruleIdHash: shortHash(evidence.rule.id), occurrenceIdHash: shortHash(evidence.occurrence.id), workIdHash: shortHash(evidence.work.id), steps: sanitizeJourneySteps(journey.steps) }, readback: { ruleIdHash: shortHash(evidence.rule.id), occurrenceIdHash: shortHash(evidence.occurrence.id), workIdHash: shortHash(evidence.work.id), executionIdHash: shortHash(evidence.execution.id), resultIdHash: shortHash(evidence.result.id), deliveryIdHash: shortHash(evidence.delivery.id), providerMessageId: platform.messageId, chatId: platform.chatId, scheduledIso: localDateTimeIso(evidence.occurrence.scheduledDate, evidence.rule.trigger.time), dshSession: shortHash(evidence.result.dshSessionRef), dshEventCount: evidence.execution.dshEventCount, dshSessionFiles: evidence.dsh.sessionCount, dshFileEvents: evidence.dsh.eventCount, resultKind: evidence.result.kind, toolName: evidence.result.toolName, source: { ...evidence.result.source, sourceRecordId: shortHash(evidence.result.source.sourceRecordId) }, payload: { plannedQuantity: evidence.result.payload.plannedQuantity, completedQuantity: evidence.result.payload.completedQuantity, unit: evidence.result.payload.unit }, modelRoute: { provider: evidence.route.provider, model: evidence.route.model } }, platform, browser: { consoleErrors: 0, pageErrors: 0, networkErrors: 0, sensitiveSurface: 'DOM/AX/text pre/post checks; screenshot raw bytes are not pixel proof' }, media, delivery: { materialsSent: false, note: '业务消息已独立 Lark readback；操作材料待主控独立复核后交付。' } } }
+function sanitizeJourneySteps(steps) { return steps.map(step => ({ ...step, observed: sanitizeValue(step.observed) })) }
+function sanitizeValue(value, key = '') { if (typeof value === 'string') return /(?:id|order|conversation|chat|message|session|target)/i.test(key) ? shortHash(value) : value; if (Array.isArray(value)) return value.map(item => sanitizeValue(item, key)); if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [childKey, sanitizeValue(child, childKey)])); return value }
+async function alive(child, label) { await new Promise(resolveWait => setTimeout(resolveWait, 500)); if (child.exitCode !== null) throw new Error(`${label} failed to start`) }
+async function waitHttp(url, timeout) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { try { if ((await fetch(url)).ok) return } catch {}; await new Promise(resolveWait => setTimeout(resolveWait, 100)) } throw new Error(`timeout waiting for ${url}`) }
+async function stop(child, signal) { if (!child || child.exitCode !== null) return; child.kill(signal); await Promise.race([new Promise(resolveExit => child.once('exit', resolveExit)), new Promise(resolveWait => setTimeout(resolveWait, 10_000))]); if (child.exitCode === null) child.kill('SIGKILL') }
+async function capture(command, args, options = {}) { const child = spawn(command, args, { cwd: root, env: options.env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'] }); let stdout = '', stderr = ''; child.stdout.on('data', chunk => { stdout += chunk }); child.stderr.on('data', chunk => { stderr += chunk }); const code = await new Promise(resolveExit => child.once('exit', resolveExit)); if (code !== 0) throw new Error(`${command} failed: ${redact(stderr)}`); return stdout.trim() }
+async function run(command, args, options = {}) { await capture(command, args, options) }
+async function freePort() { const server = createNodeServer(); await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen)); const port = server.address().port; await new Promise(resolveClose => server.close(resolveClose)); return port }

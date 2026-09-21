@@ -32,6 +32,7 @@
     "accept:p1": "node scripts/accept-p1.mjs",
     "accept:p2": "node scripts/accept-p2.mjs",
     "accept:p3": "node scripts/accept-p3.mjs",
+    "accept:p5": "node scripts/accept-p5.mjs",
     "backup": "node scripts/state-transfer.mjs backup",
     "restore": "node scripts/state-transfer.mjs restore",
     "start": "node src/server.mjs"

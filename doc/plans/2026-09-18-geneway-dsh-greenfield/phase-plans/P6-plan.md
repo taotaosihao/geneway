@@ -2,7 +2,7 @@
 
 状态：**`T0 + PRODUCT DESIGN + T1 PASS / T2 READY`**。P5 已在 `9808772` 技术 PASS，`P5 → P6` 顺序门已关闭。两名原 Team Astra planner 及 P5 后产品/工程复算均收敛为 GearJob Work Order + 隔离 Hive tenant integration API，以及仅限本地 synthetic Work Order 的纯文本、未发布、无 mention 生产跟进 Comment。现行 `user-message:geneway-goal-delegated-product-decisions` 已将中间产品决策委托给 Team planner 共识与正式 reviewer，用户仅做阶段最终验收；T0 已通过真实 Hive API、GearJob 映射、窄 Comment 合同、绕过防护、同键并发和回读证明，当前 A/C/D/E 已重算、由独立 Sol reviewer PASS 并绑定。T1 已完成 state v8、单一 file-store durable commit 和保守恢复，P6 可进入固定双来源 T2；授权不延伸到非 synthetic/生产对象、真实客户数据外发、权限提升、部署或发布。
 
-基线：Geneway `0997846c533206fe96789396fa5f68410f306fa2`；GearJob `2b1469d85ec1a8cc25614d15bbd716091eabb10c`；Hive `7dd2dfc9d381bbee8158fb5de0c06a4b7a6fc2e5`。用户已授权仅限 GearJob synthetic 对象的最小上游窄契约依赖修改；Hive 不改源码，Kivo 不使用。P6 Product Design 已通过并准入 Geneway 本地 synthetic 产品实现。本计划不授权非 synthetic/生产数据、权限提升、公网暴露、部署或发布。
+基线：Geneway `cf7c19c302dca81cf669809e389f54576e8d4fd6`；GearJob `2e89415c2a189d3bd985d9022630cee1da84b6d2`；Hive `7dd2dfc9d381bbee8158fb5de0c06a4b7a6fc2e5`。用户已授权仅限 GearJob synthetic 对象的最小上游窄契约依赖修改；Hive 不改源码，Kivo 不使用。P6 Product Design 已通过并准入 Geneway 本地 synthetic 产品实现。本计划不授权非 synthetic/生产数据、权限提升、公网暴露、部署或发布。
 
 ## 1. 目标、关键旅程与完成边界
 
@@ -25,7 +25,7 @@ P6 不实现：模型自动批准、定时/事件自动写入、通用 Workflow/
 
 ### 2.2 收敛结论
 
-1. 首轮的 Comment “推荐核验候选”状态已由 §6.1 实况 T0 和有效中间决策委托取代；当前固定为 synthetic Work Order 的窄 Comment 合同，HMAC、guard、幂等、冲突、回读和真实并发均已通过，GearJob `2b1469d8` 是当前 P6 产品依赖基线。
+1. 首轮的 Comment “推荐核验候选”状态已由 §6.1 实况 T0 和有效中间决策委托取代；当前固定为 synthetic Work Order 的窄 Comment 合同，HMAC、guard、幂等、冲突、回读和真实并发均已通过，GearJob `2e89415c` 是当前 P6 产品依赖基线。
 2. 首条旅程使用一个固定双来源原生工具。它在一次工具调用内部执行两个白名单只读请求和确定性映射/新鲜度计算；不放宽普通 runner 的恰好一次工具约束，也不为本场景强制创建两个 P3 协作子工作。若实际权限证明没有一名员工可合法同时读取两源，再重规划为协作方案。
 3. 两条连接、映射 revision 和对象范围必须进入执行授权、每次真实读取前复权及 Session 上下文失效判断；不能把第二连接藏入可变全局配置。
 4. 模型只解释结构化关联结果并提出建议。预览、批准、claim、上游写入和回读由确定性 action service 所有；渠道或自动规则只能产生待批准提案并引导到 Web。
@@ -34,7 +34,7 @@ P6 不实现：模型自动批准、定时/事件自动写入、通用 Workflow/
 7. 必要的 compare-and-write 只保护该动作真正依赖的业务前置条件，不机械绑定整个工单 `modified`。若上游无原子前置校验，Geneway 的先读后写不能冒充原子保护。
 8. P5 已 PASS，`P5 → P6` 顺序前置已关闭。P4 企业微信/真人验收 deferred 不阻塞 P6 独立 Web 技术路径，但 P6 不得据此宣称 P4 或完整合同 PASS。
 
-首轮收敛状态为 `CONSENSUS_WITH_LIMITED_RESERVATION`；其中第二源、动作类型、synthetic 对象和中间授权现已由 §6.1 取代。当前剩余的实施门是 GearJob 窄合同运行证据、A/C/D/E 新身份绑定和正式 reviewer PASS。
+首轮收敛状态为 `CONSENSUS_WITH_LIMITED_RESERVATION`；其中第二源、动作类型、synthetic 对象和中间授权现已由 §6.1 取代。GearJob 窄合同运行证据、A/C/D/E 新身份绑定和正式 reviewer 已全部 PASS。
 
 ### 2.3 独立 Astra 过度设计审查与有界消融
 
@@ -67,10 +67,10 @@ P6 不实现：模型自动批准、定时/事件自动写入、通用 Workflow/
 
 ### 4.2 时间与未知语义
 
-- 分开保存业务记录修改时间、设备采样时间、平台接收时间和查询时间。
+- 分开保存业务记录修改时间、设备采样时间、平台接收时间和查询时间。Hive 当前公开 API 不提供平台接收时间时保存 `platformReceivedAt: null` 并记录 unknown，不得用查询时间冒充。
 - Work Order `modified` 不是设备采集时间；新查询时间不证明旧采样新鲜。
 - Hive sample 以 Geneway 服务端 UTC 判断 120 秒 freshness，并允许最多 5 秒未来偏差；缺时间、latest 为空、超时或未来异常均阻止生成/批准动作。
-- 缺采样时间、未来时间、质量未知、分页不完整、零映射或多映射均 fail closed。
+- 缺采样时间、未来时间、分页不完整、零映射、多映射或来源明确返回坏质量时 fail closed。Hive 当前公开 API 不提供独立质量字段时保存 `quality: null` 并记录 unknown，不得用 `status` 冒充；字段不可得本身不阻断只读关联或人工动作资格。
 - “离线”不等于“停机”，“没有返回报警”不等于“没有报警”。没有计划基线和覆盖一致的时间证据，不声称设备导致进度落后。
 
 ## 5. 最小事实模型与可靠写入
@@ -112,6 +112,7 @@ T0 在任何 Geneway P6 产品实现前核验。GearJob 最小窄契约的实现
 
 - Hive 真实 API：专用 tenant `0561b9fa-2b58-4831-a09f-45c1d1b1e082`，device code `GW-P6-CNC-01`，device UUID `bc392c8f-9214-4416-b7c0-5cef15cd8aee`。`records:read` API credential 只存于仓库外 `0600` 文件。`GET /tenant-integrations/devices` 精确回读 code/UUID，`GET /devices/{uuid}/latest` 回读 `ts/status/data/record_id/event_id`；source environment 为 `external-test`，data mode 为 `synthetic`。
 - GearJob 真实映射：现有 synthetic `WO-26-00096` 经正常 Frappe 文档保存新增唯一 operation `GW-P6-OP-01` / workstation `GW-P6-WS-01`；唯一 enabled `MES Unit` 为 `GW-P6-CNC-01`，`hive_unit_id=GW-P6-CNC-01`。Work Order REST 回读唯一 operation/workstation；现有服务身份对通用 MES Unit REST 为 403，不得通过扩大通用权限解决。
+- GearJob `2e89415c` 的窄 mapping facade 分别返回 MES Unit 稳定文档身份 `mesUnitId` 与外部 Hive 身份 `hiveUnitId`。运行中 HMAC HTTP GET 回读 200/unique；当前 synthetic fixture 两值恰好同为 `GW-P6-CNC-01`，但实现从独立字段读取且测试使用不同值证明不做推断。
 - 第二来源因此冻结为 Hive tenant integration customer pull API，映射为 `Work Order operation row → workstation → exact enabled MES Unit → hive_unit_id/device_code → tenant-scoped Hive device UUID`。零/多 operation、零/多 enabled MES Unit、零/多 Hive device、latest 缺失/未来/过期均 fail closed；不新建 `sourceMappings[]`。
 - 写动作冻结为向该 synthetic Work Order 写入一条纯文本、未发布、无 mention/附件/外链的生产跟进 Comment。已知业务后果仅为 Work Order 时间线/`_comments` 更新与正常 `docinfo_update` realtime；不改数量、状态、库存、计划或设备。
 - 通用 Frappe `add_comment` 对拥有对象只读权的用户可直接 `ignore_permissions` 插入，是 P6 批准绕过。最小 GearJob 契约必须同时包含：复用现有 0600 secret/HMAC 的 P6 专用 audience/step；精确 Work Order 映射 GET；稳定 action key 的幂等 Comment POST 与 GET 回读；同 key/异 payload 409；以及精确服务用户的 Comment doc-event guard。不授予通用 Comment/MES Unit 权限，不加 DocType、迁移、UI、队列或通用写适配器。
@@ -121,7 +122,7 @@ T0 在任何 Geneway P6 产品实现前核验。GearJob 最小窄契约的实现
 
 | 任务 | 产物 | 依赖 / 通过条件 |
 |---|---|---|
-| P6-T0 决策与接口核验 | Hive synthetic 真实 API/映射证据 + GearJob 窄 Comment 合同及运行探针 | **PASS**：GearJob `2b1469d8`；67 项 focused tests、真实 HMAC/guard/幂等/回读、同键并发 `201+200` 且数据库一条、两名独立 reviewer PASS |
+| P6-T0 决策与接口核验 | Hive synthetic 真实 API/映射证据 + GearJob 窄 Comment 合同及运行探针 | **PASS**：GearJob `2e89415c`；67 项 focused tests、真实 HMAC mapping 含独立 `mesUnitId`/`hiveUnitId`、guard/幂等/回读、同键并发 `201+200` 且数据库一条、两名独立 reviewer PASS |
 | P6-T1 v8 与可靠提交 | store、state-transfer、迁移/故障测试 | **PASS**：`0997846`；v8 work.actions、temp file sync→rename→parent-dir sync、5 类故障、restart/restore unknown、完整 P1–P5 受影响回归、Sol correctness 与 Astra/Ponytail 双审 PASS |
 | P6-T2 双来源关联 | 一个具体第二来源插件、固定关联工具、capability/binding/grant 窄扩展 | T0、T1；两连接逐次复权、映射/时间 fail closed、一个 typed result |
 | P6-T3 动作服务 | 最小 action service + 已选上游窄 adapter | T0 写契约、T1/T2、明确写授权；批准绑定、派发前复权、幂等、回读、unknown |
@@ -135,7 +136,7 @@ T0 在任何 Geneway P6 产品实现前核验。GearJob 最小窄契约的实现
 
 `pnpm test:p6` 最少覆盖：
 
-- 不同实例同名 ID、零/多映射、revision 变化、缺失/未来/过期时间、质量未知、分页不完整；
+- 不同实例同名 ID、零/多映射、revision 变化、缺失/未来/过期时间、质量未知如实保留、显式坏质量阻断、分页不完整；
 - 双连接在受理、模型请求、每次源 I/O 前当前授权；撤权/换目标时零受影响 I/O；
 - preview digest、有效期、编辑失效、cross-member/admin越权、CSRF/Origin/字段白名单；
 - 双击批准、并发标签页、HTTP 重投、同 key 不同 payload；
@@ -149,7 +150,7 @@ T0 在任何 Geneway P6 产品实现前核验。GearJob 最小窄契约的实现
 
 ## 9. Product Design 与实施准入
 
-P6 Product Design 位于 workflow artifact `product-design-p6/`。P5 顺序、Hive synthetic 第二来源、精确映射、窄 Comment 业务方向及 GearJob HMAC/幂等/回读/guard 真实运行证据均已闭合。当前 A/C/D identities 为 `12e7ed13...` / `9c9904ce...` / `bad70914...`；独立 Sol reviewer `p6-product-design-acde-source-ref-rereview` 已 PASS，C/D 已按 workflow decision revision 5 分别绑定，E 为 approved/executable product_increment handoff。
+P6 Product Design 位于 workflow artifact `product-design-p6/`。P5 顺序、Hive synthetic 第二来源、精确映射、窄 Comment 业务方向及 GearJob HMAC/幂等/回读/guard 真实运行证据均已闭合。当前 A/C/D identities 为 `12e7ed13...` / `9c9904ce...` / `bad70914...`；独立 Sol reviewer `p6-product-design-revision6-quality-semantics-review` 已 PASS，C/D 由现行 `user-message:geneway-goal-delegated-product-decisions` 授权绑定 workflow decision revision 6，正式 validator 返回 approved/executable product_increment handoff。
 
 只有以下条件同时成立才进入 P6 代码实施：
 

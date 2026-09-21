@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { closeSync, constants as fsConstants, fchmodSync, fstatSync, openSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
@@ -20,10 +20,16 @@ export class AutomationServiceError extends Error {
   }
 }
 
-export function createAutomationService({ store, workService = null, clock = () => new Date().toISOString(), idFactory = randomUUID, connectionCatalog = [] } = {}) {
+export function createAutomationService({ store, workService = null, clock = () => new Date().toISOString(), idFactory = randomUUID, connectionCatalog = [], eventSourceId = null, eventSourceReady = () => true } = {}) {
   if (!store?.read || !store?.update) throw new TypeError('automation service 需要 store')
+  if (typeof eventSourceReady !== 'function') throw new TypeError('eventSourceReady 无效')
+  eventSourceId = text(eventSourceId) ?? null
+  const eventSourceAvailable = () => Boolean(eventSourceId && eventSourceReady())
 
   return {
+    eventSourceCapability() {
+      return eventSourceAvailable() ? { status: 'ready', sourceId: eventSourceId } : { status: 'unavailable', code: 'SOURCE_NOT_CONFIGURED' }
+    },
     async acceptDailyOccurrence({ ruleId, scheduledDate, scheduledAt, ownerCheck } = {}) {
       const occurrenceKey = dailyOccurrenceKey(ruleId, scheduledDate)
       await workService?.ensureReady?.()
@@ -39,7 +45,7 @@ export function createAutomationService({ store, workService = null, clock = () 
         const rule = state.automationRules.find(item => item.id === text(ruleId))
         const now = timestamp(clock())
         if (!rule) throw serviceError('NOT_FOUND', '自动规则不存在')
-        if (rule.trigger?.kind !== 'daily-time') throw serviceError('SOURCE_NOT_CONFIGURED', '事件来源暂不可用')
+        if (rule.trigger?.kind !== 'daily-time') throw serviceError('SOURCE_NOT_CONFIGURED', '手动核对只支持每日规则')
         if (rule.status !== 'active') {
           const occurrence = terminalOccurrence(`occurrence-${idFactory()}`, rule, scheduledDate, now, 'blocked', 'rule-inactive')
           admission = occurrenceAdmission(occurrence, state, false)
@@ -86,6 +92,47 @@ export function createAutomationService({ store, workService = null, clock = () 
       return dispatchAdmission(admission, ownerCheck)
     },
 
+    async acceptGearJobEvent(input = {}) {
+      exactInput(input, ['sourceId', 'workOrderId', 'sourceRevision', 'digest', 'ownerCheck'])
+      const sourceId = required(input.sourceId, 'sourceId'), workOrderId = required(input.workOrderId, 'workOrderId')
+      const sourceRevision = required(input.sourceRevision, 'sourceRevision')
+      const digest = required(input.digest, 'digest'), ownerCheck = input.ownerCheck
+      requireEventCapability(eventSourceId, eventSourceAvailable, sourceId)
+      if (!/^[a-f0-9]{64}$/.test(digest)) throw serviceError('INVALID_REQUEST', 'digest 无效')
+      if (ownerCheck !== undefined && typeof ownerCheck !== 'function') throw serviceError('INVALID_REQUEST', 'ownerCheck 无效')
+      await workService?.ensureReady?.()
+      if (ownerCheck && !ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
+      const outcomes = []
+      await store.update(state => {
+        if (ownerCheck && !ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
+        let next = state
+        const rules = state.automationRules.filter(item => item.trigger?.kind === 'gearjob-work-order-update' && item.trigger.sourceId === sourceId && item.workOrderId === workOrderId)
+        for (const rule of rules) {
+          const occurrenceKey = eventOccurrenceKey(rule.id, sourceId, sourceRevision, workOrderId)
+          const existing = next.automationOccurrences.find(item => item.occurrenceKey === occurrenceKey)
+          if (existing) {
+            if (existing.event?.digest !== digest) throw serviceError('CONFLICT', '同一来源事件内容不一致')
+            outcomes.push(occurrenceAdmission(existing, next))
+            continue
+          }
+          if (rule.status !== 'active') continue
+          const now = timestamp(clock())
+          const event = { sourceId, sourceRevision, digest }
+          const sourceMicros = gearJobRevisionMicros(sourceRevision), acceptMicros = instantMicros(rule.eventAcceptAfter)
+          const reason = sourceMicros === null || acceptMicros === null ? 'source-time-unverifiable' : sourceMicros < acceptMicros ? 'before-active-window' : null
+          const result = reason
+            ? { state: { ...next, automationOccurrences: [...next.automationOccurrences, { id: `occurrence-${idFactory()}`, occurrenceKey, ruleId: rule.id, ruleRevision: rule.revision, scheduledDate: null, event, workId: null, status: reason === 'source-time-unverifiable' ? 'blocked' : 'skipped', reason, deliveryId: null, createdAt: now }] } }
+            : admit(next, rule, { occurrenceKey, scheduledDate: null, event, now })
+          next = result.state
+          outcomes.push(result.admission ?? occurrenceAdmission(next.automationOccurrences.at(-1), next, false))
+        }
+        return next
+      })
+      const dispatched = []
+      for (const outcome of outcomes) dispatched.push(await dispatchAdmission(outcome, ownerCheck))
+      return { matched: outcomes.length, accepted: dispatched.filter(item => item.accepted && !item.deduplicated).length, outcomes: dispatched }
+    },
+
     async listRules(actor) {
       const state = await store.read(), member = requireMember(state, actor)
       return state.automationRules.filter(rule => rule.ownerMemberId === member.id).map(rule => projectRule(state, rule, clock()))
@@ -108,7 +155,7 @@ export function createAutomationService({ store, workService = null, clock = () 
       await store.update(state => {
         const member = requireMember(state, actor)
         exactInput(input, ['employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
-        const fields = ruleFields(state, member, input, connectionCatalog)
+        const fields = ruleFields(state, member, input, connectionCatalog, eventSourceId, eventSourceAvailable)
         const now = timestamp(clock())
         created = {
           id: `automation-${idFactory()}`,
@@ -134,17 +181,20 @@ export function createAutomationService({ store, workService = null, clock = () 
         exactInput(input, ['expectedRevision', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
         requireRevision(rule, input.expectedRevision)
         if (rule.status === 'revoked') throw serviceError('INVALID_STATE', '已撤销规则不可修改')
-        const fields = ruleFields(state, member, { ...rule, ...input }, connectionCatalog)
+        const fields = ruleFields(state, member, { ...rule, ...input }, connectionCatalog, eventSourceId, eventSourceAvailable)
+        if (state.automationOccurrences.some(item => item.ruleId === rule.id) && identityChanged(rule, fields)) throw serviceError('INVALID_STATE', '规则已有发生历史；员工、Skill、连接、工单或触发方式不可修改，请新建草稿')
         const usedRuns = deriveUsedRuns(rule, state.automationOccurrences)
         if (fields.maxRuns < usedRuns) throw serviceError('INVALID_REQUEST', '累计预算不能低于已使用次数')
         const now = timestamp(clock())
+        const sourceOrTargetChanged = fields.trigger.kind === 'gearjob-work-order-update'
+          && (rule.trigger.kind !== fields.trigger.kind || rule.trigger.sourceId !== fields.trigger.sourceId || rule.workOrderId !== fields.workOrderId)
         updated = {
           ...rule,
           ...fields,
           revision: rule.revision + 1,
           updatedAt: now,
-          effectiveFrom: rule.status === 'active' ? now : rule.effectiveFrom,
-          eventAcceptAfter: null,
+          effectiveFrom: fields.trigger.kind === 'daily-time' ? rule.status === 'active' ? now : rule.effectiveFrom : null,
+          eventAcceptAfter: fields.trigger.kind === 'gearjob-work-order-update' ? sourceOrTargetChanged && rule.status !== 'draft' ? now : rule.eventAcceptAfter : null,
         }
         return invalidateAutomationNotifications({ ...state, automationRules: replaceById(state.automationRules, updated) }, rule.id, now)
       })
@@ -188,25 +238,34 @@ export function createAutomationService({ store, workService = null, clock = () 
       if (rule.status !== from) throw serviceError('INVALID_STATE', `规则只能从 ${from} 转为 ${to}`)
       if (enteringActive) {
         normalizeTrigger(rule.trigger)
+        if (rule.trigger.kind === 'gearjob-work-order-update') requireEventCapability(eventSourceId, eventSourceAvailable, rule.trigger.sourceId)
         validateBinding(state, member, rule, connectionCatalog)
       }
       if (enteringActive && deriveUsedRuns(rule, state.automationOccurrences) >= rule.maxRuns) throw serviceError('BUDGET_EXHAUSTED', '规则累计预算已用尽')
       const now = timestamp(clock())
-      updated = { ...rule, status: to, revision: rule.revision + 1, updatedAt: now, effectiveFrom: enteringActive ? now : rule.effectiveFrom }
+      const event = rule.trigger.kind === 'gearjob-work-order-update'
+      updated = {
+        ...rule,
+        status: to,
+        revision: rule.revision + 1,
+        updatedAt: now,
+        effectiveFrom: enteringActive && !event ? now : event ? null : rule.effectiveFrom,
+        eventAcceptAfter: enteringActive && event ? now : event ? rule.eventAcceptAfter : null,
+      }
       const next = { ...state, automationRules: replaceById(state.automationRules, updated) }
       return enteringActive ? next : invalidateAutomationNotifications(next, rule.id, now)
     })
     return projectRule(await store.read(), updated, clock())
   }
 
-  function admit(state, rule, { occurrenceKey, scheduledDate, now }) {
+  function admit(state, rule, { occurrenceKey, scheduledDate, event = null, now }) {
     const prepared = workService?.prepareAutomationWork?.(state, rule, { occurrenceKey, acceptedAt: now, workId: `work-${idFactory()}`, executionId: `exec-${idFactory()}` })
     const reason = !prepared?.ok ? 'auth-blocked' : deriveUsedRuns(rule, state.automationOccurrences) >= rule.maxRuns ? 'budget' : activeAutomationWorkCount(state, rule.id) ? 'overlap' : activeAutomationWorkCount(state) >= 2 ? 'capacity' : null
     if (reason) {
-      const occurrence = { id: `occurrence-${idFactory()}`, occurrenceKey, ruleId: rule.id, ruleRevision: rule.revision, scheduledDate, workId: null, status: reason === 'auth-blocked' ? 'blocked' : 'skipped', reason, deliveryId: null, createdAt: now }
+      const occurrence = { id: `occurrence-${idFactory()}`, occurrenceKey, ruleId: rule.id, ruleRevision: rule.revision, scheduledDate, event, workId: null, status: reason === 'auth-blocked' ? 'blocked' : 'skipped', reason, deliveryId: null, createdAt: now }
       return { state: { ...state, automationOccurrences: [...state.automationOccurrences, occurrence] }, admission: occurrenceAdmission(occurrence, state, false) }
     }
-    const occurrence = { id: `occurrence-${idFactory()}`, occurrenceKey, ruleId: rule.id, ruleRevision: rule.revision, scheduledDate, workId: prepared.workId, status: null, reason: null, deliveryId: null, createdAt: now }
+    const occurrence = { id: `occurrence-${idFactory()}`, occurrenceKey, ruleId: rule.id, ruleRevision: rule.revision, scheduledDate, event, workId: prepared.workId, status: null, reason: null, deliveryId: null, createdAt: now }
     return { state: { ...state, works: [...state.works, prepared.work], automationOccurrences: [...state.automationOccurrences, occurrence] }, admission: { accepted: true, deduplicated: false, occurrence, work: prepared.work, workId: prepared.workId, executionId: prepared.executionId, acceptedAt: prepared.acceptedAt } }
   }
 
@@ -222,8 +281,9 @@ export function createAutomationService({ store, workService = null, clock = () 
   }
 }
 
-export function createAutomationRuntime({ store, automationService, workService, dataRoot, clock = () => new Date().toISOString(), timerFactory = setTimeout, clearTimer = clearTimeout, lockFactory = acquireAutomationOwner, onError = () => undefined } = {}) {
+export function createAutomationRuntime({ store, automationService, workService, dataRoot, clock = () => new Date().toISOString(), timerFactory = setTimeout, clearTimer = clearTimeout, lockFactory = acquireAutomationOwner, onOwnerLost = async () => undefined, onError = () => undefined } = {}) {
   if (!store?.read || !automationService?.acceptDailyOccurrence || !workService?.ensureReady || !workService?.automationOwnerLost) throw new TypeError('automation runtime 依赖无效')
+  if (typeof onOwnerLost !== 'function') throw new TypeError('onOwnerLost 无效')
   if (!isAbsolute(dataRoot) || resolve(dataRoot) === parse(resolve(dataRoot)).root) throw new TypeError('automation data root 无效')
   let owner
   let timer
@@ -242,6 +302,7 @@ export function createAutomationRuntime({ store, automationService, workService,
         scheduleGeneration += 1
         if (timer) clearTimer(timer)
         timer = undefined
+        try { await onOwnerLost(error) } catch (callbackError) { onError(callbackError) }
         await workService.automationOwnerLost()
         onError(Object.assign(new Error('automation owner lock lost'), { code: 'OWNER_LOCK_LOST', cause: error }))
       }).catch(onError)
@@ -269,6 +330,11 @@ export function createAutomationRuntime({ store, automationService, workService,
       if (!running) throw serviceError('OWNER_NOT_RUNNING', '自动执行入口暂不可用')
       if (!automationService?.acceptManualOccurrence) throw serviceError('OWNER_NOT_RUNNING', '自动执行入口暂不可用')
       return automationService.acceptManualOccurrence(actor, id, { ...input, ownerCheck: () => running })
+    },
+    async acceptGearJobEvent(input) {
+      if (!running) throw serviceError('OWNER_NOT_RUNNING', '自动执行入口暂不可用')
+      if (!automationService?.acceptGearJobEvent) throw serviceError('OWNER_NOT_RUNNING', '自动执行入口暂不可用')
+      return automationService.acceptGearJobEvent({ ...input, ownerCheck: () => running })
     },
     async refresh() {
       if (!running) return
@@ -408,12 +474,18 @@ export function dailyOccurrenceKey(ruleId, scheduledDate) {
   return `${id}:${date}`
 }
 
+export function eventOccurrenceKey(ruleId, sourceId, sourceRevision, workOrderId) {
+  const identity = [required(ruleId, 'ruleId'), required(sourceId, 'sourceId'), 'on_update', 'Work Order', required(workOrderId, 'workOrderId'), required(sourceRevision, 'sourceRevision')]
+  return `${identity[0]}:event:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`
+}
+
 export function deriveUsedRuns(rule, occurrences = []) {
   return occurrences.filter(item => item?.ruleId === rule?.id && text(item.workId)).length
 }
 
 export function nextDailyOccurrence(rule, now, occurrences = []) {
   if (!rule || rule.status !== 'active' || deriveUsedRuns(rule, occurrences) >= rule.maxRuns) return null
+  if (rule.trigger?.kind !== 'daily-time') return null
   if (!rule.effectiveFrom) return null
   const current = parseInstant(now), effective = parseInstant(rule.effectiveFrom)
   if (!current || !effective) return null
@@ -456,6 +528,7 @@ function terminalOccurrence(id, rule, scheduledDate, createdAt, status, reason) 
     ruleId: rule.id,
     ruleRevision: rule.revision,
     scheduledDate,
+    event: null,
     workId: null,
     status,
     reason,
@@ -482,8 +555,9 @@ function invalidateAutomationNotifications(state, ruleId, timestamp) {
   }
 }
 
-function ruleFields(state, member, input, connectionCatalog) {
+function ruleFields(state, member, input, connectionCatalog, eventSourceId, eventSourceAvailable) {
   const trigger = normalizeTrigger(input.trigger)
+  if (trigger.kind === 'gearjob-work-order-update') requireEventCapability(eventSourceId, eventSourceAvailable, trigger.sourceId)
   const maxRuns = input.maxRuns === undefined ? 10 : input.maxRuns
   if (!Number.isSafeInteger(maxRuns) || maxRuns < 1 || maxRuns > 10) throw serviceError('INVALID_REQUEST', '累计预算必须是 1 至 10 的整数')
   const fields = {
@@ -527,10 +601,16 @@ function validateNotification(state, member, id) {
 function normalizeTrigger(trigger) {
   if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) throw serviceError('INVALID_REQUEST', 'trigger 无效')
   if (typeof trigger.kind !== 'string' || !trigger.kind.trim()) throw serviceError('INVALID_REQUEST', 'trigger kind 无效')
-  if (trigger.kind !== 'daily-time') throw serviceError('SOURCE_NOT_CONFIGURED', '事件来源暂不可用')
-  if (Object.keys(trigger).sort().join(',') !== 'kind,time,timeZone') throw serviceError('INVALID_REQUEST', 'trigger 字段无效')
-  if (typeof trigger.time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(trigger.time) || trigger.timeZone !== 'Asia/Shanghai') throw serviceError('INVALID_REQUEST', '每日触发时间无效')
-  return { kind: trigger.kind, time: trigger.time, timeZone: trigger.timeZone }
+  if (trigger.kind === 'daily-time') {
+    if (Object.keys(trigger).sort().join(',') !== 'kind,time,timeZone') throw serviceError('INVALID_REQUEST', 'trigger 字段无效')
+    if (typeof trigger.time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(trigger.time) || trigger.timeZone !== 'Asia/Shanghai') throw serviceError('INVALID_REQUEST', '每日触发时间无效')
+    return { kind: trigger.kind, time: trigger.time, timeZone: trigger.timeZone }
+  }
+  if (trigger.kind === 'gearjob-work-order-update') {
+    if (Object.keys(trigger).sort().join(',') !== 'kind,sourceId') throw serviceError('INVALID_REQUEST', 'trigger 字段无效')
+    return { kind: trigger.kind, sourceId: required(trigger.sourceId, 'sourceId') }
+  }
+  throw serviceError('INVALID_REQUEST', 'trigger kind 不支持')
 }
 
 function ownedRule(state, member, id) {
@@ -557,6 +637,20 @@ function exactInput(value, allowed) {
 }
 
 function replaceById(items, value) { return items.map(item => item.id === value.id ? value : item) }
+function requireEventCapability(configuredSourceId, available, requestedSourceId) {
+  if (!available() || configuredSourceId !== requestedSourceId) throw serviceError('SOURCE_NOT_CONFIGURED', 'GearJob 事件来源未配置')
+}
+function identityChanged(rule, fields) { return ['employeeId', 'skillId', 'connectionId', 'workOrderId'].some(key => rule[key] !== fields[key]) || JSON.stringify(rule.trigger) !== JSON.stringify(fields.trigger) }
+function gearJobRevisionMicros(value) {
+  const match = /^(\d{4})-(\d\d)-(\d\d) (\d\d):(\d\d):(\d\d)\.(\d{6})$/.exec(value)
+  if (!match) return null
+  const [, year, month, day, hour, minute, second, fraction] = match
+  const millis = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour) - 8, Number(minute), Number(second))
+  const check = new Date(millis + ZONE_OFFSET_MS).toISOString()
+  if (check.slice(0, 19) !== `${year}-${month}-${day}T${hour}:${minute}:${second}`) return null
+  return BigInt(millis) * 1000n + BigInt(fraction)
+}
+function instantMicros(value) { const millis = Date.parse(value); return Number.isFinite(millis) ? BigInt(millis) * 1000n : null }
 function timestamp(value) { const result = typeof value === 'string' ? value : value instanceof Date ? value.toISOString() : ''; if (!result || !Number.isFinite(Date.parse(result))) throw serviceError('INTERNAL_ERROR', '时钟无效'); return result }
 function required(value, label) { const result = text(value); if (!result) throw serviceError('INVALID_REQUEST', `${label} 无效`); return result }
 function nullableText(value) { if (value === null) return null; return required(value, 'notificationConversationId') }

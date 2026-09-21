@@ -11,6 +11,7 @@ import { readRuntimeConfig } from './runtime-config.mjs'
 import { readConnectionCatalog } from './connection-catalog.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 import { createFeishuRuntime } from '../plugins/feishu.mjs'
+import { createGearJobEventReceiver, readGearJobEventRuntimeConfig } from '../plugins/gearjob-events.mjs'
 import { ChannelServiceError, createChannelService } from './channel-service.mjs'
 import { AutomationServiceError, createAutomationRuntime, createAutomationService } from './automation-service.mjs'
 
@@ -37,12 +38,13 @@ export async function start() {
   if (origin.protocol !== 'http:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('GENEWAY_TRUSTED_ORIGIN 必须匹配 P2 明文 loopback HTTP 服务')
 
   const runtimeConfig = readRuntimeConfig({ ...process.env, GENEWAY_STATE: statePath }, root)
+  const gearJobEventConfig = await readGearJobEventRuntimeConfig(process.env, root)
   const store = createFileStore(statePath)
   const connectionCatalog = await readConnectionCatalog(runtimeConfig.connectionCatalogFile, root)
   const runner = createDshRunner({ root, config: runtimeConfig })
   const collaborationRunner = createCollaborationRunner({ store, root, dshHome: runtimeConfig.dshHome, secretRoot: runtimeConfig.secretRoot })
   const knowledge = collaborationRunner.getKnowledgeService()
-  let channelRuntime, automationRuntime
+  let channelRuntime, automationRuntime, gearJobEventReceiver
   const service = createWorkService({
     store, runner, collaborationRunner,
     connectionCatalog,
@@ -57,14 +59,23 @@ export async function start() {
   })
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
-  const automation = createAutomationService({ store, workService: service, connectionCatalog })
-  automationRuntime = createAutomationRuntime({ store, automationService: automation, workService: service, dataRoot: runtimeConfig.dataRoot, onError: error => console.error(error) })
+  const automation = createAutomationService({ store, workService: service, connectionCatalog, eventSourceId: gearJobEventConfig?.sourceId, eventSourceReady: () => automationRuntime?.ownsLock() === true && gearJobEventReceiver?.isListening() === true })
+  automationRuntime = createAutomationRuntime({
+    store, automationService: automation, workService: service, dataRoot: runtimeConfig.dataRoot,
+    onOwnerLost: async () => { const receiver = gearJobEventReceiver; gearJobEventReceiver = undefined; await receiver?.close() },
+    onError: error => console.error(error),
+  })
   const channel = createChannelService({ store, workService: service })
   channelRuntime = createFeishuRuntime({ store, channelService: channel, secretRoot: process.env.GENEWAY_SECRET_ROOT?.trim() ? runtimeConfig.secretRoot : undefined, automationOwnerCheck: () => automationRuntime.ownsLock() })
   try {
     await automationRuntime.start()
+    if (gearJobEventConfig) {
+      gearJobEventReceiver = createGearJobEventReceiver({ automationRuntime, ...gearJobEventConfig })
+      await gearJobEventReceiver.start()
+    }
     await channelRuntime.start()
   } catch (error) {
+    await gearJobEventReceiver?.close?.().catch(() => undefined)
     await automationRuntime.stop().catch(() => undefined)
     await channelRuntime.close().catch(() => undefined)
     await service.close().catch(() => undefined)
@@ -78,7 +89,7 @@ export async function start() {
   const shutdown = async code => {
     if (shuttingDown) return
     shuttingDown = true
-    await shutdownServer(server, service, channelRuntime, automationRuntime)
+    await shutdownServer(server, service, channelRuntime, automationRuntime, gearJobEventReceiver)
     process.exit(code)
   }
   process.once('SIGTERM', () => shutdown(0))
@@ -126,7 +137,7 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       if (request.method === 'GET' && url.pathname === '/api/bootstrap') { exactQuery(url); return sendJson(response, 200, await service.bootstrap(actor)) }
       if (request.method === 'GET' && url.pathname === '/api/automations') {
         exactQuery(url)
-        return sendJson(response, 200, automation ? { rules: await automation.listRules(actor), occurrences: await automation.listOccurrences(actor) } : { rules: [], occurrences: [] })
+        return sendJson(response, 200, automation ? { rules: await automation.listRules(actor), occurrences: await automation.listOccurrences(actor), eventSource: automation.eventSourceCapability() } : { rules: [], occurrences: [], eventSource: { status: 'unavailable', code: 'SOURCE_NOT_CONFIGURED' } })
       }
       if (automation && request.method === 'POST' && url.pathname === '/api/automations') {
         exactQuery(url)
@@ -138,7 +149,7 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       if (automation && automationMatch && request.method === 'GET' && !automationMatch[2]) {
         exactQuery(url)
         const id = decode(automationMatch[1])
-        return sendJson(response, 200, { rule: await automation.getRule(actor, id), occurrences: await automation.listOccurrences(actor, id) })
+        return sendJson(response, 200, { rule: await automation.getRule(actor, id), occurrences: await automation.listOccurrences(actor, id), eventSource: automation.eventSourceCapability() })
       }
       if (automation && automationMatch && request.method === 'PATCH' && !automationMatch[2]) {
         exactQuery(url)
@@ -408,7 +419,7 @@ const CHANNEL_ERROR_STATUS = {
 
 const AUTOMATION_ERROR_STATUS = {
   INVALID_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404,
-  REVISION_CONFLICT: 409, INVALID_STATE: 409, BUDGET_EXHAUSTED: 409,
+  REVISION_CONFLICT: 409, INVALID_STATE: 409, BUDGET_EXHAUSTED: 409, CONFLICT: 409,
   SOURCE_NOT_CONFIGURED: 503,
   OWNER_NOT_RUNNING: 503, OWNER_LOCK_LOST: 503,
 }
@@ -433,8 +444,9 @@ function maskOfficialId(value) {
   return text.length <= 4 ? '•'.repeat(text.length) : `…${text.slice(-4)}`
 }
 
-export async function shutdownServer(server, service, channelRuntime, automationRuntime) {
+export async function shutdownServer(server, service, channelRuntime, automationRuntime, gearJobEventReceiver) {
   const intakeClosed = new Promise((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose()))
+  await gearJobEventReceiver?.close?.().catch(() => undefined)
   await automationRuntime?.stop?.().catch(() => undefined)
   await channelRuntime?.close?.().catch(() => undefined)
   await service.close().catch(() => undefined)

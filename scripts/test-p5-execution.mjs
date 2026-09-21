@@ -1,30 +1,37 @@
 import assert from 'node:assert/strict'
+import { createHmac } from 'node:crypto'
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
-import { createAutomationService, dailyOccurrenceKey } from '../src/automation-service.mjs'
+import { createAutomationRuntime, createAutomationService, dailyOccurrenceKey } from '../src/automation-service.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 import { authorizeExecutionRequestFile, connectionSnapshot } from '../src/execution-grant.mjs'
 import { migrateState, createFileStore } from '../src/store/file-store.mjs'
 import { createExecutionRequestGuard } from '../plugins/execution-request-guard.mjs'
 import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
+import { createGearJobEventReceiver, GEARJOB_EVENT_PATH, readGearJobEventRuntimeConfig } from '../plugins/gearjob-events.mjs'
 
 const now = '2026-09-21T00:00:00.000Z'
 const catalog = [{ kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test' }]
 
 await atomicAndAdmissionChecks()
 await manualAdmissionChecks()
+await eventAdmissionChecks()
+await eventReceiverReplayChecks()
 await concurrencyAndCapacityChecks()
 await ownerLossBeforeDispatchChecks()
 await ownerLossAfterRunnerStartChecks()
 await ownerLossBeforeResultCommitChecks()
+await liveEventCapabilityLossChecks()
 await requestGuardChecks()
 await actualProfileGuardChecks()
 await deadlineAndCancellationChecks()
 await closeTeardownChecks()
 await gearJobTimeoutChecks()
+await gearJobEventConfigChecks()
+await gearJobEventReceiverChecks()
 console.log('P5 execution checks passed; external effects=0; real GearJob/ZenMux=not called')
 
 async function manualAdmissionChecks() {
@@ -62,6 +69,102 @@ async function manualAdmissionChecks() {
     const outcomes = await Promise.all(['rule-a', 'rule-b', 'rule-c'].map((ruleId, index) => capacity.automation.acceptManualOccurrence({ id: 'member-owner' }, ruleId, { expectedRevision: 1, clientRequestId: `capacity-${index}` })))
     assert.equal(outcomes.filter(item => item.accepted).length, 2); assert.equal(outcomes.find(item => item.reason)?.reason, 'capacity')
   } finally { await capacity.close() }
+}
+
+async function eventAdmissionChecks() {
+  const harness = await admissionHarness({ maxRuns: 3, rules: ['rule-a'] })
+  try {
+    await harness.store.update(state => ({ ...state, automationRules: state.automationRules.map(rule => rule.id === 'rule-a' ? { ...rule, trigger: { kind: 'gearjob-work-order-update', sourceId: 'gearjob:dev.localhost' }, effectiveFrom: null, eventAcceptAfter: '2026-09-21T00:00:00.000Z' } : rule) }))
+    const input = { sourceId: 'gearjob:dev.localhost', workOrderId: 'WO-1', sourceRevision: '2026-09-21 08:01:02.123456', digest: 'a'.repeat(64) }
+    const first = await harness.automation.acceptGearJobEvent(input)
+    const replay = await harness.automation.acceptGearJobEvent(input)
+    assert.equal(first.accepted, 1)
+    assert.equal(replay.outcomes[0].deduplicated, true)
+    let state = await harness.store.read()
+    assert.equal(state.automationOccurrences[0].scheduledDate, null)
+    assert.deepEqual(state.automationOccurrences[0].event, { sourceId: input.sourceId, sourceRevision: input.sourceRevision, digest: input.digest })
+    assert.equal(Object.hasOwn(state.automationOccurrences[0].event, 'sourceTime'), false)
+    assert.match(state.automationOccurrences[0].occurrenceKey, /^rule-a:event:[a-f0-9]{64}$/)
+    assert.equal(state.works.length, 1)
+    await assert.rejects(harness.automation.acceptGearJobEvent({ ...input, digest: 'b'.repeat(64) }), error => error.code === 'CONFLICT')
+    await harness.store.update(value => ({ ...value, works: value.works.map(work => ({ ...work, status: 'completed', executions: work.executions.map(execution => ({ ...execution, status: 'completed' })) })) }))
+    const stale = await harness.automation.acceptGearJobEvent({ ...input, sourceRevision: '2026-09-20 07:59:59.000001', digest: 'c'.repeat(64) })
+    assert.equal(stale.accepted, 0)
+    assert.equal(stale.outcomes[0].reason, 'before-active-window')
+    assert.equal((await harness.store.read()).works.length, 1)
+    const unverifiable = await harness.automation.acceptGearJobEvent({ ...input, sourceRevision: '2026-09-31 08:02:02.000001', digest: 'd'.repeat(64) })
+    assert.equal(unverifiable.outcomes[0].reason, 'source-time-unverifiable')
+    await assert.rejects(harness.automation.acceptGearJobEvent({ ...input, sourceId: 'gearjob:other', sourceRevision: '2026-09-21 08:02:02.000001', digest: 'e'.repeat(64) }), error => error.code === 'SOURCE_NOT_CONFIGURED')
+    state = await harness.store.read()
+    assert.equal(state.automationOccurrences.length, 3)
+  } finally { await harness.close() }
+}
+
+async function gearJobEventReceiverChecks() {
+  const secret = Buffer.from('receiver-secret')
+  const port = await freePort()
+  const calls = []
+  let failure
+  const receiver = createGearJobEventReceiver({
+    secret,
+    sourceId: 'gearjob:dev.localhost',
+    expectedSourceAddress: '127.0.0.1',
+    host: '127.0.0.1',
+    port,
+    automationRuntime: { async acceptGearJobEvent(input) { calls.push(input); if (failure) throw failure; return { matched: 1, accepted: 1 } } },
+  })
+  await receiver.start()
+  try {
+    const duplicate = createGearJobEventReceiver({ secret, sourceId: 'gearjob:dev.localhost', expectedSourceAddress: '127.0.0.1', host: '127.0.0.1', port, automationRuntime: { async acceptGearJobEvent() { return { matched: 0, accepted: 0 } } } })
+    await assert.rejects(duplicate.start(), error => error.code === 'EADDRINUSE')
+    await duplicate.close()
+    const body = JSON.stringify({ source: 'gearjob:dev.localhost', event: 'on_update', doctype: 'Work Order', name: 'WO-1', modified: '2026-09-21 08:01:02.123456' })
+    const signature = createHmac('sha256', secret).update(body).digest('base64')
+    const accepted = await fetch(`http://127.0.0.1:${port}/p5/gearjob/work-order`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-frappe-webhook-signature': signature }, body })
+    assert.equal(accepted.status, 202)
+    assert.deepEqual(calls.map(item => ({ sourceId: item.sourceId, workOrderId: item.workOrderId, sourceRevision: item.sourceRevision })), [{ sourceId: 'gearjob:dev.localhost', workOrderId: 'WO-1', sourceRevision: '2026-09-21 08:01:02.123456' }])
+    const rejected = await fetch(`http://127.0.0.1:${port}/p5/gearjob/work-order`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-frappe-webhook-signature': 'bad' }, body })
+    assert.equal(rejected.status, 401)
+    assert.equal(calls.length, 1)
+    assert.equal((await fetch(`http://127.0.0.1:${port}/other`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-frappe-webhook-signature': signature }, body })).status, 404)
+    failure = Object.assign(new Error('conflict'), { code: 'CONFLICT' })
+    assert.equal((await fetch(`http://127.0.0.1:${port}/p5/gearjob/work-order`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-frappe-webhook-signature': signature }, body })).status, 409)
+    failure = new Error('store failed')
+    assert.equal((await fetch(`http://127.0.0.1:${port}/p5/gearjob/work-order`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-frappe-webhook-signature': signature }, body })).status, 503)
+  } finally { await receiver.close() }
+  await assert.rejects(fetch(`http://127.0.0.1:${port}${GEARJOB_EVENT_PATH}`))
+}
+
+async function eventReceiverReplayChecks() {
+  const harness = await admissionHarness({ maxRuns: 3, rules: ['rule-a'] })
+  const secret = Buffer.from('replay-secret'), port = await freePort()
+  const receiver = createGearJobEventReceiver({ secret, sourceId: 'gearjob:dev.localhost', expectedSourceAddress: '127.0.0.1', host: '127.0.0.1', port, automationRuntime: { acceptGearJobEvent: input => harness.automation.acceptGearJobEvent(input) } })
+  try {
+    await harness.store.update(state => ({ ...state, automationRules: state.automationRules.map(rule => rule.id === 'rule-a' ? { ...rule, trigger: { kind: 'gearjob-work-order-update', sourceId: 'gearjob:dev.localhost' }, effectiveFrom: null, eventAcceptAfter: now } : rule) }))
+    await receiver.start()
+    const body = JSON.stringify({ source: 'gearjob:dev.localhost', event: 'on_update', doctype: 'Work Order', name: 'WO-1', modified: '2026-09-21 08:00:00.000001' })
+    const signature = createHmac('sha256', secret).update(body).digest('base64'), options = { method: 'POST', headers: { 'content-type': 'application/json', 'x-frappe-webhook-signature': signature }, body }
+    assert.equal((await fetch(`http://127.0.0.1:${port}${GEARJOB_EVENT_PATH}`, options)).status, 202)
+    assert.equal((await fetch(`http://127.0.0.1:${port}${GEARJOB_EVENT_PATH}`, options)).status, 200)
+    const state = await harness.store.read()
+    assert.equal(state.automationOccurrences.length, 1); assert.equal(state.works.length, 1)
+  } finally { await receiver.close(); await harness.close() }
+}
+
+async function gearJobEventConfigChecks() {
+  const root = await mkdtemp(join(tmpdir(), 'geneway-p5-event-config-'))
+  const repo = join(root, 'repo'), secretPath = join(root, 'event-secret')
+  try {
+    await writeFile(secretPath, 'secret', { mode: 0o600 })
+    assert.equal(await readGearJobEventRuntimeConfig({}, repo), null)
+    await assert.rejects(readGearJobEventRuntimeConfig({ GENEWAY_GEARJOB_EVENT_PATH: '/other' }, repo), /不允许环境覆盖/)
+    await assert.rejects(readGearJobEventRuntimeConfig({ GENEWAY_GEARJOB_EVENT_SECRET_FILE: secretPath }, repo), /全有或全无/)
+    const env = { GENEWAY_GEARJOB_EVENT_SECRET_FILE: secretPath, GENEWAY_GEARJOB_EVENT_SOURCE_ID: 'gearjob:dev.localhost', GENEWAY_GEARJOB_EVENT_SOURCE_ADDRESS: '172.20.0.5', GENEWAY_GEARJOB_EVENT_HOST: '172.20.0.1', GENEWAY_GEARJOB_EVENT_PORT: '39471' }
+    const config = await readGearJobEventRuntimeConfig(env, repo)
+    assert.deepEqual({ ...config, secret: config.secret.toString() }, { secret: 'secret', sourceId: 'gearjob:dev.localhost', expectedSourceAddress: '172.20.0.5', host: '172.20.0.1', port: 39471 })
+    await assert.rejects(readGearJobEventRuntimeConfig({ ...env, GENEWAY_GEARJOB_EVENT_HOST: '0.0.0.0' }, repo), /wildcard/)
+    assert.equal(GEARJOB_EVENT_PATH, '/p5/gearjob/work-order')
+  } finally { await rm(root, { recursive: true, force: true }) }
 }
 
 async function atomicAndAdmissionChecks() {
@@ -196,6 +299,27 @@ async function ownerLossAfterRunnerStartChecks() {
   await workService.close()
 }
 
+async function liveEventCapabilityLossChecks() {
+  const root = await mkdtemp(join(tmpdir(), 'geneway-p5-live-capability-'))
+  let state = fixture({ rules: [] }), loseOwner, runtime, receiver, ownerLosses = 0
+  const store = { async read() { return structuredClone(state) }, async update(mutator) { state = migrateState(await mutator(structuredClone(state))); return structuredClone(state) } }
+  const workService = { async ensureReady() {}, async automationOwnerLost() { ownerLosses += 1 } }
+  const automation = createAutomationService({ store, workService, clock: () => now, connectionCatalog: catalog, eventSourceId: 'gearjob:dev.localhost', eventSourceReady: () => runtime?.ownsLock() === true && receiver?.isListening() === true })
+  runtime = createAutomationRuntime({ store, automationService: automation, workService, dataRoot: root, lockFactory: async () => ({ lost: new Promise(resolve => { loseOwner = resolve }), async release() {} }), onOwnerLost: async () => receiver.close() })
+  receiver = createGearJobEventReceiver({ secret: Buffer.from('live-secret'), sourceId: 'gearjob:dev.localhost', expectedSourceAddress: '127.0.0.1', host: '127.0.0.1', port: await freePort(), automationRuntime: runtime })
+  try {
+    await runtime.start(); await receiver.start()
+    assert.deepEqual(automation.eventSourceCapability(), { status: 'ready', sourceId: 'gearjob:dev.localhost' })
+    await receiver.close()
+    assert.equal(automation.eventSourceCapability().status, 'unavailable')
+    await assert.rejects(automation.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'gearjob-work-order-update', sourceId: 'gearjob:dev.localhost' } }), error => error.code === 'SOURCE_NOT_CONFIGURED')
+    await receiver.start()
+    loseOwner(new Error('lost'))
+    await waitFor(() => !receiver.isListening() && !runtime.ownsLock() && ownerLosses === 1)
+    assert.equal(automation.eventSourceCapability().status, 'unavailable')
+  } finally { await receiver.close(); await runtime.close(); await rm(root, { recursive: true, force: true }) }
+}
+
 async function ownerLossBeforeResultCommitChecks() {
   let state = fixture({ rules: ['rule-a'] }), owned = true, cancelCalls = 0, releaseCommit, reachedCommit
   const commitReached = new Promise(resolve => { reachedCommit = resolve })
@@ -306,7 +430,7 @@ async function admissionHarness({ maxRuns = 3, rules, includeManualWork = false 
     async cancel(executionId) { pending.get(executionId)?.reject(Object.assign(new Error('cancelled'), { code: 'CANCELLED' })); pending.delete(executionId) },
   }
   const workService = createWorkService({ store, runner, clock: () => now, connectionCatalog: catalog, idFactory: () => `work-service-${++sequence}` })
-  const automation = createAutomationService({ store, workService, clock: () => now, connectionCatalog: catalog, idFactory: () => `automation-${++sequence}` })
+  const automation = createAutomationService({ store, workService, clock: () => now, connectionCatalog: catalog, idFactory: () => `automation-${++sequence}`, eventSourceId: 'gearjob:dev.localhost' })
   return { store, automation, close: async () => { await workService.close(); await rm(root, { recursive: true, force: true }) } }
 }
 
@@ -484,4 +608,12 @@ async function waitFor(predicate) {
     await new Promise(resolve => setTimeout(resolve, 5))
   }
   assert.fail('condition did not settle')
+}
+
+async function freePort() {
+  const server = createServer()
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const port = server.address().port
+  await new Promise(resolve => server.close(resolve))
+  return port
 }

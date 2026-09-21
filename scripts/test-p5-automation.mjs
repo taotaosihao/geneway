@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { createAutomationRuntime, createAutomationService, dailyOccurrenceKey, deriveUsedRuns, nextDailyOccurrence } from '../src/automation-service.mjs'
+import { createAutomationRuntime, createAutomationService, dailyOccurrenceKey, deriveUsedRuns, eventOccurrenceKey, nextDailyOccurrence } from '../src/automation-service.mjs'
 import { createChannelService } from '../src/channel-service.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 import { createFeishuRuntime } from '../plugins/feishu.mjs'
@@ -25,7 +25,7 @@ const store = {
   async read() { return structuredClone(state.current) },
   async update(mutator) { state.current = migrateState(await mutator(structuredClone(state.current))); return structuredClone(state.current) },
 }
-const service = createAutomationService({ store, clock: () => state.clock, idFactory: () => `id-${++idCounter}`, connectionCatalog: catalog })
+const service = createAutomationService({ store, clock: () => state.clock, idFactory: () => `id-${++idCounter}`, connectionCatalog: catalog, eventSourceId: 'source-test' })
 
 await migrationChecks()
 await validatorChecks()
@@ -33,7 +33,7 @@ await historicalBindingChecks()
 await ruleChecks()
 await derivedChecks()
 await transferChecks()
-console.log('P5 automation checks passed; event=SOURCE_NOT_CONFIGURED; external effects=0')
+console.log('P5 automation checks passed; event trigger enabled; external effects=0')
 
 async function validatorChecks() {
   const base = fixture().current
@@ -56,6 +56,7 @@ async function validatorChecks() {
   const budgetRule = { ...dailyRule, id: 'rule-budget', maxRuns: 1 }
   assert.throws(() => migrateState({ ...base, works: [work1, work2], automationRules: [budgetRule], automationOccurrences: [occurrenceRecord('occurrence-budget-1', budgetRule, '2026-09-20', work1.id), occurrenceRecord('occurrence-budget-2', budgetRule, '2026-09-21', work2.id)] }), /累计预算超限/)
   assert.throws(() => migrateState({ ...base, works: [work1], deliveries: [delivery], automationRules: [dailyRule], automationOccurrences: [occurrenceRecord('occurrence-terminal-delivery', dailyRule, '2026-09-20', null, 'delivery-valid', 'skipped')] }), /投递引用不闭合/)
+  assert.doesNotThrow(() => migrateState({ ...base, works: [work1], automationRules: [eventActive], automationOccurrences: [eventOccurrenceRecord('occurrence-event', eventActive, work1.id, null)] }))
   assert.throws(() => migrateState({ ...base, automationRules: [eventDraft], automationOccurrences: [occurrenceRecord('occurrence-event', eventDraft, '2026-09-20', null, null, 'skipped')] }), /规则引用不闭合/)
 }
 
@@ -70,14 +71,14 @@ async function historicalBindingChecks() {
   const historicalWork = workRecord('historical-work')
   const historicalOccurrence = occurrenceRecord('historical-occurrence', active, '2026-09-20', historicalWork.id)
   local.current = migrateState({ ...local.current, works: [historicalWork], automationOccurrences: [historicalOccurrence] })
-  const updated = await localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 2, employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', workOrderId: 'WO-2' })
+  await assert.rejects(localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 2, employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', workOrderId: 'WO-2' }), error => error.code === 'INVALID_STATE')
+  const updated = await localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 2, maxRuns: 9, notificationConversationId: null })
   assert.equal(updated.revision, 3)
-  assert.deepEqual([updated.employeeId, updated.skillId, updated.connectionId, updated.workOrderId], ['employee-owner-2', 'skill-owner-2', 'connection-owner-2', 'WO-2'])
   local.current = migrateState({
     ...local.current,
     members: local.current.members.map(member => member.id === 'member-owner' ? { ...member, employeeIds: ['employee-owner'] } : member),
-    employees: local.current.employees.map(employee => employee.id === 'employee-owner-2' ? { ...employee, enabled: false } : employee),
-    connections: local.current.connections.map(connection => connection.id === 'connection-owner-2' ? { ...connection, enabled: false, status: 'unavailable', allowedObjectIds: [] } : connection),
+    employees: local.current.employees.map(employee => employee.id === 'employee-owner' ? { ...employee, enabled: false } : employee),
+    connections: local.current.connections.map(connection => connection.id === 'connection-owner' ? { ...connection, enabled: false, status: 'unavailable', allowedObjectIds: [] } : connection),
   })
   assert.doesNotThrow(() => migrateState(structuredClone(local.current)))
   await assert.rejects(localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 3, maxRuns: 9 }), error => error.code === 'FORBIDDEN')
@@ -99,7 +100,7 @@ async function ruleChecks() {
   assert.equal(created.usedRuns, 0)
   assert.equal(created.nextDueAt, null)
   assert.deepEqual(Object.keys((await store.read()).automationRules[0]).sort(), ['connectionId', 'createdAt', 'effectiveFrom', 'employeeId', 'eventAcceptAfter', 'id', 'maxRuns', 'notificationConversationId', 'ownerMemberId', 'revision', 'revokedAt', 'skillId', 'status', 'trigger', 'updatedAt', 'workOrderId'])
-  await assert.rejects(service.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'event', source: 'gearjob' } }), error => error.code === 'SOURCE_NOT_CONFIGURED')
+  await assert.rejects(service.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'event', source: 'gearjob' } }), error => error.code === 'INVALID_REQUEST')
   await assert.rejects(service.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: daily('08:00'), maxRuns: 0 }), error => error.code === 'INVALID_REQUEST')
   const enabled = await service.enableRule({ id: 'member-owner' }, created.id, { expectedRevision: 1 })
   assert.equal(enabled.status, 'active')
@@ -120,11 +121,33 @@ async function ruleChecks() {
   state.current = migrateState({ ...state.current, ...channels })
   const eventDraft = automationRule('event-service', 'draft', eventTrigger(), { effectiveFrom: null, eventAcceptAfter: null })
   state.current = migrateState({ ...state.current, automationRules: [...state.current.automationRules, eventDraft] })
-  await assert.rejects(service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 1, trigger: eventTrigger() }), error => error.code === 'SOURCE_NOT_CONFIGURED')
-  await assert.rejects(service.enableRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 1 }), error => error.code === 'SOURCE_NOT_CONFIGURED')
-  state.current = migrateState({ ...state.current, automationRules: state.current.automationRules.map(rule => rule.id === eventDraft.id ? { ...rule, status: 'paused', eventAcceptAfter: now } : rule) })
-  await assert.rejects(service.resumeRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 1 }), error => error.code === 'SOURCE_NOT_CONFIGURED')
-  state.current = migrateState({ ...state.current, automationRules: state.current.automationRules.filter(rule => rule.id !== eventDraft.id) })
+  const unavailableEvents = createAutomationService({ store, clock: () => state.clock, connectionCatalog: catalog })
+  await assert.rejects(unavailableEvents.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: eventTrigger() }), error => error.code === 'SOURCE_NOT_CONFIGURED')
+  await assert.rejects(unavailableEvents.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 1, trigger: eventTrigger() }), error => error.code === 'SOURCE_NOT_CONFIGURED')
+  await assert.rejects(unavailableEvents.enableRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 1 }), error => error.code === 'SOURCE_NOT_CONFIGURED')
+  const updatedEvent = await service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 1, trigger: eventTrigger() })
+  assert.equal(updatedEvent.effectiveFrom, null); assert.equal(updatedEvent.eventAcceptAfter, null)
+  const enabledEvent = await service.enableRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 2 })
+  assert.equal(enabledEvent.effectiveFrom, null); assert.equal(enabledEvent.eventAcceptAfter, state.clock)
+  state.clock = '2026-09-20T01:15:00.000Z'
+  const retargetedNotification = await service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 3, maxRuns: 9, notificationConversationId: 'conversation-owner' })
+  assert.equal(retargetedNotification.eventAcceptAfter, enabledEvent.eventAcceptAfter)
+  const pausedEventService = await service.pauseRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 4 })
+  assert.equal(pausedEventService.eventAcceptAfter, enabledEvent.eventAcceptAfter)
+  await assert.rejects(unavailableEvents.resumeRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 5 }), error => error.code === 'SOURCE_NOT_CONFIGURED')
+  state.clock = '2026-09-20T01:30:00.000Z'
+  const resumedEvent = await service.resumeRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 5 })
+  assert.equal(resumedEvent.eventAcceptAfter, state.clock)
+  state.clock = '2026-09-20T01:45:00.000Z'
+  const retargetedEvent = await service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 6, employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', workOrderId: 'WO-2' })
+  assert.equal(retargetedEvent.eventAcceptAfter, state.clock)
+  const historicalEventWork = { ...workRecord('work-event-history'), employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', input: { workOrderId: 'WO-2' } }
+  const historicalEvent = eventOccurrenceRecord('occurrence-event-history', retargetedEvent, historicalEventWork.id)
+  state.current = migrateState({ ...state.current, works: [...state.current.works, historicalEventWork], automationOccurrences: [...state.current.automationOccurrences, historicalEvent] })
+  await assert.rejects(service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 7, employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1' }), error => error.code === 'INVALID_STATE')
+  const historySafeEdit = await service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 7, maxRuns: 9, notificationConversationId: null })
+  assert.equal(historySafeEdit.eventAcceptAfter, retargetedEvent.eventAcceptAfter)
+  state.current = migrateState({ ...state.current, works: state.current.works.filter(work => work.id !== historicalEventWork.id), automationOccurrences: state.current.automationOccurrences.filter(item => item.ruleId !== eventDraft.id), automationRules: state.current.automationRules.filter(rule => rule.id !== eventDraft.id) })
   state.clock = '2026-09-20T02:00:00.000Z'
   const updated = await service.updateRule({ id: 'member-owner' }, created.id, { expectedRevision: 2, maxRuns: 2, notificationConversationId: 'conversation-owner' })
   assert.equal(updated.revision, 3)
@@ -206,12 +229,13 @@ async function transferChecks() {
   try {
     const source = join(root, 'source'), backup = join(root, 'backup'), restored = join(root, 'restored')
     await mkdir(source, { recursive: true })
-    const rules = [automationRule('rule-active', 'active', daily('08:00'), { notificationConversationId: 'conversation-owner' }), automationRule('rule-draft', 'draft', daily('08:00')), automationRule('rule-paused', 'paused', daily('08:00')), automationRule('rule-revoked', 'revoked', daily('08:00'))]
-    const sendingWork = workRecord('work-sending'), pendingWork = workRecord('work-pending')
+    const rules = [automationRule('rule-active', 'active', daily('08:00'), { notificationConversationId: 'conversation-owner' }), automationRule('rule-draft', 'draft', daily('08:00')), automationRule('rule-paused', 'paused', daily('08:00')), automationRule('rule-revoked', 'revoked', daily('08:00')), automationRule('rule-event-active', 'active', eventTrigger())]
+    const sendingWork = workRecord('work-sending'), pendingWork = workRecord('work-pending'), eventWork = workRecord('work-event')
     const sendingDelivery = automationDelivery('delivery-sending', sendingWork.id, 'sending'), pendingDelivery = automationDelivery('delivery-pending', pendingWork.id, 'pending')
     const sendingOccurrence = occurrenceRecord('occurrence-sending', rules[0], '2026-09-20', sendingWork.id, sendingDelivery.id)
     const pendingOccurrence = occurrenceRecord('occurrence-pending', rules[3], '2026-09-19', pendingWork.id, pendingDelivery.id)
-    const transferState = migrateState({ ...fixture().current, works: [sendingWork, pendingWork], deliveries: [sendingDelivery, pendingDelivery], automationRules: rules, automationOccurrences: [sendingOccurrence, pendingOccurrence] })
+    const eventOccurrence = eventOccurrenceRecord('occurrence-event', rules[4], eventWork.id)
+    const transferState = migrateState({ ...fixture().current, works: [sendingWork, pendingWork, eventWork], deliveries: [sendingDelivery, pendingDelivery], automationRules: rules, automationOccurrences: [sendingOccurrence, pendingOccurrence, eventOccurrence] })
     await writeFile(join(source, 'state.json'), JSON.stringify(transferState, null, 2) + '\n', { mode: 0o600 })
     const secretCanary = 'P5_TRANSFER_SECRET_CANARY_DO_NOT_COPY'
     await mkdir(join(source, 'secrets'), { recursive: true, mode: 0o700 })
@@ -220,8 +244,8 @@ async function transferChecks() {
     await writeFile(join(source, 'dsh', 'unreferenced-secret.txt'), secretCanary, { mode: 0o600 })
     await run(['backup', '--output', backup], { GENEWAY_STATE: join(source, 'state.json'), GENEWAY_DSH_HOME: join(source, 'dsh') })
     const manifest = JSON.parse(await readFile(join(backup, 'manifest.json'), 'utf8'))
-    assert.equal(manifest.schema.automationRules, 4)
-    assert.equal(manifest.schema.automationOccurrences, 2)
+    assert.equal(manifest.schema.automationRules, 5)
+    assert.equal(manifest.schema.automationOccurrences, 3)
     assert.equal((await readFile(join(backup, 'state.json'), 'utf8')).includes(secretCanary), false)
     assert.equal((await readFile(join(backup, 'manifest.json'), 'utf8')).includes(secretCanary), false)
     await run(['restore', '--input', backup, '--data-root', restored])
@@ -230,8 +254,9 @@ async function transferChecks() {
     assert.equal(restoredRules.get('rule-active').status, 'paused')
     assert.equal(restoredRules.get('rule-active').revision, 2)
     assert.notEqual(restoredRules.get('rule-active').updatedAt, rules[0].updatedAt)
-    for (const rule of rules.slice(1)) assert.deepEqual(restoredRules.get(rule.id), rule)
-    assert.deepEqual(restoredState.automationOccurrences, [sendingOccurrence, pendingOccurrence])
+    assert.equal(restoredRules.get('rule-event-active').status, 'paused')
+    for (const rule of rules.slice(1, 4)) assert.deepEqual(restoredRules.get(rule.id), rule)
+    assert.deepEqual(restoredState.automationOccurrences, [sendingOccurrence, pendingOccurrence, eventOccurrence])
     assert.equal(restoredState.deliveries.find(item => item.id === sendingDelivery.id).status, 'unknown')
     assert.equal(restoredState.deliveries.find(item => item.id === pendingDelivery.id).status, 'pending')
     assert.equal(JSON.stringify(restoredState).includes(secretCanary), false)
@@ -307,5 +332,6 @@ function automationRule(id, status, trigger, extra = {}) {
 }
 function workRecord(id) { return { id, ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', input: { workOrderId: 'WO-1' }, status: 'completed', results: [], executions: [] } }
 function deliveryRecord(id, workId) { return { id, channelAppId: 'app-owner', requestId: `request-${id}`, workId, targetConversationId: 'conversation-owner', targetIdentityId: 'identity-owner', contentScope: 'result', contentKey: 'work.accepted', status: 'pending', attempts: 0, createdAt: now, updatedAt: now } }
-function occurrenceRecord(id, rule, scheduledDate, workId, deliveryId = null, status = null) { return { id, occurrenceKey: dailyOccurrenceKey(rule.id, scheduledDate), ruleId: rule.id, ruleRevision: rule.revision, scheduledDate, workId, status, reason: status ? 'test-reason' : null, deliveryId, createdAt: now } }
+function occurrenceRecord(id, rule, scheduledDate, workId, deliveryId = null, status = null) { return { id, occurrenceKey: dailyOccurrenceKey(rule.id, scheduledDate), ruleId: rule.id, ruleRevision: rule.revision, scheduledDate, event: null, workId, status, reason: status ? 'test-reason' : null, deliveryId, createdAt: now } }
+function eventOccurrenceRecord(id, rule, workId, deliveryId = null, status = null) { const event = { sourceId: rule.trigger.sourceId, sourceRevision: '2026-09-20 09:00:00.000001', digest: '1'.repeat(64) }; return { id, occurrenceKey: eventOccurrenceKey(rule.id, event.sourceId, event.sourceRevision, rule.workOrderId), ruleId: rule.id, ruleRevision: rule.revision, scheduledDate: null, event, workId, status, reason: status ? 'test-reason' : null, deliveryId, createdAt: now } }
 function run(args, env) { return execFile(process.execPath, [transfer, ...args], { env: { ...process.env, ...env }, maxBuffer: 4 * 1024 * 1024 }) }

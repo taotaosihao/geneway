@@ -26,6 +26,17 @@ releaseServiceClose()
 await heldShutdown
 await assert.rejects(() => fetch(heldUrl))
 
+const lifecycle = [], lifecycleServer = createServer((_request, response) => response.end('ok'))
+await new Promise(resolve => lifecycleServer.listen(0, '127.0.0.1', resolve))
+await shutdownServer(
+  lifecycleServer,
+  { async close() { lifecycle.push('work') } },
+  { async close() { lifecycle.push('channel') } },
+  { async stop() { lifecycle.push('automation-stop') }, async close() { lifecycle.push('automation-close') } },
+  { async close() { lifecycle.push('receiver') } },
+)
+assert.deepEqual(lifecycle, ['receiver', 'automation-stop', 'channel', 'work', 'automation-close'])
+
 const root = await mkdtemp(join(tmpdir(), 'geneway-shutdown-'))
 const connectionCatalog = join(root, 'connections.json')
 await writeFile(connectionCatalog, JSON.stringify({ version: 1, targets: [] }), { mode: 0o600 })

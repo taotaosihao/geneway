@@ -203,7 +203,7 @@ P5 只有在真定时、真 GearJob 事件、真模型/工具、真通知、Web/
 
 - 事件 occurrence 继续留在 v7 的 `automationOccurrences[]`，只增加可空 `event`：`sourceId`、完整六位微秒 `sourceRevision` 和 raw-body `digest`。可比较的事件时间按固定 GearJob `+08:00` 语义从 `sourceRevision` 严格派生，不持久第二份时间权威；daily/manual 的 `event` 必须为 `null`，不新增事件表或第二状态机。
 - 稳定身份为 `ruleId + sourceId + on_update + Work Order + workOrderId + sourceRevision`，不含 digest 或 rule revision。digest 只用于判定同身份同内容 replay 与同身份异内容 conflict。
-- `eventAcceptAfter` 仅在首次启用、恢复、事件 source 或目标工单变化时更新；通知目标或累计预算变化不重置窗口。
+- `eventAcceptAfter` 仅在首次启用、恢复，或尚无任何 occurrence 时修改事件 source/目标工单后更新；一旦已有发生历史，员工、Skill、连接、目标工单和 trigger 都不可原地改绑，必须新建草稿，避免当前 rule 改写历史身份。通知目标或累计预算变化不重置窗口。
 - `sourceRevision < eventAcceptAfter` 记录 `skipped: before-active-window`；源时间无法按已验证的 GearJob `+08:00`、六位微秒语义比较时记录 `blocked: source-time-unverifiable`。不得以接收时间替代来源时间。
 
 ### 10.2 runtime 可用性与窄 receiver

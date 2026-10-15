@@ -2,6 +2,8 @@
 
 > **合同 v4.3 注记（2026-10-15）**：T3 已在 `e8522e3` 实施并有真实证据（`/home/gewu/.codex/workflow/artifacts/20260919-006-geneway-dsh-greenfield/p6-t3-live-evidence.md`），状态应为 T3 PASS；按合同 v4.3 §9，P4 通过前暂停 T4–T6 新实施，升级导致的已提交代码修复归入 P4-U0。恢复时须在派发前复核中补充 Agent 停用与成员开放范围检查；当前批准绑定 `owner.sessionVersion` 依赖“开放范围变更即递增登录会话版本”，该检查是 P4 取消此递增的前置条件。
 
+> **合同 v4.4 注记（2026-10-15）**：业务系统由 GearJob 改为 Kivo TPM。GearJob Work Order + Hive 的来源选择、生产跟进 Comment 写动作及相关证据转为历史，与来源无关的已实施部分（如 T1）由重规划逐项判断保留并回归；恢复 P6 前以 Kivo TPM 与 Kivo 设备监控原位重规划，写动作已由用户决定为经 MCP 写工具、以 Kivo 机器账号创建 synthetic 设备的维修单，Kivo 侧补按单号幂等（合同 §5.6）。
+
 状态：**`T0 + PRODUCT DESIGN + T1 + T2 + T3 PASS / T4–T6 按合同 v4.3 暂停`**。P5 已在 `9808772` 技术 PASS，`P5 → P6` 顺序门已关闭。两名原 Team Astra planner 及 P5 后产品/工程复算均收敛为 GearJob Work Order + 隔离 Hive tenant integration API，以及仅限本地 synthetic Work Order 的纯文本、未发布、无 mention 生产跟进 Comment。现行 `user-message:geneway-goal-delegated-product-decisions` 已将中间产品决策委托给 Team planner 共识与正式 reviewer，用户仅做阶段最终验收；T0 已通过真实 Hive API、GearJob 映射、窄 Comment 合同、绕过防护、同键并发和回读证明，当前 A/C/D/E 已重算、由独立 Sol reviewer PASS 并绑定。T1 已完成 state v8、单一 file-store durable commit 和保守恢复；T2 已完成固定双来源 typed correlation、逐 GET 复权、mapping Session 失效和真实三 GET 回读。授权不延伸到非 synthetic/生产对象、真实客户数据外发、权限提升、部署或发布。
 
 基线：Geneway `280ff5ca645437ceec64416bdebc43f6c09c1e7e`；GearJob `2e89415c2a189d3bd985d9022630cee1da84b6d2`；Hive `7dd2dfc9d381bbee8158fb5de0c06a4b7a6fc2e5`。用户已授权仅限 GearJob synthetic 对象的最小上游窄契约依赖修改；Hive 不改源码，Kivo 不使用。P6 Product Design 已通过并准入 Geneway 本地 synthetic 产品实现。本计划不授权非 synthetic/生产数据、权限提升、公网暴露、部署或发布。

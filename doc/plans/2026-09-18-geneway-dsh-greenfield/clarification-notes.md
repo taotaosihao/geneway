@@ -2,7 +2,7 @@
 
 首次记录：2026-09-18；最近修订：2026-10-15。范围正文见 [实施合同](implementation-contract.md)。本文件仅记录来源、工程取舍与检查事实，不新增实施义务，不构成执行或发布批准。
 
-第 1–8 节保留此前合同的澄清与修订历史；其中的路径、摘要、范围排除和当时状态不代表当前有效版本。全量合同升级见第 8 节，v4.1 第一性原理审查修订见第 9 节，v4.3 后台 Agent、成员自助渠道与会话隔离修订见第 10 节；当前范围仅以实施合同正文为准。
+第 1–8 节保留此前合同的澄清与修订历史；其中的路径、摘要、范围排除和当时状态不代表当前有效版本。全量合同升级见第 8 节，v4.1 第一性原理审查修订见第 9 节，v4.3 后台 Agent、成员自助渠道与会话隔离修订见第 10 节，v4.4 业务来源改为 Kivo TPM 与 MCP 接入见第 11 节；当前范围仅以实施合同正文为准。
 
 ## 1. 当前请求与既定决定
 
@@ -193,3 +193,65 @@ DevSpace subagents skill 成功读取自：
 审查列出的 P1–P6 计划问题中，设计性修改（如 P4 命令式路由改为渠道会话、P2/P3 隔离不变量、P5 通知目标、P6 派发前补 Agent 停用/开放范围复核）按 §2.6 由 P4 重规划的 planner team 在原计划内落实；本次只在各计划文件头加注 v4.3 影响，并同步 P6 状态行；同批未提交修改中 P6-plan 表格的 T3 PASS 一行来自此前 Codex 会话（证据 `/home/gewu/.codex/workflow/artifacts/20260919-006-geneway-dsh-greenfield/p6-t3-live-evidence.md`，提交 `e8522e3`），本次保留。DSH 升级任务编号为 P4-U0，避免与原 P4 计划中已执行的 T0 飞书接口探针冲突。审查原文保存在主代理会话外部，不入 Git。
 
 本次只修改合同、本记录与阶段计划文件头，未提交 Git，未修改产品代码或依赖，未升级 DSH，未访问飞书/微信、模型或业务系统。
+
+## 11. v4.4 业务来源改为 Kivo TPM，经 MCP 接入
+
+### 11.1 用户决定（2026-10-15）
+
+| 决定 | 用户原话 | 合同落点 |
+|---|---|---|
+| 业务系统由 GearJob 改为 Kivo，接入 Kivo 的 TPM（设备维护），代码以 `deploy/dongguan-airui` 分支为准 | “gearjob 项目改成 kivo 项目，改成接入 kivo 的 tmp，~/.codex/worktrees/bd52/kivo 这个分支的” | §5.6、§9 P4-K0/P5-K1/P6、DEP-SOURCE |
+| 允许在 Kivo 侧新增 MCP | “kivo 可以加上mcp” | §5.6 Kivo MCP 接入、§6 |
+| MCP 按最新规范 | “按照最新的 mcp 2 的方式来” | §5.6：规范 2026-07-28 版，`@modelcontextprotocol/server`/`client` 2.x 精确锁定 |
+
+“tmp”经用户确认即 Kivo 的 TPM 设备维护模块（`mes/tpm/repairs`、`maintenance`、`inspections`、`plans` 等）。“MCP 2”按官方规范版本理解：规范没有“2.0”这个版本号，最新版为 2026-07-28，官方 TypeScript SDK 以 2.x 实现它。
+
+### 11.2 核对的 Kivo 事实（只读，`26182fccf35d915982ea844ec71db58970a99c04`，经独立审查复核）
+
+- TPM 维修、保养、点检/异常、计划控制器均为 `JwtAuthGuard` + `PermissionGuard` + `@ProductModule('mes.tpm')`，读取按组织资源范围过滤；无组织范围的账号列表返回空结果，越界单号返回 404。`@RequirePermission` 只在 HTTP 守卫中生效，服务层只做范围过滤；Kivo `AGENTS.md` 禁止 Agent 直连数据库或私有服务。
+- 认证只有登录换取的 Bearer JWT：有效期 24 小时，无刷新接口（仅 login/logout/session），授权版本变化或会话撤销后立即 401；同账号 60 秒内失败加进行中登录达 5 次即限流。`mes-api` 无 API Key 或长期令牌；机器身份只供内部 `mes-worker`。写入路径要求人类会话，会把调用账号记为人类操作者。
+- 创建维修单 `POST mes/tpm/repairs`：`deviceId`、`reason`（必填）、可选 `orderNo`、`description`、`source`、`detail`、`assigneeIds`（传入则需派工权限）。`orderNo` 可由调用方指定且全局唯一，重复时数据库唯一约束未被映射，返回 HTTP 500；创建无幂等回放。`detail` 只允许 `description`，`source.kind` 只能是 `device_alarm`/`mes_exception`/`manual`，都不能承载 Geneway 动作身份；`x-trace-id` 请求头会写入审计、outbox 和 webhook 的 `traceId`。按 `requestId` 幂等的只有 cancel/terminate/archive/unarchive。
+- 通知：`generic_json` webhook 端点；`business_event` 覆盖维修/保养/点检的 status、executorId、assigneeId、startedAt、completedAt 变化，另有 `device_alarm`。签名头为 `webhook-id`/`webhook-timestamp`/`webhook-signature`，`whsec_` 密钥上的 `v1` HMAC-SHA256，覆盖“投递标识.时间戳.原始请求体”。每次投递 10 秒截止，超时、408、429、5xx 记为结果未知且不自动重试，因此不是可靠投递。发送地址策略由环境变量配置，可允许回环地址；通知由 `mes-worker` 投递。
+- 既有 `packages/agent-mcp`：手写 stdio、协议 `2024-11-05`、单一 `KIVO_TOKEN`，两个工具（方法快照读取与锁定）属 `fms.manufacturing`，调用的是 fms-api 而非 mes-api，FMS 与 MES 的 JWT 密钥不同。
+- 设备监控（`mes/equipment/monitor`、`status-overview`）依赖 Kivo 与 Hive 的设备绑定，缺绑定返回来源完整性未证明；`mes/equipment/alarms` 只有确认/关闭写接口，报警读取走设备事实。
+- 测试实例前置：无有效 License 时非管理员登录被拒，开发模式可换测试公钥；未设 `JWT_SECRET` 会退回开发默认值；通知需要主密钥与 webhook 策略；`mes-worker` 有运行身份校验。
+- MCP SDK：`@modelcontextprotocol/server`/`client` 2.3.1（2026-10-05）默认协商的最新版本仍为 `2025-11-25`，2026-07-28 须显式启用；server 依赖 zod 4。
+- 正在使用的工作树 `~/.codex/worktrees/bd52/kivo` 有他人未提交改动。
+
+### 11.3 取舍
+
+- MCP 端点放在 `mes-api` 内，不改既有 FMS stdio 包：令牌由本服务签发并校验，避免独立进程转发令牌（规范禁止令牌透传）；工具经 MES HTTP 路由执行，守卫照常生效；不影响 `agent-mcp` 的现有使用方。Kivo `ai/project-map.md` 写有“`packages/agent-mcp` 保持唯一窄参考实现”，该原则在其文档中仍待产品负责人确认；新增 `mes-api` 内置端点后 Kivo 内会有两处 MCP 实现，须请 Kivo 负责人一并确认。
+- （已被 11.6 用户决定取代）不采用 MCP Authorization（OAuth 2.1）而用 Kivo 会话 Bearer，是记录在案的规范偏离：Kivo 没有授权服务器，单一受控客户端加本机监听、`Origin` 校验和最小权限账号足以覆盖当前风险；以后开放给更多客户端时再评估。
+- 暴露给模型的工具以 Geneway 插件内的固定允许清单为准，服务端注解不作授权依据；写工具从不进入模型工具列表。权限因此同时由 Geneway 与 Kivo 两侧裁决，不只存在于提示词。
+- 事件用 Kivo 已有的签名 webhook 并配对账补偿，而不是 MCP 通知：2026-07-28 规范核心无状态，没有持久推送；webhook 自身也不保证送达。
+- GearJob 下与业务来源无关的结论（身份、授权、Session、委派、取消、恢复、节拍、定时）继续有效，只在 DSH 升级后回归；依赖业务来源的旅程（J1、J4、J6、J8 事件、J9）在 Kivo 上重新验证。P6 中与来源无关的已实施部分逐项判断保留。
+- 写动作候选为创建维修单：可指定单号作稳定身份、可直接回读、是真实 TPM 记录。因创建无幂等回放，未知结果一律先按单号回读。
+
+### 11.4 待后续阶段确认
+
+- Kivo 设备监控是否需要 Hive 测试实例，由 P6 重规划探针确定。
+- MCP client credentials 授权扩展目前在 ext-auth 仓库中仍为草案（Stable 只有 Enterprise-Managed Authorization）；P4-K0 锁定其提交，并以真实调用确认 SDK 2.x 的私钥 JWT 提供者可用。
+- Kivo 侧分支的推送与合入时机。
+
+### 11.5 独立审查（2026-10-15）
+
+v4.4 初稿经两名未参与修改的审查者复审：合同一致性审查与 Kivo 源码/MCP 规范事实审查，结论均为 PASS_WITH_FIXES（无阻断；重要 8 项和 9 项）。已按审查修订：DSH 升级不再要求在 GearJob 上重跑依赖来源的旅程；写动作明确为待用户决定；Kivo 授权收窄为 MCP 层；MCP 端点改为 `mes-api` 内置并经 HTTP 路由守卫；鉴权偏离与 SDK 须显式启用 2026-07-28 写明；工具允许清单；写入幂等与动作身份落点按源码更正；webhook 不可靠投递的受理与对账；测试实例前置条件与令牌管理；P4-K0 补充横切验收；追溯表与 AC-25 按阶段拆分。复核轮：一致性审查确认上轮 17 项中 16 项解决，余下 1 项及新发现的承载位置残留、鉴权偏离未设门槛已修正；事实审查结论 PASS，按其建议补充 404 回读处理、监听地址由部署层控制、MCP 控制器模块标注、webhook 密钥解码及 Kivo 文档原则的确认事项。SDK 默认协商旧版协议一项依据发布包常量与默认参数推断，由 AC-25 的线路证据最终验证。
+
+### 11.6 审查后的用户决定（2026-10-15）
+
+| 问题 | 用户原话 | 落点 |
+|---|---|---|
+| P6 写动作是否采用创建维修单 | “1：同意” | §5.6 写动作、DEP-WRITE；Kivo 侧补上按单号幂等 |
+| 是否接受不用 MCP 授权、改用 Kivo 会话令牌 | “2：哪种长期更优用哪种” | 取规范授权方案，见下 |
+| 服务账号被记为人类操作者、`mes-api` 内新增 MCP 端点 | “3：增加机器账号，可以新增和修改” | §5.6 授权范围与机器账号 |
+
+“长期更优”的判断：选择遵循 MCP 规范授权部分，机器客户端用官方 `oauth-client-credentials` 扩展（私钥签名 JWT 断言），令牌绑定 Kivo MCP 资源。理由：
+
+- Kivo 会话令牌没有受众，持有者可访问账号权限内的全部 mes-api；绑定资源的短时令牌只能用于 MCP 端点。
+- 私钥只在 Geneway，Kivo 只存公钥，没有共享口令，可轮换、可吊销；也避开了会话令牌 24 小时过期、无刷新和登录限流的问题。
+- 机器账号使 Kivo 审计如实记录非人类操作者，写入策略可以按机器账号单独放行。
+- 以后其他 MCP 客户端接入 Kivo 时可直接复用，不必改协议；代价是 P4-K0 需要在 Kivo 实现授权端点与机器账号管理，工作量大于直接复用会话令牌。
+
+“可以新增和修改”经用户确认（“确认是前者”）指“可以为此新增和修改 Kivo 代码”，不是让机器账号新增和修改业务记录；机器账号仍只授维修单创建一项写权限。用户允许为机器账号“新增和修改”，因此 11.3 中“授权仅限 MCP 层”的取舍与“409 映射须单独授权”已被取代：授权范围扩大为本集成所需的 Kivo 改动（MCP、机器账号与管理入口、授权端点、数据结构与权限定义、写动作幂等），与本集成无关的 Kivo 业务改动和推送、合入仍不在授权内。`mes-api` 内新增 MCP 端点视为用户已同意，与 Kivo `ai/project-map.md` 中待确认原则的差异在 P4-K0 同步更新该文档。
+
+第三轮复核（同一事实审查者）结论 PASS_WITH_FIXES，已按其意见补充：Kivo 守卫只认人类会话，须增加进程内机器主体并由守卫识别；新增独立机器账号主体与加载器，不复用 worker 运行身份，写入策略逐动作放行并在事务内复核撤权；扩展标为草案并锁定提交、只做 client credentials 加私钥 JWT；授权服务器元数据与断言校验要求；按单号幂等只对同一机器账号且同范围回放，其余 409 不泄露内容；管理入口以管理 API 为准。

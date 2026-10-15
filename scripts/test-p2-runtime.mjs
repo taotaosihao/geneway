@@ -41,7 +41,7 @@ try {
 
 function testCapabilities() {
   const capabilities = listCapabilities()
-  assert.deepEqual(capabilities.map(item => item.id), ['gearjob-work-order-read', 'cycle-time-calculate', WORK_ORDER_DEVICE_CORRELATION_CAPABILITY])
+  assert.deepEqual(capabilities.map(item => item.id), ['gearjob-work-order-read', 'cycle-time-calculate', WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, 'kivo-tpm-record-read', 'kivo-tpm-record-list'])
   const correlation = capabilities.find(item => item.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY)
   assert.deepEqual(Object.fromEntries(['id', 'skillId', 'action', 'toolName', 'pluginId', 'pluginVersion', 'resultKind', 'requiredInputs', 'requiresConnection', 'connectionKind'].map(key => [key, correlation[key]])), {
     id: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY,

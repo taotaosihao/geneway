@@ -1,9 +1,13 @@
 import { calculateCycleTime } from './domain/cycle-time.mjs'
+import { isDeepStrictEqual } from 'node:util'
+import { assertTpmObservation, KIVO_TPM_RESULT_KIND, KIVO_TPM_TOOLS, normalizeTpmInput, normalizeTpmObservation, tpmSourcePath, tpmToolRequest } from './domain/tpm.mjs'
 
 export const GEARJOB_TOOL = 'geneway_gearjob_read_work_order'
 export const CYCLE_TIME_TOOL = 'geneway_calculate_cycle_time'
 export const WORK_ORDER_DEVICE_CORRELATION_TOOL = 'geneway_correlate_work_order_device'
 export const WORK_ORDER_DEVICE_CORRELATION_CAPABILITY = 'manufacturing-work-order-device-correlate'
+export const KIVO_TPM_RECORD_READ_CAPABILITY = 'kivo-tpm-record-read'
+export const KIVO_TPM_RECORD_LIST_CAPABILITY = 'kivo-tpm-record-list'
 
 const capabilities = Object.freeze({
   'gearjob-work-order-read': Object.freeze({
@@ -53,6 +57,36 @@ const capabilities = Object.freeze({
     buildPrompt: correlationPrompt,
     parseResult: parseCorrelationResult,
   }),
+  [KIVO_TPM_RECORD_READ_CAPABILITY]: Object.freeze({
+    id: KIVO_TPM_RECORD_READ_CAPABILITY,
+    skillId: 'skill-kivo-tpm-record-read',
+    action: 'kivo.tpm.record.read',
+    toolName: KIVO_TPM_TOOLS.readRecord,
+    pluginId: 'geneway-kivo-tpm',
+    pluginVersion: '1',
+    resultKind: KIVO_TPM_RESULT_KIND,
+    requiredInputs: Object.freeze(['recordType', 'reference']),
+    connectionKind: 'kivo-mcp',
+    requiresConnection: true,
+    normalizeInput: (value, options) => normalizeTpmInput('record', value, options),
+    buildPrompt: tpmPrompt,
+    parseResult: parseTpmResult,
+  }),
+  [KIVO_TPM_RECORD_LIST_CAPABILITY]: Object.freeze({
+    id: KIVO_TPM_RECORD_LIST_CAPABILITY,
+    skillId: 'skill-kivo-tpm-record-list',
+    action: 'kivo.tpm.record.list',
+    toolName: KIVO_TPM_TOOLS.listRecords,
+    pluginId: 'geneway-kivo-tpm',
+    pluginVersion: '1',
+    resultKind: KIVO_TPM_RESULT_KIND,
+    requiredInputs: Object.freeze(['recordType', 'filters']),
+    connectionKind: 'kivo-mcp',
+    requiresConnection: true,
+    normalizeInput: (value, options) => normalizeTpmInput('list', value, options),
+    buildPrompt: tpmPrompt,
+    parseResult: parseTpmResult,
+  }),
 })
 
 export function listCapabilities() {
@@ -65,6 +99,7 @@ export function getCapability(id) {
 
 export function validateCapabilityInput(capabilityId, value, { allowMissing = false } = {}) {
   const capability = requiredCapability(capabilityId)
+  if ([KIVO_TPM_RECORD_READ_CAPABILITY, KIVO_TPM_RECORD_LIST_CAPABILITY].includes(capabilityId)) return capability.normalizeInput(value, { allowMissing })
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid('INVALID_INPUT', '能力输入必须是对象')
   const allowed = new Set(capability.requiredInputs)
   const extra = Object.keys(value).find(key => !allowed.has(key))
@@ -165,6 +200,52 @@ function correlationPrompt(capability, input, previousFact, confirmations) {
     previousFact ? `上一条获准结构化事实仅供对照：${JSON.stringify(projectFact(previousFact))}` : '',
     `当前有效确认：${JSON.stringify(confirmations)}`,
   ].filter(Boolean).join('\n')
+}
+
+function tpmPrompt(capability, input, previousFact, confirmations) {
+  return [
+    '你是 Geneway Kivo TPM 只读说明员工。',
+    `必须且只能调用一次 ${capability.toolName}，参数必须精确为 ${JSON.stringify(input)}。`,
+    '工具返回后不得再次调用工具；只能依据同一结构化观察说明记录类型、原始与规范状态、关联设备、责任人、计划及执行时间、来源与查询时间。',
+    'scope_empty 表示当前机器账号没有组织读取范围，不能解释为没有业务记录。列表仅说明返回页，不声称已读完其他页。',
+    '时间、状态或计划基线未知时明确说未知，逾期判断只能采用程序结果；不得自行计算、猜测或执行写入。',
+    previousFact ? `上一条获准结构化事实仅供对照：${JSON.stringify(projectFact(previousFact))}` : '',
+    `当前有效确认：${JSON.stringify(confirmations)}`,
+  ].filter(Boolean).join('\n')
+}
+
+function parseTpmResult(capability, value, input) {
+  exactKeys(value, ['ok', 'observation'], 'Kivo TPM 工具结果')
+  try {
+    const observation = assertTpmObservation(value.observation)
+    const mode = capability.id === KIVO_TPM_RECORD_READ_CAPABILITY ? 'record' : 'list'
+    if (observation.mode !== mode || observation.recordType !== input.recordType) throw new Error('type mismatch')
+    const request = tpmToolRequest(mode, input)
+    if (!sameTpmPath(observation.sources[0].path, tpmSourcePath(request))) throw new Error('source mismatch')
+    const sourceKeys = ['system', 'path', 'queriedAt', 'traceId']
+    const empty = observation.status === 'scope_empty'
+    const result = {
+      status: observation.status, source: pick(observation.sources[0], sourceKeys),
+      value: empty ? null : mode === 'record' ? observation.records[0].facts : { ...observation.pagination, items: observation.records.map(record => record.facts) },
+    }
+    const deviceResult = observation.sources[1] ? {
+      status: observation.status, source: pick(observation.sources[1], sourceKeys), value: empty ? null : observation.linkedDevice.facts,
+    } : undefined
+    const expected = normalizeTpmObservation({ mode, input, result, deviceResult, connection: observation.source })
+    if (!isDeepStrictEqual(observation, expected)) throw new Error('observation mismatch')
+    if (deviceResult && (deviceResult.source.traceId !== result.source.traceId
+      || (!empty && !sameTpmPath(deviceResult.source.path, tpmSourcePath(tpmToolRequest('record', { recordType: 'device', reference: observation.records[0].deviceId })))))) throw new Error('device source mismatch')
+    const payload = structuredClone(observation)
+    return { kind: capability.resultKind, payload, source: structuredClone(payload.source), toolName: capability.toolName, pluginId: capability.pluginId, pluginVersion: capability.pluginVersion }
+  } catch {
+    throw capabilityError('TOOL_CHAIN_INVALID', 'Kivo TPM 工具结果与固定输入或结构化观察不匹配')
+  }
+}
+
+function sameTpmPath(actual, expected) {
+  const source = new URL(actual, 'http://kivo.invalid'), target = new URL(expected, 'http://kivo.invalid')
+  source.searchParams.sort(); target.searchParams.sort()
+  return source.href === target.href
 }
 
 function parseGearJobResult(capability, value, input) {
@@ -285,6 +366,12 @@ function projectFact(value) {
     const parsed = parseCapabilityToolResult(WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, { ok: true, ...value.payload }, { workOrderId: value.payload.workOrderId })
     return { kind: value.kind, payload: parsed.payload, ...(value.source ? { source: parsed.source } : {}) }
   }
+  if (value.kind === KIVO_TPM_RESULT_KIND) {
+    let payload
+    try { payload = structuredClone(assertTpmObservation(value.payload)) } catch { throw capabilityError('INVALID_REQUEST', 'Kivo TPM 结构化事实无效') }
+    if (value.source !== undefined && !isDeepStrictEqual(value.source, payload.source)) throw capabilityError('INVALID_REQUEST', 'Kivo TPM 事实来源不匹配')
+    return { kind: value.kind, payload, source: structuredClone(payload.source) }
+  }
   throw capabilityError('INVALID_REQUEST', '结构化事实 kind 未获准')
 }
 
@@ -295,7 +382,7 @@ function requiredCapability(id) {
 }
 
 function allowedErrorCodes(capabilityId) {
-  return capabilityId === 'gearjob-work-order-read' || capabilityId === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY
+  return ['gearjob-work-order-read', WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, KIVO_TPM_RECORD_READ_CAPABILITY, KIVO_TPM_RECORD_LIST_CAPABILITY].includes(capabilityId)
     ? new Set(['INVALID_REQUEST', 'SOURCE_NOT_CONFIGURED', 'FORBIDDEN', 'NOT_FOUND', 'CANCELLED', 'UPSTREAM_TIMEOUT', 'UPSTREAM_ERROR', 'INVALID_SOURCE'])
     : new Set(['INVALID_INPUT', 'MISSING_AVAILABLE_SECONDS', 'MISSING_QUANTITY', 'INVALID_AVAILABLE_SECONDS_TYPE', 'INVALID_QUANTITY_TYPE', 'NON_FINITE_AVAILABLE_SECONDS', 'NON_FINITE_QUANTITY', 'NEGATIVE_AVAILABLE_SECONDS', 'NON_POSITIVE_QUANTITY', 'NON_FINITE_RESULT', 'FORBIDDEN', 'CANCELLED'])
 }

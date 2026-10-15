@@ -1,5 +1,7 @@
 # P5 定时、事件与主动持续工作详细计划
 
+> **合同 v4.3 注记（2026-10-15）**：P5 PASS 结论成立于 DSH `0.1.6-alpha.2`。v4.3 下 P4-U0 只回归现有 P5 路径；通知目标改为成员渠道身份（不随渠道会话轮换失效）、纳入微信目标及其“失败/待核对”语义，由 P4 重规划落实；“P4 企业微信 deferred”表述已由合同 §5.4 取代。
+
 状态：**P5 PASS。冻结候选 `9808772cc5b1a4a8487c969ddcc0f7e9e179eb77` 已在同一正式运行中通过 T7a 真实每日定时与 T7b 真实 GearJob after-commit 事件主链；真实 ZenMux DeepSeek、DSH、GearJob synthetic external-test、飞书业务回读、恢复/重放/冲突/撤销和清理边界均成立。最终 MP4/report/离线手册已通过独立正确性、视觉可操作性与 Astra/Ponytail 复审，并用 Geneway 产品飞书 app 发送后逐条回读。P4 企业微信与真人最终验收仍为 deferred，P5 PASS 不推导部署、发布或生产验收。**
 
 基线：`283771c5240799360f9c0d5f0d439e440fdaa4ad`（P4 飞书 runtime 切片）。P4 企业微信、真实手机 HTTPS 和阶段末真人验收仍为 deferred，P4 不是 PASS。

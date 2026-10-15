@@ -1,6 +1,8 @@
 # P6 制造业务关联与有限真实写入详细计划
 
-状态：**`T0 + PRODUCT DESIGN + T1 + T2 PASS / T3 READY`**。P5 已在 `9808772` 技术 PASS，`P5 → P6` 顺序门已关闭。两名原 Team Astra planner 及 P5 后产品/工程复算均收敛为 GearJob Work Order + 隔离 Hive tenant integration API，以及仅限本地 synthetic Work Order 的纯文本、未发布、无 mention 生产跟进 Comment。现行 `user-message:geneway-goal-delegated-product-decisions` 已将中间产品决策委托给 Team planner 共识与正式 reviewer，用户仅做阶段最终验收；T0 已通过真实 Hive API、GearJob 映射、窄 Comment 合同、绕过防护、同键并发和回读证明，当前 A/C/D/E 已重算、由独立 Sol reviewer PASS 并绑定。T1 已完成 state v8、单一 file-store durable commit 和保守恢复；T2 已完成固定双来源 typed correlation、逐 GET 复权、mapping Session 失效和真实三 GET 回读。授权不延伸到非 synthetic/生产对象、真实客户数据外发、权限提升、部署或发布。
+> **合同 v4.3 注记（2026-10-15）**：T3 已在 `e8522e3` 实施并有真实证据（`/home/gewu/.codex/workflow/artifacts/20260919-006-geneway-dsh-greenfield/p6-t3-live-evidence.md`），状态应为 T3 PASS；按合同 v4.3 §9，P4 通过前暂停 T4–T6 新实施，升级导致的已提交代码修复归入 P4-U0。恢复时须在派发前复核中补充 Agent 停用与成员开放范围检查；当前批准绑定 `owner.sessionVersion` 依赖“开放范围变更即递增登录会话版本”，该检查是 P4 取消此递增的前置条件。
+
+状态：**`T0 + PRODUCT DESIGN + T1 + T2 + T3 PASS / T4–T6 按合同 v4.3 暂停`**。P5 已在 `9808772` 技术 PASS，`P5 → P6` 顺序门已关闭。两名原 Team Astra planner 及 P5 后产品/工程复算均收敛为 GearJob Work Order + 隔离 Hive tenant integration API，以及仅限本地 synthetic Work Order 的纯文本、未发布、无 mention 生产跟进 Comment。现行 `user-message:geneway-goal-delegated-product-decisions` 已将中间产品决策委托给 Team planner 共识与正式 reviewer，用户仅做阶段最终验收；T0 已通过真实 Hive API、GearJob 映射、窄 Comment 合同、绕过防护、同键并发和回读证明，当前 A/C/D/E 已重算、由独立 Sol reviewer PASS 并绑定。T1 已完成 state v8、单一 file-store durable commit 和保守恢复；T2 已完成固定双来源 typed correlation、逐 GET 复权、mapping Session 失效和真实三 GET 回读。授权不延伸到非 synthetic/生产对象、真实客户数据外发、权限提升、部署或发布。
 
 基线：Geneway `280ff5ca645437ceec64416bdebc43f6c09c1e7e`；GearJob `2e89415c2a189d3bd985d9022630cee1da84b6d2`；Hive `7dd2dfc9d381bbee8158fb5de0c06a4b7a6fc2e5`。用户已授权仅限 GearJob synthetic 对象的最小上游窄契约依赖修改；Hive 不改源码，Kivo 不使用。P6 Product Design 已通过并准入 Geneway 本地 synthetic 产品实现。本计划不授权非 synthetic/生产数据、权限提升、公网暴露、部署或发布。
 
@@ -125,7 +127,7 @@ T0 在任何 Geneway P6 产品实现前核验。GearJob 最小窄契约的实现
 | P6-T0 决策与接口核验 | Hive synthetic 真实 API/映射证据 + GearJob 窄 Comment 合同及运行探针 | **PASS**：GearJob `2e89415c`；67 项 focused tests、真实 HMAC mapping 含独立 `mesUnitId`/`hiveUnitId`、guard/幂等/回读、同键并发 `201+200` 且数据库一条、两名独立 reviewer PASS |
 | P6-T1 v8 与可靠提交 | store、state-transfer、迁移/故障测试 | **PASS**：`0997846`；v8 work.actions、temp file sync→rename→parent-dir sync、5 类故障、restart/restore unknown、完整 P1–P5 受影响回归、Sol correctness 与 Astra/Ponytail 双审 PASS |
 | P6-T2 双来源关联 | 一个具体第二来源插件、固定关联工具、capability/binding/grant 窄扩展 | **PASS**：`e028d79` + `280ff5c`；固定 `connectionIds{gearJob,hive}`、三个 GET 逐次复权、mapping revision/identity Session 失效、strict UTC/120s/5s、六字段 machineFacts/raw 泄露 0；真实 API authorize=3、唯一 mapping/device、fresh age `0.304s`；Sol correctness 与 Astra/Ponytail 双审 PASS |
-| P6-T3 动作服务 | 最小 action service + 已选上游窄 adapter | T0 写契约、T1/T2、明确写授权；批准绑定、派发前复权、幂等、回读、unknown |
+| P6-T3 动作服务 | 最小 action service + 已选上游窄 adapter | **PASS**：`e8522e3`；仅 `work.actions[]` + 具体 GearJob Comment adapter，三类防重身份、可靠 attempt、最多一次 POST、三个来源 GET 与 Comment GET 紧前复权、201/200 后 exact readback、noEffect/unknown/reconcile/recovery 零自动写；受控矩阵与完整 `pnpm test:p5` PASS，Sol correctness 与 Astra/Ponytail 终审 PASS；同候选真实 action service 对 synthetic `WO-26-00096` 写入并回读唯一 private Comment，重复批准数据库仍一条，证据 `p6-t3-live-evidence.md` |
 | P6-T4 API/UI | server、现有工作详情、手机批准/恢复 | 正式 A/C/D/E、T2/T3 稳定；无第二导航/审批平台 |
 | P6-T5 恢复与组合回归 | `test:p6`、v4–v8 transfer、P1–P5 affected regression | T1–T4；旧批准失效、in-flight unknown、零自动写入 |
 | P6-T6 真实验收 | `accept:p6`、Design Review、MP4/report/Lark | 两真实来源与明确写授权；普通 UI、上游唯一记录/回读、拒绝/重复/unknown |

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
-import { Client, InsufficientScopeError, PrivateKeyJwtProvider, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
+import { Client, InsufficientScopeError, OAuthError, OAuthErrorCode, PrivateKeyJwtProvider, StreamableHTTPClientTransport } from '@modelcontextprotocol/client'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { authorizeExecutionGrant, consumeExecutionGrant, resolveCredentialFile } from '../src/execution-grant.mjs'
 import { KIVO_TPM_TOOLS, TPM_RECORD_TYPES, TPM_LIST_RECORD_TYPES, normalizeTpmInput, normalizeTpmObservation, tpmToolRequest, tpmSourcePath, tpmError } from '../src/domain/tpm.mjs'
@@ -246,7 +246,9 @@ function safeError(error, signal, timeout) {
   const code = signal?.aborted ? signal.reason?.code === 'UPSTREAM_TIMEOUT' || signal.reason?.name === 'TimeoutError' ? 'UPSTREAM_TIMEOUT' : 'CANCELLED'
     : timeout?.aborted ? 'UPSTREAM_TIMEOUT'
       : Object.hasOwn(MESSAGES, error?.code) ? error.code
-        : error instanceof InsufficientScopeError || [401, 403].includes(error?.status ?? error?.code) ? 'FORBIDDEN'
+        : error instanceof InsufficientScopeError
+          || (error instanceof OAuthError && [OAuthErrorCode.InvalidClient, OAuthErrorCode.UnauthorizedClient].includes(error.code))
+          || [401, 403].includes(error?.status ?? error?.code) ? 'FORBIDDEN'
           : [-32600, -32602].includes(error?.code) ? 'INVALID_SOURCE' : 'UPSTREAM_ERROR'
   return tpmError(code, MESSAGES[code])
 }

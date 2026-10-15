@@ -1,15 +1,20 @@
 import assert from 'node:assert/strict'
 import { createHash, createHmac } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createActionService } from '../src/action-service.mjs'
-import { WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from '../src/capabilities.mjs'
-import { createGearJobCommentAdapter, gearJobReadbackConnectionSnapshot } from '../src/gearjob-comment-adapter.mjs'
-import { createWorkService } from '../src/work-service.mjs'
+import { parseCapabilityToolResult, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from '../src/capabilities.mjs'
+import { createGearJobCommentAdapter } from '../src/gearjob-comment-adapter.mjs'
+import { createWorkService, recoverActionFacts } from '../src/work-service.mjs'
+import { createFileStore } from '../src/store/file-store.mjs'
 
 const now = '2026-09-21T10:00:00.000Z'
 const owner = { id: 'member-owner' }
+let networkCalls = 0, modelCalls = 0
+const originalFetch = globalThis.fetch
+globalThis.fetch = async () => { networkCalls += 1; assert.fail('retained action tests must not use the network') }
+const inertRunner = { configured: true, async run() { modelCalls += 1; assert.fail('retained action tests must not invoke a model') }, async cancel() {}, async close() {} }
 const root = await mkdtemp(join(tmpdir(), 'geneway-p6-action-'))
 const secretRoot = join(root, 'secrets')
 
@@ -19,96 +24,87 @@ try {
   await bodyAndDigestChecks()
   await actionServiceChecks()
   await employeeAuthorizationChecks()
+  await historicalPersistenceChecks()
   await adapterChecks()
-  console.log('P6 action checks passed; preview/action/dispatch/readback/recovery boundaries verified')
+  assert.equal(networkCalls, 0)
+  assert.equal(modelCalls, 0)
+  console.log('P6 retained action checks passed; retired admission I/O=0; history/revocation/recovery and raw adapter boundaries verified')
 } finally {
+  globalThis.fetch = originalFetch
   await rm(root, { recursive: true, force: true })
 }
 
 async function employeeAuthorizationChecks() {
   for (const source of ['member', 'employee', 'agent-members']) {
-    const sample = fixture({ mutate: state => { state.employees[0].name = '助手' }, adapter: { async dispatch({ action }) { return { kind: 'not-claimed', action } } } })
-    const workService = createWorkService({ store: sample.store })
-    const preview = await sample.service.createPreview(owner, 'work-1', { body: '撤权后旧批准不能恢复。', clientRequestId: `authorization-${source}` })
-    const approved = await sample.service.approve(owner, 'work-1', preview.id, approval(preview))
-    assert.equal(approved.decision.kind, 'approved')
-    assert.equal(approved.attempt, null)
+    const action = historicalAction('authorization', { decision: historicalDecision('approved') })
+    const sample = fixture({ actions: [action] })
+    const workService = createWorkService({ store: sample.store, runner: inertRunner })
     const admin = { id: 'member-admin' }
     const employee = () => workService.listConfig(admin, 'employees').then(items => items[0])
     const oldVersion = (await sample.store.read()).members[0].sessionVersion
     if (source === 'member') {
       await workService.updateMember(admin, owner.id, { expectedEmployeeIds: ['employee-1'], employeeIds: [] })
+      await assert.rejects(sample.service.approve(owner, 'work-1', action.id, approval(action)), { code: 'FORBIDDEN' })
       await workService.updateMember(admin, owner.id, { expectedEmployeeIds: [], employeeIds: ['employee-1'] })
     } else if (source === 'employee') {
       await workService.updateConfig(admin, 'employees', 'employee-1', { expectedRevision: (await employee()).revision, enabled: false })
+      await assert.rejects(sample.service.approve(owner, 'work-1', action.id, approval(action)), { code: 'FORBIDDEN' })
       await workService.updateConfig(admin, 'employees', 'employee-1', { expectedRevision: (await employee()).revision, enabled: true })
     } else {
       await workService.updateConfig(admin, 'employees', 'employee-1', { expectedRevision: (await employee()).revision, memberIds: ['member-admin'] })
+      await assert.rejects(sample.service.approve(owner, 'work-1', action.id, approval(action)), { code: 'FORBIDDEN' })
       await workService.updateConfig(admin, 'employees', 'employee-1', { expectedRevision: (await employee()).revision, memberIds: [owner.id, 'member-admin'] })
     }
     const state = await sample.store.read()
     assert.equal(state.members[0].sessionVersion, oldVersion)
     assert.equal(state.works[0].actions[0].decision.invalidationReason, 'OWNER_REVOKED')
-    await assert.rejects(sample.service.approve(owner, 'work-1', preview.id, approval(preview)), error => error.code === 'REVISION_CONFLICT')
+    assert.equal(state.works[0].actions[0].attempt, null)
+    await expectRetired(sample, () => sample.service.approve(owner, 'work-1', action.id, approval(action)))
+    assertNoIo(sample)
   }
 
-  const effects = []
-  const unknown = fixture({ adapter: fakeAdapter(effects, 0, { kind: 'unknown', reason: 'UPSTREAM_TIMEOUT' }) })
-  const preview = await unknown.service.createPreview(owner, 'work-1', { body: '已有请求只保留核对。', clientRequestId: 'authorization-unknown' })
-  const attempt = await unknown.service.approve(owner, 'work-1', preview.id, approval(preview))
-  const workService = createWorkService({ store: unknown.store })
-  await workService.updateMember({ id: 'member-admin' }, owner.id, { expectedEmployeeIds: ['employee-1'], employeeIds: [] })
-  await workService.updateMember({ id: 'member-admin' }, owner.id, { expectedEmployeeIds: [], employeeIds: ['employee-1'] })
-  const preserved = (await unknown.store.read()).works[0].actions[0]
-  assert.deepEqual(preserved.attempt, attempt.attempt)
-  assert.equal(preserved.decision.invalidatedAt, undefined)
-  await unknown.service.approve(owner, 'work-1', preview.id, approval(preview))
-  assert.deepEqual(effects, ['post'])
-
-  let entered, release
-  const started = new Promise(resolve => { entered = resolve })
-  const gate = new Promise(resolve => { release = resolve })
-  const dispatchEffects = []
-  const delayed = fixture({ adapter: {
-    async dispatch({ claimAttempt }) {
-      entered()
-      await gate
-      const claim = await claimAttempt()
-      if (!claim.claimed) return { kind: 'not-claimed', action: claim.action }
-      dispatchEffects.push('post')
-      return { kind: 'unknown', reason: 'UPSTREAM_TIMEOUT' }
-    },
-  } })
-  const delayedPreview = await delayed.service.createPreview(owner, 'work-1', { body: '派发前撤销再加回也不发送。', clientRequestId: 'authorization-dispatch' })
-  const approving = delayed.service.approve(owner, 'work-1', delayedPreview.id, approval(delayedPreview))
-  await started
-  const authority = createWorkService({ store: delayed.store })
+  const action = historicalAction('authorization-unknown', {
+    decision: historicalDecision('approved'), attempt: historicalAttempt({ unknownAt: now, unknownReason: 'UPSTREAM_TIMEOUT' }),
+  })
+  const unknown = fixture({ actions: [action] })
+  const authority = createWorkService({ store: unknown.store, runner: inertRunner })
   await authority.updateMember({ id: 'member-admin' }, owner.id, { expectedEmployeeIds: ['employee-1'], employeeIds: [] })
   await authority.updateMember({ id: 'member-admin' }, owner.id, { expectedEmployeeIds: [], employeeIds: ['employee-1'] })
-  release()
-  assert.equal((await approving).decision.invalidationReason, 'OWNER_REVOKED')
-  assert.deepEqual(dispatchEffects, [])
+  assert.deepEqual((await unknown.store.read()).works[0].actions[0], action, 'revocation must preserve an already attempted unknown effect')
+  await expectRetired(unknown, () => unknown.service.approve(owner, 'work-1', action.id, approval(action)))
+  await expectRetired(unknown, () => unknown.service.reconcile(owner, 'work-1', action.id))
+  await assert.rejects(unknown.service.revoke(owner, 'work-1', action.id, approval(action)), { code: 'BUSY' })
+  assertNoIo(unknown)
 }
 
 async function bodyAndDigestChecks() {
   for (const body of ['', ' padded', 'padded ', 'line\nfeed', '@member', 'http://x', 'HTTPS://x', 'www.x', 'mailto:x', 'data:x', '/files/x', '[x](relative)', '![x]', `${'界'.repeat(667)}`]) {
     const { service } = fixture()
-    await assert.rejects(service.createPreview(owner, 'work-1', { body, clientRequestId: 'request-1' }), error => error.code === 'INVALID_INPUT')
+    await assert.rejects(service.createPreview(owner, 'work-1', { body, clientRequestId: 'request-1' }), { code: 'INVALID_INPUT' })
   }
   assert.equal(Buffer.byteLength('界'.repeat(666)), 1998)
-  let previewClock = now
-  const base = fixture({ clockFn: () => previewClock })
-  const preview = await base.service.createPreview(owner, 'work-1', { body: '工单需要人工核对。', clientRequestId: 'request-1' })
-  previewClock = '2026-09-21T10:00:01.000Z'
-  const replay = await base.service.createPreview(owner, 'work-1', { body: '工单需要人工核对。', clientRequestId: 'request-1' })
-  assert.equal(replay.id, preview.id)
-  await assert.rejects(base.service.createPreview(owner, 'work-1', { body: '正文已编辑。', clientRequestId: 'request-1' }), error => error.code === 'REVISION_CONFLICT')
-  const sameProposal = await base.service.createPreview(owner, 'work-1', { body: '工单需要人工核对。', clientRequestId: 'request-2' })
-  assert.equal(sameProposal.id, preview.id)
-  assert.equal(sameProposal.proposalKey, preview.proposalKey)
-  assert.equal(sameProposal.requestKeys.length, 2)
-  await assert.rejects(base.service.createPreview(owner, 'work-1', { body: 'request-2 改正文必须冲突。', clientRequestId: 'request-2' }), error => error.code === 'REVISION_CONFLICT')
-  assert.equal((await base.store.read()).works[0].actions.length, 1)
+  for (const clientRequestId of ['', 'contains spaces', 'x'.repeat(129)]) {
+    const sample = fixture()
+    await assert.rejects(sample.service.createPreview(owner, 'work-1', { body: '安全备注。', clientRequestId }), { code: 'INVALID_REQUEST' })
+    assertNoIo(sample)
+  }
+  const parsed = parseCapabilityToolResult(WORK_ORDER_DEVICE_CORRELATION_CAPABILITY,
+    { ok: true, ...correlationPayload() }, { workOrderId: 'WO-26-00096' })
+  assert.equal(parsed.kind, 'manufacturing.work-order-device-correlation')
+  assert.deepEqual(parsed.payload, correlationPayload())
+  assert.deepEqual(parsed.source, { gearJob: correlationPayload().gearJob, hive: correlationPayload().hive })
+  for (const bad of [{ ...correlationPayload(), workOrderId: 'WO-OTHER' }, { ...correlationPayload(), extra: true }]) {
+    assert.throws(() => parseCapabilityToolResult(WORK_ORDER_DEVICE_CORRELATION_CAPABILITY,
+      { ok: true, ...bad }, { workOrderId: 'WO-26-00096' }), { code: 'TOOL_CHAIN_INVALID' })
+  }
+  const action = historicalAction('digest')
+  const base = fixture({ actions: [action] })
+  for (const request of [
+    { body: action.preview.payload.body, clientRequestId: 'request-1' },
+    { body: action.preview.payload.body, clientRequestId: 'request-2' },
+    { body: '正文已编辑。', clientRequestId: 'request-1' },
+    { body: '界'.repeat(666), clientRequestId: 'utf8-boundary' },
+  ]) await expectRetired(base, () => base.service.createPreview(owner, 'work-1', request))
 
   const mutations = [
     state => { state.members[0].sessionVersion += 1 },
@@ -132,208 +128,198 @@ async function bodyAndDigestChecks() {
     state => { state.works[0].results[0].payload.machineFacts.mode = 'MANUAL' },
     state => { state.works[0].results[0].payload.unknowns = ['QUALITY_NOT_PROVIDED'] },
   ]
-  const digests = new Set([preview.preview.digest])
-  for (let index = 0; index < mutations.length; index += 1) {
-    const sample = fixture({ mutate: mutations[index] })
-    const candidate = await sample.service.createPreview(owner, 'work-1', { body: '工单需要人工核对。', clientRequestId: `request-${index + 10}` })
-    assert.equal(digests.has(candidate.preview.digest), false, `frozen field ${index} must alter digest`)
-    digests.add(candidate.preview.digest)
+  for (const mutate of mutations) {
+    const sample = fixture({ actions: [action], mutate })
+    const before = await sample.store.read()
+    await expectRetired(sample, () => sample.service.createPreview(owner, 'work-1', { body: action.preview.payload.body, clientRequestId: 'changed-facts' }))
+    await expectRetired(sample, () => sample.service.approve(owner, 'work-1', action.id, approval(action)))
+    const after = await sample.store.read()
+    assert.deepEqual(after.works[0].actions[0], action, 'retirement must not recompute historical preview/digest')
+    assert.deepEqual(after.works[0].results, before.works[0].results, 'legacy typed/source facts must not be rewritten')
   }
 }
 
 async function actionServiceChecks() {
-  const effects = []
-  const successful = fixture({ adapter: fakeAdapter(effects) })
-  const preview = await successful.service.createPreview(owner, 'work-1', { body: '批准后的安全备注。', clientRequestId: 'approve-1' })
-  await assert.rejects(successful.service.approve({ id: 'member-admin' }, 'work-1', preview.id, approval(preview)), error => error.code === 'NOT_FOUND')
-  const result = await successful.service.approve(owner, 'work-1', preview.id, approval(preview))
-  assert.equal(result.receipt.upstreamRecordId, `geneway-p6-${preview.id}`)
-  assert.deepEqual(effects, ['post'])
-  assert.equal(successful.authCount(), 3)
-  const duplicate = await successful.service.approve(owner, 'work-1', preview.id, approval(preview))
-  assert.equal(duplicate.receipt.upstreamRecordId, result.receipt.upstreamRecordId)
-  assert.deepEqual(effects, ['post'])
+  for (const action of historicalActions()) {
+    const sample = fixture({ actions: [action] })
+    await assert.rejects(sample.service.approve({ id: 'member-admin' }, 'work-1', action.id, approval(action)), { code: 'NOT_FOUND' })
+    await assert.rejects(sample.service.reconcile({ id: 'member-admin' }, 'work-1', action.id), { code: 'NOT_FOUND' })
+    await expectRetired(sample, () => sample.service.createPreview(owner, 'work-1', { body: '不能新建旧来源动作。', clientRequestId: action.id }))
+    await expectRetired(sample, () => sample.service.approve(owner, 'work-1', action.id, approval(action)))
+    await expectRetired(sample, () => sample.service.reconcile(owner, 'work-1', action.id))
+    const approvals = await Promise.allSettled([1, 2].map(() => sample.service.approve(owner, 'work-1', action.id, approval(action))))
+    assert.equal(approvals.every(item => item.status === 'rejected' && item.reason.code === 'CAPABILITY_RETIRED'), true)
+    assert.deepEqual((await sample.store.read()).works[0].actions, [action])
+    assertNoIo(sample)
+  }
 
-  const queryOnly = fixture({ adapter: fakeAdapter([]), refresh: payload => {
-    payload.queriedAt = '2026-09-21T10:00:01.000Z'
-    payload.gearJob.queriedAt = payload.hive.queriedAt = payload.queriedAt
-    payload.freshness.ageSeconds = 31
-  } })
-  const queryPreview = await queryOnly.service.createPreview(owner, 'work-1', { body: '查询时间变化不改变业务事实。', clientRequestId: 'query-only' })
-  assert.ok((await queryOnly.service.approve(owner, 'work-1', queryPreview.id, approval(queryPreview))).receipt)
-
-  const changedEffects = []
-  const changed = fixture({ adapter: fakeAdapter(changedEffects), refresh: payload => { payload.machineFacts.mode = 'MANUAL' } })
-  const changedPreview = await changed.service.createPreview(owner, 'work-1', { body: '业务字段变化阻止写入。', clientRequestId: 'changed' })
-  await assert.rejects(changed.service.approve(owner, 'work-1', changedPreview.id, approval(changedPreview)), error => error.code === 'REVISION_CONFLICT')
-  assert.deepEqual(changedEffects, [])
-  assert.equal((await changed.store.read()).works[0].actions[0].decision.invalidationReason, 'SOURCE_FACTS_CHANGED')
-
-  const expiredEffects = []
-  const expiredPreviewService = fixture({ adapter: fakeAdapter(expiredEffects), clockFn: valueClock([now, '2026-09-21T10:10:00.000Z']) })
-  const expiring = await expiredPreviewService.service.createPreview(owner, 'work-1', { body: '十分钟边界失效。', clientRequestId: 'preview-expiry' })
-  const expiredPreview = await expiredPreviewService.service.approve(owner, 'work-1', expiring.id, approval(expiring))
-  assert.equal(expiredPreview.decision.kind, 'expired')
-  assert.deepEqual(expiredEffects, [])
-
-  const staleDispatchEffects = []
-  const staleDispatch = fixture({ adapter: fakeAdapter(staleDispatchEffects), clockFn: valueClock([now, now, '2026-09-21T10:01:31.000Z']) })
-  const staleCandidate = await staleDispatch.service.createPreview(owner, 'work-1', { body: '派发时重新计算采样新鲜度。', clientRequestId: 'stale-dispatch' })
-  const staleResult = await staleDispatch.service.approve(owner, 'work-1', staleCandidate.id, approval(staleCandidate))
-  assert.equal(staleResult.decision.invalidationReason, 'SOURCE_FACTS_CHANGED')
-  assert.deepEqual(staleDispatchEffects, [])
-
-  const rejected = fixture({ adapter: fakeAdapter([]) })
-  const rejectPreview = await rejected.service.createPreview(owner, 'work-1', { body: '拒绝不写。', clientRequestId: 'reject' })
-  assert.equal((await rejected.service.reject(owner, 'work-1', rejectPreview.id, { previewDigest: rejectPreview.preview.digest })).decision.kind, 'rejected')
-  await assert.rejects(rejected.service.approve(owner, 'work-1', rejectPreview.id, approval(rejectPreview)), error => error.code === 'REVISION_CONFLICT')
-
-  const concurrentEffects = []
-  const concurrent = fixture({ adapter: fakeAdapter(concurrentEffects, 5) })
-  const concurrentPreview = await concurrent.service.createPreview(owner, 'work-1', { body: '并发只写一次。', clientRequestId: 'concurrent' })
-  const approvals = await Promise.all([1, 2].map(() => concurrent.service.approve(owner, 'work-1', concurrentPreview.id, approval(concurrentPreview))))
-  assert.equal(concurrentEffects.length, 1)
-  assert.equal(approvals.some(item => item.receipt), true)
-
-  const decisionRaceEffects = []
-  const decisionRace = fixture({ adapter: fakeAdapter(decisionRaceEffects, 5) })
-  const decisionPreview = await decisionRace.service.createPreview(owner, 'work-1', { body: '批准与拒绝竞争。', clientRequestId: 'decision-race' })
-  const [approvedRace, rejectedRace] = await Promise.allSettled([
-    decisionRace.service.approve(owner, 'work-1', decisionPreview.id, approval(decisionPreview)),
-    decisionRace.service.reject(owner, 'work-1', decisionPreview.id, { previewDigest: decisionPreview.preview.digest }),
-  ])
-  assert.equal(approvedRace.status, 'fulfilled')
-  assert.equal(rejectedRace.status, 'rejected')
-  assert.equal(decisionRaceEffects.length, 1)
-
-  let releaseClaim, dispatchStarted
-  const started = new Promise(resolve => { dispatchStarted = resolve })
-  const claimGate = new Promise(resolve => { releaseClaim = resolve })
-  let revokeRacePosts = 0
-  const revokeRace = fixture({ adapter: {
-    async dispatch({ action, claimAttempt }) {
-      dispatchStarted()
-      await claimGate
-      const claimed = await claimAttempt()
-      if (!claimed.claimed) return { kind: 'not-claimed', action: claimed.action }
-      revokeRacePosts += 1
-      return { kind: 'receipt', upstreamRecordId: `geneway-p6-${action.id}` }
-    },
-    async reconcile() { throw new Error('not used') },
-  } })
-  const revokePreview = await revokeRace.service.createPreview(owner, 'work-1', { body: '撤销与 claim 竞争。', clientRequestId: 'revoke-race' })
-  const approving = revokeRace.service.approve(owner, 'work-1', revokePreview.id, approval(revokePreview))
-  await started
-  const revoked = await revokeRace.service.revoke(owner, 'work-1', revokePreview.id, { previewDigest: revokePreview.preview.digest })
-  releaseClaim()
-  assert.equal(revoked.decision.invalidationReason, 'OWNER_REVOKED')
-  assert.equal((await approving).attempt, null)
-  assert.equal(revokeRacePosts, 0)
-
-  for (const outcome of [
-    { kind: 'no-effect', reason: 'SOURCE_REVISION_CONFLICT' },
-    { kind: 'unknown', reason: 'UPSTREAM_TIMEOUT' },
-    { kind: 'unknown', reason: 'ACTION_ID_CONFLICT' },
-    { kind: 'unknown', reason: 'UPSTREAM_5XX' },
-    { kind: 'unknown', reason: 'READBACK_MISMATCH' },
+  for (const mutate of [
+    state => { state.members[0].employeeIds = [] },
+    state => { state.employees[0].enabled = false },
+    state => { state.skills[0].enabled = false },
+    state => { state.modelRoutes[0].enabled = false },
+    state => { state.connections[0].enabled = false },
+    state => { state.connections[0].allowedObjectIds = [] },
   ]) {
-    const sample = fixture({ adapter: fakeAdapter([], 0, outcome) })
-    const candidate = await sample.service.createPreview(owner, 'work-1', { body: `结果 ${outcome.reason}`, clientRequestId: outcome.reason })
-    const settled = await sample.service.approve(owner, 'work-1', candidate.id, approval(candidate))
-    assert.equal(outcome.kind === 'no-effect' ? settled.attempt.noEffectReason : settled.attempt.unknownReason, outcome.reason)
+    const action = historicalAction('unauthorized', { decision: historicalDecision('approved') })
+    const sample = fixture({ actions: [action], mutate })
+    for (const operation of ['approve', 'revoke', 'reject']) {
+      await assert.rejects(sample.service[operation](owner, 'work-1', action.id, approval(action)), { code: 'FORBIDDEN' })
+    }
+    assertNoIo(sample)
   }
 
-  const unresolved = fixture({ adapter: fakeAdapter([], 0, { kind: 'unknown', reason: 'UPSTREAM_DISCONNECTED' }) })
-  const unknown = await unresolved.service.createPreview(owner, 'work-1', { body: '未知结果。', clientRequestId: 'unknown' })
-  await unresolved.service.approve(owner, 'work-1', unknown.id, approval(unknown))
-  await assert.rejects(unresolved.service.createPreview(owner, 'work-1', { body: '换 ID 也不允许。', clientRequestId: 'bypass' }), error => error.code === 'BUSY')
-
-  let reconcilePosts = 0, reconcileGets = 0
-  const reconcileAdapter = {
-    async dispatch({ claimAttempt }) { const claimed = await claimAttempt(); if (claimed.claimed) reconcilePosts += 1; return { kind: 'unknown', reason: 'UPSTREAM_DISCONNECTED' } },
-    async reconcile({ action }) { reconcileGets += 1; return { kind: 'receipt', upstreamRecordId: `geneway-p6-${action.id}` } },
+  for (const operation of ['reject', 'revoke']) {
+    const action = historicalAction(operation)
+    const sample = fixture({ actions: [action] })
+    await assert.rejects(sample.service[operation]({ id: 'member-admin' }, 'work-1', action.id, approval(action)), { code: 'NOT_FOUND' })
+    await assert.rejects(sample.service[operation](owner, 'work-1', action.id, { previewDigest: 'b'.repeat(64) }), { code: 'REVISION_CONFLICT' })
+    const result = await sample.service[operation](owner, 'work-1', action.id, approval(action))
+    assert.equal(result.decision.kind, operation === 'reject' ? 'rejected' : 'revoked')
+    assert.deepEqual(result.preview, action.preview)
+    assert.equal(result.attempt, null)
+    assert.deepEqual(await sample.service[operation](owner, 'work-1', action.id, approval(action)), result)
+    await expectRetired(sample, () => sample.service.approve(owner, 'work-1', action.id, approval(action)))
   }
-  const reconciliation = fixture({ adapter: reconcileAdapter })
-  const reconcilePreview = await reconciliation.service.createPreview(owner, 'work-1', { body: '只读核对。', clientRequestId: 'reconcile' })
-  await reconciliation.service.approve(owner, 'work-1', reconcilePreview.id, approval(reconcilePreview))
-  const reconciled = await reconciliation.service.reconcile(owner, 'work-1', reconcilePreview.id)
-  assert.ok(reconciled.receipt)
-  assert.deepEqual({ reconcilePosts, reconcileGets }, { reconcilePosts: 1, reconcileGets: 1 })
 
-  const claimFaultEffects = []
-  const claimFault = fixture({ adapter: fakeAdapter(claimFaultEffects), storeFault: 'attempt' })
-  const claimFaultPreview = await claimFault.service.createPreview(owner, 'work-1', { body: 'attempt 持久化失败不写。', clientRequestId: 'claim-fault' })
-  await assert.rejects(claimFault.service.approve(owner, 'work-1', claimFaultPreview.id, approval(claimFaultPreview)), /attempt persistence failed/)
-  assert.deepEqual(claimFaultEffects, [])
+  const pending = historicalAction('revoke-race', { decision: historicalDecision('approved') })
+  const revokeRace = fixture({ actions: [pending] })
+  const [approvedRace, revokedRace] = await Promise.allSettled([
+    revokeRace.service.approve(owner, 'work-1', pending.id, approval(pending)),
+    revokeRace.service.revoke(owner, 'work-1', pending.id, approval(pending)),
+  ])
+  assert.equal(approvedRace.status, 'rejected')
+  assert.equal(approvedRace.reason.code, 'CAPABILITY_RETIRED')
+  assert.equal(revokedRace.status, 'fulfilled')
+  assert.equal(revokedRace.value.decision.invalidationReason, 'OWNER_REVOKED')
+  assert.equal(revokedRace.value.attempt, null)
+  assertNoIo(revokeRace)
 
-  const receiptFaultEffects = []
-  const receiptFault = fixture({ adapter: fakeAdapter(receiptFaultEffects), storeFault: 'receipt' })
-  const receiptFaultPreview = await receiptFault.service.createPreview(owner, 'work-1', { body: 'receipt 持久化失败保持未知。', clientRequestId: 'receipt-fault' })
-  await assert.rejects(receiptFault.service.approve(owner, 'work-1', receiptFaultPreview.id, approval(receiptFaultPreview)), /receipt persistence failed/)
-  const receiptFaultAction = (await receiptFault.store.read()).works[0].actions[0]
-  assert.equal(receiptFaultAction.attempt.unknownReason, 'RECEIPT_PERSIST_FAILED')
-  assert.equal(receiptFaultAction.receipt, null)
-  assert.deepEqual(receiptFaultEffects, ['post'])
+  const draft = historicalAction('reject-race')
+  const rejectRace = fixture({ actions: [draft] })
+  const [approvalRace, rejectedRace] = await Promise.allSettled([
+    rejectRace.service.approve(owner, 'work-1', draft.id, approval(draft)),
+    rejectRace.service.reject(owner, 'work-1', draft.id, approval(draft)),
+  ])
+  assert.equal(approvalRace.status, 'rejected')
+  assert.equal(approvalRace.reason.code, 'CAPABILITY_RETIRED')
+  assert.equal(rejectedRace.status, 'fulfilled')
+  assert.equal(rejectedRace.value.decision.kind, 'rejected')
+  assertNoIo(rejectRace)
 
-  let dispatchRaceStore, dispatchRacePost = 0, dispatchRaceGet = 0
-  const dispatchRaceAdapter = createGearJobCommentAdapter({
-    clock: () => new Date(now), idFactory: uuidSequence(),
-    async fetchImpl(_url, init) {
-      if (init.method === 'GET') { dispatchRaceGet += 1; return response(200, {}) }
-      dispatchRacePost += 1
-      const request = JSON.parse(init.body)
-      await dispatchRaceStore.update(state => { state.connections[0].status = 'unavailable'; return state })
-      return response(201, commentResponse({ id: request.action_id, preview: { payload: { body: request.content }, expectedRevision: request.expected_revision } }, 'created'))
-    },
+  for (const action of historicalActions().filter(value => value.attempt)) {
+    const sample = fixture({ actions: [action] })
+    for (const operation of ['reject', 'revoke']) {
+      await assert.rejects(sample.service[operation](owner, 'work-1', action.id, approval(action)), { code: 'BUSY' })
+    }
+    assert.deepEqual((await sample.store.read()).works[0].actions, [action], 'an existing effect must not be erased or reported as revoked')
+    assertNoIo(sample)
+  }
+
+  const rotatedAction = historicalAction('rotated', {
+    decision: historicalDecision('approved'), attempt: historicalAttempt({ unknownAt: now, unknownReason: 'UPSTREAM_DISCONNECTED' }),
   })
-  const dispatchRace = fixture({ adapter: dispatchRaceAdapter })
-  dispatchRaceStore = dispatchRace.store
-  const dispatchRacePreview = await dispatchRace.service.createPreview(owner, 'work-1', { body: 'POST 后撤权禁止 GET。', clientRequestId: 'dispatch-readback-race' })
-  const dispatchRaceResult = await dispatchRace.service.approve(owner, 'work-1', dispatchRacePreview.id, approval(dispatchRacePreview))
-  assert.equal(dispatchRaceResult.attempt.unknownReason, 'READBACK_AUTHORIZATION_FAILED')
-  assert.deepEqual({ dispatchRacePost, dispatchRaceGet }, { dispatchRacePost: 1, dispatchRaceGet: 0 })
-
-  let reconcileRaceStore, reconcileRaceGet = 0
-  const reconcileRaceAdapter = {
-    async dispatch({ claimAttempt }) { const claimed = await claimAttempt(); return claimed.claimed ? { kind: 'unknown', reason: 'UPSTREAM_DISCONNECTED' } : { kind: 'not-claimed', action: claimed.action } },
-    async reconcile({ connection, authorizeReadback }) {
-      const prepared = gearJobReadbackConnectionSnapshot(connection)
-      await reconcileRaceStore.update(state => { state.connections[0].revision += 1; return state })
-      try { await authorizeReadback(prepared) } catch { return { kind: 'unknown', reason: 'READBACK_AUTHORIZATION_FAILED' } }
-      reconcileRaceGet += 1
-      return { kind: 'unknown', reason: 'READBACK_NOT_FOUND' }
-    },
-  }
-  const reconcileRace = fixture({ adapter: reconcileRaceAdapter })
-  reconcileRaceStore = reconcileRace.store
-  const reconcileRacePreview = await reconcileRace.service.createPreview(owner, 'work-1', { body: 'reconcile 临近 GET 再复权。', clientRequestId: 'reconcile-readback-race' })
-  await reconcileRace.service.approve(owner, 'work-1', reconcileRacePreview.id, approval(reconcileRacePreview))
-  await reconcileRace.service.reconcile(owner, 'work-1', reconcileRacePreview.id)
-  assert.equal(reconcileRaceGet, 0)
-
-  let rotatedAction, rotatedGet = 0
-  const rotatedAdapter = createGearJobCommentAdapter({
-    clock: () => new Date(now), idFactory: uuidSequence(),
-    async fetchImpl(_url, init) {
-      if (init.method === 'POST') throw new Error('controlled disconnect')
-      rotatedGet += 1
-      return response(200, commentResponse(rotatedAction, 'found'))
-    },
-  })
-  const rotated = fixture({ adapter: rotatedAdapter })
-  const rotatedPreview = await rotated.service.createPreview(owner, 'work-1', { body: '凭据轮换后允许重新核对。', clientRequestId: 'rotated-reconcile' })
-  rotatedAction = rotatedPreview
-  assert.equal((await rotated.service.approve(owner, 'work-1', rotatedPreview.id, approval(rotatedPreview))).attempt.unknownReason, 'UPSTREAM_DISCONNECTED')
-  await writeFile(join(secretRoot, 'gear-next.json'), JSON.stringify({ apiKey: 'gear-key-next', apiSecret: 'gear-secret-next', invocationSecret: 'n'.repeat(48) }), { mode: 0o600 })
+  const rotated = fixture({ actions: [rotatedAction] })
   await rotated.store.update(state => {
     state.connections[0].revision += 1
-    state.connections[0].credentialRef = 'gear-next.json'
+    state.connections[0].credentialRef = 'must-not-read.json'
     return state
   })
-  rotated.connectionCatalog[0].credentialRef = 'gear-next.json'
-  const rotatedReceipt = await rotated.service.reconcile(owner, 'work-1', rotatedPreview.id)
-  assert.equal(rotatedGet, 1)
-  assert.equal(rotatedReceipt.receipt.upstreamRecordId, `geneway-p6-${rotatedPreview.id}`)
+  rotated.connectionCatalog[0].credentialRef = 'must-not-read.json'
+  await expectRetired(rotated, () => rotated.service.reconcile(owner, 'work-1', rotatedAction.id))
+}
+
+async function historicalPersistenceChecks() {
+  const path = join(root, 'retained-history.json')
+  const store = createFileStore(path)
+  const seed = fixtureState()
+  seed.works[0].actions = historicalActions()
+  await store.update(() => seed)
+  const before = await store.read()
+  const service = createWorkService({ store: createFileStore(path), runner: inertRunner, clock: () => now })
+  await service.ensureReady()
+  const recovered = await createFileStore(path).read()
+  assert.deepEqual(recovered, recoverActionFacts(before, now))
+  assert.equal(recovered.works[0].actions.find(action => action.id === 'action-pending').decision.invalidationReason, 'RECOVERY_INVALIDATED')
+  assert.equal(recovered.works[0].actions.find(action => action.id === 'action-prepared').attempt.unknownReason, 'RECOVERY_UNKNOWN')
+  for (const action of before.works[0].actions.filter(value => value.receipt || value.attempt?.unknownAt || value.attempt?.noEffectAt)) {
+    assert.deepEqual(recovered.works[0].actions.find(value => value.id === action.id), action)
+  }
+  assert.deepEqual(recovered.works[0].results, before.works[0].results)
+  assert.deepEqual(recovered.works[0].executions, before.works[0].executions)
+  await service.ensureReady()
+  assert.deepEqual(await createFileStore(path).read(), recovered, 'restart recovery must be idempotent and never replay an action')
+
+  const draft = recovered.works[0].actions.find(action => action.id === 'action-draft')
+  const durable = await readFile(path, 'utf8')
+  const failing = createActionService({
+    store: createFileStore(path, { async rename() { throw new Error('action decision persistence failed') } }),
+    adapter: fakeAdapter([]), connectionCatalog: catalog(seed), clock: () => now,
+  })
+  await assert.rejects(failing.revoke(owner, 'work-1', draft.id, approval(draft)), /action decision persistence failed/)
+  assert.equal(await readFile(path, 'utf8'), durable, 'failed administrative decision must not change durable historical facts')
+
+  await store.update(state => {
+    state.connections.forEach(connection => { connection.enabled = false })
+    state.skills[0].enabled = false
+    return state
+  })
+  const visible = await service.getWork(owner, 'work-1')
+  assert.equal(visible.ok, true)
+  assert.equal(visible.value.retired, true)
+  assert.deepEqual(visible.value.results, before.works[0].results, 'disabled legacy execution bindings must not hide historical typed/source facts')
+  assert.deepEqual(visible.value.actions, recovered.works[0].actions)
+  assert.equal((await service.getWork({ id: 'member-admin' }, 'work-1')).error.code, 'NOT_FOUND')
+  const stopped = await service.cancel(owner, 'work-1')
+  assert.equal(stopped.ok, true)
+  assert.equal(stopped.accepted, false)
+  assert.deepEqual(stopped.value.actions, recovered.works[0].actions, 'stop must not erase unknown effects or receipts')
+  await service.close()
+  assert.equal(modelCalls, 0)
+}
+
+async function expectRetired(sample, operation) {
+  const before = await sample.store.read()
+  await assert.rejects(operation, { code: 'CAPABILITY_RETIRED' })
+  assert.deepEqual(await sample.store.read(), before, 'retired admission must not create actions/executions or rewrite facts')
+  assertNoIo(sample)
+}
+function assertNoIo(sample) {
+  assert.deepEqual(sample.io, { correlation: 0, dispatch: 0, reconcile: 0 })
+  assert.equal(modelCalls, 0)
+  assert.equal(networkCalls, 0)
+}
+
+function historicalDecision(kind) { return { kind, memberId: owner.id, previewDigest: 'a'.repeat(64), decidedAt: now } }
+function historicalAttempt(extra = {}) { return { previewDigest: 'a'.repeat(64), preparedAt: now, ...extra } }
+function historicalAction(suffix, changes = {}) {
+  const action = {
+    id: `action-${suffix}`, requestKeys: [`request-${suffix}`], proposalKey: `proposal-${suffix}`,
+    intent: { kind: 'gearjob.work-order.comment', targetKey: 'gearjob:gearjob-dev:Work Order:WO-26-00096' },
+    preview: {
+      digest: 'a'.repeat(64), resultId: 'result-1',
+      target: { system: 'gearjob', sourceInstance: 'dev.localhost', sourceEnvironment: 'external-test', dataMode: 'synthetic', objectType: 'Work Order', workOrderId: 'WO-26-00096' },
+      payload: { body: '已保存的安全备注。' }, expectedRevision: 'modified:2026-09-21T09:59:00.000000Z',
+      createdAt: now, expiresAt: '2026-09-21T10:10:00.000Z',
+    },
+    decision: null, attempt: null, receipt: null,
+  }
+  return { ...action, ...changes, preview: { ...action.preview, ...changes.preview } }
+}
+function historicalActions() {
+  return [
+    historicalAction('draft'), historicalAction('pending', { decision: historicalDecision('approved') }),
+    historicalAction('prepared', { decision: historicalDecision('approved'), attempt: historicalAttempt() }),
+    historicalAction('receipt', { decision: historicalDecision('approved'), attempt: historicalAttempt(),
+      receipt: { previewDigest: 'a'.repeat(64), upstreamRecordId: 'saved-synthetic-comment', recordedAt: now } }),
+    historicalAction('no-effect', { decision: historicalDecision('approved'),
+      attempt: historicalAttempt({ noEffectAt: now, noEffectReason: 'SOURCE_REVISION_CONFLICT' }) }),
+    ...['rejected', 'revoked', 'expired'].map(kind => historicalAction(kind, { decision: historicalDecision(kind) })),
+    ...['UPSTREAM_TIMEOUT', 'ACTION_ID_CONFLICT', 'UPSTREAM_5XX', 'READBACK_MISMATCH', 'UPSTREAM_DISCONNECTED',
+      'READBACK_AUTHORIZATION_FAILED', 'RECEIPT_PERSIST_FAILED', 'RECOVERY_UNKNOWN'].map(reason => historicalAction(reason, {
+      decision: historicalDecision('approved'), attempt: historicalAttempt({ unknownAt: now, unknownReason: reason }),
+    })),
+  ]
 }
 
 async function adapterChecks() {
@@ -458,55 +444,55 @@ async function adapterChecks() {
   assert.equal(JSON.stringify(outcome).includes('gear-secret'), false)
 }
 
-function fixture({ adapter, mutate, refresh, storeFault, clockFn = () => now } = {}) {
+function fixture({ mutate, actions = [] } = {}) {
   const state = fixtureState()
+  state.works[0].actions = structuredClone(actions)
   mutate?.(state)
-  const store = memoryStore(state, storeFault)
+  const store = memoryStore(state)
   const connectionCatalog = catalog(state)
-  let authorizationCount = 0
+  const io = { correlation: 0, dispatch: 0, reconcile: 0 }
+  const upstream = fakeAdapter([])
   const service = createActionService({
-    store, adapter: adapter ?? fakeAdapter([]), secretRoot, connectionCatalog, clock: clockFn,
+    store, adapter: {
+      async dispatch(value) { io.dispatch += 1; return upstream.dispatch(value) },
+      async reconcile(value) { io.reconcile += 1; return upstream.reconcile(value) },
+    }, secretRoot, connectionCatalog, clock: () => now,
     idFactory: uuidSequence(),
-    readCorrelation: async ({ authorize }) => {
-      await authorize(); authorizationCount += 1
-      await authorize(); authorizationCount += 1
-      await authorize(); authorizationCount += 1
-      const payload = structuredClone((await store.read()).works[0].results[0].payload)
-      refresh?.(payload)
-      return payload
-    },
+    async readCorrelation() { io.correlation += 1; assert.fail('retired actions must not re-read legacy sources') },
   })
-  return { service, store, connectionCatalog, authCount: () => authorizationCount }
+  return { service, store, connectionCatalog, io }
 }
 
-function fakeAdapter(effects, delay = 0, outcome = null) {
+function fakeAdapter(effects) {
   return {
-    async dispatch({ action, claimAttempt }) {
-      const claimed = await claimAttempt()
-      if (!claimed.claimed) return { kind: 'not-claimed', action: claimed.action }
-      effects.push('post')
-      if (delay) await new Promise(resolve => setTimeout(resolve, delay))
-      return outcome ?? { kind: 'receipt', upstreamRecordId: `geneway-p6-${action.id}` }
-    },
-    async reconcile() { return { kind: 'unknown', reason: 'READBACK_NOT_FOUND' } },
+    async dispatch() { effects.push('post'); assert.fail('retired action must not dispatch') },
+    async reconcile() { effects.push('get'); assert.fail('retired action must not reconcile') },
   }
 }
 
 function fixtureState() {
   const payload = correlationPayload()
+  const input = { workOrderId: 'WO-26-00096' }
+  const result = parseCapabilityToolResult(WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, { ok: true, ...payload }, input)
   return {
     version: 8,
     members: [
-      { id: 'member-owner', role: 'member', enabled: true, sessionVersion: 1, employeeIds: ['employee-1'] },
-      { id: 'member-admin', role: 'admin', enabled: true, sessionVersion: 1, employeeIds: ['employee-1'] },
+      { id: 'member-owner', loginName: 'owner', authRef: 'member-owner', role: 'member', enabled: true, sessionVersion: 1, employeeIds: ['employee-1'] },
+      { id: 'member-admin', loginName: 'admin', authRef: 'member-admin', role: 'admin', enabled: true, sessionVersion: 1, employeeIds: ['employee-1'] },
     ],
     modelRoutes: [{ id: 'route-1', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
-    employees: [{ id: 'employee-1', enabled: true, modelRouteId: 'route-1', connectionIds: ['connection-gear', 'connection-hive'], skillIds: ['skill-manufacturing-work-order-device-correlate'] }],
+    employees: [{ id: 'employee-1', name: '助手', enabled: true, modelRouteId: 'route-1', connectionIds: ['connection-gear', 'connection-hive'], skillIds: ['skill-manufacturing-work-order-device-correlate'] }],
     connections: [gearConnection(), hiveConnection()],
     skills: [{ id: 'skill-manufacturing-work-order-device-correlate', enabled: true, capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY }],
+    confirmations: [], knowledgeMaterials: [], reservations: {},
+    channelApps: [], channelIdentities: [], channelConversations: [], channelMessages: [], deliveries: [], linkCodes: [],
+    automationRules: [], automationOccurrences: [],
     works: [{
       id: 'work-1', ownerMemberId: 'member-owner', employeeId: 'employee-1', skillId: 'skill-manufacturing-work-order-device-correlate', capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY,
-      connectionIds: { gearJob: 'connection-gear', hive: 'connection-hive' }, input: { workOrderId: 'WO-26-00096' }, results: [{ id: 'result-1', kind: 'manufacturing.work-order-device-correlation', input: { workOrderId: 'WO-26-00096' }, payload }], actions: [],
+      connectionIds: { gearJob: 'connection-gear', hive: 'connection-hive' }, input, status: 'completed', acceptedAt: now,
+      results: [{ id: 'result-1', ...result, input, capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, skillId: 'skill-manufacturing-work-order-device-correlate',
+        schemaVersion: 1, createdAt: now, dshSessionRef: 'session-fixture', contextConfirmationRefs: [] }],
+      executions: [{ id: 'exec-1', status: 'completed', resultId: 'result-1' }], actions: [],
     }],
   }
 }
@@ -535,17 +521,13 @@ function catalog(state) {
   return state.connections.map(({ allowedObjectIds, enabled, status, skillIds, revision, ...connection }) => connection)
 }
 
-function memoryStore(initial, fault) {
+function memoryStore(initial) {
   let state = structuredClone(initial), pending = Promise.resolve()
-  let faulted = false
   return {
     async read() { await pending; return structuredClone(state) },
     async update(mutator) {
       const operation = pending.then(async () => {
         const next = structuredClone(await mutator(structuredClone(state)))
-        const before = state.works?.[0]?.actions?.[0], after = next.works?.[0]?.actions?.[0]
-        if (!faulted && fault === 'attempt' && !before?.attempt && after?.attempt) { faulted = true; throw new Error('attempt persistence failed') }
-        if (!faulted && fault === 'receipt' && !before?.receipt && after?.receipt) { faulted = true; throw new Error('receipt persistence failed') }
         state = next
         return structuredClone(state)
       })
@@ -566,5 +548,4 @@ function commentResponse(action, status) {
 function response(status, body) { return { status, async json() { return structuredClone(body) } } }
 function tokenClaims(token) { return JSON.parse(Buffer.from(token.split('.')[0], 'base64url')) }
 function sequenceClock(values) { let index = 0; return () => new Date(values[Math.min(index++, values.length - 1)]) }
-function valueClock(values) { let index = 0; return () => values[Math.min(index++, values.length - 1)] }
 function uuidSequence() { let value = 0; return () => `00000000-0000-4000-8000-${String(++value).padStart(12, '0')}` }

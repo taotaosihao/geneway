@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict'
+import { generateKeyPairSync } from 'node:crypto'
 import { createServer as createNodeServer } from 'node:http'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
+import { testKivoTpmConnection } from '../plugins/kivo-tpm.mjs'
+import { getCapability, parseCapabilityToolResult } from '../src/capabilities.mjs'
 import { readConnectionCatalog } from '../src/connection-catalog.mjs'
+import { normalizeTpmObservation, tpmSourcePath, tpmToolRequest } from '../src/domain/tpm.mjs'
+import { createObservation } from '../src/domain/work-order.mjs'
 import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 import { readRuntimeConfig } from '../src/runtime-config.mjs'
@@ -17,7 +21,7 @@ await mkdir(join(root, 'private'), { mode: 0o700 })
 await writeFile(catalogFile, JSON.stringify({ version: 1, targets: catalogTargets() }), { mode: 0o600 })
 const connectionCatalog = await readConnectionCatalog(catalogFile, process.cwd())
 const conflictingCatalogFile = join(root, 'private', 'conflicting-connections.json')
-await writeFile(conflictingCatalogFile, JSON.stringify({ version: 1, targets: [target('connection-a', 'A'), { ...target('connection-b', 'B'), credentialRef: 'connection-a.json' }] }), { mode: 0o600 })
+await writeFile(conflictingCatalogFile, JSON.stringify({ version: 1, targets: [target('connection-a', 'A'), { ...target('connection-b', 'B'), credentialRef: 'connection-a.pem' }] }), { mode: 0o600 })
 await assert.rejects(readConnectionCatalog(conflictingCatalogFile, process.cwd()), /同一 credentialRef/)
 const calls = []
 const gates = new Map()
@@ -51,12 +55,7 @@ const runner = {
     }
     return {
       ...common,
-      result: {
-        kind: 'gearjob.work-order.observation',
-        payload: { workOrderId: args.input.workOrderId, status: 'In Process', plannedQuantity: 10, completedQuantity: 4, unit: 'Nos', sourceRecordId: `Work Order:${args.input.workOrderId}`, sourceRevision: 'r1', sourceSystem: 'GearJob', sourceInstance: 'A', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest' },
-        source: { sourceRecordId: `Work Order:${args.input.workOrderId}`, sourceRevision: 'r1', sourceSystem: 'GearJob', sourceInstance: 'A', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest' },
-        toolName: 'geneway_gearjob_read_work_order', pluginId: 'geneway-gearjob-work-order', pluginVersion: '2',
-      },
+      result: tpmResult(args),
     }
   },
   async cancel(executionId) { gates.get(executionId)?.release() },
@@ -102,29 +101,43 @@ try {
   assert.equal(calls.length, callsAfterContinue)
   assert.equal((await service.continueWork(alice, waiting.value.id, { input: { quantity: 60 }, clientRequestId: 'continue-new-key' })).error.status, 409)
 
-  const waitingGear = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: {}, clientRequestId: 'waiting-gear' })
-  assert.equal(waitingGear.value.status, 'waiting_input')
-  assert.deepEqual(waitingGear.value.requiredInputs, ['workOrderId'])
-  assert.equal(waitingGear.value.executions.length, 0)
+  const callsBeforeTpm = calls.length
+  const waitingTpm = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-kivo-tpm-record-read', connectionId: 'connection-a', input: { recordType: 'repair' }, clientRequestId: 'waiting-tpm' })
+  assert.equal(waitingTpm.value.status, 'waiting_input')
+  assert.deepEqual(waitingTpm.value.requiredInputs, ['reference'])
+  assert.equal(waitingTpm.value.executions.length, 0)
+  assert.equal(calls.length, callsBeforeTpm)
 
-  const gear = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-a', input: { workOrderId: 'WO-1' }, clientRequestId: 'gear' })
-  const completedGear = await waitFor(service, alice, gear.value.id, work => work.status === 'completed')
-  assert.equal(completedGear.results.length, 1)
-  assert.equal(completedGear.results[0].kind, 'gearjob.work-order.observation')
-  assert.equal(completedGear.observations[0].completion.ratio, 0.4)
-  assert.equal(completedGear.observations[0].evidenceMode, 'real-frappe-rest')
-  assert.equal(completedGear.executions[0].resultObservationId, completedGear.results[0].id)
-  const persisted = (await store.read()).works.find(item => item.id === gear.value.id)
+  const tpm = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-kivo-tpm-record-read', capabilityId: 'kivo-tpm-record-read', connectionId: 'connection-a', input: { recordType: 'repair', reference: 'WO-1' }, clientRequestId: 'tpm' })
+  const completedTpm = await waitFor(service, alice, tpm.value.id, work => work.status === 'completed')
+  assert.equal(completedTpm.results.length, 1)
+  assert.equal(completedTpm.results[0].kind, 'kivo.tpm.observation')
+  assert.equal(completedTpm.results[0].payload.records[0].status, 'reported')
+  assert.equal(completedTpm.results[0].payload.source.evidenceMode, 'controlled-domain')
+  assert.equal(completedTpm.executions[0].resultId, completedTpm.results[0].id)
+  assert.equal(calls.length, callsBeforeTpm + 1)
+  const persisted = (await store.read()).works.find(item => item.id === tpm.value.id)
   assert.equal('observations' in persisted, false)
   assert.equal('followUps' in persisted, false)
   assert.equal(calls.at(-1).grant.connection.id, 'connection-a')
+  assert.equal(calls.at(-1).grant.connection.clientId, '00000000-0000-4000-8000-000000000003')
+  assert.equal(calls.at(-1).grant.connection.revision, 1)
+  assert.equal(calls.at(-1).sessionMetadata.connectionRevision, 1)
   assert.equal(calls.at(-1).grant.policyFile, stateFile)
   assert.equal(calls.at(-1).sessionMetadata.ownerMemberId, 'member-alice')
 
-  assert.equal((await service.getWork(bob, gear.value.id)).error.status, 404)
-  assert.equal((await service.getWork(admin, gear.value.id)).error.status, 404)
-  const sameBob = await service.createWork(bob, { employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 120, quantity: 2 }, clientRequestId: 'gear' })
-  assert.notEqual(sameBob.value.id, gear.value.id)
+  const legacy = (await store.read()).works.find(work => work.id === 'legacy-history')
+  const historical = await service.getWork(alice, legacy.id)
+  assert.deepEqual(historical.value.results, legacy.results)
+  assert.equal(historical.value.observations[0].completion.ratio, 0.4)
+  assert.equal(historical.value.observations[0].evidenceMode, 'real-frappe-rest')
+  assert.equal(historical.value.executions[0].resultObservationId, legacy.results[0].id)
+  assert.equal((await service.getWork(bob, legacy.id)).error.status, 404)
+  assert.equal((await service.getWork(admin, legacy.id)).error.status, 404)
+  assert.equal((await service.getWork(bob, tpm.value.id)).error.status, 404)
+  assert.equal((await service.getWork(admin, tpm.value.id)).error.status, 404)
+  const sameBob = await service.createWork(bob, { employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 120, quantity: 2 }, clientRequestId: 'tpm' })
+  assert.notEqual(sameBob.value.id, tpm.value.id)
   await waitFor(service, bob, sameBob.value.id, work => work.status === 'completed')
 
   const confirmation1 = await service.createConfirmation(alice, { employeeId: 'employee-a', label: '班次', value: '白班' })
@@ -133,25 +146,27 @@ try {
   const confirmedWork = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 300, quantity: 5 }, clientRequestId: 'confirmed-capability' })
   await waitFor(service, alice, confirmedWork.value.id, work => work.status === 'completed')
   assert.deepEqual(calls.find(item => item.sessionMetadata.workId === confirmedWork.value.id).confirmations, [{ id: confirmation1.id, revision: 2, label: '班次', value: '夜班' }])
-  const follow = await service.followUp(alice, gear.value.id, '当前依据是什么？', { clientRequestId: 'follow' })
+  const follow = await service.followUp(alice, tpm.value.id, '当前依据是什么？', { clientRequestId: 'follow' })
   assert.equal(follow.ok, true)
-  const followed = await waitFor(service, alice, gear.value.id, work => work.followUps.length === 1)
+  const followed = await waitFor(service, alice, tpm.value.id, work => work.followUps.length === 1)
   assert.deepEqual(followed.results.at(-1).contextConfirmationRefs, [{ id: confirmation1.id, revision: 2 }])
   assert.deepEqual(followed.executions.at(-1).contextConfirmationRefs, [{ id: confirmation1.id, revision: 2 }])
   assert.match(followed.executions.at(-1).confirmationFingerprint, /^[a-f0-9]{64}$/)
   assert.equal(followed.executions.at(-1).resultFollowUpId, followed.results.at(-1).id)
   const followCall = calls.find(item => item.operation === 'follow-up')
   assert.deepEqual(followCall.followUp.confirmations, [{ id: confirmation1.id, revision: 2, label: '班次', value: '夜班' }])
-  assert.equal(JSON.stringify(followCall.followUp.facts).includes('说明 gearjob'), false)
+  assert.equal(JSON.stringify(followCall.followUp.facts).includes('说明 kivo-tpm-record-read'), false)
+  assert.deepEqual(followCall.followUp.facts, [{ kind: completedTpm.results[0].kind, payload: completedTpm.results[0].payload, source: completedTpm.results[0].source }])
+  assert.equal(followCall.sessionId, completedTpm.results[0].dshSessionRef)
   await service.deleteConfirmation(alice, confirmation1.id)
   assert.equal((await service.listConfirmations(alice))[0].status, 'revoked')
   await assert.rejects(
     () => service.updateConfirmation(alice, confirmation1.id, { value: '不可复活' }),
     error => error.code === 'INVALID_REQUEST',
   )
-  const refresh = await service.refreshWork(alice, gear.value.id, { clientRequestId: 'after-revoke' })
+  const refresh = await service.refreshWork(alice, tpm.value.id, { clientRequestId: 'after-revoke' })
   assert.equal(refresh.ok, true)
-  await waitFor(service, alice, gear.value.id, work => work.results.length === 3)
+  await waitFor(service, alice, tpm.value.id, work => work.results.length === 3)
   assert.deepEqual(calls.at(-1).sessionMetadata.confirmationRefs, [])
 
   const busyGate = deferred()
@@ -189,24 +204,26 @@ try {
   assert.equal(calls.at(-1).agentInstructions, '后续执行采用新指令。')
   for (const [field, value] of Object.entries({
     targetIdentity: 'other', baseUrl: 'http://127.0.0.1/other', hostHeader: 'other.localhost',
+    issuer: 'http://127.0.0.1:8199', clientId: '00000000-0000-4000-8000-000000000099',
     sourceSystem: 'Other', sourceInstance: 'Other', sourceEnvironment: 'production',
     dataMode: 'live', evidenceMode: 'controlled',
   })) await assert.rejects(service.updateConfig(admin, 'connections', 'connection-a', { [field]: value }), /不可原地更换/)
   const beforeRotation = (await service.listConfig(admin, 'connections')).find(item => item.id === 'connection-a')
-  const rotated = await service.updateConfig(admin, 'connections', 'connection-a', { credentialRef: 'connection-a-next.json' })
-  assert.equal(rotated.credentialRef, 'connection-a-next.json')
+  const rotated = await service.updateConfig(admin, 'connections', 'connection-a', { credentialRef: 'connection-a-next.pem' })
+  assert.equal(rotated.credentialRef, 'connection-a-next.pem')
   assert.equal(rotated.revision, beforeRotation.revision + 1)
   assert.equal(rotated.status, 'unknown')
-  await assert.rejects(service.updateConfig(admin, 'connections', 'connection-a', { credentialRef: 'connection-a-next.json', baseUrl: 'http://127.0.0.1/other' }), /不可原地更换/)
-  await service.updateConfig(admin, 'connections', 'connection-a', { credentialRef: 'connection-a.json' })
+  await assert.rejects(service.updateConfig(admin, 'connections', 'connection-a', { credentialRef: 'connection-a-next.pem', baseUrl: 'http://127.0.0.1/other' }), /不可原地更换/)
+  await service.updateConfig(admin, 'connections', 'connection-a', { credentialRef: 'connection-a.pem' })
+  await assert.rejects(service.updateConfig(admin, 'connections', 'connection-a', { allowedObjectIds: ['WO-1', 'WO-2'] }), error => error.code === 'INVALID_REQUEST')
   const mutableConnection = await service.updateConfig(admin, 'connections', 'connection-a', {
-    name: 'connection-a-renamed', allowedObjectIds: ['WO-1', 'WO-2'], enabled: false, skillIds: [],
+    name: 'connection-a-renamed', allowedObjectIds: [], enabled: false, skillIds: [],
   })
   assert.equal(mutableConnection.name, 'connection-a-renamed')
-  assert.deepEqual(mutableConnection.allowedObjectIds, ['WO-1', 'WO-2'])
+  assert.deepEqual(mutableConnection.allowedObjectIds, [])
   assert.equal(mutableConnection.enabled, false)
   assert.deepEqual(mutableConnection.skillIds, [])
-  await service.updateConfig(admin, 'connections', 'connection-a', { name: 'connection-a', allowedObjectIds: ['WO-1'], enabled: true, skillIds: ['skill-gearjob-work-order-read'] })
+  await service.updateConfig(admin, 'connections', 'connection-a', { name: 'connection-a', allowedObjectIds: [], enabled: true, skillIds: ['skill-kivo-tpm-record-read'] })
   const skillOff = await service.updateConfig(admin, 'skills', 'skill-cycle-time-calculate', { enabled: false })
   assert.equal(skillOff.enabled, false)
   await service.updateConfig(admin, 'skills', 'skill-cycle-time-calculate', { enabled: true })
@@ -218,14 +235,14 @@ try {
   const tested = await service.testConnection(admin, 'connection-a')
   assert.equal(tested.ok, true)
   await assert.rejects(
-    service.createConfig(admin, 'connections', { id: 'bad-secret', name: 'bad', kind: 'gearjob-rest', targetIdentity: 'bad', baseUrl: 'http://127.0.0.1', credentialRef: '../secret', allowedObjectIds: [], sourceSystem: 'GearJob', sourceInstance: 'bad', sourceEnvironment: 'test', dataMode: 'synthetic', evidenceMode: 'controlled', enabled: true, skillIds: ['skill-gearjob-work-order-read'] }),
+    service.createConfig(admin, 'connections', { ...target('browser-ready', 'browser-ready'), id: 'bad-secret', name: 'bad', credentialRef: '../secret', allowedObjectIds: [], enabled: true, skillIds: ['skill-kivo-tpm-record-read'] }),
     error => error.code === 'INVALID_REQUEST',
   )
   await assert.rejects(
-    service.createConfig(admin, 'connections', { id: 'long-secret', name: 'long', kind: 'gearjob-rest', targetIdentity: 'long', baseUrl: 'http://127.0.0.1', credentialRef: `a${'.'.repeat(128)}`, allowedObjectIds: [], sourceSystem: 'GearJob', sourceInstance: 'long', sourceEnvironment: 'test', dataMode: 'synthetic', evidenceMode: 'controlled', enabled: true, skillIds: ['skill-gearjob-work-order-read'] }),
+    service.createConfig(admin, 'connections', { ...target('browser-ready', 'browser-ready'), id: 'long-secret', name: 'long', credentialRef: `a${'.'.repeat(128)}`, allowedObjectIds: [], enabled: true, skillIds: ['skill-kivo-tpm-record-read'] }),
     error => error.code === 'INVALID_REQUEST',
   )
-  const browserReady = await service.createConfig(admin, 'connections', { id: 'browser-ready', name: 'browser-ready', kind: 'gearjob-rest', targetIdentity: 'browser-ready', baseUrl: 'http://127.0.0.1', credentialRef: 'browser-ready.json', allowedObjectIds: [], sourceSystem: 'GearJob', sourceInstance: 'browser-ready', sourceEnvironment: 'test', dataMode: 'synthetic', evidenceMode: 'controlled', enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'] })
+  const browserReady = await service.createConfig(admin, 'connections', { ...target('browser-ready', 'browser-ready'), id: 'browser-ready', name: 'browser-ready', allowedObjectIds: [], enabled: true, status: 'ready', skillIds: ['skill-kivo-tpm-record-read'] })
   assert.equal(browserReady.status, 'unknown')
 
   const testStarted = deferred()
@@ -235,7 +252,7 @@ try {
   await testStarted.promise
   await service.updateConfig(admin, 'connections', 'connection-a', { name: 'connection-a-updated' })
   testRelease.release()
-  await assert.rejects(staleTest, error => error.code === 'BUSY')
+  await assert.rejects(staleTest, error => error.code === 'FORBIDDEN')
   assert.equal((await service.listConfig(admin, 'connections')).find(item => item.id === 'connection-a').status, 'unknown')
   await service.testConnection(admin, 'connection-a')
   await checkCredentialTargetCannotBeRedirected(admin)
@@ -254,7 +271,7 @@ try {
   for (const [label, mutate] of [
     ['member', state => { state.members.find(item => item.id === 'member-alice').enabled = false }],
     ['employee', state => { state.employees.find(item => item.id === 'employee-a').enabled = false }],
-    ['skill', state => { state.skills.find(item => item.id === 'skill-gearjob-work-order-read').enabled = false }],
+    ['skill', state => { state.skills.find(item => item.id === 'skill-kivo-tpm-record-read').enabled = false }],
     ['connection', state => { state.connections.find(item => item.id === 'connection-a').enabled = false }],
   ]) await checkRevokedBeforeDispatch(label, mutate)
   console.log('service checks passed')
@@ -289,7 +306,7 @@ async function checkRevokedBeforeDispatch(label, mutate) {
   let runs = 0
   const service = createWorkService({ store: gatedStore, runner: { configured: true, async run() { runs += 1; throw new Error('must not dispatch') }, async close() {} }, connectionCatalog })
   const actor = { id: 'member-alice' }
-  const accepted = await service.createWork(actor, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: { workOrderId: 'WO-1' }, clientRequestId: `revoke-${label}` })
+  const accepted = await service.createWork(actor, { employeeId: 'employee-a', skillId: 'skill-kivo-tpm-record-read', connectionId: 'connection-a', input: { recordType: 'repair', reference: 'WO-1' }, clientRequestId: `revoke-${label}` })
   await base.update(state => { mutate(state); return state })
   blockRead = false
   gate.release()
@@ -331,30 +348,53 @@ async function checkCloseSettlement(cancelRequested) {
 function seedState(state) {
   const now = '2026-09-19T00:00:00.000Z'
   const member = (id, role, employeeIds) => ({ id, loginName: id, displayName: id, role, enabled: true, authRef: id, sessionVersion: 1, employeeIds, createdAt: now, updatedAt: now })
-  const connection = (id, instance) => ({ id, name: id, kind: 'gearjob-rest', targetIdentity: instance, baseUrl: `http://127.0.0.1/${id}`, credentialRef: `${id}.json`, allowedObjectIds: ['WO-1'], sourceSystem: 'GearJob', sourceInstance: instance, sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest', enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'], revision: 1 })
+  const connection = (id, instance) => ({ ...target(id, instance), id, name: id, allowedObjectIds: [], enabled: true, status: 'ready', skillIds: ['skill-kivo-tpm-record-read'], revision: 1 })
   return {
     ...state,
     members: [member('member-admin', 'admin', ['employee-admin']), member('member-alice', 'member', ['employee-a']), member('member-bob', 'member', ['employee-b'])],
     modelRoutes: [{ id: 'model-zenmux', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     skills: [
-      { id: 'skill-gearjob-work-order-read', name: '工单查询', capabilityId: 'gearjob-work-order-read', enabled: true },
+      { id: 'skill-kivo-tpm-record-read', name: 'TPM 工单查询', capabilityId: 'kivo-tpm-record-read', enabled: true },
+      { id: 'skill-gearjob-work-order-read', name: '历史工单', capabilityId: 'gearjob-work-order-read', enabled: false },
       { id: 'skill-cycle-time-calculate', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true },
     ],
-    connections: [connection('connection-a', 'A'), connection('connection-b', 'B')],
+    connections: [connection('connection-a', 'A'), connection('connection-b', 'B'), {
+      id: 'legacy-connection', name: '历史 GearJob', kind: 'gearjob-rest', targetIdentity: 'legacy', baseUrl: 'https://legacy.invalid', credentialRef: 'legacy-unavailable.json',
+      allowedObjectIds: ['LEGACY-WO'], sourceSystem: 'GearJob', sourceInstance: 'legacy', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest', enabled: false, status: 'disabled', skillIds: ['skill-gearjob-work-order-read'], revision: 1,
+    }],
     employees: [
       { id: 'employee-admin', name: '管理员员工', enabled: true, modelRouteId: 'model-zenmux', connectionIds: [], skillIds: ['skill-cycle-time-calculate'] },
-      { id: 'employee-a', name: '员工 A', enabled: true, modelRouteId: 'model-zenmux', connectionIds: ['connection-a'], skillIds: ['skill-gearjob-work-order-read', 'skill-cycle-time-calculate'] },
+      { id: 'employee-a', name: '员工 A', enabled: true, modelRouteId: 'model-zenmux', connectionIds: ['connection-a'], skillIds: ['skill-kivo-tpm-record-read', 'skill-cycle-time-calculate'] },
       { id: 'employee-b', name: '员工 B', enabled: true, modelRouteId: 'model-zenmux', connectionIds: ['connection-b'], skillIds: ['skill-cycle-time-calculate'] },
     ],
+    works: [historicalWorkFixture()],
   }
+}
+
+function tpmResult(call) {
+  const queriedAt = '2026-10-15T14:00:00.000Z', deviceId = '00000000-0000-4000-8000-000000000001'
+  const source = { system: 'kivo', path: tpmSourcePath(tpmToolRequest('record', call.input)), queriedAt, traceId: call.executionId }
+  const observation = normalizeTpmObservation({ mode: 'record', input: call.input, connection: call.grant.connection,
+    result: { status: 'ok', source, value: { id: '00000000-0000-4000-8000-000000000002', orderNo: call.input.reference, deviceId, status: 'reported', createdAt: queriedAt, updatedAt: queriedAt } },
+    deviceResult: { status: 'ok', source: { ...source, path: tpmSourcePath(tpmToolRequest('record', { recordType: 'device', reference: deviceId })) }, value: { id: deviceId, code: 'D-1', name: '设备', lifecycleStatus: 'active' } },
+  })
+  return parseCapabilityToolResult(call.capabilityId, { ok: true, observation }, call.input)
+}
+
+function historicalWorkFixture() {
+  const capability = getCapability('gearjob-work-order-read'), queriedAt = '2026-09-19T00:00:00.000Z'
+  const parsed = parseCapabilityToolResult(capability.id, { ok: true, workOrderId: 'LEGACY-WO', status: 'In Process', plannedQuantity: 10, completedQuantity: 4, unit: 'Nos', sourceTime: queriedAt, sourceRecordId: 'Work Order:LEGACY-WO', sourceRevision: 'legacy-r1', sourceSystem: 'GearJob', sourceInstance: 'legacy', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest' }, { workOrderId: 'LEGACY-WO' })
+  const payload = { ...createObservation({ source: parsed.payload, queriedAt }), evidenceMode: parsed.payload.evidenceMode }
+  const result = { ...parsed, id: payload.observationId, capabilityId: capability.id, skillId: capability.skillId, schemaVersion: 1, input: { workOrderId: 'LEGACY-WO' }, payload, createdAt: queriedAt, dshSessionRef: 'session-legacy-read-only', contextConfirmationRefs: [] }
+  return { id: 'legacy-history', ownerMemberId: 'member-alice', employeeId: 'employee-a', skillId: capability.skillId, capabilityId: capability.id, connectionId: 'legacy-connection', input: result.input, goal: '历史工单观察', status: 'completed', requiredInputs: [], acceptedAt: queriedAt, results: [result], actions: [], executions: [{ id: 'legacy-execution', status: 'completed', dshSessionRef: result.dshSessionRef, resultId: result.id, resultObservationId: result.id }] }
 }
 
 function catalogTargets() {
   return [
     target('connection-a', 'A'),
-    { ...target('connection-a', 'A'), credentialRef: 'connection-a-next.json' },
+    { ...target('connection-a', 'A'), credentialRef: 'connection-a-next.pem' },
     target('connection-b', 'B'),
-    { ...target('browser-ready', 'browser-ready'), baseUrl: 'http://127.0.0.1', credentialRef: 'browser-ready.json', sourceEnvironment: 'test', evidenceMode: 'controlled' },
+    target('browser-ready', 'browser-ready'),
   ]
 }
 
@@ -365,7 +405,7 @@ async function checkUnavailableCatalog(alice, admin) {
   const bootstrap = await unavailableService.bootstrap(alice)
   assert.equal(bootstrap.connections.find(item => item.id === 'connection-a').status, 'unavailable')
   assert.equal((await unavailableService.listConfig(admin, 'connections')).find(item => item.id === 'connection-a').status, 'unavailable')
-  const rejected = await unavailableService.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: { workOrderId: 'WO-1' } })
+  const rejected = await unavailableService.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-kivo-tpm-record-read', connectionId: 'connection-a', input: { recordType: 'repair', reference: 'WO-1' } })
   assert.equal(rejected.error.status, 403)
   const cycle = await unavailableService.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 120, quantity: 2 } })
   await waitFor(unavailableService, alice, cycle.value.id, work => work.status === 'completed')
@@ -393,7 +433,8 @@ async function checkSafeExecutionErrors(alice) {
 }
 
 function target(id, instance) {
-  return { kind: 'gearjob-rest', targetIdentity: instance, baseUrl: `http://127.0.0.1/${id}`, credentialRef: `${id}.json`, sourceSystem: 'GearJob', sourceInstance: instance, sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'real-frappe-rest' }
+  const origin = `http://127.0.0.1:${id === 'connection-a' ? 8101 : id === 'connection-b' ? 8102 : 8103}`
+  return { kind: 'kivo-mcp', targetIdentity: instance, baseUrl: `${origin}/api/v1/mes/mcp`, issuer: origin, clientId: `00000000-0000-4000-8000-00000000000${id === 'connection-a' ? '3' : id === 'connection-b' ? '4' : '5'}`, credentialRef: `${id}.pem`, sourceSystem: 'Kivo', sourceInstance: instance, sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled-domain' }
 }
 
 async function checkCredentialTargetCannotBeRedirected(admin) {
@@ -407,7 +448,8 @@ async function checkCredentialTargetCannotBeRedirected(admin) {
   try {
     const captureRoot = join(root, 'capture')
     const captureStore = createFileStore(join(captureRoot, 'state.json'))
-    const malicious = { ...seedState({ connections: [] }).connections[0], id: 'connection-evil', name: 'evil', targetIdentity: 'attacker', baseUrl: `http://127.0.0.1:${capture.address().port}`, hostHeader: 'attacker.invalid' }
+    const origin = `http://127.0.0.1:${capture.address().port}`
+    const malicious = { ...seedState({ connections: [] }).connections[0], id: 'connection-evil', name: 'evil', targetIdentity: 'attacker', baseUrl: `${origin}/api/v1/mes/mcp`, issuer: origin, hostHeader: 'attacker.invalid' }
     await captureStore.update(state => {
       const seeded = seedState(state)
       seeded.connections[0] = { ...malicious, id: 'connection-a', name: 'connection-a' }
@@ -415,19 +457,21 @@ async function checkCredentialTargetCannotBeRedirected(admin) {
     })
     const secretRoot = join(captureRoot, 'secrets')
     await mkdir(secretRoot, { recursive: true, mode: 0o700 })
-    await writeFile(join(secretRoot, 'connection-a.json'), JSON.stringify({ authorization: 'token must-not-leak' }), { mode: 0o600 })
-    let runs = 0
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } })
+    await writeFile(join(secretRoot, 'connection-a.pem'), privateKey, { mode: 0o600 })
+    let runs = 0, probes = 0
     const captureService = createWorkService({
       store: captureStore,
       connectionCatalog,
       runner: { configured: true, async run() { runs += 1; throw new Error('must not dispatch') }, async close() {} },
-      connectionTester: connection => readGearJobWorkOrder({ workOrderId: 'WO-1', connection, secretRoot }),
+      connectionTester: (connection, { authorize }) => { probes += 1; return testKivoTpmConnection({ connection, secretRoot, authorize }) },
     })
-    await assert.rejects(captureService.createConfig(admin, 'connections', malicious), error => error.code === 'FORBIDDEN')
-    await assert.rejects(captureService.testConnection(admin, 'connection-a'), error => error.code === 'FORBIDDEN')
-    const work = await captureService.createWork({ id: 'member-alice' }, { employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-a', input: { workOrderId: 'WO-1' } })
+    await assert.rejects(captureService.createConfig(admin, 'connections', malicious), error => error.code === 'FORBIDDEN' && /可信目录/.test(error.message))
+    await assert.rejects(captureService.testConnection(admin, 'connection-a'), error => error.code === 'FORBIDDEN' && /可信目录/.test(error.message))
+    const work = await captureService.createWork({ id: 'member-alice' }, { employeeId: 'employee-a', skillId: 'skill-kivo-tpm-record-read', connectionId: 'connection-a', input: { recordType: 'repair', reference: 'WO-1' } })
     assert.equal(work.error.status, 403)
     assert.equal(runs, 0)
+    assert.equal(probes, 0)
     assert.deepEqual(received, [])
   } finally {
     await new Promise(resolve => capture.close(resolve))

@@ -5,6 +5,7 @@ import { createServer as createNodeServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readModelCredential, readRuntimeConfig } from '../src/runtime-config.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const endpoint = process.env.GENEWAY_ACCEPT_CDP_ENDPOINT ?? 'http://127.0.0.1:9223'
@@ -202,6 +203,10 @@ function validObservation(result) {
 }
 
 async function startServer() {
+  const modelKey = await readModelCredential(readRuntimeConfig(process.env, root))
+  const modelRef = 'geneway-model.key'
+  await writeFile(join(secretRoot, modelRef), modelKey, { mode: 0o600 })
+  await chmod(join(secretRoot, modelRef), 0o600)
   const child = spawn(process.execPath, ['src/server.mjs'], {
     cwd: root,
     env: {
@@ -211,7 +216,9 @@ async function startServer() {
       GENEWAY_AUTH_FILE: authPath,
       GENEWAY_CONNECTION_CATALOG: connectionCatalogPath,
       GENEWAY_SECRET_ROOT: secretRoot,
+      GENEWAY_MODEL_CREDENTIAL_REF: modelRef,
       GENEWAY_DSH_HOME: dshHome,
+      DSH_HOME: dshHome,
       GENEWAY_TRUSTED_ORIGIN: appUrl,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
-import { readRuntimeConfig, readSettings } from '../src/runtime-config.mjs'
+import { readModelCredential, readRuntimeConfig } from '../src/runtime-config.mjs'
 
 const root = process.cwd()
 const config = readRuntimeConfig(process.env, root)
@@ -23,7 +23,7 @@ try {
     model: config.model.model,
     initializeTimeoutMs: 15_000,
     requestTimeoutMs: 120_000,
-    env: childEnvironment(config),
+    env: await childEnvironment(config, dshHome),
   })
   try {
     await harness.start()
@@ -65,10 +65,8 @@ try {
   await rm(dshHome, { recursive: true, force: true })
 }
 
-function childEnvironment(config) {
-  const settings = readSettings()
-  const settingsEnv = settings?.env && typeof settings.env === 'object' ? settings.env : {}
-  const env = { PATH: process.env.PATH, HOME: process.env.HOME, LANG: process.env.LANG, DSH_TELEMETRY_MODE: 'DISABLED' }
-  if (typeof settingsEnv.ANTHROPIC_AUTH_TOKEN === 'string' && settingsEnv.ANTHROPIC_AUTH_TOKEN.trim()) env.ZENMUX_API_KEY = settingsEnv.ANTHROPIC_AUTH_TOKEN
+async function childEnvironment(config, dshHome) {
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME, LANG: process.env.LANG, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' }
+  env[config.model.credentialEnv] = await readModelCredential(config)
   return env
 }

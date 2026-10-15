@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { fork } from 'node:child_process'
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -8,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { runProfile } from '@deepseek-ai/dsh/profile-boot'
-import { readSettings } from '../src/runtime-config.mjs'
+import { readModelCredential, readRuntimeConfig } from '../src/runtime-config.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const requireFromDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
@@ -20,36 +21,41 @@ const TOOL_B = 'p3_probe_employee_b'
 const STRUCTURED_OUTPUT = 'structured_output'
 const ROUTE = Object.freeze({ provider: 'geneway-p3-capture', model: 'p3-probe', maxTokens: 256 })
 
-const capture = await startCaptureServer()
-const dshHome = await mkdtemp(join(tmpdir(), 'geneway-p3-delegation-'))
-const realModelEnabled = process.env.GENEWAY_P3_PROBE_MODEL === 'true'
-const configuredZenMuxKey = realModelEnabled ? readSettings()?.env?.ANTHROPIC_AUTH_TOKEN : undefined
-const probeEnvironment = {
-  DSH_HOME: dshHome,
-  DSH_TELEMETRY_MODE: 'DISABLED',
-  GENEWAY_P3_CAPTURE_BASE_URL: `${capture.address}/v1`,
-  GENEWAY_P3_CAPTURE_KEY: 'local-probe-only',
-}
-if (typeof configuredZenMuxKey === 'string' && configuredZenMuxKey.trim()) probeEnvironment.ZENMUX_API_KEY = configuredZenMuxKey
-const restoreEnvironment = setEnvironment(probeEnvironment)
+if (process.argv[2] === '--runtime-isolation-child') await probeRuntimeChild(process.argv[3])
+else await main()
 
-let runtime
-try {
-  const store = await createProbeStore(join(dshHome, 'geneway-p3-probe-state.json'))
-  runtime = await runProfile({
-    environment: launchEnvironment(),
-    profile: 'sdk',
-    patchFiles: [patchPath],
-    args: [],
-    resolutionMode: 'runtime',
-  })
-  const result = await runProbe(runtime.ctx, capture, store, realModelEnabled)
-  console.log(JSON.stringify({ ok: true, dshVersion, ...result }, null, 2))
-} finally {
-  await runtime?.shutdown.shutdown(0).catch(() => undefined)
-  restoreEnvironment()
-  await capture.close()
-  await rm(dshHome, { recursive: true, force: true })
+async function main() {
+  const capture = await startCaptureServer()
+  const dshHome = await mkdtemp(join(tmpdir(), 'geneway-p3-delegation-'))
+  const realModelEnabled = process.env.GENEWAY_P3_PROBE_MODEL === 'true'
+  const configuredZenMuxKey = realModelEnabled ? await readModelCredential(readRuntimeConfig()) : undefined
+  const probeEnvironment = {
+    DSH_HOME: dshHome,
+    DSH_TELEMETRY_MODE: 'DISABLED',
+    GENEWAY_P3_CAPTURE_BASE_URL: `${capture.address}/v1`,
+    GENEWAY_P3_CAPTURE_KEY: 'local-probe-only',
+  }
+  if (typeof configuredZenMuxKey === 'string' && configuredZenMuxKey.trim()) probeEnvironment.ZENMUX_API_KEY = configuredZenMuxKey
+  const restoreEnvironment = setEnvironment(probeEnvironment)
+
+  let runtime
+  try {
+    const store = await createProbeStore(join(dshHome, 'geneway-p3-probe-state.json'))
+    runtime = await runProfile({
+      environment: launchEnvironment(),
+      profile: 'sdk',
+      patchFiles: [patchPath],
+      args: [],
+      resolutionMode: 'runtime',
+    })
+    const result = await runProbe(runtime.ctx, capture, store, realModelEnabled)
+    console.log(JSON.stringify({ ok: true, dshVersion, ...result }, null, 2))
+  } finally {
+    await runtime?.shutdown.shutdown(0).catch(() => undefined)
+    restoreEnvironment()
+    await capture.close()
+    await rm(dshHome, { recursive: true, force: true })
+  }
 }
 
 async function runProbe(ctx, captureServer, store, runRealModel) {
@@ -68,7 +74,7 @@ async function runProbe(ctx, captureServer, store, runRealModel) {
   const dynamicAuthorization = await probeDynamicAuthorization(harness, captureServer)
   const unknownUsage = await probeUnknownUsage(harness)
   const realModel = await probeRealModel(harness, runRealModel)
-  const runtimeIsolation = await probeRuntimeIsolation(captureServer, store)
+  const runtimeIsolation = await probeRuntimeIsolation()
 
   return {
     provider: { name: provider.name, inheritsParentContext: provider.inheritsParentContext, capabilities: provider.capabilities },
@@ -560,71 +566,89 @@ async function probeUnknownUsage(harness) {
   }
 }
 
-async function probeRuntimeIsolation(captureServer, store) {
-  const firstRuntime = await bootIsolatedRuntime(captureServer)
-  const secondRuntime = await bootIsolatedRuntime(captureServer)
-  const trace = []
-  let sequence = 0
-  const record = (type, data = {}) => trace.push({ sequence: ++sequence, type, ...data })
-  captureServer.record = record
-  const firstHarness = setupHarness(firstRuntime.runtime.ctx, captureServer, store, record).harness
-  const secondHarness = setupHarness(secondRuntime.runtime.ctx, captureServer, store, record).harness
-  const w1 = await createRoot(firstHarness, 'runtime-close-w1', [
-    { childWorkId: 'runtime-w1-child', executionId: 'runtime-w1-exec', employeeId: 'employee-a', connectionId: 'connection-a', objectId: 'object-a', allowedTools: [TOOL_A] },
-  ])
-  const w2 = await createRoot(secondHarness, 'runtime-close-w2', [
-    { childWorkId: 'runtime-w2-child', executionId: 'runtime-w2-exec', employeeId: 'employee-b', connectionId: 'connection-b', objectId: 'object-b', allowedTools: [TOOL_B] },
-  ])
-  let runW1
-  let runW2
+async function probeRuntimeIsolation() {
+  const workers = []
   try {
-    ;[runW1, runW2] = await Promise.all([
-      dispatchChild(firstHarness, w1, w1.grants[0], {
-        childWorkId: 'runtime-w1-child', executionId: 'runtime-w1-exec', employeeId: 'employee-a', connectionId: 'connection-a', objectId: 'object-a', scenario: 'runtime-close-w1', budgetLimit: 2,
-      }),
-      dispatchChild(secondHarness, w2, w2.grants[0], {
-        childWorkId: 'runtime-w2-child', executionId: 'runtime-w2-exec', employeeId: 'employee-b', connectionId: 'connection-b', objectId: 'object-b', scenario: 'w2-runtime-close', budgetLimit: 2,
-      }),
-    ])
-    await captureServer.waitFor('model', 'runtime-close-w1')
-    await cancelRoot(firstHarness, w1, 'runtime-close')
-    const closeW1 = firstRuntime.runtime.shutdown.shutdown(0)
-    const [resultW1, resultW2] = await Promise.all([runW1.result, runW2.result])
-    await closeW1
-    assert.equal(resultW1.stopReason, 'aborted')
-    assert.equal(resultW2.stopReason, 'completed')
-    assert.deepEqual(resultW2.structured, { scenario: 'w2-runtime-close', status: 'done' })
-    await persistReadback(secondHarness, runW2, resultW2)
-    return { separateRuntimes: true, w1RuntimeClosed: true, w1: 'aborted', w2: 'completed' }
+    for (const scenario of ['runtime-close-w1', 'w2-runtime-close']) workers.push(await startRuntimeChild(scenario))
+    await Promise.all(workers.map(worker => worker.started))
+    workers[0].child.send('cancel')
+    const [first, second] = await Promise.all(workers.map(worker => worker.completed))
+    assert.equal(first.stopReason, 'aborted')
+    assert.equal(second.stopReason, 'completed')
+    assert.notEqual(workers[0].home, workers[1].home)
+    return { separateRuntimes: true, separateProcesses: true, w1RuntimeClosed: true, w1: first.stopReason, w2: second.stopReason }
   } finally {
-    await Promise.allSettled([runW1?.dispose(), runW2?.dispose(), w1.dispose(), w2.dispose()].filter(Boolean))
-    await Promise.allSettled([firstRuntime.runtime.shutdown.shutdown(0), secondRuntime.runtime.shutdown.shutdown(0)])
-    await Promise.allSettled([rm(firstRuntime.home, { recursive: true, force: true }), rm(secondRuntime.home, { recursive: true, force: true })])
+    for (const worker of workers) if (worker.child.exitCode === null && worker.child.signalCode === null) worker.child.kill('SIGKILL')
+    await Promise.allSettled(workers.map(worker => worker.completed))
+    await Promise.all(workers.map(worker => rm(worker.home, { recursive: true, force: true })))
   }
 }
 
-async function bootIsolatedRuntime(captureServer) {
+async function startRuntimeChild(scenario) {
   const home = await mkdtemp(join(tmpdir(), 'geneway-p3-isolated-'))
-  const restore = setEnvironment({
-    DSH_HOME: home,
-    DSH_TELEMETRY_MODE: 'DISABLED',
-    GENEWAY_P3_CAPTURE_BASE_URL: `${captureServer.address}/v1`,
-    GENEWAY_P3_CAPTURE_KEY: 'local-probe-only',
-  })
+  let child
   try {
-    const isolatedRuntime = await runProfile({
-      environment: launchEnvironment(),
-      profile: 'sdk',
-      patchFiles: [patchPath],
-      args: [],
-      resolutionMode: 'runtime',
+    child = fork(fileURLToPath(import.meta.url), ['--runtime-isolation-child', scenario], {
+      cwd: root,
+      env: { PATH: process.env.PATH, HOME: home, DSH_HOME: home, DSH_TELEMETRY_MODE: 'DISABLED' },
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     })
-    return { runtime: isolatedRuntime, home }
   } catch (error) {
     await rm(home, { recursive: true, force: true })
     throw error
+  }
+  let ready, rejectReady, result, stderr = ''
+  const started = new Promise((resolve, reject) => { ready = resolve; rejectReady = reject })
+  const completed = new Promise((resolve, reject) => {
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+    child.on('message', message => { if (message.type === 'started') ready(); if (message.type === 'result') result = message.result })
+    child.once('error', error => { rejectReady(error); reject(error) })
+    child.once('close', (code, signal) => {
+      if (code === 0 && result) resolve(result)
+      else { const error = new Error(`isolated runtime ${scenario} failed (${code ?? signal}): ${stderr}`); rejectReady(error); reject(error) }
+    })
+  })
+  void started.catch(() => undefined)
+  void completed.catch(() => undefined)
+  return { child, home, started, completed }
+}
+
+async function probeRuntimeChild(scenario) {
+  assert(['runtime-close-w1', 'w2-runtime-close'].includes(scenario))
+  assert(process.send && process.env.DSH_HOME)
+  const home = process.env.DSH_HOME
+  const capture = await startCaptureServer()
+  const restore = setEnvironment({ GENEWAY_P3_CAPTURE_BASE_URL: `${capture.address}/v1`, GENEWAY_P3_CAPTURE_KEY: 'local-probe-only', DSH_TELEMETRY_MODE: 'DISABLED' })
+  let runtime, work, run
+  try {
+    runtime = await runProfile({ environment: launchEnvironment(), profile: 'sdk', patchFiles: [patchPath], args: [], resolutionMode: 'runtime' })
+    const store = await createProbeStore(join(home, 'probe-state.json'))
+    const { harness } = setupHarness(runtime.ctx, capture, store, () => undefined)
+    const first = scenario === 'runtime-close-w1'
+    const grant = { childWorkId: first ? 'runtime-w1-child' : 'runtime-w2-child', executionId: first ? 'runtime-w1-exec' : 'runtime-w2-exec', employeeId: first ? 'employee-a' : 'employee-b', connectionId: first ? 'connection-a' : 'connection-b', objectId: first ? 'object-a' : 'object-b', allowedTools: [first ? TOOL_A : TOOL_B] }
+    work = await createRoot(harness, scenario, [grant])
+    run = await dispatchChild(harness, work, work.grants[0], { ...grant, scenario, budgetLimit: 2 })
+    const cancel = first ? new Promise(resolve => process.once('message', resolve)) : undefined
+    await capture.waitFor('model', scenario)
+    process.send({ type: 'started' })
+    if (first) {
+      await cancel
+      await cancelRoot(harness, work, 'runtime-close')
+      await runtime.shutdown.shutdown(0)
+    }
+    const result = await run.result
+    assert.equal(result.stopReason, first ? 'aborted' : 'completed')
+    if (!first) {
+      assert.deepEqual(result.structured, { scenario, status: 'done' })
+      await persistReadback(harness, run, result)
+    }
+    process.send({ type: 'result', result: { stopReason: result.stopReason } })
   } finally {
+    await Promise.allSettled([run?.dispose(), work?.dispose()].filter(Boolean))
+    await runtime?.shutdown.shutdown(0).catch(() => undefined)
+    await capture.close()
     restore()
+    process.disconnect()
   }
 }
 
@@ -666,6 +690,12 @@ async function probeRealModel(harness, enabled) {
     assert(rootRequests.some(entry => entry.parentCanaryPresent))
     assert(childRequests.length > 0 && childRequests.every(entry => !entry.parentCanaryPresent))
     const readback = await persistReadback(harness, run, result)
+    await harness.ctx.sessionPersistence.flush()
+    for (const sessionId of [rootWork.agent.id, run.id]) {
+      const stored = await harness.ctx.sessionPersistence.open(sessionId, 'read')
+      try { assert.equal(JSON.stringify({ header: stored.header, ...(await stored.read()) }).includes(process.env.ZENMUX_API_KEY), false, 'model credential reached a native Session log') }
+      finally { await stored.close() }
+    }
     return {
       ran: true,
       provider: 'zenmux',
@@ -674,6 +704,7 @@ async function probeRealModel(harness, enabled) {
       childRequests: childRequests.length,
       parentCanaryExcludedFromChild: true,
       structured: true,
+      sessionCredentialLeaks: 0,
       usageSeen: readback.usage.inputTokens !== null,
     }
   } finally {

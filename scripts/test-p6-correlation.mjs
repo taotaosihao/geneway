@@ -252,9 +252,10 @@ async function runnerChecks() {
   await assert.rejects(async () => parseRunResult({ events: [...events, events[0]], finalResponse: 'bad' }, { capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, input: { workOrderId: 'WO-1' } }), /恰好有一次/)
 
   const dshHome = join(root, 'dsh-home'), harnesses = []
+  await writeFile(join(secretRoot, 'model.key'), 'synthetic-correlation-model-key', { mode: 0o600 })
   const runner = createDshRunner({
     root: process.cwd(),
-    config: { model: { configured: true, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash' }, source: { configured: true }, dshHome, stateFile: join(root, 'state.json'), dataRoot: root, secretRoot },
+    config: { model: { configured: true, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'model.key', credentialEnv: 'ZENMUX_API_KEY' }, source: { configured: true }, dshHome, stateFile: join(root, 'state.json'), dataRoot: root, secretRoot },
     harnessFactory() {
       const index = harnesses.length
       const harness = { closed: 0, async run() { return { events, finalResponse: '关联完成', sessionId: `session-${index + 1}` } }, async close() { this.closed += 1 } }
@@ -283,6 +284,14 @@ async function runnerChecks() {
   const sixth = await runner.run({ ...base, executionId: 'exec-runner-6', sessionId: fifth.dshSessionRef, sessionMetadata: correlationMetadata(1, revisionB, mappingB), grant: correlationRunnerGrant(1, revisionB, mappingB) })
   assert.equal(harnesses.length, 4)
   assert.equal(sixth.continuity, 'successor')
+  await writeFile(join(secretRoot, 'model.key'), 'synthetic-rotated-correlation-key', { mode: 0o600 })
+  const resumed = { ...base, executionId: 'exec-runner-revoked-key', sessionId: sixth.dshSessionRef, sessionMetadata: correlationMetadata(1, revisionB, mappingB), grant: correlationRunnerGrant(1, revisionB, mappingB) }
+  await assert.rejects(runner.run(resumed), { code: 'MODEL_NOT_CONFIGURED' })
+  assert.equal(harnesses.length, 4)
+  assert.equal(harnesses[3].closed, 1)
+  await rm(join(secretRoot, 'model.key'))
+  await assert.rejects(runner.run({ ...resumed, executionId: 'exec-runner-missing-key' }), { code: 'MODEL_NOT_CONFIGURED' })
+  assert.equal(harnesses.length, 4)
   await runner.close()
 }
 
@@ -343,5 +352,5 @@ function correlationGrant(state) { const work = state.works.find(item => item.id
 function oldGrant(state) { const work = state.works.find(item => item.id === 'work-old'); return { ...grantBase(work, work.executions[0]), connection: connectionSnapshot(state.connections[0]) } }
 function correlationMetadata(revision, mappingRevision = null, mappingIdentity = null) { return { ownerMemberId: 'member-a', workId: 'work-correlation', employeeId: 'employee-a', skillId: 'skill-manufacturing-work-order-device-correlate', capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, modelRouteId: 'route-a', confirmationFingerprint: 'empty', confirmationRefs: [], connectionIds: { gearJob: 'connection-gear', hive: 'connection-hive' }, connectionRevisions: { gearJob: revision, hive: revision }, mappingRevision, mappingIdentity } }
 function correlationRunnerGrant(revision, mappingRevision = null, mappingIdentity = null) { return { connections: correlationConnections(revision), mappingRevision, mappingIdentity, policyFile: join(root, 'state.json'), policyRoot: root, secretRoot } }
-function runEvents(result) { const callId = 'call-correlation'; return [{ type: 'tool/call', data: { name: WORK_ORDER_DEVICE_CORRELATION_TOOL, callId, arguments: JSON.stringify({ workOrderId: 'WO-1' }) } }, { type: 'tool/result', data: { message: { source: { kind: 'tool', callId }, content: [{ type: 'tool-result', isError: false, toolCallId: callId, content: [{ type: 'text', text: JSON.stringify({ ok: true, ...result }) }] }] } } }] }
+function runEvents(result) { const callId = 'call-correlation'; return [{ type: 'tool/call', data: { name: WORK_ORDER_DEVICE_CORRELATION_TOOL, callId, arguments: JSON.stringify({ workOrderId: 'WO-1' }) } }, { type: 'tool/result', data: { message: { role: 'tool', source: { kind: 'tool', callId }, isError: false, toolCallId: callId, content: [{ type: 'text', text: JSON.stringify({ ok: true, ...result }) }] } } }] }
 async function waitFor(read, predicate) { for (let attempt = 0; attempt < 200; attempt += 1) { const value = await read(); if (predicate(value)) return value; await new Promise(resolve => setTimeout(resolve, 5)) } throw new Error('timed out') }

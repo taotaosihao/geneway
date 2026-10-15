@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gunzipSync, zstdDecompressSync } from 'node:zlib'
 import { startControlledGearJob } from './p2-controlled-gearjob.mjs'
+import { readModelCredential, readRuntimeConfig } from '../src/runtime-config.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const endpoint = process.env.GENEWAY_ACCEPT_CDP_ENDPOINT ?? 'http://127.0.0.1:9223'
@@ -499,7 +500,6 @@ async function backupAndRestore(beforeState, browserSecrets, successor) {
   }))
   const manifest = JSON.parse(await readFile(join(backupPath, 'manifest.json'), 'utf8'))
   if (manifest.candidate !== candidate || manifest.version !== 2 || manifest.schema.stateVersion !== 4 || backupRun.entries !== manifest.entries.length) throw new Error('backup manifest summary mismatch')
-  const settingsPath = process.env.GENEWAY_ZENMUX_SETTINGS_FILE ?? join(process.env.HOME ?? dirname(root), '.claude', 'settings.json')
   const auth = JSON.parse(await readFile(authPath, 'utf8'))
   const markers = [
     adminPassword, memberPassword, controlledAuthorization, controlledControlAuthorization,
@@ -507,10 +507,7 @@ async function backupAndRestore(beforeState, browserSecrets, successor) {
     ...collectStrings(JSON.parse(await readFile(gearJobCredential, 'utf8'))),
     ...collectStrings(auth),
   ]
-  try {
-    const settings = JSON.parse(await readFile(settingsPath, 'utf8'))
-    markers.push(...['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ZENMUX_API_KEY'].flatMap(key => collectStrings(settings?.env?.[key])))
-  } catch {}
+  if (readRuntimeConfig().model.configured) markers.push(await readModelCredential(readRuntimeConfig()))
   const uniqueMarkers = [...new Set(markers.filter(value => typeof value === 'string' && value.length >= 8))]
   let bytes = 0
   for (const entry of manifest.entries) {
@@ -592,6 +589,10 @@ async function gearResult(evaluate, workId, count) {
 }
 
 async function startServer(paths = {}) {
+  const modelKey = await readModelCredential(readRuntimeConfig(process.env, root))
+  const modelRef = 'geneway-model.key', serverSecretRoot = paths.secret ?? secretRoot
+  await writeFile(join(serverSecretRoot, modelRef), modelKey, { mode: 0o600 })
+  await chmod(join(serverSecretRoot, modelRef), 0o600)
   const child = spawn(process.execPath, ['src/server.mjs'], {
     cwd: root,
     env: {
@@ -600,8 +601,10 @@ async function startServer(paths = {}) {
       GENEWAY_STATE: paths.state ?? statePath,
       GENEWAY_AUTH_FILE: paths.auth ?? authPath,
       GENEWAY_CONNECTION_CATALOG: connectionCatalogPath,
-      GENEWAY_SECRET_ROOT: paths.secret ?? secretRoot,
+      GENEWAY_SECRET_ROOT: serverSecretRoot,
+      GENEWAY_MODEL_CREDENTIAL_REF: modelRef,
       GENEWAY_DSH_HOME: paths.dsh ?? dshHome,
+      DSH_HOME: paths.dsh ?? dshHome,
       GENEWAY_TRUSTED_ORIGIN: appUrl,
     },
     stdio: ['ignore', 'pipe', 'pipe'],

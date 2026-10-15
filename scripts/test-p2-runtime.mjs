@@ -429,7 +429,7 @@ function interval(toolName, args, value) {
   return {
     events: [
       { type: 'tool/call', data: { callId, name: toolName, arguments: JSON.stringify(args) } },
-      { type: 'tool/result', data: { message: { source: { kind: 'tool', callId }, content: [{ type: 'tool-result', toolCallId: callId, isError: false, content: [{ type: 'text', text: JSON.stringify(value) }] }] } } },
+      { type: 'tool/result', data: { message: { role: 'tool', source: { kind: 'tool', callId }, toolCallId: callId, isError: false, content: [{ type: 'text', text: JSON.stringify(value) }] } } },
     ],
     finalResponse: '结构化结果说明',
   }

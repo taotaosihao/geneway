@@ -6,7 +6,7 @@ import { access, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rena
 import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readRuntimeConfig, readSettings, validateRuntimeConfig } from '../src/runtime-config.mjs'
+import { readModelCredential, readRuntimeConfig, validateRuntimeConfig } from '../src/runtime-config.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const artifactRoot = resolve(root, 'artifacts', 'p5-acceptance')
@@ -546,7 +546,11 @@ async function seedEnrollment(statePath, enrollment, providerAppId, providerTena
 }
 
 async function startServer(paths, origin, port, config) {
-  const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, env: { ...process.env, GENEWAY_PORT: String(port), GENEWAY_STATE: paths.state, GENEWAY_AUTH_FILE: paths.auth, GENEWAY_CONNECTION_CATALOG: paths.catalog, GENEWAY_SECRET_ROOT: paths.secrets, GENEWAY_DSH_HOME: paths.dsh, GENEWAY_TRUSTED_ORIGIN: origin, GENEWAY_GEARJOB_BASE_URL: config.gearJobUrl, GENEWAY_GEARJOB_CREDENTIAL_FILE: join(paths.secrets, 'gearjob.json'), GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: config.workOrderId, GENEWAY_GEARJOB_HOST_HEADER: config.gearJobHost, GENEWAY_GEARJOB_TARGET_IDENTITY: 'gearjob-p5', GENEWAY_GEARJOB_EVENT_SECRET_FILE: paths.eventSecret, GENEWAY_GEARJOB_EVENT_SOURCE_ID: EVENT_SOURCE_ID, GENEWAY_GEARJOB_EVENT_SOURCE_ADDRESS: EVENT_SOURCE_ADDRESS, GENEWAY_GEARJOB_EVENT_HOST: EVENT_HOST, GENEWAY_GEARJOB_EVENT_PORT: String(EVENT_PORT) }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const modelKey = await readModelCredential(config.runtime)
+  const modelRef = 'geneway-model.key'
+  await writeFile(join(paths.secrets, modelRef), modelKey, { mode: 0o600 })
+  await chmod(join(paths.secrets, modelRef), 0o600)
+  const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, env: { ...process.env, GENEWAY_PORT: String(port), GENEWAY_STATE: paths.state, GENEWAY_AUTH_FILE: paths.auth, GENEWAY_CONNECTION_CATALOG: paths.catalog, GENEWAY_SECRET_ROOT: paths.secrets, GENEWAY_MODEL_CREDENTIAL_REF: modelRef, GENEWAY_DSH_HOME: paths.dsh, DSH_HOME: paths.dsh, GENEWAY_TRUSTED_ORIGIN: origin, GENEWAY_GEARJOB_BASE_URL: config.gearJobUrl, GENEWAY_GEARJOB_CREDENTIAL_FILE: join(paths.secrets, 'gearjob.json'), GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: config.workOrderId, GENEWAY_GEARJOB_HOST_HEADER: config.gearJobHost, GENEWAY_GEARJOB_TARGET_IDENTITY: 'gearjob-p5', GENEWAY_GEARJOB_EVENT_SECRET_FILE: paths.eventSecret, GENEWAY_GEARJOB_EVENT_SOURCE_ID: EVENT_SOURCE_ID, GENEWAY_GEARJOB_EVENT_SOURCE_ADDRESS: EVENT_SOURCE_ADDRESS, GENEWAY_GEARJOB_EVENT_HOST: EVENT_HOST, GENEWAY_GEARJOB_EVENT_PORT: String(EVENT_PORT) }, stdio: ['ignore', 'pipe', 'pipe'] })
   let error = ''; child.stderr.on('data', chunk => { error = (error + chunk).slice(-4_000) })
   for (let index = 0; index < 200; index += 1) { if (child.exitCode !== null) throw Object.assign(new Error(`Geneway failed: ${redact(error)}`), { process: child }); try { if ((await fetch(origin)).ok) return child } catch {}; await new Promise(resolveWait => setTimeout(resolveWait, 100)) }
   throw Object.assign(new Error('Geneway startup timed out'), { process: child })
@@ -581,12 +585,12 @@ async function validateFormal(input) {
   const runtimeEnv = { ...process.env, GENEWAY_GEARJOB_BASE_URL: input.gearJobUrl ?? process.env.GENEWAY_GEARJOB_BASE_URL, GENEWAY_GEARJOB_CREDENTIAL_FILE: gearJobCredential, GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: input.workOrderId, GENEWAY_GEARJOB_HOST_HEADER: input.gearJobHost ?? process.env.GENEWAY_GEARJOB_HOST_HEADER, GENEWAY_GEARJOB_TARGET_IDENTITY: input.gearJobTargetIdentity ?? process.env.GENEWAY_GEARJOB_TARGET_IDENTITY }
   const runtime = readRuntimeConfig(runtimeEnv, root); await validateRuntimeConfig(runtime)
   if (!runtime.source.configured) throw new Error(`GearJob runtime config is not configured: ${runtime.source.error ?? 'unknown'}`)
-  if (runtime.model.provider !== 'zenmux' || runtime.model.model !== 'deepseek/deepseek-v4.1-flash' || !runtime.model.configured) throw new Error('runtime settings must configure ZenMux DeepSeek V4.1 Flash through actual settings env')
+  if (runtime.model.provider !== 'zenmux' || runtime.model.model !== 'deepseek/deepseek-v4.1-flash' || !runtime.model.configured) throw new Error('runtime config must select ZenMux DeepSeek V4.1 Flash with an explicit Geneway credential reference')
   if (process.env.GENEWAY_GEARJOB_BASE_URL && process.env.GENEWAY_GEARJOB_BASE_URL !== runtime.source.baseUrl) throw new Error('conflicting GearJob base URL sources')
   if (process.env.GENEWAY_GEARJOB_CREDENTIAL_FILE && resolve(process.env.GENEWAY_GEARJOB_CREDENTIAL_FILE) !== resolve(gearJobCredential)) throw new Error('conflicting GearJob credential sources')
-  const gearRaw = await readFile(gearJobCredential, 'utf8'), settings = readSettings(process.env), settingsToken = settings?.env?.ANTHROPIC_AUTH_TOKEN
+  const gearRaw = await readFile(gearJobCredential, 'utf8'), modelKey = await readModelCredential(runtime)
   let gearValue; try { gearValue = JSON.parse(gearRaw) } catch { gearValue = gearRaw }
-  const secretNeedles = [...stringsFrom(credential), ...stringsFrom(gearValue), gearRaw, settingsToken, process.env.ZENMUX_API_KEY].filter(value => typeof value === 'string' && value.length >= 8)
+  const secretNeedles = [...stringsFrom(credential), ...stringsFrom(gearValue), gearRaw, modelKey].filter(value => typeof value === 'string' && value.length >= 8)
   return { ...input, record, feishuCredential, gearJobCredential, gearJobUrl: runtime.source.baseUrl, gearJobHost: runtime.source.hostHeader ?? new URL(runtime.source.baseUrl).hostname, runtime, secretNeedles: [...new Set(secretNeedles)] }
 }
 

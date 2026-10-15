@@ -8,7 +8,7 @@ import { CYCLE_TIME_TOOL, GEARJOB_TOOL, getCapability } from './capabilities.mjs
 import { buildAgentPrompt, parseRunResult } from './dsh-runner.mjs'
 import { createObservation } from './domain/work-order.mjs'
 import { connectionSnapshot } from './execution-grant.mjs'
-import { readRuntimeConfig, readSettings } from './runtime-config.mjs'
+import { assertDshHome, readModelCredential, readRuntimeConfig } from './runtime-config.mjs'
 import { createCycleTimeTool } from '../plugins/cycle-time.mjs'
 import { createGearJobWorkOrderTool } from '../plugins/gearjob-work-order.mjs'
 import { COLLABORATION_TOOLS, createCollaborationTools } from '../plugins/collaboration.mjs'
@@ -39,6 +39,7 @@ export function createCollaborationRunner({
   if (!Number.isSafeInteger(agentOptions.maxTokens) || agentOptions.maxTokens < 1 || agentOptions.maxTokens > 4096) throw new Error('collaboration maxTokens must be between 1 and 4096')
   let runtime
   let booting
+  let modelCredential
   let knowledgeFiber
   let knowledgeMounting
   let knowledgeLifecycle = Promise.resolve()
@@ -147,6 +148,7 @@ export function createCollaborationRunner({
       if (runtime) await runtime.shutdown.shutdown(0)
       runtime = undefined
       booting = undefined
+      modelCredential = undefined
     },
   }
 
@@ -158,13 +160,20 @@ export function createCollaborationRunner({
   }
 
   async function boot() {
-    const settingsKey = readSettings()?.env?.ANTHROPIC_AUTH_TOKEN
+    assertDshHome(dshHome)
+    const config = readRuntimeConfig(process.env, workspaceRoot)
+    // Knowledge maintenance and native history can boot without a usable model; requests are gated separately.
+    try { modelCredential = config.model.credentialRef ? await readModelCredential(config) : undefined }
+    catch (error) {
+      if (error?.code !== 'MODEL_NOT_CONFIGURED') throw error
+      modelCredential = undefined
+    }
     const values = {
-      ...process.env,
+      ...Object.fromEntries(['PATH', 'HOME', 'USER', 'LANG', 'LC_ALL', 'TMPDIR'].filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]])),
       ...environment,
       DSH_HOME: dshHome,
       DSH_TELEMETRY_MODE: 'DISABLED',
-      ...(typeof settingsKey === 'string' && settingsKey.trim() ? { ZENMUX_API_KEY: settingsKey } : {}),
+      ...(modelCredential ? { [config.model.credentialEnv]: modelCredential } : {}),
     }
     delete values.GENEWAY_DSH_GRANT_FILE
     const started = await runProfileImpl({ environment: launchEnvironment(values), profile: 'sdk', patchFiles: [patchPath], args: [], resolutionMode: 'runtime' })
@@ -173,6 +182,14 @@ export function createCollaborationRunner({
   }
 
   async function install(ctx) {
+    ctx.on('agent/request', async ({ agent }, next) => {
+      try {
+        await authorizeModelRequest()
+        const proposed = await next()
+        if (proposed.provider !== agentOptions.provider || proposed.model !== agentOptions.model) throw runtimeError('MODEL_NOT_CONFIGURED', '模型路由不可用')
+        return proposed
+      } catch (error) { requestFailures.set(agent, error); throw error }
+    })
     ctx.on('agent/created', ({ agent }) => {
       if (agent.session.header.origin !== 'subagent') return
       const gate = deferred()
@@ -203,6 +220,14 @@ export function createCollaborationRunner({
       if (!binding.allowedTools.includes(execution.name)) return 'Tool is outside the employee collaboration scope'
       return undefined
     })
+  }
+
+  async function authorizeModelRequest() {
+    if (localCapture(agentOptions, environment)) return
+    const config = readRuntimeConfig(process.env, workspaceRoot)
+    if (agentOptions.provider !== config.model.provider || agentOptions.model !== config.model.model) throw runtimeError('MODEL_NOT_CONFIGURED', '模型路由不可用')
+    const current = await readModelCredential(config)
+    if (!modelCredential || current !== modelCredential) throw runtimeError('MODEL_NOT_CONFIGURED', '模型路由不可用')
   }
 
   async function mountKnowledge(ctx) {
@@ -760,7 +785,7 @@ function businessEvents(events) {
 function toolFailure(events) {
   for (const event of events) {
     if (event.type !== 'tool/result') continue
-    const block = event.data?.message?.content?.find(item => item.type === 'tool-result')?.content?.find(item => item.type === 'text')
+    const block = event.data?.message?.content?.find(item => item.type === 'text')
     try {
       const value = JSON.parse(block?.text)
       if (value?.ok === false && ['BUDGET_EXHAUSTED', 'FORBIDDEN', 'CANCELLED', 'UPSTREAM_TIMEOUT', 'UPSTREAM_ERROR', 'KNOWLEDGE_PLUGIN_DISABLED', 'KNOWLEDGE_REFERENCE_INVALID'].includes(value.error?.code)) return value.error
@@ -799,7 +824,18 @@ function untilAbort(promise, signal) {
   })
 }
 function runtimeError(code, message) { return Object.assign(new Error(message), { code }) }
+function localCapture(options, environment) {
+  if (options.provider !== 'geneway-p3-capture' || options.model !== 'p3-runtime-test'
+    || typeof environment.GENEWAY_P3_CAPTURE_KEY !== 'string' || !environment.GENEWAY_P3_CAPTURE_KEY.trim()) return false
+  try {
+    const url = new URL(environment.GENEWAY_P3_CAPTURE_BASE_URL)
+    return url.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(url.hostname)
+      && url.pathname === '/v1' && !url.username && !url.password && !url.search && !url.hash
+  } catch { return false }
+}
+
 function safeRuntimeCause(error) {
+  if (error?.code === 'MODEL_NOT_CONFIGURED') return { code: 'MODEL_NOT_CONFIGURED', message: '模型路由不可用' }
   if (error?.code === 'BUDGET_EXHAUSTED') return { code: 'BUDGET_EXHAUSTED', message: '协作模型请求预算已耗尽' }
   if (error?.code === 'FORBIDDEN') return { code: 'FORBIDDEN', message: '当前执行授权已失效' }
   if (error?.code === 'KNOWLEDGE_PLUGIN_DISABLED') return { code: 'KNOWLEDGE_PLUGIN_DISABLED', message: '知识能力已停用' }

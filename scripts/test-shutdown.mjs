@@ -75,6 +75,7 @@ const child = spawn(process.execPath, ['src/server.mjs'], {
     GENEWAY_STATE: statePath,
     GENEWAY_AUTH_FILE: join(root, 'auth.json'),
     GENEWAY_DSH_HOME: join(root, 'dsh'),
+    DSH_HOME: join(root, 'dsh'),
     GENEWAY_CONNECTION_CATALOG: connectionCatalog,
     GENEWAY_GEARJOB_BASE_URL: '',
     GENEWAY_GEARJOB_CREDENTIAL_FILE: '',

@@ -15,7 +15,7 @@ import {
   WORK_ORDER_DEVICE_CORRELATION_TOOL,
 } from './capabilities.mjs'
 import { connectionSnapshot, correlationConnectionSnapshots, correlationMappingBinding } from './execution-grant.mjs'
-import { readRuntimeConfig, readSettings } from './runtime-config.mjs'
+import { readModelCredential, readRuntimeConfig } from './runtime-config.mjs'
 
 export { GEARJOB_TOOL, WORK_ORDER_DEVICE_CORRELATION_TOOL }
 
@@ -23,6 +23,7 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
   const active = new Map()
   const sessions = new Map()
   const grants = new WeakMap()
+  const modelCredentials = new WeakMap()
   const patch = resolve(root, 'config', 'p1-runtime.patch.yml')
 
   return {
@@ -55,6 +56,8 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       let grantFiles = harness ? grants.get(harness) : undefined
 
       try {
+        const modelCredential = config.model.provider === 'zenmux' || config.model.credentialRef ? await readModelCredential(config) : undefined
+        if (harness && modelCredential !== modelCredentials.get(harness)) throw runnerError('MODEL_NOT_CONFIGURED', '模型路由不可用')
         if (!harness) {
           const grantDirectory = join(config.dshHome, 'grants')
           await mkdir(grantDirectory, { recursive: true, mode: 0o700 })
@@ -71,12 +74,13 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
             cwd: root,
             provider: config.model.provider,
             model: config.model.model,
-            env: childEnvironment(config, grantFiles.tool, grantFiles.request),
+            env: childEnvironment(config, grantFiles.tool, grantFiles.request, modelCredential),
             initializeTimeoutMs: 15_000,
             requestTimeoutMs: 120_000,
           })
           runState.harness = harness
           grants.set(harness, grantFiles)
+          modelCredentials.set(harness, modelCredential)
         }
         if (runState.cancelled) throw cancelledError()
         const requestGrant = executionGrant({ executionId, operation, capability, input: requestInput, metadata, supplied: options.grant, config })
@@ -141,6 +145,7 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
     for (const [sessionId, item] of sessions) if (item.harness === harness) sessions.delete(sessionId)
     const grantFiles = grants.get(harness)
     grants.delete(harness)
+    modelCredentials.delete(harness)
     if (grantFiles) await removeGrantFiles(grantFiles)
   }
 }
@@ -172,11 +177,11 @@ export function parseRunResult(result, options = {}) {
   const parsedInput = validateCapabilityInput(capabilityId, argumentsValue)
   if (!parsedInput.ok || !isDeepStrictEqual(parsedInput.input, validated.input)) throw runnerError('TOOL_CHAIN_INVALID', '工具参数与能力输入不匹配')
   const message = toolResult?.message
-  if (!message || message.source?.kind !== 'tool' || message.source.callId !== call.callId) throw runnerError('TOOL_CHAIN_INVALID', '工具结果缺失或 callId 不匹配')
+  if (!message || message.role !== 'tool' || message.source?.kind !== 'tool' || message.source.callId !== call.callId || message.toolCallId !== call.callId) throw runnerError('TOOL_CHAIN_INVALID', '工具结果缺失或 callId 不匹配')
   const content = message.content
-  if (!Array.isArray(content) || content.length !== 1 || content[0]?.type !== 'tool-result' || content[0].isError !== false || content[0].toolCallId !== call.callId || !Array.isArray(content[0].content) || content[0].content.length !== 1 || content[0].content[0]?.type !== 'text') throw runnerError('TOOL_CHAIN_INVALID', '工具结果结构不符合合同')
+  if (message.isError !== false || !Array.isArray(content) || content.length !== 1 || content[0]?.type !== 'text') throw runnerError('TOOL_CHAIN_INVALID', '工具结果结构不符合合同')
   let value
-  try { value = JSON.parse(content[0].content[0].text) } catch { throw runnerError('TOOL_CHAIN_INVALID', '工具结果不是 JSON') }
+  try { value = JSON.parse(content[0].text) } catch { throw runnerError('TOOL_CHAIN_INVALID', '工具结果不是 JSON') }
   const parsed = parseCapabilityToolResult(capabilityId, value, validated.input)
   const explanation = text(result?.finalResponse)
   if (!explanation) throw runnerError('TOOL_CHAIN_INVALID', '同一 DSH interval 未产生说明')
@@ -304,16 +309,15 @@ function requestAuthorizationFailed(result) {
     && event.data.reason.error?.message === '执行授权已失效')
 }
 
-function childEnvironment(config, grantFile, requestGrantFile) {
-  const settings = readSettings()
-  const settingsEnv = settings?.env && typeof settings.env === 'object' ? settings.env : {}
+function childEnvironment(config, grantFile, requestGrantFile, modelCredential) {
   const env = {
+    DSH_HOME: config.dshHome,
     DSH_TELEMETRY_MODE: 'DISABLED',
     GENEWAY_DSH_GRANT_FILE: grantFile,
     GENEWAY_DSH_REQUEST_GRANT_FILE: requestGrantFile,
   }
   for (const key of ['PATH', 'HOME', 'USER', 'LANG', 'LC_ALL', 'TMPDIR']) if (typeof process.env[key] === 'string') env[key] = process.env[key]
-  if (typeof settingsEnv.ANTHROPIC_AUTH_TOKEN === 'string' && settingsEnv.ANTHROPIC_AUTH_TOKEN.trim()) env.ZENMUX_API_KEY = settingsEnv.ANTHROPIC_AUTH_TOKEN
+  if (modelCredential) env[config.model.credentialEnv ?? 'ZENMUX_API_KEY'] = modelCredential
   return env
 }
 

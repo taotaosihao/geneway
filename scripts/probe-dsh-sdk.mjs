@@ -14,7 +14,7 @@ const client = new HarnessClient({
   dshHome,
   processCwd: root,
   initializeTimeoutMs: 10_000,
-  env: { ...process.env, DSH_TELEMETRY_MODE: 'DISABLED' },
+  env: { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' },
 })
 
 try {

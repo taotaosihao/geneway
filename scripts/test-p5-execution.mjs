@@ -366,7 +366,7 @@ async function actualProfileGuardChecks() {
   const harness = new DeepSeekHarness({
     profile: 'sdk', patches: [join(root, 'config/p1-runtime.patch.yml'), networkPatch], dshHome,
     processCwd: root, cwd: root, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash',
-    env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: process.env.LANG, DSH_TELEMETRY_MODE: 'DISABLED', ZENMUX_API_KEY: 'guard-must-stop-before-provider' },
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: process.env.LANG, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED', ZENMUX_API_KEY: 'guard-must-stop-before-provider' },
     initializeTimeoutMs: 15_000, requestTimeoutMs: 120_000,
   })
   try {

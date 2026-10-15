@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { accessSync, constants } from 'node:fs'
+import { accessSync, constants, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -15,9 +16,10 @@ try {
   process.exit(2)
 }
 
+const dshHome = mkdtempSync(join(tmpdir(), 'geneway-dsh-plugin-'))
 const child = spawn(dshBin, ['--profile', 'sdk', '--patch', patch], {
   cwd: root,
-  env: { ...process.env, DSH_TELEMETRY_MODE: 'DISABLED' },
+  env: { ...process.env, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED' },
   stdio: ['pipe', 'pipe', 'pipe'],
 })
 let stdout = ''
@@ -31,6 +33,7 @@ const timeout = setTimeout(() => {
 
 child.on('close', (code, signal) => {
   clearTimeout(timeout)
+  rmSync(dshHome, { recursive: true, force: true })
   const result = { code, signal, stdout, stderr }
   if (!stderr.includes('GENEWAY_P1_DSH_TOOL_RESULT')) {
     console.error(JSON.stringify(result, null, 2))

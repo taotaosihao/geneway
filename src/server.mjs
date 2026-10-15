@@ -38,6 +38,7 @@ export async function start() {
   if (origin.protocol !== 'http:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('GENEWAY_TRUSTED_ORIGIN 必须匹配 P2 明文 loopback HTTP 服务')
 
   const runtimeConfig = readRuntimeConfig({ ...process.env, GENEWAY_STATE: statePath }, root)
+  process.env.DSH_HOME = runtimeConfig.dshHome
   const gearJobEventConfig = await readGearJobEventRuntimeConfig(process.env, root)
   const store = createFileStore(statePath)
   const connectionCatalog = await readConnectionCatalog(runtimeConfig.connectionCatalogFile, root)

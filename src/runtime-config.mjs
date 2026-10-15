@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { resolveCredentialFile } from './execution-grant.mjs'
 
@@ -7,8 +7,6 @@ const ZENMUX_MODEL = 'deepseek/deepseek-v4.1-flash'
 const ZENMUX_BASE_URL = 'https://zenmux.ai/api/v1'
 
 export function readRuntimeConfig(env = process.env, root = process.cwd()) {
-  const settings = readSettings(env)
-  const settingsEnv = settings?.env && typeof settings.env === 'object' ? settings.env : {}
   const baseUrl = nonEmpty(env.GENEWAY_GEARJOB_BASE_URL)
   const credentialFile = nonEmpty(env.GENEWAY_GEARJOB_CREDENTIAL_FILE)
   const explicitSecretRoot = nonEmpty(env.GENEWAY_SECRET_ROOT)
@@ -22,6 +20,7 @@ export function readRuntimeConfig(env = process.env, root = process.cwd()) {
   const model = ZENMUX_MODEL
   const zenmuxBaseUrl = ZENMUX_BASE_URL
   const provider = ZENMUX_PROVIDER
+  const modelCredentialRef = nonEmpty(env.GENEWAY_MODEL_CREDENTIAL_REF)
   const hostHeader = nonEmpty(env.GENEWAY_GEARJOB_HOST_HEADER)
   const targetIdentity = nonEmpty(env.GENEWAY_GEARJOB_TARGET_IDENTITY) ?? safeHost(baseUrl)
 
@@ -67,7 +66,9 @@ export function readRuntimeConfig(env = process.env, root = process.cwd()) {
       model,
       baseUrl: zenmuxBaseUrl,
       credentialEnv: 'ZENMUX_API_KEY',
-      configured: Boolean(nonEmpty(settingsEnv.ANTHROPIC_AUTH_TOKEN)),
+      credentialRef: modelCredentialRef,
+      secretRoot,
+      configured: Boolean(modelCredentialRef),
     },
     dshHome,
     stateFile,
@@ -77,18 +78,27 @@ export function readRuntimeConfig(env = process.env, root = process.cwd()) {
   }
 }
 
-export function readSettings(env = process.env) {
-  const settingsPath = nonEmpty(env.GENEWAY_ZENMUX_SETTINGS_FILE) ?? join(env.HOME ?? dirname(process.cwd()), '.claude', 'settings.json')
+export async function readModelCredential(config = readRuntimeConfig()) {
   try {
-    return JSON.parse(readFileSync(settingsPath, 'utf8'))
+    const filePath = await resolveCredentialFile(config.model.secretRoot ?? config.secretRoot, config.model.credentialRef)
+    const key = (await readFile(filePath, 'utf8')).trim()
+    if (!key || /\s/.test(key)) throw new Error('invalid-key')
+    return key
   } catch {
-    return undefined
+    throw Object.assign(new Error('模型凭据不可用，请配置 Geneway 服务端秘密引用'), { code: 'MODEL_NOT_CONFIGURED' })
+  }
+}
+
+export function assertDshHome(dshHome, env = process.env) {
+  const home = nonEmpty(env.DSH_HOME)
+  if (!home || !isAbsolute(home) || resolve(home) !== resolve(dshHome)) {
+    throw Object.assign(new Error('DSH_HOME 必须与当前 Geneway 运行目录一致'), { code: 'RUNTIME_HOME_MISMATCH' })
   }
 }
 
 export async function validateRuntimeConfig(config) {
-  if (!config?.source?.configured) return config
-  await resolveCredentialFile(config.source.secretRoot, config.source.credentialRef)
+  if (config?.source?.configured) await resolveCredentialFile(config.source.secretRoot, config.source.credentialRef)
+  if (config?.model?.configured) await readModelCredential(config)
   return config
 }
 

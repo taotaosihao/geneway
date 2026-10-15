@@ -12,6 +12,7 @@ import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService, ERROR_STATUS } from '../src/work-service.mjs'
 
 const temp = await mkdtemp(join(tmpdir(), 'geneway-p3-http-ui-'))
+process.env.DSH_HOME = join(temp, 'dsh')
 const store = createFileStore(join(temp, 'state.json'))
 const authPath = join(temp, 'auth.json')
 const origin = `http://127.0.0.1:${await freePort()}`

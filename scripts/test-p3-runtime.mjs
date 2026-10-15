@@ -10,9 +10,10 @@ import { createKnowledgeService } from '../src/knowledge-service.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 
 const temp = await mkdtemp(join(tmpdir(), 'geneway-p3-runtime-'))
+process.env.DSH_HOME = join(temp, 'dsh')
 const capture = await startCapture()
 const previousUrl = process.env.GENEWAY_P3_CAPTURE_BASE_URL
-let runtimeFailure
+let runtimeFailure, runner, service, failure
 process.env.GENEWAY_P3_CAPTURE_BASE_URL = `${capture.address}/v1`
 try {
   const store = createFileStore(join(temp, 'state.json'))
@@ -22,7 +23,7 @@ try {
   await writeFile(join(temp, 'secrets', gearConnection.credentialRef), 'local-test-only', { mode: 0o600 })
   const schemaSnapshots = []
   const runtimeHooks = { onKnowledgeSchemas: names => schemaSnapshots.push(names) }
-  const runner = createCollaborationRunner({
+  runner = createCollaborationRunner({
     store,
     root: process.cwd(),
     dshHome: join(temp, 'dsh'),
@@ -32,7 +33,7 @@ try {
     onError: error => { runtimeFailure = error },
     testHooks: runtimeHooks,
   })
-  const service = createWorkService({ store, collaborationRunner: runner, connectionCatalog: [gearConnection] })
+  service = createWorkService({ store, collaborationRunner: runner, connectionCatalog: [gearConnection] })
   const actor = { id: 'member-owner' }
   const knowledgeIds = ['runtime', 'disposable', 'sibling']
   const knowledge = createKnowledgeService({ store, idFactory: () => knowledgeIds.shift() })
@@ -515,13 +516,18 @@ try {
   await new Promise(resolve => setTimeout(resolve, 30))
   assert.equal(capture.requests, requestsBeforeRestart)
 
-  console.log('P3 collaboration runtime checks passed')
+} catch (error) {
+  failure = error
 } finally {
+  for (const cleanup of [() => service?.close(), () => runner?.close(), () => capture.close(), () => rm(temp, { recursive: true, force: true })]) {
+    try { await cleanup() }
+    catch (error) { failure = failure ? new AggregateError([failure, error], 'P3 runtime failed and cleanup also failed', { cause: failure }) : error }
+  }
   if (previousUrl === undefined) delete process.env.GENEWAY_P3_CAPTURE_BASE_URL
   else process.env.GENEWAY_P3_CAPTURE_BASE_URL = previousUrl
-  await capture.close()
-  await rm(temp, { recursive: true, force: true })
 }
+if (failure) throw failure
+console.log('P3 collaboration runtime checks passed')
 
 function seed(state, gearConnection) {
   const now = '2026-09-19T00:00:00.000Z'

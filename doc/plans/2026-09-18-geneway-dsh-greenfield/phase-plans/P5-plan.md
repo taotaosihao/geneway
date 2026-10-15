@@ -1,253 +1,149 @@
-# P5 定时、事件与主动持续工作详细计划
+# P5-K1：Kivo TPM 事件与主动持续工作
 
-> **合同 v4.3 注记（2026-10-15）**：P5 PASS 结论成立于 DSH `0.1.6-alpha.2`。v4.3 下 P4-U0 只回归现有 P5 路径；通知目标改为成员渠道身份（不随渠道会话轮换失效）、纳入微信目标及其“失败/待核对”语义，由 P4 重规划落实；“P4 企业微信 deferred”与真人最终验收的表述已由合同 §5.4（含渠道模拟验收）取代。
+> 合同 v4.4 当前执行计划。2026-10-16 07:40（Asia/Shanghai）形成，早于 P5-K1 探针、代码与服务运行。状态：**独立过度设计与阶段计划复审均通过；按 §9 依赖进入实施，运行验收尚未开始**。
+>
+> v4.3 的 P5 PASS 仅证明旧 DSH / GearJob 路径；原计划与历史证据保留在 Git 历史，不是 Kivo 验收。P4 已由用户于 2026-10-16 07:21 确认功能通过；普通界面逻辑后置至全量功能实施后统一调整，权限、安全、误操作和必需入口不可达仍当期解决。
 
-> **合同 v4.4 注记（2026-10-15）**：业务系统由 GearJob 改为 Kivo TPM。T7b 的 GearJob after-commit 事件证据转为历史；P4 通过后执行 P5-K1，在本计划内原位规划并以 Kivo TPM 签名 webhook 重新验证 J8 事件路径与 AC-18 事件部分，定时路径只回归（合同 §5.6、§9）。
+## 1. 目标、基线与权限
 
-状态：**P5 PASS。冻结候选 `9808772cc5b1a4a8487c969ddcc0f7e9e179eb77` 已在同一正式运行中通过 T7a 真实每日定时与 T7b 真实 GearJob after-commit 事件主链；真实 ZenMux DeepSeek、DSH、GearJob synthetic external-test、飞书业务回读、恢复/重放/冲突/撤销和清理边界均成立。最终 MP4/report/离线手册已通过独立正确性、视觉可操作性与 Astra/Ponytail 复审，并用 Geneway 产品飞书 app 发送后逐条回读。P4 企业微信与真人最终验收仍为 deferred，P5 PASS 不推导部署、发布或生产验收。**
+按合同 §5.6、§9 完成 J8 / AC-18 的 Kivo TPM 签名 webhook 路径：真实受权的人类 HTTP 更新 synthetic 单据，经业务事务、outbox、真实 mes-worker 投递，Geneway 持久受理并在 10 秒内返回 2xx；异步通过当前授权 MCP 读取当前事实、创建有界工作、由 DSH 分析，并在 Web 和模拟渠道回读。兼容原每日定时语义，重新验证 Kivo 目标与通知。
 
-基线：`283771c5240799360f9c0d5f0d439e440fdaa4ad`（P4 飞书 runtime 切片）。P4 企业微信、真实手机 HTTPS 和阶段末真人验收仍为 deferred，P4 不是 PASS。
+- Geneway：`/home/gewu/.devspace/worktrees/geneway-f4222c66`，`rebuild/dsh-greenfield`，实施前基线 `5d1a1efa76bb6ee38387d880561043fd6832c8ca`。
+- Kivo：`/home/gewu/.devspace/worktrees/kivo-geneway-mcp`，`codex/geneway-kivo-mcp`，基线 `c429483ac0d423cc1092c1d9d6d517dc4c910e44`。只用此独立 clone；不得触及共享 Kivo 工作区或改写其 refs。
+- 只在本机独立数据库、Redis、端口和 synthetic A/B 实例验证；仅 loopback。只本地提交，不 push、PR、merge、部署或发布。不向真实成员发产品消息，不扫描联系人或群。
+- 不读改暂存清理 `ui-sketches*`。秘密只在服务端独立 secret store；不从旧项目扫描。普通管理员不能读取成员正文。
+- 模型固定 `deepseek/deepseek-v4.1-flash`，无 fallback；渠道为模拟验收，经实际 iLink 和飞书通道代码。
+- P5 不开放机器写入、不增加通用事件总线、第二队列、第二 MCP、补历史事件工具、任意 cron、字段过滤 DSL 或部署入口。P6 的创建维修单仍单独规划实施。
 
-本计划是 P5 唯一有效计划。它不授权修改 GearJob/Frappe 产品源码、新增网络暴露、生产写入、部署或发布。
+## 2. Team Astra 规划与审查门
 
-## 1. 目标、关键旅程与非目标
+两名独立只读规划者先分别形成方案，随后交换分歧并形成共识：
 
-P5 交付 G7、J8 和 AC-18：已授权成员为明确 GearJob 测试工单创建一条每日定时规则和一条真实工单更新事件规则。每次合法发生经既有 work service 读取、分析并保存结果，Web 始终可回读，可选通知只发本人已验证飞书私聊。
+- `/root/p5_k1_product_planner`：Astra/high，产品语义、旅程和验收。
+- `/root/p5_k1_engineering_planner`：Astra/high，生产者、受理、安全和恢复。
 
-两条规则针对同一工单时仍产生两个独立工作，不按工单号合并。事件只说明“为什么触发”；业务结果必须由 DSH 工具重新读取当前源事实，页面分开显示事件时间与查询时间。
+主代理汇总本文件，两个 planner 均未实施或启动探针。共识包括：目标单据 revision 是唯一变化依据；受理不等 MCP；固定 60 秒对账；激活 baseline/CAS；单 store 原子关联；严格来源配置；备份绑定来源配置；精确 action 回声识别及 P6 真实写链界限。无未决产品分歧。
 
-P5 不实现：通用 Workflow/DSL、事件总线、第二任务队列、模型轮询、任意 cron/时区、群发、跨成员自动共享、无人批准写入、通用补偿平台或 P6 业务动作。
+独立审查者必须未参与规划。两名审查者接收相同合同、当前决策、计划和源码候选，首轮互不提供对方结论或预设 PASS：一名审查复杂度，一名审查合同、正确性和验收闭合。争议复杂度先做有界消融，再修订原位计划；不能以实现代替计划证明。只有正式复审通过才开放下表实施任务。用户保留阶段最终验收权。
 
-## 2. Team Astra 规划、分歧与唯一裁决
+独立过度设计审查 `/root/p5_k1_overdesign_review` 已通过只读有界消融：删除持久入站、对账或版本/activation 会破坏明确验收；另建队列、listener、trace 表和配置框架无必要。正式阶段审查 `/root/p5_k1_plan_phase_review` 首轮指出 active 无 occurrence / ACK pending 时改绑的基线缺口。两名原 planner 再次独立判断后形成“仅 draft 改身份”的共识，已在 §3/§10 原位闭合；过度设计审查也确认该变体避免活动改绑迁移事务，最终正确性复审已通过，审查内容 SHA-256 为 `ac0d5ebdd757aaf3cf80e59367282b40ccf7762e7b402efea6c875603746f402`（随后仅更新审查状态）。独立复审仅证明计划就绪；此过程未运行探针或实施。
 
-### 2.1 独立规划者
+## 3. 用户行为与规则边界
 
-- 产品/UX：`/root/p5_astra_product_plan`，`gpt-6-astra` / high，只读。
-- 工程/安全：`/root/p5_astra_engineering_plan`，`gpt-6-astra` / high，只读。
+成员为明确的 Kivo TPM 单据选择“每天核对”或“跟进该单据新版本，核对当前状态”。输入为 `{recordType, reference}`，仅 `repair | maintenance | inspection`，绑定明确可信 connection，不可按同名单位自动换实例。
 
-两者先独立检查合同、P1–P4 代码/计划、store/work/channel/runtime/backup 和本机 Frappe Webhook，再交换关于定时语义、预算、真实事件、恢复与 P4 顺序限制的实质分歧。
+事件规则跟进整个目标单据版本，不做字段过滤或字段投影。Kivo 当前业务事件覆盖维修 `status/executorId`、保养 `status/assigneeId`、点检 `status/startedAt/completedAt`；其他更新由对账发现。界面说明事件可及时唤醒、每 60 秒发起当前状态核对，不能承诺所有目标在 60 秒内完成或逐条历史变更恢复。相关设备版本变化不触发单据规则。
 
-T0 阻塞解除后，`/root/p5_t7b_product_plan` 与 `/root/p5_t7b_engineering_plan` 又以当前代码、GearJob `9ea23fc0`、无临时修补 T0 证据和 T7a 制品为输入独立复算 T3b/T7b。两者收敛为：复用现有 automation/work/channel 单事实链，只增加一个原生窄 receiver 和 occurrence 上的事件事实；不增加队列、事件总线、通用 webhook 框架、第二持久层或 GearJob 改造。
+首次启用或恢复时，MCP 读取稳定 recordId 和 `records[0].facts.revision = R`；随后 CAS 规则配置 revision/status 并复核当前权限，才写 active、activationId 和 baseline R。读失败保持 draft/paused。activationId 可用本次激活配置 revision；handledRevision 独立推进，不改变用户配置 revision。GET 与 CAS 之间的 R+1 必须由后续事件/对账发现，不按 occurredAt 早于 CAS 丢弃。
 
-### 2.2 主控裁决
+仅 draft 规则允许修改身份字段：目标 `recordType/reference`、connection 及可信 source 身份、employee/skill、`trigger.kind`。首次成功激活后身份固定，不以是否已有 occurrence 为条件；active 尚无 occurrence、已持久 ACK 尚未生成 occurrence、paused 均不得改绑。更换身份须新建草稿，不自动停用旧规则。身份比较只取上述字段，不比较整个 trigger；每日 `HH:mm` 不是身份。
 
-1. 定时规则只支持“每天 `HH:mm`，`Asia/Shanghai`”。不实现一次性、固定间隔、cron、其他时区或 DST 解释器。定时发生身份为 `ruleId + 上海当地日期`，同日修改/恢复/重启不会再自动执行。
-   timer 醒来后重读墙钟和规则；在计划时刻后 60 秒内可受理为正常调度延迟，超过 60 秒则记 `skipped: missed-window`。进程停机、睡眠或时钟前跳跨过窗口均不补跑，直接计算下一个未来日期。
-2. 每条规则的自动执行预算是**累计 1–10 次**，默认 10；成功原子预约新工作即消耗，失败/停止/中断不返还，重投/重叠跳过/纯通知重试不消耗。不增加每日重置任务或跨日竞态；界面明确“累计最多 N 次”。
-3. 单次自动工作 120 秒硬截止，全局自动并发上限 2；不根据价格做伪精确预算。
-4. 同规则上一工作活动时，新发生记为 `skipped: overlap`；容量满时记 `skipped: capacity`。不排队、不合并、不延后暗中执行。
-5. 漏定时默认不补跑；恢复后只计算下一个未来时刻。成员可显式“现在核对一次”，它读当前事实、消耗一次预算，不冒充历史快照。
-6. 暂停规则阻止未实际派发的模型/工具步骤和待发自动通知，不伪称撤回已发请求。停止本次工作、暂停未来规则和取消待发通知是三个独立动作。
-7. P4 计划 §10 原“不提前进入 P5 实施”顺序限制已由 `user-message:2026-09-20-approve-p5-docker-bridge-callback` 明确取代：P4 企业微信/真实手机/最终验收保持 deferred且 P4 仍不 PASS，但可先实施 P5 独立路径。该决定不改写 P4 完成条件。
+首次启用的 MCP 读取或 CAS 失败保持 draft，可修正身份后重新启用；读取基线期间若配置已改，旧 revision CAS 必须失败，不得把旧目标 baseline 写给新目标。恢复失败保持原 paused，不新增“从未激活但 paused”状态，不因缺少 occurrence 或 activation 证据自动解锁暂停规则。
 
-双 Astra 对业务场景、真实事件、单 store、无队列、发送复权、恢复和 UI 层级已收敛。产品 planner 最终主张每日重置 1–10 次，工程 planner 最终主张累计 1–10 次，两者不构成预算共识。主控依合同的“有界自动任务”和 Ponytail 最小实现选择累计预算：它提供整个授权周期的硬上限，不引入每日重置与跨日竞态。规划收敛结论为 `CONSENSUS_WITH_RESERVATIONS`；当时的顺序保留项已由上述用户决定闭合。
+累计预算、本人通知目的地和每日 `HH:mm` 按现有权限、配置 revision、生效时间及日期去重规则修改。非身份编辑不更换 activationId、不重置 baseline/handledRevision，也不单凭配置 revision 变化终结同 activation 已 ACK 的 pending。pending 原子认领采用最新预算、通知身份及当前授权，记录当时配置 revision；已有 occurrence/work 保持原关联。通知修改沿用旧投递失效规则，不迁移旧消息或重跑工作；预算终态跳过不因后来加预算复活。
 
-### 2.3 独立过度设计审查与有界消融
+旧 GearJob 规则只保留历史、暂停和撤销入口，不能映射为 Kivo 或重新启用。暂停后恢复必须显式操作并建立新 baseline；暂停期间不补历史。
 
-独立 reviewer：`/root/p4_overdesign_review`，只读，未参与 P5 双 Astra 规划、主控写作或正确性 phase review。首轮找到 rule 的 capability/泛化 input/usedRuns/nextDueAt 和 occurrence 的 owner/snapshot/execution/五态及 work 反向引用等重复权威。修订后最终结论 **PASS / Lean already. Ship.**
+保留原有边界：
 
-有界消融保留规则与 occurrence 两组合同必需事实，但把 capability/model/已用次数/下次时间/work 反向来源改为从现有 Skill/employee/occurrence/trigger 和单向 `occurrence.workId` 派生；occurrence 仅保留触发事实与 `workId` 或 `skipped|blocked + reason`，删除第二运行状态机。保留 `maxRuns`、120 秒、并发 2、60 秒到时窗口、event active-window、OS `flock`、恢复、MP4/report/Lark，因为删除任一项都会损害有界运行、去重、撤权、单 owner、数据完整或用户明确的验收材料要求。
+- 每日只支持上海 `HH:mm`，到时 60 秒窗口；`ruleId + 当地日期` 去重，漏定时不补，重启或同日编辑不重复。
+- 累计预算 1–10 次，默认 10；创建并原子关联 work 才消耗；失败、停止、中断不返还。纯读取、重放、回声和通知重试不消耗。
+- 单次 120 秒硬截止，全局自动并发 2。overlap/capacity/budget 为终态跳过，不排队或暗中补跑。
+- “现在核对一次”读取当前事实并遵守预算，不冒充历史快照。
+- 停止本次、暂停未来和取消待发通知是三个独立动作。已发出的外部请求不伪称已撤回。
 
-## 3. 真实 GearJob 事件与 T0 停止门
+## 4. 可信来源与窄接收入口
 
-事件源选用本机完整 GearJob/Frappe 测试实例的标准 `Webhook`，监听团队自建 `external-test / synthetic` Work Order 的 `on_update`。不修改 GearJob/Frappe 产品源码。
+复用 Web loopback server 的固定 `POST /api/events/kivo/:sourceId`；在 Cookie 认证前独立执行严格 HMAC 路径。automation owner 成功取得后才 listen，未持有 owner 不受理。不得增加第二 listener、端口或泛化 webhook 框架。
 
-Webhook 仅携带固定来源、event kind、DocType、`name`、`modified`。使用 `X-Frappe-Webhook-Signature = base64(HMAC-SHA256(rawBody))`；必须对真实原始字节验签，不得 parse 后重序列化再验签。发生身份为 `ruleId + sourceId + eventKind + doctype + recordId + sourceRevision`，不含当前规则 revision，避免旧事件在编辑后重新执行。
+唯一配置固定在 `${runtimeConfig.dataRoot}/event-sources.json`，dataRoot 是 stateFile 所在目录。runtime 与备份共用严格 loader；不提供可覆盖路径环境变量、CLI 或 state 内副本。每个 source 明确映射 connection、可信 MCP resource/source instance、signingSecretRef、允许上游 subscription ids 和 enabled。body 中自述的来源字符串不能建立信任。缺失、停用或失效来源不受理事件；每日定时独立。
 
-规则每次首次启用、恢复或修改触发/对象时，服务端设置新的 `eventAcceptAfter`。Frappe `modified` 按已验证的源站点时区和精度转为唯一 instant；只接受 `modified >= eventAcceptAfter` 的新发生。暂停期间产生但恢复后才延迟到达的事件记为 `skipped: before-active-window`，不派发；时区、精度、时钟偏差或解析无法证明时 fail closed 为 `blocked: source-time-unverifiable`。不用接收时间冒充来源发生时间。
+签名遵从真实 Kivo sender：`whsec_` 后 base64 解码密钥，`v1` HMAC-SHA256 over `id.timestamp.rawBody`，常量时间比较。只对原始 bytes 验签；header 唯一、delivery id 与 body 一致、时间戳容差 ±300 秒。初始 body 上限 64 KiB、读 body 截止 5 秒，T0 用真实 payload 验证容量，不凭空扩大。只接收严格 `generic_json v2 / business_event`，拒绝 v1、错误对象、版本、时间、来源或订阅。展示 message/link 不进入模型或目标选择。
 
-T0 必须证明：
+同 deliveryId 同 raw digest 返回既有受理结果；不同 digest 返回 409。digest 不含签名时间 header，合法重新签名不改变内容身份。同 eventId 的不同 delivery 允许 message、basis、display、link 和上游 rule 等展示/投递差异；业务 typed fingerprint 冲突返回 409。fingerprint 包含可信来源/adapter、kind/version、对象身份、revision、occurredAt、trace/actor/action、before/after 和安全相关 subject 身份；label 不充当业务身份。
 
-1. 实际站点/容器/代码版本和可配置的标准 Webhook；
-2. 普通 Frappe 文档保存提交后才入站，回滚事务不触发工作；
-3. 真实 raw bytes、签名、`name + modified + event`和源日志与 occurrence 对应，并证明源站点时区、`modified` 精度及与 Geneway 时钟偏差可用于 active-window 判定；
-4. 响应丢失/5xx 导致的源重投只命中同一 occurrence；同身份不同 payload digest 拒绝；
-5. 连续合法修改产生不同稳定 `modified`；
-6. GearJob 容器到 Geneway 窄接收入口的真实网络路径，不把两个 `localhost` 当成同一网络空间。
+## 5. 持久受理与异步处理
 
-若需新增主机监听、反向代理、容器网络或防火墙变更，先停在对应授权门。after-commit、签名、稳定 revision 或网络任一失败，暂停事件分支并返回双 Astra，不以脚本直接 POST 代替真实事件。
+复用唯一 file store，增加窄入站集合：每个 source+eventId 一条 canonical 事件，包含最小 typed facts/fingerprint、deliveries 的 `{id, rawDigest}`，以及首次受理时 active 规则的 targets `{ruleId, activationId, pending 或终态 occurrenceRef/reason}`。同事件后续 delivery 不扩展到后来启用的规则；首次无 active target 永久 ignored。
 
-### 3.1 T0 实测结论与事件分支阻塞
+在 store durable sync、rename、directory sync 后才返回 2xx，正常须小于 10 秒；绝不等待 15 秒 MCP 或模型。存储失败不虚报成功。Kivo 503/响应丢失可能进入 unknown 而不重投，必须靠对账补偿，不能宣称生产者必然重试。
 
-候选 `6cd2934` 的窄入口探针已通过独立正确性和 Ponytail 复核。2026-09-20 的真实受控运行使用标准 Frappe `Webhook`、真实 `long` worker 和 Docker bridge `172.20.0.5 → 172.20.0.1:39471`，取得以下条件性结论：
+异步后处理与定时对账共享 claim：`ruleId + 可信 source instance + recordType + objectId + 当前 MCP revision`。事件 revision 为 r，当前查询 R>r 时最多生成一次 R 工作，并分别展示事件时间/版本与查询时间/版本。当前 R<r 保持 pending、等待后续周期；低于已处理版本则阻断，不倒退。相同版本由 webhook/对账同时发现，也只能关联一次工作。
 
-- 三次提交产生三个唯一且按微秒递增的 `modified`；首次在 occurrence `fsync` 后返回 503，Frappe 重投命中同一 occurrence；事务 rollback 后约 4 秒无新事件，随后提交再产生新 occurrence。
-- Frappe `Webhook Request Log` 去敏汇总为四次请求：两次 accepted、一次 replayed、一次 retry；default 队列四个历史 job 逐 ID 前后不变，测试前为空的 `long` 队列最终为空。
-- 探针、worker、Webhook、synthetic Work Order、Request Log、RQ 测试 job、secret 和容器临时文件均已清理；正式证据保存在 workflow artifact，不进入 Git。
-- 源站 `modified` 为 6 位小数。Frappe 系统时区为 `Asia/Chongqing`，当前与宿主 `+08:00` 一致；实现必须按已验证源时区解析，不能因产品定时采用 `Asia/Shanghai` 就改写来源时区。
+work/occurrence、handledRevision、target 终态在同一 store.update 中闭合。每个 accepted target 必须有可解释 pending 或终态；不能先推进 handledRevision 后丢 work。首次目标固定于 activation，暂停、恢复、撤销或删除后的旧 pending 不复活。
 
-该运行仅在临时 console/worker 进程内恢复当前 redis-py `Pipeline.execute_command` 的原始分支语义后成立。当前 GearJob `read_only_cache.py` 先在 `redis.Redis` 保存同名属性，再用继承敏感的 `hasattr(Pipeline, ...)` 判断，导致 Pipeline 自身原方法未被保存；未修补环境会在入队或 RQ 清理时失败。现有授权明确不允许修改 GearJob/Frappe 产品源码，因此：
+固定 60 秒对账读取当前目标版本，不做快速重试或历史补取。断线跨过多个版本最多补一次最新状态；不得编造每个中间 transition。
 
-- T0 接口、HMAC、稳定 revision、bridge 和受控 Frappe 语义结论可供 T1/T2/定时分支使用；
-- 无临时修补的真实事件能力为 `CANNOT_VERIFY`，事件 listener/adapter 不进入产品 runtime，事件 API/UI 不得创建或启用规则；
-- 临时修补不得写入 Geneway runtime、启动脚本或默认验收路径；不得以轮询、直接 POST、同步 `frappe.in_test` 或新队列绕过；
-- 外部有权维护者修复 GearJob 后，必须用正常新进程重跑 after-commit、rollback、HMAC、503 重投、RQ 正常清理、source clock 和零残留，独立通过后才解除事件分支阻塞。
+## 6. 当前授权、失败与恢复
 
-### 3.2 实施前只读拓扑证据
+metadata、token、每次 MCP tool、关联设备二跳和重试，work 受理、模型执行、业务 tool、通知发送及重试均复核当前授权。不能仅凭事件签名或激活时授权长期执行。
 
-2026-09-20 对当前测试环境只读核查：
+确认账号/密钥/权限被撤销：规则 paused，显示原因，旧 pending 终结。恢复权限后用户显式 resume，建立新 baseline。timeout/连接暂不可达：保留 active，下一 60 秒周期再核对，不推进 handled、不耗预算、不忙重试。区分硬撤权与软失败，不能把所有 403/异常都当网络抖动。
 
-- 实际站点是 `dev.localhost`，容器 `deploy-frappe-1` 在 `deploy_default` bridge 上的 IP 为 `172.20.0.5/16`，宿主 bridge gateway 为 `172.20.0.1`；容器与宿主 loopback 不是同一网络空间。
-- 容器当前只运行 `bench serve --port 8100`；`bench doctor` 回读 `Workers online: 0`，`default` 队列已有 4 个历史 job。Frappe Webhook 是 after-commit 后 `frappe.enqueue`，因此不得在验收中用 `frappe.in_test` 同步例外或只启 Web 进程冒充真实 worker 消费。
-- 经 `bench --site dev.localhost console` 只读查询，当前 `Webhook` 记录为空数组 `[]`；没有可直接复用的已有 Work Order 回调，T0 必须为团队 synthetic 工单新建明确专用配置。
-- 容器无 `host.docker.internal`/`extra_hosts`，宿主 `172.20.0.1` 也没有已证明的 P5 回调 listener。宿主已发布的 GearJob 端口是宿主进入 GearJob，不是 GearJob 回调 Geneway 的路径。
+普通进程重启只重新只读处理 pending；已有 work 不再次派发，活动 work 沿用 interrupted 语义。保留去重 tombstone；不增加 TTL 清理任务或历史重放 UI。
 
-因此 T0 不能直接启动 default worker：先审计/隔离现有积压，为 P5 Webhook 选专用测试队列并只启消费该队列的 worker。回调优先建立一个只绑 `172.20.0.1:<明确端口>`、只接受固定 P5 路径/方法、限定 GearJob 来源并强制 raw-body HMAC 的窄 listener；主认证 Web 继续 loopback。这一 bridge 监听是实施前需用户明确允许的本地网络边界，不由“测试环境”自动推导。
+备份恢复必须保持：active 规则变 paused，pending 入站变 restore-suppressed，渠道关闭，sending 变 unknown。旧 webhook 重投不得复活规则或派发工作。
 
-### 3.3 2026-09-21 正常 GearJob runtime 复验结论
+## 7. 精确回声识别与 P6 边界
 
-用户批准 GearJob 最小修改后，GearJob 侧仅修正 `read_only_cache.py` 对 `redis.client.Pipeline` 原方法保存的继承判断，提交 `9ea23fc0`，未重构队列或 Frappe 行为。随后在无临时 patch 的全新进程中重跑 P5-T0：
+只识别已持久化的明确 Kivo 维修创建 action：action.id 严格等于 trace、有 attempt 且非 noEffect；preview.target 包含最小 `{resource, sourceInstance, recordType:'repair', orderNo}`。复用现有 action intent/preview，不新增 trace 表、写工具或第二 action 状态机。
 
-- 证据根：`/home/gewu/.codex/workflow/artifacts/20260919-006-geneway-dsh-greenfield/p5-t0-live/gw-p5-t0-fixed-20260921-121346`。
-- `RUNTIME_COMPATIBILITY_PATCH=false`，真实 Work Order `WO-26-00103`、真实 Frappe Webhook、真实 `long` worker、Docker bridge `172.20.0.5 -> 172.20.0.1:39471`。
-- 首次持久化事件返回 503 后，同一身份重投命中 replay；3 个唯一 occurrence、4 次请求、3 次 accepted、1 次 replay；rollback 恢复后零事件；default 队列精确 job ID 不变，`long` 队列最终为空。
-- source `modified` 六位小数严格递增；worker、receiver、listener、secret、Webhook、Work Order、Request Log 均已清理。
+创建前 UUID 未知，事件 subject.label 不等于可信单号。复用必需的当前授权 MCP 回读，严格确认 `record.reference === 完整 orderNo` 且 `record.id === event.objectId`；已有 receipt 时再核 UUID。不得按 GW- 前缀、读执行 trace、label 相似或不同来源 action 抑制事件。
 
-独立 verifier 结论为 `P5_T0_live_event_source_gate: PASS`、`T7b_external_event_source_prerequisite: PASS`。这解除“外部 GearJob runtime 无法验证”的阻塞；但 P5-T3b/T7b 仍必须在 Geneway 产品事件路径中实现并跑完整业务旅程后，才可宣称事件分支或 P5 总体验收通过。
+仅抑制明确回声 event revision；同次读取发现更高 R，仍按普通变化处理。P5 正例只能是明确标注的合法持久 action fixture 加真实消费者检查；当前 Kivo producer 仍仅 human 变更，不能声称真实机器创建回声已通过。
 
-## 4. v7 唯一事实模型
+P6 必须新增并真实验证：机器 MCP 创建维修单→事务内审计/业务事件 producer→回声匹配；丢 webhook 时写后回读 revision 与 action 关联。此边界不提前开放机器写入，也不免除 P6 验收。
 
-P5 将 state v6 升为 v7，只增加：
+## 8. 来源配置与备份生命周期
 
-- `automationRules[]`：`id`、`ownerMemberId`、revision、`draft|active|paused|revoked`、`employeeId`、`skillId`、`connectionId`、精确 `workOrderId`、封闭 trigger、可选本人私聊目标、`maxRuns`、effectiveFrom/eventAcceptAfter 和必要时间戳。capability 从当前 Skill 解析，模型从 employee 解析，不在 rule 复制；已用次数从具有 workId 的 occurrence 计算，下次时间从唯一每日 trigger/effectiveFrom/已发生日期计算，均不持久第二份权威。
-- `automationOccurrences[]`：稳定 occurrenceKey、ruleId/ruleRevision、定时日期或事件 source/revision/digest/时间，以及二选一的原子受理结果：`workId`，或终态 `skipped|blocked + reason`；至多保存一个单向 `deliveryId`。owner、输入、execution 和运行状态分别从保留的 rule tombstone、work 和 delivery 读取，不复制。
+普通备份只增加固定非秘密 `event-sources.json` entry，不读取 secret root。signingSecretRef 纳入独立 secret pack refs。读取秘密前后及发布备份前比较来源配置 snapshot hash；有 sources 的 secret manifest v2 同时绑定 stateSha256 和 sourcesSha256。旧 v1 仅兼容无 sources 包。
 
-occurrence 是唯一的触发→work 单向关联；work 不反向保存 occurrenceId。原子更新前没有 occurrence 事实，更新成功后 occurrence 已有 workId；不建 `reserved/accepted/interrupted` 发生状态机。工作/执行状态、业务结果和通知状态继续从现有 work/execution/result/delivery 派生。
+恢复先验证全部摘要、refs 和路径，再将来源配置写入目标 dataRoot 同名文件，强制 enabled=false；更换 GENEWAY_STATE 自然读取恢复后的禁用配置，不能转回旧 enabled 文件绕过。存在当前可恢复事件规则、pending 引用或实际 sources 文件却遗漏时，完整备份必须失败；仅 revoked 规则/永久终态历史不要求已退役来源配置永久存在。
 
-v7 backup/restore 明确保留 v4/v5/v6/v7 读入；恢复时仅 `active→paused`，`draft`/`paused` 保持原状态，`revoked` tombstone 必须仍为 `revoked` 且不可恢复；事件入口和外发禁用、`sending→unknown`，不补跑/不补发。回退到旧代码时只在独立数据根恢复实施前 v6 备份，不删除 v7 集合降版。
+必验：普通备份零 secret 读取、双摘要/refs 错配拒恢复、备份途中 sources 变化拒发布、恢复后原签名不受理、旧无 sources 包与仅退役历史仍可恢复。
 
-## 5. 职责、运行 owner 与可靠性
+## 9. 就绪任务、所有权与顺序
 
-- `src/automation-service.mjs`：规则管理、时间计算、发生身份、重叠/容量/预算、work 原子关联、通知意图；同一文件内保留最小 timer owner，不拆调度平台。
-- `plugins/gearjob-events.mjs`：T0 无临时修补复验已通过；按完整 runtime 配置启用后，对原始字节验签、封闭字段解析和窄 HTTP 回调，不运行模型。未完整配置时不注册入口，事件规则同样不可创建或启用。
-- work service/runner/execution grant 继续拥有受理、模型、工具 I/O 和取消。
-- channel service/Feishu runtime 继续拥有通知创建、当前授权、claim、平台 I/O 和结果。自动通知调用现有 `createDelivery`，不伪造入站渠道消息。
+以下均已通过独立计划审查；**只执行依赖满足的任务**。Team Sol 实施，主代理是计划及验证总记录唯一写者。
 
-同一 data root 只能有一个触发 owner。优先用 `/usr/bin/flock` 覆盖产品服务整个生命周期，在 work/channel/触发恢复和连接前取锁。不新建租约、选主表或分布式锁。第二实例必须在任何外部副作用前明确失败。
+| 任务 | 责任与路径 | 依赖与出门证据 |
+| --- | --- | --- |
+| K1-T0 真实生产者探针 | Kivo 隔离 fixture/验收脚本唯一 writer；必要测试就近，不改无关业务或 MCP 协议 | 计划通过；人类 HTTP 更新三类单据、事务 rollback、outbox、真实 worker、v2 原字节/HMAC、delivery/event 身份、可达 loopback 与 body 上限。失败先分析，不能用直接 POST 替代主链 |
+| K1-T1 核心运行链 | Geneway core 单 writer：automation-service、store、work-service、execution-grant、server、runtime-config、state-transfer、窄 kivo event adapter 及就近测试 | T0 协议事实可用；严格来源/受理、激活/对账/claim、当前授权、恢复/备份、echo 消费者。复用 kivo-tpm 读链，不新造客户端 |
+| K1-T2 成员入口 | Web 及 UI tests 唯一 writer；通知如需修改须明确移交该路径 owner | T1 API/类型稳定；三类单据定时/事件创建、启用、暂停、恢复、撤销、预算、原因、发生/工作关系、历史退休；权限隔离与可操作性 |
+| K1-T3 独立回归 | 非实现者只读 review/verifier，验收脚本单独 owner | T0–T2 候选；下节安全/失败/重启/恢复、Kivo 及渠道回归，同一候选留证 |
+| K1-T4 阶段交付 | 主代理统筹，独立阶段审查/视觉审查 | 冻结候选真实 UI 同对象全旅程；视频、离线说明、飞书逐条回读；用户最终验收后才进入 P6 |
 
-发生受理、预算消耗和 occurrence→work 单向关联在同一 `store.update` 中完成。权限在规则保存/启用、发生受理、work 原子受理、每次原生 `agent/request`模型请求、真实工具 I/O、通知创建、发送和重试前均使用当前事实复核。工具返回后的后续模型请求也必须经该原生门；`requestTimeoutMs=120000` 不等于整次 120 秒硬截止。规则历史不是永久凭证。
+并行仅用于明确不冲突的路径与依赖。共享核心不得双 writer。Control 若有必要变化，先独立意图提交；当前方案不改变 Kivo 生产协议和机器写权限。发现会改变业务目标、写动作或授权范围的问题，停在该分支问用户。
 
-## 6. 界面与可见语义
+## 10. 验收矩阵与命令记录
 
-复用现有工作空间，在“工作”中增加“自动工作”分区，不增加底部导航项或运维控制台。界面包含列表、创建/修改和规则详情：
+主链必须是普通 UI 创建规则→真实 Kivo 人类 HTTP 改同一 synthetic 单据→事务/outbox→实际 mes-worker→签名 webhook→durable 入站→当前 MCP→DSH Flash→工作正文→模拟渠道回读。直接注入仅验证负例或确定性竞争，不能顶替主链。所有结果标注 synthetic / 渠道为模拟验收。
 
-1. 先显示需本人处理的授权、来源、预算、中断或通知异常；正常等待/执行/完成留在常规动态。
-2. 规则卡显示目标、触发、下次时间/事件等待、状态、累计已用/上限、最近结果和通知状态。
-3. 当前创建时选本人获准员工、Skill、GearJob 连接和工单，可选“每日上海时间”或已配置的“GearJob 工单更新”，设 1–10 次累计预算，通知只可选 Web 或本人已验证私聊。事件 receiver 未完整配置或启动失败时，事件选项显示不可用，服务端直接请求同样拒绝；每日规则不受影响。
-4. 保存后先为草稿，用明确“启用规则”开始接受发生。
-5. 详情区分“停止本次运行”“暂停未来触发”“取消待发通知”和“撤销规则”，并说明各自范围。
-6. 发生历史分开计划时间/事件时间、接收时间、真实查询时间、work/result 和 delivery；高频跳过在 UI 聚合计数，底层去重事实保留。
+| 维度 | 必须观察的结果 |
+| --- | --- |
+| 生产者 | 三类单据支持字段提交产生真实事件；rollback 无事件；不支持字段更新由 60 秒对账发现 |
+| 接收 | 错签名、重复 header、旧 timestamp、错 source/subscription、v1、body 超限拒绝；先 durable 后 <10 秒 2xx；MCP 延迟不阻塞 ACK |
+| 身份与重放 | 同 delivery 同内容幂等、不同内容 409；同 event 不同 delivery 的展示差异可接受、业务冲突 409；后来启用规则不吃旧事件 |
+| 激活与版本 | GET/CAS 间变化可捕获；只目标 revision；r<R 最多一个当前 R work，R<r pending；不倒退；事件与对账并发唯一工作/预算 |
+| 规则编辑 | active 无 occurrence、已 ACK pending、paused 均拒绝改身份且原归属不变；同 activation 合法预算/通知编辑不吞 pending；草稿 GET 期间改目标使旧 CAS 失败；读取失败仍可修草稿；已有发生的每日规则可改 HH:mm，日期去重不变；不重置预算或复活终态/旧通知 |
+| 补偿 | 丢投递、unknown、暂时断线、重启后只补最新状态；不伪造中间历史；terminal skips 不补跑 |
+| 权限 | 禁用账号/轮换密钥/撤权与二跳/发送重试均当前复核；硬撤权 paused，软失败不耗预算；本人可读、他人和普通管理员不可读正文 |
+| 生命周期 | 暂停/恢复新 baseline、旧 pending 终结；正常重启不重复；恢复配置 disabled/规则 paused/pending suppressed/sending unknown；旧签名不唤醒 |
+| Echo | 精确 source/action/trace/完整单号/UUID/attempt；近似、异源、读 trace 不压制；更高版本照常处理；正例注明 fixture，P6 真写链未验证 |
+| 定时与界面 | 真实每日到时、60 秒窗口/漏过/上海日期去重、1–10预算、并发2、120秒；停止/暂停/取消通知不同；关闭/重开无隐式写入 |
+| 备份 | 第8节全部；旧 state 合法迁移且退休 GearJob 不复活；秘密不进模型、浏览器、正文或普通备份 |
 
-事件来源恢复后仍需管理员完成无临时修补的 T0 复验，再开放创建；不会自动启用旧草稿、补跑故障期间事件或把受控 fixture 当成真实事件能力。
+首先检查并使用现有最小命令：`node scripts/test-p5-automation.mjs`、`node scripts/test-p5-execution.mjs --pure-only`，以及仓库现存 timer/notification/http-ui 的 harness-check 入口；确切文件/参数在执行前从 package.json 和脚本确认，不能把尚未存在命令写成已跑。补充本次 Kivo events/source loader/store/backup 语义测试以及 retired、Kivo grants、P6 action 保留行为回归。native/HTTP 用批准的隔离 launcher。
 
-`failed` 通知允许明确重试，但不重跑工作；`unknown` 不盲重发；`blocked` 显示当前撤权原因。修正 P4 UI 中固定写死的“真实渠道尚未启用”，按 exact app runtime 和当前权限显示，不开发第二套通知页面。
+Kivo 数据库集成必须先证明独立 test 库身份，现有 PG suite 按 `FMS_TEST_DATABASE_URL=DATABASE_URL` 的测试约束运行，禁止把默认库伪装为 test 库。现有 pnpm 11 workspace 聚合前置失败不得为绕过而安装/改依赖；可按脚本展开验证并如实标明未通过聚合命令。已知 Kivo boundary 基线失败须比较新增，不把 exit 1 写成通过。
 
-## 7. 实施任务、依赖与唯一写入
+单一阶段验证记录沿用 workflow `20260919-006-geneway-dsh-greenfield` 的外 Git artifact，逐项记录候选、命令、退出码、环境身份、失败与跳过原因。源码、HTTP200、单测或截图不能单独证明完整业务链。执行前后核对安装/源码与测试残留，按明确拥有的 PID/process group 和 fixture 清理，不广扫杀进程或删除他人数据。
 
-| 任务 | 产物 | 依赖 / 通过条件 |
-|---|---|---|
-| P5-T0 触发探针 | `scripts/probe-p5-trigger.mjs`；真 Frappe Webhook 和定时 owner 边界 | GearJob `9ea23fc0` 正常新进程、无临时修补复验 PASS |
-| P5-T1 v7 与时间纯策略 | store、`automation-service` 纯管理/发生部分、迁移测试 | 已确认的 T0 接口结论；唯一性、owner、revision、日期、预算、闭图；事件 schema 可校验但不可创建/启用 |
-| P5-T2 原子 work 与权限 | work-service、execution-grant、runner 必要原生 guard | T1；occurrence 原子产生 workId，模型 `agent/request`/工具前撤权，整次 120s 与并发 2 |
-| P5-T3a timer | automation runtime、每日 owner、关闭清理 | T1–T2；真实时钟、无产品队列、重叠/漏触发/关闭；首次真实读取前验证未修补环境的 GearJob REST |
-| P5-T3b GearJob 入站 | `plugins/gearjob-events.mjs`、server 窄入口、事件启用 | 外部 GearJob 修复且 T0 无临时修补复验 PASS，再依赖 T1–T2；持久后 ACK、重投、关闭 |
-| P5-T4 通知 | channel service 最小自动来源关联、既有飞书 send | 定时通知依赖 T2–T3a；事件通知另依赖解锁后的 T3b；本人私聊、幂等、发送前复权、unknown 不重发 |
-| P5-T5 API/UI | server、`web/index.html` | A/C/D/E；创建/修改/启用/暂停/恢复/撤销/发生/停止/通知恢复 |
-| P5-T6 恢复与回归 | state-transfer、`test:p5`、P1–P4 受影响回归 | v4–v7、restore paused、零补跑/外发、秘密零泄漏 |
-| P5-T7 真实验收 | `accept:p5`、Design Review、MP4 + 去敏 report + Lark 回读 | T7a 定时主链和 T7b 无临时修补的真 GearJob 事件必须在同候选组合通过；真模型、真通知及独立复审不变 |
+## 11. 冻结、交付与最终门
 
-### 7.1 T7a 正式验收记录
+独立 reviewer 审核实现和完整证据后，仅当前任务路径逻辑提交，检查 staged diff 与 `git diff --cached --check`，记录两仓 commit；不以提交代替验收。冻结后的实录须绑定同一候选和同对象旅程。
 
-T7a 每日定时主链已在候选 `9373dc88da42f76767e9c4ba9a68237f6f8d0225` 通过并交付材料：
+每个有界面阶段提供真实操作视频和可离线查看说明，显著标“渠道为模拟验收”；完整解码、打开手册并完整观看审核视频后再交付。通过 lark-cli 发给用户并逐条回读。UI 后置决定不免除必要入口、权限、取消、失败说明和真实可操作性验收。
 
-- 报告：`artifacts/p5-acceptance/p5-9373dc8-final.report.json`，SHA-256 `414d0edc613fd3ebf3daaac0e960874dd4433db58d9b586b328158181076ed7d`。
-- 视频：`artifacts/p5-acceptance/p5-9373dc8-final.mp4`，H.264，1440×900，146.72 秒，SHA-256 `eeaee5fb29bef363f481ab51dd1d14b12ad87aee77d8b30c9055a51ed7278290`。
-- 封面：`artifacts/p5-acceptance/p5-9373dc8-final.png`，SHA-256 `a56f620063263957bfa102baa7b853e6c04c17f3335e1f04c21bad726575ee48`。
-- 离线手册：`artifacts/p5-acceptance/p5-9373dc8-final.html`，SHA-256 `3f0687698b32ac5c5abf720d783a6041d74919447dfe0ba32c881e466ff63e7b`。
-- 飞书材料用 Geneway 产品 app `cli_aaae8b6cbdb89cc0` 发往已验证 p2p chat，并批量回读 4 条均 `deleted=false`：说明 `om_x100b643fe43568acb3c498727351298`，视频 `om_x100b643fe5b1d0a4b1c638d86ab13dc`，report `om_x100b643fe51494a0b3190dda7ab8f8e`，手册 `om_x100b643fe2fe90acb2c7cbea798425a`。
-
-该记录只证明 T7a 每日 timer 主链；`p5` 仍为 `conditional`，T7b 事件主链未跑完，不得宣布 P5 PASS。
-
-### 7.2 T7a + T7b 最终组合验收
-
-最终冻结候选 `9808772cc5b1a4a8487c969ddcc0f7e9e179eb77` 在同一正式运行中完成 T7a 与 T7b：
-
-- 每日规则经 390px 真实触摸启用，真实墙钟发生后读取 GearJob `WO-26-00096` 外部测试数据，ZenMux `deepseek/deepseek-v4-pro` 通过 DSH 产生结果并向本人已验证飞书私聊投递。
-- 事件规则经 390px 真实创建和启用；两次标准 Frappe `doc.save()+commit` 经 after-commit Webhook 形成两个独立 completed work 与 delivered delivery。同 raw body 重投为 `200`/零新 work，同身份异 digest 为 `409`，暂停期旧事件为 `before-active-window`，正常重启保留历史且重投去重，撤销后第三次真实保存不新增 occurrence/work/delivery。
-- GearJob 候选为 `9ea23fc0b0318a16ae0e60e3844f1263a3726aeb`，无 runtime compatibility patch。Webhook Request Log 聚合为 3 次、2 次 accepted、0 errors；验收后 Webhook/Request Log/事件 secret/worker/listener 已清理，Work Order 数量恢复，long 队列为空，default 队列精确保持原 4 项。
-- 视频：`artifacts/p5-acceptance/p5-9808772-final.mp4`，H.264/yuv420p，1440×900，25fps，41.56 秒，SHA-256 `8561e62fd7a5cd47ffe0571a7557185295e7d9729329f105642c2d775d319bcf`。它以 10 个真实动作短片 + 10 个已验证检查点展示 183.12 秒原始运行，明确标注剪辑与长等待压缩。
-- 报告：`artifacts/p5-acceptance/p5-9808772-final.report.json`，SHA-256 `bd36258f137022570cdd21976f89e4bcd8432d845059fd987c58163a9bee3e76`；离线手册：`artifacts/p5-acceptance/p5-9808772-final.html`，SHA-256 `a640ee19a423a49390725ceac5effc528d80ac264c193a52679ffac1d6954ed6`；封面 SHA-256 `e6687cd5fd89d439a458d6acbe3bceeee75e08f0fa620fff2a2c90e15879ea4a`。
-- `design-review-p5-final/verdict.json` 为 `passed`；独立 evidence、visual/browser 与 Astra/Ponytail 材料复审均为 PASS。旧 `e3d2a1d` 视频已废弃，不参与最终结论。
-- 最终材料以 `geneway-product` profile 通过 Geneway app `cli_aaae8b6cbdb89cc0` 发往已验证 p2p chat；说明、视频、report、手册回读类型分别为 `text/media/file/file`，四条均 `deleted=false`。交付回执为 workflow artifact `p5-final-delivery-receipt.json`。
-
-因此 P5 技术验收为 PASS。这一结论仅关闭 P5 G7/J8/AC-18 的当前 external-test/synthetic 范围；不关闭 P4 企业微信和真人最终验收，不授权 push、部署、发布或生产写入。
-
-每个任务仅一个 Team Sol 写入者；store、work-service、server、channel-service 不允许重叠写入。每个切片修复后回原独立 reviewer 复审。
-
-## 8. 确定性验证与真实验收
-
-`pnpm test:p5` 必须覆盖：
-
-- 上海日界、同日修改/恢复、时钟前跳/回拨、漏触发不枚举积压；暂停期间事件延迟到达不派发，不可验证的源时间 fail closed；
-- 发生原子产生 workId、同身份重投、同 ID 不同 digest 冲突、两源隔离，不存在无 work 的中间 occurrence 状态；
-- 重叠、容量 2、预算最后名额竞争、受理后失败不返还；
-- 保存/发生/work reservation/模型/工具/结果/通知/claim 边界的撤权；
-- W1 停止不影响 W2，暂停规则不删历史，未来发生不执行，取消通知不重跑业务；
-- 伪签名/错源/错对象/过大 body/恶意文本拒绝，真实源重投不增工作；
-- 结果完成后 delivery 创建崩溃间隙，平台成功后 outcome 失败为 unknown；
-- v4/v5/v6/v7 备份恢复、悬空引用拒绝、`active→paused`、已撤销规则仍 revoked 且不可恢复、历史保留、零自动重放；
-- 第二实例取锁失败时零 timer/WS/work 副作、关闭后零残留 timer；
-- 1440×900 和 390×844 的真正创建/修改/暂停/打开发生/停止本次，轮询不覆盖草稿，错误有相邻恢复动作。
-
-真实 J8 必须在同一候选、成员和 synthetic 工单上运行：
-
-1. Web 创建每日规则，设下一分钟，真实时钟到达后工具读 GearJob、结果持久、飞书返回真实 message ID；
-2. Web 创建事件规则，团队经 Frappe 正常文档保存更新测试工单，after-commit Webhook 验签受理、重新读源、分析、通知；
-3. 重投、暂停、修改、停止 W1/W2、通知 failed/unknown/blocked、重启漏触发和隔离恢复按本计划回读。
-
-fake 时钟/SDK、受控 POST 和受控模型只补故障路径，不代替真时钟、真 Frappe 事件、真模型和真飞书主链。用户只在候选冻结后做一次最终验收。
-
-## 9. 实施准入与完成边界
-
-2026-09-20 用户当前消息已同时批准 P5 C/D、允许 P4 仍非 PASS 时先实施 P5，并允许 T0 为 GearJob 容器建立只绑 Docker bridge `172.20.0.1` 的固定路径 HMAC 回调窄入口。这一授权不允许消费 default 队列历史 job、开放主 Web、修改 GearJob/Frappe 产品源码、生产写入、部署或发布。
-
-当前依赖图为：T0 PASS → T1/T2 → T3a 定时与 T3b 事件 → 对应 T4/T5/T6 → 同候选 T7a+T7b。只有 T7a、T7b 和原有组合门全部通过，才判断 P5 PASS；`9373dc8` 的 T7a 是可信历史证据，但不能代替事件代码最终候选上的重跑。
-
-P5 只有在真定时、真 GearJob 事件、真模型/工具、真通知、Web/移动操作、权限/预算/重投/恢复、P1–P4 回归、Design Review、独立正确性/复杂度复审和 MP4/report/Lark 回读均通过后才能 PASS。P5 技术完成不会关闭 P4 缺口。
-
-## 10. T0 解除后的 T3b/T7b 唯一实施补充
-
-### 10.1 单一事件事实与 active window
-
-- 事件 occurrence 继续留在 v7 的 `automationOccurrences[]`，只增加可空 `event`：`sourceId`、完整六位微秒 `sourceRevision` 和 raw-body `digest`。可比较的事件时间按固定 GearJob `+08:00` 语义从 `sourceRevision` 严格派生，不持久第二份时间权威；daily/manual 的 `event` 必须为 `null`，不新增事件表或第二状态机。
-- 稳定身份为 `ruleId + sourceId + on_update + Work Order + workOrderId + sourceRevision`，不含 digest 或 rule revision。digest 只用于判定同身份同内容 replay 与同身份异内容 conflict。
-- `eventAcceptAfter` 仅在首次启用、恢复，或尚无任何 occurrence 时修改事件 source/目标工单后更新；一旦已有发生历史，员工、Skill、连接、目标工单和 trigger 都不可原地改绑，必须新建草稿，避免当前 rule 改写历史身份。通知目标或累计预算变化不重置窗口。
-- `sourceRevision < eventAcceptAfter` 记录 `skipped: before-active-window`；源时间无法按已验证的 GearJob `+08:00`、六位微秒语义比较时记录 `blocked: source-time-unverifiable`。不得以接收时间替代来源时间。
-
-### 10.2 runtime 可用性与窄 receiver
-
-- 事件能力的唯一 runtime 事实来自同一进程的完整 receiver 配置；未配置时 UI 禁用、API 返回 `SOURCE_NOT_CONFIGURED`。不得无条件开放事件选项或硬编码“已就绪”。
-- secret file、exact source ID、exact source address、非 wildcard bridge host 和 port 必须全有或全无；callback path 是代码内唯一常量 `/p5/gearjob/work-order`，不提供环境覆盖。secret 为仓库外 `0600` 普通文件，主 Web 继续只绑 loopback。
-- receiver 只接受 exact `POST application/json`，body 最大 16 KiB、5 秒读取超时，以原始字节验证 base64 HMAC-SHA256，UTF-8 fatal decode，字段严格为 `source,event,doctype,name,modified`。
-- 输入、来源和认证错误返回明确 4xx；同身份异 digest 返回 409；只有 occurrence/work 已安全持久或明确 replay/ignored 才返回 2xx；store、owner、runtime 或其他无法证明安全受理的失败返回 503 供 Frappe 重投。
-- 生命周期顺序为 automation owner 取锁后启动 receiver；关闭时先停止新入站，再停 automation/channel/work 并释放 owner。第二实例、半启动和 listener 残留均为失败。
-
-### 10.3 UI 与恢复
-
-- 仍复用“全部工作 → 自动工作”，不增加导航或运维页。事件创建时隐藏每日时间且取消其 required；source 由服务端能力提供，不允许自由文本。
-- 事件详情显示“GearJob 工单更新”和“等待 GearJob 更新”，不显示每日时间或“现在核对一次”；历史明确分开事件时间、接收时间、查询时间、work 和通知状态，不能把事件标成“本人发起”。
-- 390×844 必须真实完成事件规则创建/启用或暂停/恢复，主操作不被底栏遮挡、无横向滚动、草稿与焦点不被轮询覆盖。
-- restore 保留 event facts，`active→paused`，accepted/running work→interrupted，sending delivery→unknown，启动后零自动重放和零自动补发。
-
-### 10.4 冻结、复审与组合验收
-
-1. 先完成确定性 event schema、去重/conflict、active-window、权限、receiver 信任边界、lifecycle、UI 和 restore 测试；`pnpm test:p5` 必须继续包含 P1–P4 受影响回归，`accept:p5 --harness-check` 保持外部效果为 0。
-2. 由独立 correctness reviewer 和独立 Astra/Ponytail reviewer 对同一实现候选复审；过度设计消融不得删除 HMAC、来源地址、完整来源时间、持久后 ACK、当前权限或恢复零重放。
-3. 冻结一个新 commit 后，先验证 GearJob commit/runtime、container/site/bridge/source timezone/queue 未漂移；只对漂移前提重验 T0。
-4. 同一候选、成员和 synthetic Work Order 上重跑 T7a 真墙钟，并跑 T7b：浏览器创建并启用事件规则，Frappe 正常 document save + commit 产生 after-commit Webhook，Geneway 持久 occurrence/work，DSH 工具重新读取 GearJob 当前事实，ZenMux DeepSeek 分析并保存 result，飞书本人私聊投递并 provider readback。
-5. 用相同 raw body 补充 replay、同身份异 digest、暂停/恢复旧事件、撤权和重启边界；这些受控请求不冒充真实 Frappe 主链。
-6. 最终只发送一套组合 MP4/report/离线手册：明确 `T7a`、`T7b`、P5 总结论和 P4 企业微信/真人验收 deferred。候选或 tracked tree 漂移即组合验收作废。
-
-### 10.5 停止条件
-
-若需要 wildcard listener、防火墙/公网/反向代理、消费 default 历史队列、再次修改 GearJob/Frappe、直接 POST 代替真实主链、轮询代替事件、临时 Pipeline patch、部署、push 或发布，停止相应路径并回到授权边界；不得降低验收标准绕过。
+阶段报告区分实现、单元/集成、真实生产者与浏览器、模拟渠道、用户最终验收；本计划尚无实施 PASS。P6 仅在 P5-K1 用户验收后，另以 Team Astra 在原 P6 计划重规划；P7 同样先规划后实施。全合同当前仍未完成。

@@ -271,3 +271,5 @@ v4.4 初稿经两名未参与修改的审查者复审：合同一致性审查与
 1. **FMS 锁定例外：**用户选择“允许专属 FMS 账号锁定”。专属 FMS 机器账号可按原权限、dry-run、人工确认、幂等和机器审计执行制造方法快照锁定，仅在本地 synthetic FMS 实例验证；Geneway 的 TPM 账号仍无此权限，写工具不进入模型。该例外用于保留既有工具迁移行为，不扩大 Geneway 的业务写动作。P4-K0-E 在原计划内落实必要的共享机器写入断言及事务复权设计后实施。
 2. **模型秘密来源：**用户指定 `~/.paseo/config.json` 中的 ZenMux API key。只定点提取其 ZenMux 配置项到 Geneway 服务端秘密存储，使用 `GENEWAY_SECRET_ROOT` 与 `GENEWAY_MODEL_CREDENTIAL_REF`；秘密正文不进入仓库、报告、浏览器、模型或日志。此项授权不允许扫描其他配置文件。
 3. **DSH 版本政策：**用户选择“按官方发行体系锁定”。主包及同发行列车的 `dsh-*` 依赖和 peers 精确同版；Cordis、Schemastery 等独立版本包依上游相容约束锁入 lockfile，本次 `cordis-plugin-group=1.0.4`，不忽略 peer mismatch。U0 版本合规阻塞解除；已发现的 home 隔离问题、原生探针失败及全部既定回归仍须修复和验证，不能因版本确认而代签通过。
+
+4. **第一模型切换：**用户随后要求“zenmux 模型改为 DeepSeek v4.1 flash”。实时读取 ZenMux 官方 `/api/v1/models` 返回 HTTP 200，精确 ID 为 `deepseek/deepseek-v4.1-flash`。本轮新配置、执行和验收使用该模型，保留旧历史模型事实；不修改 Codex/Team Astra/Team Sol 的模型配置，不扩大提供方或外发范围。

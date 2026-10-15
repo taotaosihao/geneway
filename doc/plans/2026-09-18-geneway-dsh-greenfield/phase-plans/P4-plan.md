@@ -115,6 +115,8 @@ S1/U0 的 runner、清单/lock、runtime-config、原生插件/桥及 state-tran
 
 本任务只回归来源无关的身份、授权、Session、委派、取消、恢复、节拍工具、知识撤销、定时路径以及已提交 P6 来源无关测试。J1/J4/J6业务改 Kivo验证；不启动旧 GearJob来凑升级通过。
 
+本轮第一模型按用户更新改为 ZenMux `deepseek/deepseek-v4.1-flash`，当前运行配置、装配、固定路由校验与验收调用同步；旧阶段证据和历史Session不改名。此项是已授权路由内的明确模型替换，不新增模型管理框架；仍须先完成隔离与外发检查，再经DSH验证实际请求和结果。
+
 模型仅从明确 Geneway 服务端秘密引用读取，移除默认扫描其他产品 settings。当前无合法可用引用时只阻塞真实模型验收，不能复制旧项目 secret、伪造真实调用或默换提供方。
 
 ## 5. K0：Kivo 唯一 MCP 与 TPM 主链
@@ -158,7 +160,40 @@ K0退出GearJob的新产品装配、创建和事件/Comment执行路径，保留
 
 ### 5.5 FMS收尾
 
-原 `manufacturing.method_snapshot.get/lock` 迁到 fms-api 的同一库，保持HTTP边界、原权限、dry-run、确认凭证不转发、trace、错误与幂等语义。迁移完成才下线stdio/CLI旧入口、单KIVO_TOKEN及别名，更新文档/测试。该收尾不阻塞TPM只读验收，但在恢复P6前必须完成。用户已准专属FMS机器账号锁定，Geneway TPM账号无该权限，写工具不进模型；原权限/dry-run/人工确认/幂等/机器审计必须保留。共享机器写断言与事务复权的窄化设计在本节由两Astra独立补齐、独立过度设计审查后实施。不能把只读探针当收尾PASS，也不能悄悄长期保留双实现。
+窄化规划于2026-10-15T11:48:38Z收敛，实施前由原两名Astra独立规划（p4_product_planner、p4_engineering_planner），root合成；独立p4_overdesign_v44完成六项静态消融并通过，受审正文blob为48b689e2b27d6a9ecd47ed4a0bb66c0d204ad733。只收敛用户已准的专属FMS机器锁定例外，不重开P4或提前开放TPM创建维修单；本节现已具备按依赖实施条件。共享/MES只读候选先完成审查和独立本地提交，避免修改仍在复审的公共接口。
+
+**目标与现有事实。** 原 `manufacturing.method_snapshot.get/lock` 迁入fms-api挂载的唯一MCP库，复用真实HTTP controller、`fms.manufacturing`模块、read/execute权限和既有业务service。FMS快照范围是businessEntityId/siteId，不是MES organizationUnitIds；当前GET-only内部主体也不能直接放宽成任意POST。原lock在事务外判断状态、上下文固定human，须补机器分支及并发幂等。源码未发现lockedBy/audit actorId的人类FK，不能预设删除FK迁移；实际新库仍须核对约束。此收尾不阻塞TPM只读验收，但在恢复P6前必须完成，不能长期保留双MCP。
+
+**范围与账号。** 同一MachineAccount/Store/Authority保留唯一公钥、OAuth和管理逻辑；增加严格的可空FMS范围 `{businessEntityId,siteId}`，本次仅单一明确站点。FMS管理适配验证站点与企业归属、有效状态，空/失效/MES范围均拒绝。MES组织字段保留原义，不把siteId塞入其中。产品namespace和resource策略由服务端固定，管理list/load/update/rotate、token签发与复核均执行产品边界；namespace不能代替权限。FMS专属账号仅read/execute，无create/update/reset/管理员权限；Geneway TPM账号不得获取FMS资源令牌或权限，FMS账号也不能借MES audience访问TPM。Geneway模型清单不登记lock。
+
+**确认与工具语义。** 保留workOrderId/reason/dryRun/confirmToken；dry-run仍只GET并返回当前快照、计划POST、权限与trace，不发业务写入。模型外的受控人工调用者检查预览、明确确认后发起lock；缺失/过短确认标记在POST前拒绝。confirmToken只在MCP输入边界消费，业务请求仅`{reason}`，不进入日志/审计/模型。现有标记只有最短长度检查，不证明审批人身份、不绑定对象版本、没有一次性消费保证；验收和文档如实表述，不新增签发服务、审批表或确认账本。get/dry-run需read，lock需execute，专属账号配置两项。
+
+**可信写入与事务。** 现有进程内上下文只窄增`manufacturing.method_snapshot.lock`：绑定机器账号、credential、授权revision、产品resource、固定POST目标、workOrderId、reason和trace，由已认证MCP注入边界创建，外部header/body不能制造。FMS controller识别内部主体并构造动作断言；人类请求继续既有JWT/权限/DTO。TPM路径保持GET-only；未知动作及create/update/reset都拒绝。不复制MES worker的TrustedWriteExecution，不冒充worker，也不抽象新通用写框架。
+
+实际业务事务使用同一transaction client，固定锁顺序完成当前账号/凭据/revision/角色权限依赖和目标快照的复权及状态读取，检查有效站点归属、当前License、动作/请求/目标匹配。账号管理与角色权限变化采用相容锁/并发策略；不得将事务外全局Prisma revalidate调用算事务复核。复权后才允许已locked幂等返回，不能通过快速返回绕过撤权。draft→locked只发生一次、version只加一、成功业务审计只一条，重复返回不覆盖原时间/操作者/reason。lock与原edit/reset对同一快照的竞争须保持锁后不可改，必要修改限事务状态检查。审计失败与业务写入同事务回滚，取消后不新造unlock/补偿动作。
+
+**机器审计。** 机器actor明确区别于human和MES worker，lockedBy、业务audit actorId和行写入上下文采用同一可解码引用，updatedBy沿现有trigger写入；人类历史保持原语义。已有业务audit补传既有traceId字段（不新增列），访问audit关联accountId/credentialId/resource/result，不记录私钥/token/确认原文。两planner共识采用现有合法`{kind:system,domain:service,id:machine-account:<accountId>}`，编码为`a1:["system","service","machine-account:<accountId>"]`，不新增actor域或全库SQL枚举迁移。引用只由已验证内部主体生成；读端先解码，不当裸人类ID查询；若已有展示位置需要名称，用现有systemDisplayName接缝显示机器账号，不新建页面。当前mapSnapshot未暴露lockedBy，不为本次迁移扩展示。FMS范围字段的必要迁移仍保留。
+
+**唯一库与入口。** 复用createAgentMcpHandler/官方SDK/认证层，工具定义增加必要的权限、mutates和固定执行回调，不能把lock标为readOnly；旧runner改为注入的窄HTTP接口，不依赖KivoApiClient的人类bearer。FMS只挂get/lock目录，MES只挂TPM目录，不暴露任意path/query/body。新路径成功及负例通过后删除旧stdio/CLI、bin别名、KIVO_TOKEN/SHARP_CELL_*读取及旧smoke入口，迁移有价值的参数/确认不转发/错误测试，更新有效exports/品牌清单。同步Control、project-map和方法快照文档，旧历史计划不作机械改写。
+
+**实施顺序与文件面。** 先同步Kivo `control/agent-mcp-access.md`、index、project-map和方法快照文档的已准例外并提交意图；再改platform-contracts机器scope、platform-db同账号schema增量迁移/事务复权、platform-api产品策略/窄POST；然后FMS机器账号/MCP薄挂载、正式bootstrap/JWT guard、快照controller/service及审计适配；最后唯一库工具迁移与旧入口删除。不增第二OAuth、批准平台、policy DSL或全库actor框架。
+
+**本地synthetic验收。** 使用独立FMS DB/Redis/端口/License，不接现场数据或设备；两个站点、范围内外快照、专属FMS账号、只读/越权账号及原人类操作者即可。所有结果经正式FMS bootstrap、官方SDK 2.3.1、2026-07-28、真实guards和PG读取：
+
+| 检查 | 通过条件 |
+|---|---|
+| get→dry-run→人工确认→lock→get | 最终locked、version一次增量、机器actor和trace可回读；dry-run只有GET无业务写/成功lock审计。 |
+| 缺确认、非法确认、派发前取消 | 无POST；确认标记没有到业务DTO/日志。派发后取消不声称回滚，先回读。 |
+| no execute/module/License、空/错站点、跨产品audience/namespace | 拒绝，不泄漏范围外事实；Geneway TPM账号无法lock。 |
+| human token→MCP、OAuth→业务REST、伪header/body、未知写动作 | 均无机器写旁路。 |
+| 预览/确认后停用、撤/轮换凭据、撤权限、缩范围 | 用可控事务前屏障证明写入被拒；已locked也不能绕过复权返回。 |
+| 顺序/并发lock、提交后响应丢失→回读→重试 | 一次状态转换/版本增量/成功audit，不覆盖原锁定事实。 |
+| lock与edit/reset竞争、审计失败 | 锁后内容不被修改；审计失败全事务回滚；无连接池actor泄漏。 |
+| 人类原入口与MES回归、旧入口检查 | 人类语义/历史兼容，MES仍只读，旧stdio/bin/单令牌不可执行，模型无lock。 |
+
+执行受影响包typecheck、agent-mcp目标测试、快照service测试、FMS HTTP/PG集成、boundary同基线比较；真实库确认scope迁移及actor约束。路由/DTO变更用项目OpenAPI producer生成与diff；根脚本若会连接默认开发库，改用相同producer的显式隔离配置，不借本次授权触默认实例。旧PG套件若硬编码其他数据库身份，迁移其有价值断言到本次fixture，不能伪造环境或把skipped当PASS。失败/重试未知先GET回读，不盲写，不新增幂等账本。
+
+停止点仅为无法安全做事务复权、无法正确解释FMS范围、必须伪装human或新增业务/审批动作才能迁移；已有专属账号锁定许可不重复询问。只暂停相关分支，不以TPM通过代签收尾。
 
 ## 6. 渠道会话、我的渠道、微信与恢复
 

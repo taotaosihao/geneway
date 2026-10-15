@@ -220,7 +220,7 @@ DevSpace subagents skill 成功读取自：
 
 ### 11.3 取舍
 
-- MCP 端点放在 `mes-api` 内，不改既有 FMS stdio 包：令牌由本服务签发并校验，避免独立进程转发令牌（规范禁止令牌透传）；工具经 MES HTTP 路由执行，守卫照常生效；不影响 `agent-mcp` 的现有使用方。Kivo `ai/project-map.md` 写有“`packages/agent-mcp` 保持唯一窄参考实现”，该原则在其文档中仍待产品负责人确认；新增 `mes-api` 内置端点后 Kivo 内会有两处 MCP 实现，须请 Kivo 负责人一并确认。
+- （“不改既有 FMS stdio 包”部分已被 11.7 取代）MCP 端点放在 `mes-api` 内，不改既有 FMS stdio 包：令牌由本服务签发并校验，避免独立进程转发令牌（规范禁止令牌透传）；工具经 MES HTTP 路由执行，守卫照常生效；不影响 `agent-mcp` 的现有使用方。Kivo `ai/project-map.md` 写有“`packages/agent-mcp` 保持唯一窄参考实现”，该原则在其文档中仍待产品负责人确认；新增 `mes-api` 内置端点后 Kivo 内会有两处 MCP 实现，须请 Kivo 负责人一并确认。
 - （已被 11.6 用户决定取代）不采用 MCP Authorization（OAuth 2.1）而用 Kivo 会话 Bearer，是记录在案的规范偏离：Kivo 没有授权服务器，单一受控客户端加本机监听、`Origin` 校验和最小权限账号足以覆盖当前风险；以后开放给更多客户端时再评估。
 - 暴露给模型的工具以 Geneway 插件内的固定允许清单为准，服务端注解不作授权依据；写工具从不进入模型工具列表。权限因此同时由 Geneway 与 Kivo 两侧裁决，不只存在于提示词。
 - 事件用 Kivo 已有的签名 webhook 并配对账补偿，而不是 MCP 通知：2026-07-28 规范核心无状态，没有持久推送；webhook 自身也不保证送达。
@@ -255,3 +255,11 @@ v4.4 初稿经两名未参与修改的审查者复审：合同一致性审查与
 “可以新增和修改”经用户确认（“确认是前者”）指“可以为此新增和修改 Kivo 代码”，不是让机器账号新增和修改业务记录；机器账号仍只授维修单创建一项写权限。用户允许为机器账号“新增和修改”，因此 11.3 中“授权仅限 MCP 层”的取舍与“409 映射须单独授权”已被取代：授权范围扩大为本集成所需的 Kivo 改动（MCP、机器账号与管理入口、授权端点、数据结构与权限定义、写动作幂等），与本集成无关的 Kivo 业务改动和推送、合入仍不在授权内。`mes-api` 内新增 MCP 端点视为用户已同意，与 Kivo `ai/project-map.md` 中待确认原则的差异在 P4-K0 同步更新该文档。
 
 第三轮复核（同一事实审查者）结论 PASS_WITH_FIXES，已按其意见补充：Kivo 守卫只认人类会话，须增加进程内机器主体并由守卫识别；新增独立机器账号主体与加载器，不复用 worker 运行身份，写入策略逐动作放行并在事务内复核撤权；扩展标为草案并锁定提交、只做 client credentials 加私钥 JWT；授权服务器元数据与断言校验要求；按单号幂等只对同一机器账号且同范围回放，其余 409 不泄露内容；管理入口以管理 API 为准。
+
+### 11.7 Kivo 只保留一套 MCP 实现（2026-10-15）
+
+用户原话：“只保留一套”。此前合同为避免影响 `agent-mcp` 现有使用方而决定不改动它，代价是 Kivo 内有两套 MCP；用户决定只保留一套。
+
+只读核对（`deploy/dongguan-airui`，`26182fccf`）：仓库内没有其他代码引用 `agent-mcp`；Docker 构建只复制其 `package.json` 用于 workspace 安装；`control/index.yaml` 与 `scripts/check-boundaries.mjs` 对其有路径与边界规则；`docs/agent-mcp-method-snapshot.md` 记录其以 CLI 手动调用；最近一次改动为 2026-10-10（`11c53d37c`），说明仍有人在维护，合入时须与其他分支协调。
+
+落点：`agent-mcp` 演进为唯一实现库并保持 HTTP 边界规则；`mes-api` 与 `fms-api` 只做挂载；制造方法快照工具迁移后下线 stdio 入口与单令牌模式；机器账号与授权服务器也只实现一套。为不拖慢 Geneway 主线，迁移收尾不阻塞 P4-K0 的 TPM 只读验收，但须在恢复 P6 前完成。Kivo `ai/project-map.md` 中“`packages/agent-mcp` 保持唯一窄参考实现”的原则因此成立，不再有差异。

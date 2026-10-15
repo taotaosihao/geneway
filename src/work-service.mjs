@@ -477,14 +477,21 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         }
         if (body.employeeIds !== undefined) {
           if (!stringIds(body.employeeIds) || body.employeeIds.some(employeeId => !state.employees.some(item => item.id === employeeId))) throw serviceError('INVALID_REQUEST', '成员员工授权无效')
+          if (!stringIds(body.expectedEmployeeIds) || !sameStrings([...new Set(body.expectedEmployeeIds)], [...new Set(member.employeeIds)])) throw serviceError('REVISION_CONFLICT', '成员授权已变化，请刷新后重试')
           next.employeeIds = [...new Set(body.employeeIds)]
         }
         if (member.role === 'admin' && member.enabled === true && (next.role !== 'admin' || next.enabled !== true)) {
           if (!state.members.some(item => item.id !== id && item.enabled === true && item.role === 'admin')) throw serviceError('INVALID_REQUEST', '不能禁用或降级最后一个已启用管理员')
         }
-        const authorityChanged = next.role !== member.role || next.enabled !== member.enabled || !sameStrings(next.employeeIds, member.employeeIds)
-        updated = { ...next, sessionVersion: member.sessionVersion + (authorityChanged ? 1 : 0), updatedAt: clock() }
-        return sweepKnowledgeDependencies({ ...state, members: replaceById(state.members, updated) })
+        const loginChanged = next.role !== member.role || next.enabled !== member.enabled
+        const now = clock()
+        updated = { ...next, sessionVersion: member.sessionVersion + (loginChanged ? 1 : 0), updatedAt: now }
+        const changedEmployees = new Set([...member.employeeIds, ...next.employeeIds].filter(employeeId => member.employeeIds.includes(employeeId) !== next.employeeIds.includes(employeeId)))
+        const nextState = {
+          ...state, members: replaceById(state.members, updated),
+          employees: state.employees.map(employee => changedEmployees.has(employee.id) ? { ...employee, revision: (employee.revision ?? 1) + 1 } : employee),
+        }
+        return sweepKnowledgeDependencies(invalidatePendingApprovals(nextState, work => work.ownerMemberId === id && (loginChanged || !next.employeeIds.includes(work.employeeId)), now))
       })
       return publicMember(updated)
     },
@@ -503,30 +510,45 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const state = await store.read()
       requireAdmin(state, actor)
       if (!CONFIG_KINDS.has(kind)) throw serviceError('NOT_FOUND', '配置类型不存在')
-      return kind === 'connections' ? state.connections.map(item => adminConnection(item, connectionCatalog)) : state[kind]
+      if (kind === 'connections') return state.connections.map(item => adminConnection(item, connectionCatalog))
+      return kind === 'employees' ? state.employees.map(item => adminEmployee(state, item)) : state[kind]
     },
 
     async createConfig(actor, kind, body = {}) {
-      let created
+      let created, employeeView
       await store.update(state => {
         requireAdmin(state, actor)
         created = configEntity(state, kind, body, undefined, clock(), connectionCatalog)
         if (state[kind].some(item => item.id === created.id)) throw serviceError('INVALID_REQUEST', '配置 ID 已存在')
-        return { ...state, [kind]: [...state[kind], created] }
+        const next = { ...state, [kind]: [...state[kind], created] }
+        if (kind !== 'employees') return next
+        const assigned = setEmployeeMembers(next, created.id, body.memberIds ?? [], clock())
+        employeeView = adminEmployee(assigned, created)
+        return assigned
       })
+      if (kind === 'employees') return employeeView
       return kind === 'connections' ? adminConnection(created, connectionCatalog) : created
     },
 
     async updateConfig(actor, kind, id, body = {}) {
-      let updated
+      let updated, employeeView
       await store.update(state => {
         requireAdmin(state, actor)
         const current = state[kind]?.find(item => item.id === id)
         if (!current) throw serviceError('NOT_FOUND', '配置不存在')
+        if (kind === 'employees' && body.expectedRevision !== (current.revision ?? 1)) throw serviceError('REVISION_CONFLICT', 'Agent 配置已变化，请刷新后重试')
         updated = configEntity(state, kind, body, current, clock(), connectionCatalog)
-        const next = { ...state, [kind]: replaceById(state[kind], updated) }
-        return kind === 'employees' ? sweepKnowledgeDependencies(next) : next
+        let next = { ...state, [kind]: replaceById(state[kind], updated) }
+        if (kind !== 'employees') return next
+        const now = clock()
+        if (body.memberIds !== undefined) next = setEmployeeMembers(next, id, body.memberIds, now)
+        if (updated.enabled !== true || current.modelRouteId !== updated.modelRouteId || !sameStrings(current.skillIds, updated.skillIds) || !sameStrings(current.connectionIds, updated.connectionIds)) {
+          next = invalidatePendingApprovals(next, work => work.employeeId === id, now)
+        }
+        employeeView = adminEmployee(next, updated)
+        return sweepKnowledgeDependencies(next)
       })
+      if (kind === 'employees') return employeeView
       return kind === 'connections' ? adminConnection(updated, connectionCatalog) : updated
     },
 
@@ -725,6 +747,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         sessionId: sessionResult?.dshSessionRef, sessionMetadata: context.metadata,
         grant: compact({ ...grantConnectionFields(context), policyFile: policyPaths.stateFile, policyRoot: policyPaths.dataRoot, secretRoot: policyPaths.secretRoot }),
         confirmations: context.confirmations.map(item => ({ id: item.id, revision: item.revision, label: item.label, value: item.value })),
+        agentInstructions: context.agentInstructions,
       }
       if (operation === 'follow-up') {
         runnerOptions.contextResultId = sessionResult?.id
@@ -783,6 +806,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const mappingContext = binding.capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY ? correlationMappingContext(work) : undefined
       context = {
         work, connection: binding.connection ?? null, connections: binding.connections, mappingContext, confirmations,
+        agentInstructions: binding.employee.instructions ?? '',
         metadata: {
           ownerMemberId: member.id, workId: work.id, employeeId: work.employeeId, skillId: work.skillId,
           capabilityId: work.capabilityId, ...sessionConnectionMetadata(binding, mappingContext), modelRouteId: binding.route.id,
@@ -1054,12 +1078,35 @@ function skillConfig(body, current) {
 }
 function employeeConfig(state, body, current) {
   const result = { id: current?.id ?? clean(body.id), name: clean(body.name ?? current?.name), description: clean(body.description ?? current?.description) ?? '',
+    instructions: body.instructions === undefined ? current?.instructions ?? '' : typeof body.instructions === 'string' ? body.instructions.trim() : null,
+    revision: current ? (current.revision ?? 1) + 1 : 1,
     enabled: body.enabled ?? current?.enabled ?? true, modelRouteId: body.modelRouteId ?? current?.modelRouteId ?? null,
     connectionIds: body.connectionIds ?? current?.connectionIds ?? [], skillIds: body.skillIds ?? current?.skillIds ?? [] }
-  if (!result.id || !result.name || typeof result.enabled !== 'boolean' || !stringIds(result.connectionIds) || !stringIds(result.skillIds)) throw serviceError('INVALID_REQUEST', '员工配置无效')
+  if (!result.id || !result.name || typeof result.instructions !== 'string' || result.instructions.length > 16_000 || typeof result.enabled !== 'boolean' || !stringIds(result.connectionIds) || !stringIds(result.skillIds)) throw serviceError('INVALID_REQUEST', '员工配置无效')
   if (!state.modelRoutes.some(item => item.id === result.modelRouteId)) throw serviceError('INVALID_REQUEST', '员工模型路由不存在')
   if (result.connectionIds.some(id => !state.connections.some(item => item.id === id)) || result.skillIds.some(id => !state.skills.some(item => item.id === id))) throw serviceError('INVALID_REQUEST', '员工绑定引用不存在')
   return result
+}
+
+function adminEmployee(state, employee) {
+  return { ...employee, instructions: employee.instructions ?? '', revision: employee.revision ?? 1, memberIds: state.members.filter(member => member.employeeIds.includes(employee.id)).map(member => member.id) }
+}
+
+function setEmployeeMembers(state, employeeId, memberIds, now) {
+  if (!stringIds(memberIds) || memberIds.some(id => !state.members.some(member => member.id === id))) throw serviceError('INVALID_REQUEST', 'Agent 开放成员无效')
+  const allowed = new Set(memberIds)
+  const members = state.members.map(member => {
+    if (allowed.has(member.id) === member.employeeIds.includes(employeeId)) return member
+    const employeeIds = allowed.has(member.id) ? [...member.employeeIds, employeeId] : member.employeeIds.filter(id => id !== employeeId)
+    return { ...member, employeeIds, updatedAt: now }
+  })
+  return invalidatePendingApprovals({ ...state, members }, work => work.employeeId === employeeId && !allowed.has(work.ownerMemberId), now)
+}
+
+function invalidatePendingApprovals(state, affected, now) {
+  return { ...state, works: state.works.map(work => affected(work) ? { ...work, actions: (work.actions ?? []).map(action => action.decision?.kind === 'approved' && !action.decision.invalidatedAt && !action.attempt
+    ? { ...action, decision: { ...action.decision, invalidatedAt: now, invalidationReason: 'OWNER_REVOKED' } }
+    : action) } : work) }
 }
 function connectionConfig(state, body, current, now, connectionCatalog) {
   const result = { id: current?.id ?? clean(body.id), name: clean(body.name ?? current?.name), kind: body.kind ?? current?.kind,

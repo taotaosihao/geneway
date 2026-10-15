@@ -12,11 +12,38 @@ const recoveredAt = '2026-09-21T08:00:00.000Z'
 try {
   migrationAndValidationChecks()
   await immutableChecks()
+  await authorizationCommitChecks()
   await durableCommitChecks()
   await recoveryChecks()
   console.log('P6 state/store checks passed; state=v8; durable faults=5; recovery replay/dispatch=0')
 } finally {
   await rm(root, { recursive: true, force: true })
+}
+
+async function authorizationCommitChecks() {
+  const path = join(root, 'authorization.json')
+  const store = createFileStore(path)
+  const state = actionState([
+    { ...action('pending'), decision: decision('approved') },
+    { ...action('unknown'), decision: decision('approved'), attempt: { ...attempt(), unknownAt: recoveredAt, unknownReason: 'RECOVERY_UNKNOWN' } },
+  ])
+  state.members = [
+    { id: 'member-admin', loginName: 'admin', displayName: '管理员', authRef: 'member-admin', role: 'admin', enabled: true, sessionVersion: 1, employeeIds: [] },
+    { id: 'member-owner', loginName: 'owner', displayName: '成员', authRef: 'member-owner', role: 'member', enabled: true, sessionVersion: 1, employeeIds: ['employee-1'] },
+  ]
+  state.employees = [{ id: 'employee-1' }]
+  await store.update(() => state)
+  const before = await readFile(path, 'utf8')
+  const failed = createWorkService({ store: createFileStore(path, faultOps('rename')) })
+  await assert.rejects(failed.updateMember({ id: 'member-admin' }, 'member-owner', { expectedEmployeeIds: ['employee-1'], employeeIds: [] }), /rename/)
+  assert.equal(await readFile(path, 'utf8'), before)
+  const service = createWorkService({ store, clock: () => recoveredAt })
+  await service.updateMember({ id: 'member-admin' }, 'member-owner', { expectedEmployeeIds: ['employee-1'], employeeIds: [] })
+  await service.updateMember({ id: 'member-admin' }, 'member-owner', { expectedEmployeeIds: [], employeeIds: ['employee-1'] })
+  const reopened = await createFileStore(path).read()
+  assert.equal(reopened.members[1].sessionVersion, 1)
+  assert.equal(reopened.works[0].actions[0].decision.invalidationReason, 'OWNER_REVOKED')
+  assert.deepEqual(reopened.works[0].actions[1], state.works[0].actions[1])
 }
 
 function migrationAndValidationChecks() {

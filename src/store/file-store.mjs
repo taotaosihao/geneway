@@ -370,7 +370,12 @@ function normalizeV4(value, { allowKnowledgeDependencyRefs = false } = {}) {
   uniqueIds(works, '工作')
 
   const modelRoutes = entityArray(value, 'modelRoutes', '模型路由')
-  const employees = entityArray(value, 'employees', '员工')
+  const employees = entityArray(value, 'employees', '员工').map(employee => {
+    if (Object.hasOwn(employee, 'memberIds')) throw new Error('Agent 开放成员只能由成员 employeeIds 保存')
+    if (employee.revision !== undefined && (!Number.isSafeInteger(employee.revision) || employee.revision < 1)) throw new Error('Agent revision 无效')
+    if (employee.instructions !== undefined && (typeof employee.instructions !== 'string' || employee.instructions.length > 16_000)) throw new Error('Agent instructions 无效')
+    return employee
+  })
   const connections = entityArray(value, 'connections', '连接')
   const skills = entityArray(value, 'skills', 'Skill')
   const confirmations = entityArray(value, 'confirmations', '确认信息')

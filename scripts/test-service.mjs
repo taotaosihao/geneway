@@ -164,8 +164,21 @@ try {
   await assert.rejects(service.listMembers(alice), error => error.code === 'FORBIDDEN')
   await assert.rejects(service.listConfig(alice, 'employees'), error => error.code === 'FORBIDDEN')
   assert.equal((await service.listConfig(admin, 'modelRoutes'))[0].model, 'deepseek/deepseek-v4-pro')
-  const renamed = await service.updateConfig(admin, 'employees', 'employee-admin', { description: '管理员配置员工' })
+  const renamed = await service.updateConfig(admin, 'employees', 'employee-admin', { description: '管理员配置员工', expectedRevision: (await service.listConfig(admin, 'employees')).find(employee => employee.id === 'employee-admin').revision })
   assert.equal(renamed.description, '管理员配置员工')
+  const configuredAgent = await service.updateConfig(admin, 'employees', 'employee-a', { instructions: '本次执行保留原指令。', expectedRevision: (await service.listConfig(admin, 'employees')).find(employee => employee.id === 'employee-a').revision })
+  const instructionGate = deferred()
+  nextGate = instructionGate
+  const frozen = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 60, quantity: 2 }, clientRequestId: 'instructions-frozen' })
+  const frozenExecutionId = frozen.value.executions.at(-1).id
+  await waitFor(service, alice, frozen.value.id, work => work.status === 'running' && calls.some(call => call.executionId === frozenExecutionId))
+  await service.updateConfig(admin, 'employees', 'employee-a', { instructions: '后续执行采用新指令。', expectedRevision: configuredAgent.revision })
+  assert.equal(calls.find(call => call.executionId === frozenExecutionId).agentInstructions, '本次执行保留原指令。')
+  instructionGate.release()
+  await waitFor(service, alice, frozen.value.id, work => work.status === 'completed')
+  const nextDefinition = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 60, quantity: 3 }, clientRequestId: 'instructions-updated' })
+  await waitFor(service, alice, nextDefinition.value.id, work => work.status === 'completed')
+  assert.equal(calls.at(-1).agentInstructions, '后续执行采用新指令。')
   for (const [field, value] of Object.entries({
     targetIdentity: 'other', baseUrl: 'http://127.0.0.1/other', hostHeader: 'other.localhost',
     sourceSystem: 'Other', sourceInstance: 'Other', sourceEnvironment: 'production',

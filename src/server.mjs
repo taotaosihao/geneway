@@ -375,7 +375,7 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       if (request.method === 'GET' && url.pathname === '/api/admin/members') return sendJson(response, 200, await service.listMembers(actor))
       const memberMatch = url.pathname.match(/^\/api\/admin\/members\/([^/]+)$/)
       if (memberMatch && request.method === 'PATCH') {
-        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['displayName', 'role', 'enabled', 'employeeIds'])
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['displayName', 'role', 'enabled', 'employeeIds', 'expectedEmployeeIds'])
         return sendJson(response, 200, await service.updateMember(actor, decode(memberMatch[1]), body))
       }
 
@@ -491,7 +491,7 @@ async function readJson(request, allowed) {
 
 function configFields(kind, create, collectionPatch = false) {
   const id = create || collectionPatch ? ['id'] : []
-  if (kind === 'employees') return [...id, 'name', 'description', 'enabled', 'modelRouteId', 'connectionIds', 'skillIds']
+  if (kind === 'employees') return [...id, 'name', 'description', 'instructions', 'enabled', 'modelRouteId', 'connectionIds', 'skillIds', 'memberIds', ...(!create ? ['expectedRevision'] : [])]
   if (kind === 'connections') return [...id, 'name', 'kind', 'targetIdentity', 'baseUrl', 'hostHeader', 'credentialRef', 'allowedObjectIds', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'enabled', 'skillIds']
   if (kind === 'skills') return [...id, 'name', 'capabilityId', 'enabled']
   return [...id, 'provider', 'model', 'displayName', 'enabled', 'credentialRef']

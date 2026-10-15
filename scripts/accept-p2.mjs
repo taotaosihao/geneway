@@ -93,7 +93,8 @@ try {
     const b=await api('/api/admin/connections',{method:'POST',body:{id:'connection-b',name:'Frappe-compatible 受控 B',kind:'gearjob-rest',targetIdentity:'controlled-b',baseUrl:${JSON.stringify(controlled.address)},credentialRef:'controlled-b.txt',allowedObjectIds:[${JSON.stringify(workOrderId)}],sourceSystem:'Frappe-compatible controlled source',sourceInstance:'controlled-b',sourceEnvironment:'controlled-test',dataMode:'synthetic-controlled',evidenceMode:'controlled-frappe-compatible',enabled:true,skillIds:[gearSkill.id]}})
     const employeeA=await api('/api/admin/employees',{method:'POST',body:{id:'employee-a',name:'工单助理 A',description:'读取 GearJob 外部测试 A',enabled:true,modelRouteId:route.id,connectionIds:[a.id],skillIds:[gearSkill.id]}})
     const employeeB=await api('/api/admin/employees',{method:'POST',body:{id:'employee-b',name:'生产助理 B',description:'读取受控 B 并执行节拍换算',enabled:true,modelRouteId:route.id,connectionIds:[b.id],skillIds:[gearSkill.id,cycleSkill.id]}})
-    await api('/api/admin/members/member-user',{method:'PATCH',body:{employeeIds:[employeeA.id,employeeB.id]}})
+    const member=(await api('/api/admin/members')).find(item=>item.id==='member-user')
+    await api('/api/admin/members/member-user',{method:'PATCH',body:{expectedEmployeeIds:member.employeeIds,employeeIds:[employeeA.id,employeeB.id]}})
     await reloadAll();await loadAdmin();show('admin')
     return {route:route.id,skills:[gearSkill.id,cycleSkill.id],connections:[a.id,b.id],employees:[employeeA.id,employeeB.id]}
   })()`)

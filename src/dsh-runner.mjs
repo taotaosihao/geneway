@@ -84,7 +84,7 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
         await writeGrant(grantFiles.request, requestGrant)
         await writeGrant(grantFiles.tool, toolGrant)
         if (runState.cancelled) throw cancelledError()
-        const prompt = isFollowUp ? followUpPrompt(options) : buildCapabilityPrompt(capabilityId, input, previousFact(options), options.confirmations)
+        const prompt = buildAgentPrompt(isFollowUp ? followUpPrompt(options) : buildCapabilityPrompt(capabilityId, input, previousFact(options), options.confirmations), metadata.agentInstructions)
         const result = await harness.run(prompt, sameSession ? { sessionId: requestedSessionId } : undefined)
         if (runState.cancelled) throw cancelledError()
         if (requestAuthorizationFailed(result)) throw runnerError('FORBIDDEN', '执行授权已失效')
@@ -187,6 +187,10 @@ export function parseRunResult(result, options = {}) {
   }
 }
 
+export function buildAgentPrompt(prompt, instructions) {
+  return instructions ? `本次 Agent 执行指令：\n${instructions}\n\n${prompt}` : prompt
+}
+
 function normalizedInput(capabilityId, options) {
   const input = options.input ?? (['gearjob-work-order-read', WORK_ORDER_DEVICE_CORRELATION_CAPABILITY].includes(capabilityId) ? { workOrderId: options.workOrderId } : undefined)
   const validated = validateCapabilityInput(capabilityId, input)
@@ -194,10 +198,11 @@ function normalizedInput(capabilityId, options) {
   return validated.input
 }
 
-function sessionMetadata(value, { capability }) {
+function sessionMetadata(value, { capability, options }) {
   const metadata = value
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) throw runnerError('INVALID_REQUEST', 'Session metadata 无效')
   const result = {}
+  result.agentInstructions = text(options.agentInstructions) ?? ''
   for (const key of ['ownerMemberId', 'workId', 'employeeId', 'skillId', 'capabilityId', 'modelRouteId', 'confirmationFingerprint']) {
     result[key] = text(metadata[key])
     if (!result[key]) throw runnerError('INVALID_REQUEST', `Session metadata 缺少 ${key}`)

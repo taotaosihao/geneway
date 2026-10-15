@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { runProfile } from '@deepseek-ai/dsh/profile-boot'
 import { CYCLE_TIME_TOOL, GEARJOB_TOOL, getCapability } from './capabilities.mjs'
-import { parseRunResult } from './dsh-runner.mjs'
+import { buildAgentPrompt, parseRunResult } from './dsh-runner.mjs'
 import { createObservation } from './domain/work-order.mjs'
 import { connectionSnapshot } from './execution-grant.mjs'
 import { readRuntimeConfig, readSettings } from './runtime-config.mjs'
@@ -221,6 +221,7 @@ export function createCollaborationRunner({
   async function executeRoot(rootWorkId, generation, entry) {
     const ctx = await context()
     const rootSnapshot = await startRoot(rootWorkId, generation)
+    const rootInstructions = (await store.read()).employees.find(employee => employee.id === rootSnapshot.employeeId)?.instructions ?? ''
     const rootExecution = rootSnapshot.executions.find(execution => execution.generation === generation && ACTIVE.has(execution.status))
     if (!rootExecution) throw runtimeError('BUSY', '协作根执行不可运行')
     const rootHandle = await ctx.agents.create({ sessionId: `collaboration-root-${randomUUID()}`, meta: { cwd: workspaceRoot }, agentOptions })
@@ -259,7 +260,7 @@ export function createCollaborationRunner({
     summaryContexts.set(rootHandle.agent, structuredClone(projection))
     rootHandle.agent.ctx.tools.restrict({ allow: [COLLABORATION_TOOLS.summarize] })
     rootHandle.agent.followup(createUserMessage({
-      content: [{ type: 'text', text: `SCENARIO:root-summary Review only these persisted business results. Submit resultRefs only to ${COLLABORATION_TOOLS.summarize}; do not repeat identifiers in prose. Then provide a concise factual summary: ${JSON.stringify(modelSummaryProjection(projection))}` }],
+      content: [{ type: 'text', text: buildAgentPrompt(`SCENARIO:root-summary Review only these persisted business results. Submit resultRefs only to ${COLLABORATION_TOOLS.summarize}; do not repeat identifiers in prose. Then provide a concise factual summary: ${JSON.stringify(modelSummaryProjection(projection))}`, rootInstructions) }],
       source: { kind: 'user' },
     }))
     await untilAbort(rootHandle.agent.whenIdle(), rootSignal)
@@ -292,7 +293,7 @@ export function createCollaborationRunner({
     try {
       run = await ctx.subagents.start('spawn', {
         label: item.id,
-        prompt: [{ type: 'text', text: childPrompt(child, capability.toolName, confirmations) }],
+        prompt: [{ type: 'text', text: buildAgentPrompt(childPrompt(child, capability.toolName, confirmations), state.employees.find(employee => employee.id === child.employeeId)?.instructions) }],
         parent: [...entry.handles][0].agent,
         signal,
         agentOptions,

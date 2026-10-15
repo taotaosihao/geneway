@@ -89,11 +89,11 @@ try {
   ])
   await waitFor(service, actor, sharedRefWork.value.id, work => work.status === 'completed')
   const adminForShared = { id: 'member-admin' }
-  await service.updateMember(adminForShared, actor.id, { employeeIds: ['employee-lead', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
+  await service.updateMember(adminForShared, actor.id, { expectedEmployeeIds: (await store.read()).members.find(member => member.id === actor.id).employeeIds, employeeIds: ['employee-lead', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
   const sharedStale = (await service.getWork(actor, sharedRefWork.value.id)).value
   assert.deepEqual(sharedStale.collaboration.staleItemIds, ['item-knowledge-shared-a'])
   assert.deepEqual(sharedStale.collaboration.staleKnowledgeRefs, [`${material.id}@3#p1-c1`])
-  await service.updateMember(adminForShared, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
+  await service.updateMember(adminForShared, actor.id, { expectedEmployeeIds: (await store.read()).members.find(member => member.id === actor.id).employeeIds, employeeIds: ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
 
   for (const scenario of ['knowledge-negative-unsearched', 'knowledge-negative-bad-revision', 'knowledge-negative-bad-segment']) {
     const negative = await create(service, actor, scenario, [{ ...item(`item-${scenario}`, 'employee-b', 60, 1), knowledgeQuery: '替换后的当前依据' }])
@@ -107,8 +107,8 @@ try {
   assert.equal((await waitFor(service, actor, siblingNegative.value.id, work => work.status === 'failed')).executions.at(-1).error.code, 'KNOWLEDGE_REFERENCE_INVALID')
   assert.equal(siblingMaterial.id, 'knowledge-sibling')
 
-  const revokeB = () => service.updateMember(adminForShared, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-revoked', 'employee-incompatible'] })
-  const restoreB = () => service.updateMember(adminForShared, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
+  const revokeB = async () => service.updateMember(adminForShared, actor.id, { expectedEmployeeIds: (await store.read()).members.find(member => member.id === actor.id).employeeIds, employeeIds: ['employee-lead', 'employee-a', 'employee-revoked', 'employee-incompatible'] })
+  const restoreB = async () => service.updateMember(adminForShared, actor.id, { expectedEmployeeIds: (await store.read()).members.find(member => member.id === actor.id).employeeIds, employeeIds: ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
   let knowledgeIo = 0, childRequests = 0, armed = true
   runtimeHooks.beforeKnowledgeSearch = () => { knowledgeIo += 1 }
   runtimeHooks.beforeAgentRequest = async ({ binding }) => { if (armed && binding.kind === 'child') { armed = false; await revokeB() } }
@@ -371,7 +371,7 @@ try {
     { ...item('item-revoke', 'employee-a', 300, 5), dependsOn: ['item-revoke-safe'] },
   ])
   await capture.waitFor('item-revoke')
-  await service.updateConfig(adminForShared, 'employees', 'employee-a', { enabled: false })
+  await service.updateConfig(adminForShared, 'employees', 'employee-a', { enabled: false, expectedRevision: (await service.listConfig(adminForShared, 'employees')).find(employee => employee.id === 'employee-a').revision })
   capture.release('item-revoke')
   const revokedDone = await waitFor(service, actor, revoked.value.id, work => work.status === 'failed')
   assert.equal(revokedDone.executions.at(-1).error.code, 'FORBIDDEN', runtimeFailure?.stack)
@@ -379,7 +379,7 @@ try {
   assert.equal(revokedChildren.find(work => work.planItemId === 'item-revoke-safe').status, 'completed')
   assert.equal(revokedChildren.find(work => work.planItemId === 'item-revoke-safe').results.length, 1)
   assert.equal(revokedChildren.find(work => work.planItemId === 'item-revoke').executions.at(-1).error.code, 'FORBIDDEN')
-  await service.updateConfig(adminForShared, 'employees', 'employee-a', { enabled: true })
+  await service.updateConfig(adminForShared, 'employees', 'employee-a', { enabled: true, expectedRevision: (await service.listConfig(adminForShared, 'employees')).find(employee => employee.id === 'employee-a').revision })
   assert.equal((await service.continueCollaboration(actor, revoked.value.id, { clientRequestId: 'revoke-recovery' })).ok, true)
   await waitFor(service, actor, revoked.value.id, work => work.status === 'completed')
   const recoveredChildren = (await store.read()).works.filter(work => work.rootWorkId === revoked.value.id)
@@ -495,12 +495,12 @@ try {
   delete runtimeHooks.afterRootDispose
 
   const admin = { id: 'member-admin' }
-  await service.updateMember(admin, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-revoked', 'employee-incompatible'] })
+  await service.updateMember(admin, actor.id, { expectedEmployeeIds: (await store.read()).members.find(member => member.id === actor.id).employeeIds, employeeIds: ['employee-lead', 'employee-a', 'employee-revoked', 'employee-incompatible'] })
   assert.equal((await service.getWork(actor, remountedKnowledge.value.id)).value.collaboration.status, 'stale')
-  await service.updateMember(admin, actor.id, { employeeIds: ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
-  await service.updateConfig(admin, 'employees', 'employee-b', { enabled: false })
+  await service.updateMember(admin, actor.id, { expectedEmployeeIds: (await store.read()).members.find(member => member.id === actor.id).employeeIds, employeeIds: ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible'] })
+  await service.updateConfig(admin, 'employees', 'employee-b', { enabled: false, expectedRevision: (await service.listConfig(admin, 'employees')).find(employee => employee.id === 'employee-b').revision })
   assert.equal((await service.getWork(actor, remountedKnowledge.value.id)).value.collaboration.status, 'stale')
-  await service.updateConfig(admin, 'employees', 'employee-b', { enabled: true })
+  await service.updateConfig(admin, 'employees', 'employee-b', { enabled: true, expectedRevision: (await service.listConfig(admin, 'employees')).find(employee => employee.id === 'employee-b').revision })
 
   capture.hold('item-restart')
   const restarting = await create(service, actor, 'restart', [item('item-restart', 'employee-b', 100, 2)])

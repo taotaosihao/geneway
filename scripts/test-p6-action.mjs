@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { createActionService } from '../src/action-service.mjs'
 import { WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from '../src/capabilities.mjs'
 import { createGearJobCommentAdapter, gearJobReadbackConnectionSnapshot } from '../src/gearjob-comment-adapter.mjs'
+import { createWorkService } from '../src/work-service.mjs'
 
 const now = '2026-09-21T10:00:00.000Z'
 const owner = { id: 'member-owner' }
@@ -17,10 +18,76 @@ try {
   await writeFile(join(secretRoot, 'gear.json'), JSON.stringify({ apiKey: 'gear-key', apiSecret: 'gear-secret', invocationSecret: 's'.repeat(48) }), { mode: 0o600 })
   await bodyAndDigestChecks()
   await actionServiceChecks()
+  await employeeAuthorizationChecks()
   await adapterChecks()
   console.log('P6 action checks passed; preview/action/dispatch/readback/recovery boundaries verified')
 } finally {
   await rm(root, { recursive: true, force: true })
+}
+
+async function employeeAuthorizationChecks() {
+  for (const source of ['member', 'employee', 'agent-members']) {
+    const sample = fixture({ mutate: state => { state.employees[0].name = '助手' }, adapter: { async dispatch({ action }) { return { kind: 'not-claimed', action } } } })
+    const workService = createWorkService({ store: sample.store })
+    const preview = await sample.service.createPreview(owner, 'work-1', { body: '撤权后旧批准不能恢复。', clientRequestId: `authorization-${source}` })
+    const approved = await sample.service.approve(owner, 'work-1', preview.id, approval(preview))
+    assert.equal(approved.decision.kind, 'approved')
+    assert.equal(approved.attempt, null)
+    const admin = { id: 'member-admin' }
+    const employee = () => workService.listConfig(admin, 'employees').then(items => items[0])
+    const oldVersion = (await sample.store.read()).members[0].sessionVersion
+    if (source === 'member') {
+      await workService.updateMember(admin, owner.id, { expectedEmployeeIds: ['employee-1'], employeeIds: [] })
+      await workService.updateMember(admin, owner.id, { expectedEmployeeIds: [], employeeIds: ['employee-1'] })
+    } else if (source === 'employee') {
+      await workService.updateConfig(admin, 'employees', 'employee-1', { expectedRevision: (await employee()).revision, enabled: false })
+      await workService.updateConfig(admin, 'employees', 'employee-1', { expectedRevision: (await employee()).revision, enabled: true })
+    } else {
+      await workService.updateConfig(admin, 'employees', 'employee-1', { expectedRevision: (await employee()).revision, memberIds: ['member-admin'] })
+      await workService.updateConfig(admin, 'employees', 'employee-1', { expectedRevision: (await employee()).revision, memberIds: [owner.id, 'member-admin'] })
+    }
+    const state = await sample.store.read()
+    assert.equal(state.members[0].sessionVersion, oldVersion)
+    assert.equal(state.works[0].actions[0].decision.invalidationReason, 'OWNER_REVOKED')
+    await assert.rejects(sample.service.approve(owner, 'work-1', preview.id, approval(preview)), error => error.code === 'REVISION_CONFLICT')
+  }
+
+  const effects = []
+  const unknown = fixture({ adapter: fakeAdapter(effects, 0, { kind: 'unknown', reason: 'UPSTREAM_TIMEOUT' }) })
+  const preview = await unknown.service.createPreview(owner, 'work-1', { body: '已有请求只保留核对。', clientRequestId: 'authorization-unknown' })
+  const attempt = await unknown.service.approve(owner, 'work-1', preview.id, approval(preview))
+  const workService = createWorkService({ store: unknown.store })
+  await workService.updateMember({ id: 'member-admin' }, owner.id, { expectedEmployeeIds: ['employee-1'], employeeIds: [] })
+  await workService.updateMember({ id: 'member-admin' }, owner.id, { expectedEmployeeIds: [], employeeIds: ['employee-1'] })
+  const preserved = (await unknown.store.read()).works[0].actions[0]
+  assert.deepEqual(preserved.attempt, attempt.attempt)
+  assert.equal(preserved.decision.invalidatedAt, undefined)
+  await unknown.service.approve(owner, 'work-1', preview.id, approval(preview))
+  assert.deepEqual(effects, ['post'])
+
+  let entered, release
+  const started = new Promise(resolve => { entered = resolve })
+  const gate = new Promise(resolve => { release = resolve })
+  const dispatchEffects = []
+  const delayed = fixture({ adapter: {
+    async dispatch({ claimAttempt }) {
+      entered()
+      await gate
+      const claim = await claimAttempt()
+      if (!claim.claimed) return { kind: 'not-claimed', action: claim.action }
+      dispatchEffects.push('post')
+      return { kind: 'unknown', reason: 'UPSTREAM_TIMEOUT' }
+    },
+  } })
+  const delayedPreview = await delayed.service.createPreview(owner, 'work-1', { body: '派发前撤销再加回也不发送。', clientRequestId: 'authorization-dispatch' })
+  const approving = delayed.service.approve(owner, 'work-1', delayedPreview.id, approval(delayedPreview))
+  await started
+  const authority = createWorkService({ store: delayed.store })
+  await authority.updateMember({ id: 'member-admin' }, owner.id, { expectedEmployeeIds: ['employee-1'], employeeIds: [] })
+  await authority.updateMember({ id: 'member-admin' }, owner.id, { expectedEmployeeIds: [], employeeIds: ['employee-1'] })
+  release()
+  assert.equal((await approving).decision.invalidationReason, 'OWNER_REVOKED')
+  assert.deepEqual(dispatchEffects, [])
 }
 
 async function bodyAndDigestChecks() {

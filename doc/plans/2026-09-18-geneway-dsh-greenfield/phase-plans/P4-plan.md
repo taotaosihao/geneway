@@ -97,6 +97,10 @@
 
 对话停止只取消本次回复；工作停止只取消本 work 及已有明确归属子工作。一个会话中 W1 停止不能影响 W2。恢复活动回复为 interrupted；已完成且原生历史缺失显示历史不可用，不改写成未完成。
 
+原生有限探针验证后，S1-B接口冻结如下（既定§3实现分支，不另建规划权威）：`/api/conversations` GET/POST、`/:id` GET/PATCH、`/:id/turns` POST、`/:id/turns/:turnId/cancel` POST。create只接employeeId/title；PATCH只接改名或归档，活动回复须先停止再归档；turn输入text/clientRequestId，同ID同body去重、异body409，一会话最多一个活动回复。terminal旧turn取消accepted=false，不得转而取消新turn。浏览器不接收原生Session引用或提交owner。
+
+summary为id/title/employeeId/employeeName/source/时间/archivedAt/readOnlyReason/activeTurnId；detail增加turns、historyStatus及由work.conversationId派生的relatedWorks。turn只有产品id、用户/助手可见文字、accepted/running/completed/failed/cancelled/interrupted、时间和安全error；历史不可读时文字可null。historyStatus(empty/available/partial/unavailable)独立于回复状态，缺历史不得静默fresh，HISTORY_UNAVAILABLE只读；撤权、停用、不可用Agent和归档分别有明确只读原因，owner旧历史不因Agent从bootstrap消失而丢归属名称。POSTwork/协作根可带conversationId，在同一事务核owner、根Agent相同且未归档；旧work仍null。UI沿现有页面和轮询，新建/继续/停止/历史/关联工作同屏可操作，不新增SSE，登录切换清正文草稿，响应按请求会话ID落位。
+
 ### 3.3 S1 普通入口验收
 
 admin 在后台创建两个 Agent，将其中一个只开放 A；A 实际登录后看到可用 Agent，B 不能通过 UI/API使用它。A/B 使用公共 Agent 各发不同 canary，并各新建第二对话验证干净上下文；实际模型给出回复。修改指令后新执行生效，进行中执行不偷换定义。A 未重登即可看到授权改变，撤权后新派发失败。admin/B 用已知 conversation/work/Session标识、历史/搜索/导出入口均不能取得 A 正文。A 在同一对话关联 W1/W2，停 W1 不停 W2；重启仍能查看对话谱系。桌面及 390×844 实际完成创建、消息、历史和停止。

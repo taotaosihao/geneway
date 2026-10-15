@@ -2,9 +2,10 @@ import { constants } from 'node:fs'
 import { access, lstat, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { isAbsolute, parse, relative, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { getCapability, validateCapabilityInput, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
+import { getCapability, KIVO_TPM_RECORD_LIST_CAPABILITY, KIVO_TPM_RECORD_READ_CAPABILITY, validateCapabilityInput, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
 
 const ACTIVE_EXECUTIONS = new Set(['accepted', 'running'])
+const KIVO_TPM_CAPABILITIES = new Set([KIVO_TPM_RECORD_READ_CAPABILITY, KIVO_TPM_RECORD_LIST_CAPABILITY])
 
 export async function consumeExecutionGrant({ filePath = process.env.GENEWAY_DSH_GRANT_FILE, toolName, input } = {}) {
   if (!text(filePath)) throw grantError('FORBIDDEN', '本次执行没有工具授权')
@@ -51,6 +52,8 @@ export async function authorizeExecutionGrant(grant, { readState = readPolicySta
     if (['cancel_requested', 'cancelled'].includes(execution.status)) throw grantError('CANCELLED', '本次执行已停止')
     throw grantError('FORBIDDEN', '当前执行已不可派发')
   }
+  if (KIVO_TPM_CAPABILITIES.has(grant.capabilityId)
+    && (!ACTIVE_EXECUTIONS.has(work.status) || !isDeepStrictEqual(work.input, grant.input) || !isDeepStrictEqual(execution.input, grant.input))) throw grantError('FORBIDDEN', '当前 TPM 工作或执行输入已变化')
   const currentConfirmationRefs = (state.confirmations ?? [])
     .filter(item => item.ownerMemberId === member.id && item.employeeId === employee.id && item.status === 'active')
     .map(item => ({ id: item.id, revision: item.revision }))
@@ -59,6 +62,7 @@ export async function authorizeExecutionGrant(grant, { readState = readPolicySta
 
   const occurrence = (state.automationOccurrences ?? []).find(item => item?.workId === work.id)
   if (occurrence) {
+    if (KIVO_TPM_CAPABILITIES.has(grant.capabilityId)) throw grantError('FORBIDDEN', '当前自动规则不支持 TPM 执行')
     const rule = (state.automationRules ?? []).find(item => item?.id === occurrence.ruleId)
     const workOrderId = work.input?.workOrderId
     if (!rule || rule.status !== 'active' || rule.ownerMemberId !== member.id
@@ -92,19 +96,39 @@ export async function authorizeExecutionGrant(grant, { readState = readPolicySta
   if (current.kind !== capability.connectionKind || work.connectionId !== current.id || !employee.connectionIds?.includes(current.id) || !current.skillIds?.includes(skill.id)) throw grantError('FORBIDDEN', '当前连接绑定已撤销')
   const snapshot = connectionSnapshot(current)
   if (!isDeepStrictEqual(snapshot, grant.connection)) throw grantError('FORBIDDEN', '当前连接 revision 或目标已变化')
-  if (!current.allowedObjectIds?.includes(grant.input.workOrderId)) throw grantError('FORBIDDEN', '业务对象已不在当前连接允许范围内')
+  if (!connectionInputAllowed(current, grant.capabilityId, grant.input)) throw grantError('FORBIDDEN', '业务对象已不在当前连接允许范围内')
   return { member, employee, skill, route, work, execution, connection: current }
+}
+
+export function connectionInputAllowed(connection, capabilityId, input) {
+  const capability = getCapability(capabilityId)
+  if (!capability || capability.id !== capabilityId) return false
+  const validated = validateCapabilityInput(capabilityId, input)
+  if (!validated.ok || !isDeepStrictEqual(validated.input, input)) return false
+  if (connection?.kind === 'kivo-mcp') {
+    return KIVO_TPM_CAPABILITIES.has(capabilityId) && capability.connectionKind === 'kivo-mcp'
+      && Array.isArray(connection.allowedObjectIds) && connection.allowedObjectIds.length === 0
+  }
+  if (connection?.kind === 'gearjob-rest') {
+    return (capability.connectionKind === 'gearjob-rest' || capabilityId === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY)
+      && Array.isArray(connection.allowedObjectIds) && connection.allowedObjectIds.includes(input.workOrderId)
+  }
+  return false
 }
 
 export function connectionSnapshot(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw grantError('FORBIDDEN', '连接快照无效')
+  if (!['gearjob-rest', 'hive-tenant-records', 'kivo-mcp'].includes(value.kind)) throw grantError('FORBIDDEN', '连接类型未获准')
   const required = ['id', 'revision', 'kind', 'targetIdentity', 'baseUrl', 'credentialRef', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']
+  if (value.kind === 'kivo-mcp') required.push('issuer', 'clientId')
   for (const key of required) if (key !== 'revision' && !text(value[key])) throw grantError('FORBIDDEN', `连接快照缺少 ${key}`)
   if (!Number.isSafeInteger(value.revision) || value.revision < 1) throw grantError('FORBIDDEN', '连接 revision 无效')
   if (!Array.isArray(value.allowedObjectIds) || value.allowedObjectIds.some(item => !text(item))) throw grantError('FORBIDDEN', '连接对象范围无效')
   let url
   try { url = new URL(value.baseUrl) } catch { throw grantError('FORBIDDEN', '连接目标地址无效') }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw grantError('FORBIDDEN', '连接目标地址无效')
+  if (value.kind === 'kivo-mcp' && (value.baseUrl !== url.href || url.pathname !== '/api/v1/mes/mcp' || value.issuer !== url.origin
+    || !uuid(value.clientId) || value.allowedObjectIds.length !== 0)) throw grantError('FORBIDDEN', 'Kivo 资源、issuer、机器账号或范围配置无效')
   if (value.hostHeader !== undefined && (!text(value.hostHeader) || /[\u0000-\u001f\u007f]/.test(value.hostHeader))) throw grantError('FORBIDDEN', '连接 Host header 无效')
   return compact({
     id: value.id,
@@ -112,6 +136,7 @@ export function connectionSnapshot(value) {
     kind: value.kind,
     targetIdentity: value.targetIdentity,
     baseUrl: value.baseUrl,
+    ...(value.kind === 'kivo-mcp' ? { issuer: value.issuer, clientId: value.clientId } : {}),
     hostHeader: text(value.hostHeader),
     credentialRef: value.credentialRef,
     allowedObjectIds: [...value.allowedObjectIds],
@@ -192,7 +217,10 @@ function validateGrantShape(grant) {
     correlationConnectionSnapshots(grant.connections)
     correlationMappingBinding(grant.mappingRevision, grant.mappingIdentity)
   }
-  else if (capability.requiresConnection) connectionSnapshot(grant.connection)
+  else if (capability.requiresConnection) {
+    const connection = connectionSnapshot(grant.connection)
+    if (KIVO_TPM_CAPABILITIES.has(grant.capabilityId) && connection.kind !== 'kivo-mcp') throw grantError('FORBIDDEN', 'TPM 能力必须使用 Kivo 连接')
+  }
   else if (grant.connection !== null) throw grantError('FORBIDDEN', '无连接能力的授权结构无效')
   validatePolicyPaths(grant)
 }

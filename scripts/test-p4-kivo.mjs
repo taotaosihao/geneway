@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
-import { generateKeyPairSync, verify } from 'node:crypto'
+import { generateKeyPairSync, randomUUID, verify } from 'node:crypto'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertTpmObservation, KIVO_TPM_TOOLS, normalizeTpmInput, normalizeTpmObservation, tpmToolRequest, tpmSourcePath } from '../src/domain/tpm.mjs'
-import { assertKivoTpmTools, createKivoTpmTools, KIVO_MCP_SCOPE, KIVO_TPM_SCHEMA_FINGERPRINTS, listKivoTpmRecords, readKivoTpmRecord, schemaFingerprint, testKivoTpmConnection } from '../plugins/kivo-tpm.mjs'
+import { apply, assertKivoTpmTools, createKivoTpmTools, KIVO_MCP_SCOPE, KIVO_TPM_SCHEMA_FINGERPRINTS, listKivoTpmRecords, readKivoTpmRecord, schemaFingerprint, testKivoTpmConnection } from '../plugins/kivo-tpm.mjs'
 
 const fixturePath = process.argv[2]
 assert.ok(fixturePath, '请显式传入脱敏 tpm-wire-tools.json；本测试不寻找或读取运行凭据')
@@ -22,6 +22,19 @@ for (const schema of ['inputSchema', 'outputSchema']) {
   const changed = structuredClone(tools)
   changed[0][schema].properties.surprise = { type: 'string' }
   assert.throws(() => assertKivoTpmTools(changed), { code: 'INVALID_SOURCE' })
+}
+
+const mountedTools = [], previousGrant = process.env.GENEWAY_DSH_GRANT_FILE
+try {
+  process.env.GENEWAY_DSH_GRANT_FILE = join(tmpdir(), `missing-kivo-lifecycle-grant-${randomUUID()}.json`)
+  const dispose = apply({ tools: { register(tool) { mountedTools.push(tool) } } })
+  assert.equal(typeof dispose, 'function', 'Cordis4 must receive the native apply disposer')
+  assert.equal(mountedTools.length, 2)
+  dispose()
+  assert.equal((await mountedTools[0].execute({ recordType: 'repair', reference: 'R-1' })).error.code, 'CANCELLED')
+} finally {
+  if (previousGrant === undefined) delete process.env.GENEWAY_DSH_GRANT_FILE
+  else process.env.GENEWAY_DSH_GRANT_FILE = previousGrant
 }
 
 const deviceId = '00000000-0000-4000-8000-000000000001'

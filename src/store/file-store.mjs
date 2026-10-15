@@ -1,6 +1,10 @@
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
+import { getCapability, parseCapabilityToolResult } from '../capabilities.mjs'
+import { KIVO_TPM_RESULT_KIND } from '../domain/tpm.mjs'
+import { connectionSnapshot } from '../execution-grant.mjs'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 
 export const STATE_VERSION = 9
@@ -28,7 +32,7 @@ const CORRELATION_SKILL_ID = 'skill-manufacturing-work-order-device-correlate'
 const CORRELATION_TOOL_NAME = 'geneway_correlate_work_order_device'
 const CORRELATION_PLUGIN_ID = 'geneway-work-order-device-correlation'
 const CORRELATION_RESULT_KIND = 'manufacturing.work-order-device-correlation'
-const RESULT_KINDS = new Set(['gearjob.work-order.observation', 'manufacturing.takt', CORRELATION_RESULT_KIND, 'assistant.follow-up', 'assistant.collaboration-summary'])
+const RESULT_KINDS = new Set(['gearjob.work-order.observation', 'manufacturing.takt', CORRELATION_RESULT_KIND, KIVO_TPM_RESULT_KIND, 'assistant.follow-up', 'assistant.collaboration-summary'])
 const ACTION_INVALIDATION_REASONS = new Set(['RECOVERY_INVALIDATED', 'PREVIEW_SUPERSEDED', 'OWNER_REVOKED', 'PREVIEW_EXPIRED', 'PREVIEW_DIGEST_CHANGED', 'SOURCE_FACTS_CHANGED', 'SOURCE_RECHECK_FAILED', 'DISPATCH_DEADLINE_EXPIRED'])
 const ACTION_UNKNOWN_REASONS = new Set(['RECOVERY_UNKNOWN', 'ALREADY_UNKNOWN', 'ACTION_ID_CONFLICT', 'UPSTREAM_TIMEOUT', 'UPSTREAM_DISCONNECTED', 'UPSTREAM_RESULT_UNKNOWN', 'UPSTREAM_5XX', 'INVALID_SUCCESS_RESPONSE', 'READBACK_NOT_FOUND', 'READBACK_MISMATCH', 'READBACK_FAILED', 'READBACK_AUTHORIZATION_FAILED', 'RECEIPT_PERSIST_FAILED'])
 const ACTION_NO_EFFECT_REASONS = new Set(['DISPATCH_DEADLINE_EXPIRED', 'SOURCE_REVISION_CONFLICT', 'P6_SCOPE_UNAVAILABLE', 'CONNECTOR_AUTH_FAILED', 'INVALID_REQUEST', 'INVALID_COMMENT_ACTION'])
@@ -383,7 +387,10 @@ function normalizeV4(value, { allowKnowledgeDependencyRefs = false } = {}) {
     if (employee.instructions !== undefined && (typeof employee.instructions !== 'string' || employee.instructions.length > 16_000)) throw new Error('Agent instructions 无效')
     return employee
   })
-  const connections = entityArray(value, 'connections', '连接')
+  const connections = entityArray(value, 'connections', '连接').map(connection => {
+    if (connection.kind === 'kivo-mcp') connectionSnapshot(connection)
+    return connection
+  })
   const skills = entityArray(value, 'skills', 'Skill')
   const confirmations = entityArray(value, 'confirmations', '确认信息')
 
@@ -1398,6 +1405,13 @@ function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) 
     normalizeCorrelationResult(result, id)
   } else if (result.inputProvenance !== undefined) {
     throw new Error(`结果 ${id} 不得包含输入来源`)
+  }
+  if (kind === KIVO_TPM_RESULT_KIND) {
+    const capability = getCapability(result.capabilityId)
+    if (capability?.resultKind !== KIVO_TPM_RESULT_KIND || result.skillId !== capability.skillId) throw new Error(`结果 ${id} TPM 能力无效`)
+    const parsed = parseCapabilityToolResult(capability.id, { ok: true, observation: result.payload }, result.input)
+    if (result.toolName !== parsed.toolName || result.pluginId !== parsed.pluginId || result.pluginVersion !== parsed.pluginVersion
+      || !isDeepStrictEqual(result.source, parsed.source) || result.createdAt !== parsed.payload.queriedAt) throw new Error(`结果 ${id} TPM 能力来源或时间不匹配`)
   }
   if (kind === 'assistant.follow-up') {
     exactKeys(result.input, ['text'], `结果 ${id} 输入`)

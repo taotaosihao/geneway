@@ -3,7 +3,7 @@ import { open, realpath } from 'node:fs/promises'
 import { isAbsolute, relative, resolve } from 'node:path'
 
 export const CONNECTION_TARGET_FIELDS = Object.freeze([
-  'kind', 'targetIdentity', 'baseUrl', 'hostHeader', 'credentialRef', 'sourceSystem',
+  'kind', 'targetIdentity', 'baseUrl', 'issuer', 'clientId', 'hostHeader', 'credentialRef', 'sourceSystem',
   'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode',
 ])
 export const CONNECTION_IDENTITY_FIELDS = Object.freeze(CONNECTION_TARGET_FIELDS.filter(key => key !== 'credentialRef'))
@@ -49,6 +49,7 @@ function targetTuple(value) {
     kind: value?.kind,
     targetIdentity: text(value?.targetIdentity),
     baseUrl: canonicalBaseUrl(value?.baseUrl),
+    ...(value?.kind === 'kivo-mcp' ? { issuer: text(value.issuer), clientId: text(value.clientId) } : {}),
     hostHeader: text(value?.hostHeader),
     credentialRef: text(value?.credentialRef),
     sourceSystem: text(value?.sourceSystem),
@@ -57,9 +58,13 @@ function targetTuple(value) {
     dataMode: text(value?.dataMode),
     evidenceMode: text(value?.evidenceMode),
   }
-  if (!['gearjob-rest', 'hive-tenant-records'].includes(result.kind) || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef)
+  if (!['gearjob-rest', 'hive-tenant-records', 'kivo-mcp'].includes(result.kind) || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef)
     || ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode'].some(key => !result[key])) throw new Error('连接目标目录条目无效')
   if (result.kind === 'hive-tenant-records' && !uuid(result.targetIdentity)) throw new Error('Hive 连接 targetIdentity 必须是 tenant UUID')
+  if (result.kind === 'kivo-mcp') {
+    const resource = new URL(result.baseUrl)
+    if (text(value.baseUrl) !== result.baseUrl || resource.pathname !== '/api/v1/mes/mcp' || result.issuer !== resource.origin || !uuid(result.clientId)) throw new Error('Kivo 连接 resource、issuer 或 clientId 无效')
+  } else if (value.issuer !== undefined || value.clientId !== undefined) throw new Error('旧连接不得包含 Kivo 机器账号字段')
   return Object.freeze(result)
 }
 

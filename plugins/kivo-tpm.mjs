@@ -36,8 +36,8 @@ const MESSAGES = Object.freeze({
 
 export function apply(ctx) {
   const lifetime = new AbortController()
-  ctx.on('dispose', () => lifetime.abort(tpmError('CANCELLED', MESSAGES.CANCELLED)))
   for (const tool of createKivoTpmTools({ signal: lifetime.signal })) ctx.tools.register(tool)
+  return () => lifetime.abort(tpmError('CANCELLED', MESSAGES.CANCELLED))
 }
 
 export function createKivoTpmTools({ authorize = defaultAuthorize, signal, fetchImpl = fetch } = {}) {

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readWorkOrderDeviceCorrelation } from '../plugins/work-order-device-correlation.mjs'
 import { WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
-import { createGearJobCommentAdapter, gearJobReadbackConnectionSnapshot } from './gearjob-comment-adapter.mjs'
+import { gearJobReadbackConnectionSnapshot } from './gearjob-comment-adapter.mjs'
+import { getCapability } from './capabilities.mjs'
 import { authorizeWorkBinding } from './work-service.mjs'
 
 const WORK_ORDER_ID = 'WO-26-00096'
@@ -15,7 +16,7 @@ const BODY_BLOCKED = /[\u0000-\u001f\u007f]|@|https?:\/\/|www\.|mailto:|data:|\/
 
 export function createActionService({ store, adapter, clock = () => new Date().toISOString(), idFactory = randomUUID, connectionCatalog = [], secretRoot, readCorrelation = readWorkOrderDeviceCorrelation } = {}) {
   if (!store) throw new Error('store is required')
-  const upstream = adapter ?? createGearJobCommentAdapter({ clock: () => new Date(clock()) })
+  const upstream = adapter
 
   return {
     async createPreview(actor, workId, body = {}) {
@@ -24,6 +25,7 @@ export function createActionService({ store, adapter, clock = () => new Date().t
       let result
       await store.update(state => {
         const context = actionContext(state, actor, workId, connectionCatalog)
+        requireActionCapability(context)
         const target = previewTarget(context)
         const payload = { body: content }
         const expectedRevision = context.result.payload.gearJob.sourceRevision
@@ -64,6 +66,7 @@ export function createActionService({ store, adapter, clock = () => new Date().t
       let approved
       await store.update(state => {
         const context = actionContext(state, actor, workId, connectionCatalog)
+        requireActionCapability(context)
         const action = requireAction(context.work, actionId)
         assertApprovalRequest(action, body)
         if (action.receipt || action.attempt?.noEffectAt) { approved = action; return state }
@@ -155,6 +158,7 @@ export function createActionService({ store, adapter, clock = () => new Date().t
     async reconcile(actor, workId, actionId) {
       const state = await store.read()
       const context = readbackContext(state, actor, workId, actionId, connectionCatalog)
+      requireActionCapability(context)
       const action = requireReadbackAttempt(context, actionId)
       const outcome = await upstream.reconcile({ action, connection: context.binding.connections.gearJob, secretRoot, authorizeReadback: preparedConnection => authorizeReadback(actor, workId, actionId, preparedConnection) })
       if (outcome.kind === 'receipt') return recordReceipt(actor, workId, actionId, outcome.upstreamRecordId)
@@ -297,6 +301,10 @@ function actionContext(state, actor, workId, connectionCatalog) {
   const gearJob = binding.connections.gearJob
   if (gearJob.sourceEnvironment !== 'external-test' || gearJob.dataMode !== 'synthetic' || !gearJob.allowedObjectIds?.includes(WORK_ORDER_ID)) throw actionError('FORBIDDEN', 'GearJob 连接不在 synthetic external-test 范围内')
   return { ...authorized, result }
+}
+
+function requireActionCapability(context) {
+  if (getCapability(context.work.capabilityId)?.retired) throw actionError('CAPABILITY_RETIRED', '旧来源已停止新执行，可查看历史记录')
 }
 
 function previewTarget(context) {

@@ -4,13 +4,16 @@ import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { runProfile } from '@deepseek-ai/dsh/profile-boot'
-import { CYCLE_TIME_TOOL, GEARJOB_TOOL, getCapability } from './capabilities.mjs'
+import { CYCLE_TIME_TOOL, getCapability, sanitizeFollowUpContext } from './capabilities.mjs'
 import { buildAgentPrompt, parseRunResult } from './dsh-runner.mjs'
 import { createObservation } from './domain/work-order.mjs'
-import { connectionSnapshot } from './execution-grant.mjs'
+import { connectionInputAllowed, connectionSnapshot } from './execution-grant.mjs'
+import { assertTrustedConnection } from './connection-catalog.mjs'
+import { KIVO_TPM_RESULT_KIND, KIVO_TPM_TOOLS } from './domain/tpm.mjs'
+import { isRetiredWork } from './work-service.mjs'
 import { assertDshHome, readModelCredential, readRuntimeConfig } from './runtime-config.mjs'
 import { createCycleTimeTool } from '../plugins/cycle-time.mjs'
-import { createGearJobWorkOrderTool } from '../plugins/gearjob-work-order.mjs'
+import { createKivoTpmTools } from '../plugins/kivo-tpm.mjs'
 import { COLLABORATION_TOOLS, createCollaborationTools } from '../plugins/collaboration.mjs'
 import { KNOWLEDGE_TOOLS, createKnowledgePlugin } from '../plugins/knowledge.mjs'
 import { createKnowledgeService, currentKnowledgeReference, knowledgeRefKey, stableKnowledgeRefs } from './knowledge-service.mjs'
@@ -31,6 +34,7 @@ export function createCollaborationRunner({
   agentOptions = DEFAULT_AGENT,
   environment = {},
   secretRoot = readRuntimeConfig(process.env, workspaceRoot).secretRoot,
+  connectionCatalog = [],
   clock = () => new Date().toISOString(),
   onError = () => undefined,
   testHooks = {},
@@ -40,6 +44,7 @@ export function createCollaborationRunner({
   let runtime
   let booting
   let modelCredential
+  let kivoFiber
   let knowledgeFiber
   let knowledgeMounting
   let knowledgeLifecycle = Promise.resolve()
@@ -94,6 +99,7 @@ export function createCollaborationRunner({
       const state = await store.read()
       const rootWork = state.works.find(work => work.id === rootWorkId && work.collaboration)
       if (!rootWork) throw runtimeError('NOT_FOUND', '协作工作不存在')
+      if (isRetiredWork(state, rootWork)) throw runtimeError('CAPABILITY_RETIRED', '旧来源已停止新执行，可查看历史记录')
       const existing = activeRoots.get(rootWorkId)
       if (existing) {
         if (existing.generation === rootWork.collaboration.generation) return existing.promise
@@ -185,6 +191,8 @@ export function createCollaborationRunner({
       await knowledgeLifecycle
       await knowledgeFiber?.dispose()
       knowledgeFiber = undefined
+      await kivoFiber?.dispose()
+      kivoFiber = undefined
       if (runtime) await runtime.shutdown.shutdown(0)
       runtime = undefined
       booting = undefined
@@ -330,12 +338,19 @@ export function createCollaborationRunner({
     })
     ctx.on('agent/disposed', ({ agent }) => gates.delete(agent.id))
     const toolAuthorize = request => authorizeTool(request)
-    ctx.tools.register(createGearJobWorkOrderTool({ authorize: toolAuthorize }))
+    const kivoPlugin = { name: 'geneway-kivo-tpm', inject: ['tools'], apply(scope) {
+      const lifetime = new AbortController()
+      for (const tool of createKivoTpmTools({ authorize: toolAuthorize, signal: lifetime.signal })) scope.tools.register(tool)
+      return () => lifetime.abort(runtimeError('CANCELLED', '本次执行已停止'))
+    } }
+    kivoFiber = ctx.plugin(kivoPlugin)
+    await kivoFiber
+    await testHooks.onKivoMounted?.({ ctx, fiber: kivoFiber, plugin: kivoPlugin })
     ctx.tools.register(createCycleTimeTool({ authorize: toolAuthorize }))
     for (const tool of createCollaborationTools({ invoke: invokeCollaboration })) ctx.tools.register(tool)
     if (knowledgeEnabled) await mountKnowledge(ctx)
     ctx.tools.guard(execution => {
-      if (![GEARJOB_TOOL, CYCLE_TIME_TOOL, ...Object.values(COLLABORATION_TOOLS), ...Object.values(KNOWLEDGE_TOOLS)].includes(execution.name)) return undefined
+      if (![CYCLE_TIME_TOOL, ...Object.values(KIVO_TPM_TOOLS), ...Object.values(COLLABORATION_TOOLS), ...Object.values(KNOWLEDGE_TOOLS)].includes(execution.name)) return undefined
       const binding = execution.agent && bindings.get(execution.agent)
       if (!binding) return 'Agent identity is not bound to a collaboration execution'
       if (!binding.allowedTools.includes(execution.name)) return 'Tool is outside the employee collaboration scope'
@@ -367,12 +382,14 @@ export function createCollaborationRunner({
   async function executeRoot(rootWorkId, generation, entry) {
     const ctx = await context()
     const rootSnapshot = await startRoot(rootWorkId, generation)
-    const rootInstructions = (await store.read()).employees.find(employee => employee.id === rootSnapshot.employeeId)?.instructions ?? ''
+    const rootState = await store.read()
+    const rootInstructions = rootState.employees.find(employee => employee.id === rootSnapshot.employeeId)?.instructions ?? ''
     const rootExecution = rootSnapshot.executions.find(execution => execution.generation === generation && ACTIVE.has(execution.status))
     if (!rootExecution) throw runtimeError('BUSY', '协作根执行不可运行')
     const rootHandle = await ctx.agents.create({ sessionId: `collaboration-root-${randomUUID()}`, meta: { cwd: workspaceRoot }, agentOptions })
     entry.handles.add(rootHandle)
-    const rootBinding = Object.freeze({ kind: 'root', rootWorkId, workId: rootWorkId, executionId: rootExecution.id, employeeId: rootSnapshot.employeeId, generation, cancelGeneration: rootSnapshot.collaboration.cancelGeneration, planRevision: rootSnapshot.plan.revision, allowedTools: Object.freeze(Object.values(COLLABORATION_TOOLS)) })
+    const rootConnection = rootSnapshot.connectionId ? rootState.connections.find(item => item.id === rootSnapshot.connectionId) : null
+    const rootBinding = Object.freeze({ kind: 'root', rootWorkId, workId: rootWorkId, executionId: rootExecution.id, employeeId: rootSnapshot.employeeId, generation, cancelGeneration: rootSnapshot.collaboration.cancelGeneration, planRevision: rootSnapshot.plan.revision, connection: rootConnection ? Object.freeze(connectionSnapshot(rootConnection)) : null, allowedTools: Object.freeze(Object.values(COLLABORATION_TOOLS)) })
     bindings.set(rootHandle.agent, rootBinding)
     rootHandle.agent.ctx.on('agent/request', async ({ agent, signal }, next) => {
       if (bindings.get(agent) !== rootBinding || signal.aborted) throw runtimeError('CANCELLED', '协作根执行已停止')
@@ -416,11 +433,10 @@ export function createCollaborationRunner({
     if (!isDeepStrictEqual(submittedRefs, projection.resultRefs)) throw runtimeError('TOOL_CHAIN_INVALID', '负责人未提交当前持久结果引用')
     const explanation = lastAssistantText(rootHandle.agent.session.snapshotEvents())
     if (!explanation) throw runtimeError('TOOL_CHAIN_INVALID', '负责人未生成后置事实汇总')
-    return finishRoot(rootBinding, rootHandle.agent.id, explanation, rootHandle.agent.session.snapshotEvents(), submittedRefs, projection.confirmationRefs)
+    return finishRoot(rootBinding, rootHandle.agent.id, explanation, rootHandle.agent.session.snapshotEvents(), submittedRefs, projection.confirmationRefs, projection)
   }
 
   async function executeChild(ctx, rootSnapshot, item, generation, entry, rootSignal) {
-    await deriveRemainingQuantity(rootSnapshot.id, item, generation)
     const state = await store.read()
     const child = state.works.find(work => work.id === item.childWorkId)
     const currentRoot = state.works.find(work => work.id === rootSnapshot.id)
@@ -434,12 +450,13 @@ export function createCollaborationRunner({
     const knowledgeDependent = Boolean(child.knowledgeQuery)
     if (knowledgeDependent && !knowledgeEnabled) throw runtimeError('KNOWLEDGE_PLUGIN_DISABLED', '知识能力已停用')
     const confirmations = state.confirmations.filter(item => item.ownerMemberId === rootSnapshot.ownerMemberId && item.employeeId === child.employeeId && item.status === 'active').sort((left, right) => left.id.localeCompare(right.id))
+    const dependencies = dependencyProjection(state, currentRoot, item, child.employeeId)
     const signal = AbortSignal.any([rootSignal, AbortSignal.timeout(rootSnapshot.collaboration.childTimeoutMs)])
     let run
     try {
       run = await ctx.subagents.start('spawn', {
         label: item.id,
-        prompt: [{ type: 'text', text: buildAgentPrompt(childPrompt(child, capability.toolName, confirmations), state.employees.find(employee => employee.id === child.employeeId)?.instructions) }],
+        prompt: [{ type: 'text', text: buildAgentPrompt(childPrompt(child, capability.toolName, confirmations, dependencies.map(item => item.fact)), state.employees.find(employee => employee.id === child.employeeId)?.instructions) }],
         parent: [...entry.handles][0].agent,
         signal,
         agentOptions,
@@ -459,6 +476,7 @@ export function createCollaborationRunner({
         connection: connection ? Object.freeze(connectionSnapshot(connection)) : null,
         knowledgeQuery: child.knowledgeQuery,
         confirmationRefs: Object.freeze(confirmations.map(item => Object.freeze({ id: item.id, revision: item.revision }))),
+        dependencies: Object.freeze(dependencies),
       })
       const gate = gates.get(run.id)
       if (!gate || gate.agent !== run.localAgent || !ctx.agents.isOwnedBy(run.id, [...entry.handles][0].agent)) throw runtimeError('FORBIDDEN', '原生子 Agent 身份无法绑定')
@@ -492,35 +510,6 @@ export function createCollaborationRunner({
         testHooks.afterChildDispose?.({ workId: child.id, runId: run.id })
       }
     }
-  }
-
-  async function deriveRemainingQuantity(rootWorkId, item, generation) {
-    await store.update(state => {
-      const rootWork = state.works.find(work => work.id === rootWorkId && work.collaboration?.generation === generation)
-      const child = state.works.find(work => work.id === item.childWorkId)
-      if (!rootWork || child?.capabilityId !== 'cycle-time-calculate' || child.input.quantity !== undefined || !child.requiredInputs.includes('quantity') || child.executions.length) return state
-      const dependencies = (item.dependsOn ?? []).map(id => rootWork.plan.items.find(candidate => candidate.id === id)).filter(Boolean)
-      const sources = dependencies.flatMap(dependency => {
-        const sourceChild = state.works.find(work => work.id === dependency.childWorkId)
-        const handoff = rootWork.handoffs.find(candidate => candidate.childWorkId === sourceChild?.id && candidate.generation === generation && candidate.status === 'current')
-        const result = sourceChild?.results.find(candidate => handoff?.resultRefs.includes(candidate.id) && candidate.kind === 'gearjob.work-order.observation')
-        return result ? [{ dependency, result }] : []
-      })
-      if (sources.length !== 1) return state
-      const [{ dependency, result }] = sources
-      const plannedQuantity = result.payload.plannedQuantity, completedQuantity = result.payload.completedQuantity
-      const quantity = plannedQuantity - completedQuantity
-      if (![plannedQuantity, completedQuantity, quantity].every(Number.isFinite) || quantity <= 0) return state
-      const now = clock(), input = { ...child.input, quantity }
-      const inputProvenance = { quantity: { kind: 'gearjob.remaining-quantity', sourcePlanItemId: dependency.id, sourceResultId: result.id, plannedQuantity, completedQuantity } }
-      const requiredInputs = child.requiredInputs.filter(name => name !== 'quantity'), ready = requiredInputs.length === 0
-      const execution = { id: `exec-${randomUUID()}`, operation: 'collaboration-child', clientRequestId: `derived-${randomUUID()}`, input, status: 'accepted', acceptedAt: now, generation, cancelGeneration: rootWork.collaboration.cancelGeneration, planRevision: rootWork.plan.revision, employeeId: child.employeeId }
-      return { ...state, works: state.works.map(work => {
-        if (work.id === child.id) return { ...child, input, inputProvenance, requiredInputs, status: ready ? 'accepted' : 'waiting_input', executions: ready ? [execution] : [] }
-        if (work.id === rootWork.id) return { ...rootWork, plan: { ...rootWork.plan, items: rootWork.plan.items.map(candidate => candidate.id === item.id ? { ...candidate, status: ready ? 'not_started' : 'waiting_input' } : candidate) } }
-        return work
-      }) }
-    })
   }
 
   async function authorizeTool({ toolName, input, invocation, grant }) {
@@ -566,39 +555,86 @@ export function createCollaborationRunner({
   }
 
   async function authorize(binding, { reserveRequest = false } = {}) {
-    if (!binding) throw runtimeError('FORBIDDEN', 'Agent identity 未绑定')
     let context
     await store.update(state => {
-      const rootWork = state.works.find(work => work.id === binding.rootWorkId && work.collaboration)
-      const work = state.works.find(candidate => candidate.id === binding.workId)
-      const execution = work?.executions.find(candidate => candidate.id === binding.executionId)
-      const member = state.members.find(candidate => candidate.id === rootWork?.ownerMemberId && candidate.enabled === true)
-      const employee = state.employees.find(candidate => candidate.id === binding.employeeId && candidate.enabled === true)
-      const skill = state.skills.find(candidate => candidate.id === work?.skillId && candidate.enabled === true)
-      const route = state.modelRoutes.find(candidate => candidate.id === employee?.modelRouteId && candidate.enabled === true)
-      if (!rootWork || !member || !member.employeeIds.includes(employee?.id) || !employee?.skillIds?.includes(skill?.id) || !route || route.provider !== 'zenmux' || route.model !== 'deepseek/deepseek-v4.1-flash' || route.credentialRef !== 'ZENMUX_API_KEY') throw runtimeError('FORBIDDEN', '当前成员、员工或模型路由授权已撤销')
-      if (rootWork.collaboration.generation !== binding.generation || rootWork.collaboration.cancelGeneration !== binding.cancelGeneration || rootWork.collaboration.status !== 'running') throw runtimeError('CANCELLED', '协作 generation 已关闭')
-      if (!execution || execution.generation !== binding.generation || execution.cancelGeneration !== binding.cancelGeneration || !ACTIVE.has(execution.status)) throw runtimeError('CANCELLED', '当前执行已关闭')
-      let connection = null
-      const capability = getCapability(work.capabilityId)
-      if (!capability || skill.capabilityId !== capability.id) throw runtimeError('FORBIDDEN', '当前 Skill 授权已撤销')
-      if (binding.kind === 'child') {
-        const item = rootWork.plan.items.find(candidate => candidate.childWorkId === work.id)
-        if (!item || item.employeeId !== binding.employeeId || item.status !== 'running') throw runtimeError('FORBIDDEN', '当前计划项授权已失效')
-      }
-      if (capability.requiresConnection && binding.kind === 'child') {
-        connection = state.connections.find(candidate => candidate.id === work.connectionId && candidate.enabled === true && candidate.status === 'ready')
-        if (!connection || !employee.connectionIds?.includes(connection.id) || !connection.skillIds?.includes(skill.id) || !connection.allowedObjectIds?.includes(work.input.workOrderId) || !isDeepStrictEqual(connectionSnapshot(connection), binding.connection)) throw runtimeError('FORBIDDEN', '当前连接 revision、目标或业务对象授权已撤销')
-      }
+      context = executionAuthorization(state, binding)
+      const { rootWork } = context
       if (reserveRequest) {
         if (rootWork.collaboration.requestCount >= rootWork.collaboration.requestLimit) throw runtimeError('BUDGET_EXHAUSTED', '协作模型请求预算已耗尽')
         rootWork.collaboration = { ...rootWork.collaboration, requestCount: rootWork.collaboration.requestCount + 1 }
         return { ...state, works: state.works.map(candidate => candidate.id === rootWork.id ? rootWork : candidate) }
       }
-      context = { rootWork, work, execution, member, employee, skill, route, connection }
       return state
     })
     return context
+  }
+
+  function executionAuthorization(state, binding) {
+    if (!binding) throw runtimeError('FORBIDDEN', 'Agent identity 未绑定')
+    const rootWork = state.works.find(work => work.id === binding.rootWorkId && work.collaboration)
+    const work = state.works.find(candidate => candidate.id === binding.workId)
+    const execution = work?.executions.find(candidate => candidate.id === binding.executionId)
+    const member = state.members.find(candidate => candidate.id === rootWork?.ownerMemberId && candidate.enabled === true)
+    const employee = state.employees.find(candidate => candidate.id === binding.employeeId && candidate.enabled === true)
+    const skill = state.skills.find(candidate => candidate.id === work?.skillId && candidate.enabled === true)
+    const route = state.modelRoutes.find(candidate => candidate.id === employee?.modelRouteId && candidate.enabled === true)
+    if (!rootWork || !member || !member.employeeIds.includes(employee?.id) || !employee?.skillIds?.includes(skill?.id) || !route || route.provider !== 'zenmux' || route.model !== 'deepseek/deepseek-v4.1-flash' || route.credentialRef !== 'ZENMUX_API_KEY') throw runtimeError('FORBIDDEN', '当前成员、员工或模型路由授权已撤销')
+    if (isRetiredWork(state, rootWork)) throw runtimeError('CAPABILITY_RETIRED', '旧来源已停止新执行，可查看历史记录')
+    if (rootWork.collaboration.generation !== binding.generation || rootWork.collaboration.cancelGeneration !== binding.cancelGeneration || rootWork.collaboration.status !== 'running') throw runtimeError('CANCELLED', '协作 generation 已关闭')
+    if (work.ownerMemberId !== member.id || work.status !== 'running' || !execution || execution.generation !== binding.generation || execution.cancelGeneration !== binding.cancelGeneration || !ACTIVE.has(execution.status)) throw runtimeError('CANCELLED', '当前执行已关闭')
+    const capability = getCapability(work.capabilityId)
+    if (!capability || skill.capabilityId !== capability.id) throw runtimeError('FORBIDDEN', '当前 Skill 授权已撤销')
+    if (binding.kind === 'child') {
+      const item = rootWork.plan.items.find(candidate => candidate.childWorkId === work.id)
+      if (!item || item.employeeId !== binding.employeeId || item.status !== 'running' || work.rootWorkId !== rootWork.id || binding.capabilityId !== work.capabilityId
+        || !isDeepStrictEqual(binding.input, work.input) || !isDeepStrictEqual(execution.input, work.input)) throw runtimeError('FORBIDDEN', '当前计划项或执行参数已变化')
+      if (!isDeepStrictEqual(dependencyProjection(state, rootWork, item, employee.id), binding.dependencies)) throw runtimeError('FORBIDDEN', '交接事实或接收授权已变化')
+    }
+    let connection = null
+    if (capability.requiresConnection) {
+      connection = state.connections.find(candidate => candidate.id === work.connectionId && candidate.enabled === true && candidate.status === 'ready')
+      if (!connection || connection.kind !== capability.connectionKind || !employee.connectionIds?.includes(connection.id) || !connection.skillIds?.includes(skill.id)
+        || !isDeepStrictEqual(connectionSnapshot(connection), binding.connection)) throw runtimeError('FORBIDDEN', '当前连接 revision 或目标已撤销')
+      assertTrustedConnection(connectionCatalog, connection)
+      if (binding.kind === 'child' && !connectionInputAllowed(connection, capability.id, work.input)) throw runtimeError('FORBIDDEN', '当前业务对象授权已撤销')
+    }
+    return { rootWork, work, execution, member, employee, skill, route, connection }
+  }
+
+  function handoffProjection(state, rootWork, child, handoff, recipientEmployeeId) {
+    const member = state.members.find(item => item.id === rootWork.ownerMemberId && item.enabled === true)
+    const sourceEmployee = state.employees.find(item => item.id === child?.employeeId && item.enabled === true)
+    const recipient = state.employees.find(item => item.id === recipientEmployeeId && item.enabled === true)
+    const skill = state.skills.find(item => item.id === child?.skillId && item.enabled === true)
+    const capability = skill && getCapability(skill.capabilityId)
+    const result = handoff?.resultRefs.length === 1 && child?.results.find(item => item.id === handoff.resultRefs[0])
+    if (!member || !sourceEmployee || !recipient || !member.employeeIds.includes(sourceEmployee.id) || !member.employeeIds.includes(recipient.id)
+      || !sourceEmployee.skillIds?.includes(skill?.id) || !capability || capability.retired || child.ownerMemberId !== member.id || child.rootWorkId !== rootWork.id
+      || child.status !== 'completed' || handoff?.status !== 'current' || !result || result.capabilityId !== child.capabilityId) throw runtimeError('FORBIDDEN', '交接事实或接收员工未获准')
+    let connection = null
+    if (capability.requiresConnection) {
+      const current = state.connections.find(item => item.id === child.connectionId && item.enabled === true && item.status === 'ready')
+      if (!current || current.kind !== capability.connectionKind || !sourceEmployee.connectionIds?.includes(current.id) || !current.skillIds?.includes(skill.id)
+        || !recipient.connectionIds?.includes(current.id) || !recipient.skillIds?.includes(skill.id)
+        || !connectionInputAllowed(current, capability.id, child.input)) throw runtimeError('FORBIDDEN', '交接事实连接授权已撤销')
+      assertTrustedConnection(connectionCatalog, current)
+      connection = connectionSnapshot(current)
+      if (['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode'].some(key => result.source?.[key] !== current[key])) throw runtimeError('FORBIDDEN', '交接事实来源与当前连接不匹配')
+    }
+    if (handoff.knowledgeRefs.some(ref => !currentKnowledgeReference(state, ref, member.id, sourceEmployee.id)
+      || !currentKnowledgeReference(state, ref, member.id, recipient.id) || !currentKnowledgeReference(state, ref, member.id, rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '交接知识接收范围已失效')
+    const fact = sanitizeFollowUpContext({ question: '核对当前交接事实', facts: [{ kind: result.kind, payload: result.payload, ...(result.source ? { source: result.source } : {}) }], confirmations: [] }).facts[0]
+    return { workId: child.id, resultId: result.id, handoffId: handoff.id, connection, knowledgeRefs: handoff.knowledgeRefs, fact }
+  }
+
+  function dependencyProjection(state, rootWork, item, recipientEmployeeId) {
+    return (item.dependsOn ?? []).map(id => {
+      const dependency = rootWork.plan.items.find(candidate => candidate.id === id)
+      const child = dependency && state.works.find(work => work.id === dependency.childWorkId)
+      const handoff = child && rootWork.handoffs.find(candidate => candidate.childWorkId === child.id && candidate.status === 'current')
+      if (dependency?.status !== 'completed') throw runtimeError('FORBIDDEN', '前序事实尚未完成交接')
+      return handoffProjection(state, rootWork, child, handoff, recipientEmployeeId)
+    })
   }
 
   async function validateRequestContext(binding, agent) {
@@ -624,6 +660,7 @@ export function createCollaborationRunner({
     await store.update(state => {
       const work = state.works.find(candidate => candidate.id === rootWorkId && candidate.collaboration)
       if (!work || work.collaboration.generation !== generation || work.collaboration.status !== 'accepted') throw runtimeError('BUSY', '协作工作不可启动')
+      if (isRetiredWork(state, work)) throw runtimeError('CAPABILITY_RETIRED', '旧来源已停止新执行，可查看历史记录')
       const execution = work.executions.find(candidate => candidate.generation === generation && candidate.status === 'accepted')
       if (!execution) throw runtimeError('BUSY', '协作根执行不可启动')
       const next = { ...work, status: 'running', collaboration: { ...work.collaboration, status: 'running' }, executions: work.executions.map(candidate => candidate.id === execution.id ? { ...candidate, status: 'running', startedAt: clock() } : candidate) }
@@ -653,6 +690,7 @@ export function createCollaborationRunner({
     const now = clock()
     await testHooks.beforeFinishChild?.(binding)
     await store.update(state => {
+      executionAuthorization(state, binding)
       const rootWork = state.works.find(work => work.id === binding.rootWorkId)
       const child = state.works.find(work => work.id === binding.workId)
       const execution = child?.executions.find(candidate => candidate.id === binding.executionId)
@@ -675,9 +713,11 @@ export function createCollaborationRunner({
     })
   }
 
-  async function finishRoot(binding, sessionId, explanation, events, submittedRefs, confirmationRefs) {
+  async function finishRoot(binding, sessionId, explanation, events, submittedRefs, confirmationRefs, projection) {
     let result
     await store.update(state => {
+      executionAuthorization(state, binding)
+      if (!isDeepStrictEqual(summaryProjectionFromState(state, binding), projection)) throw runtimeError('FORBIDDEN', '汇总事实或接收授权已变化')
       const rootWork = state.works.find(work => work.id === binding.rootWorkId)
       const execution = rootWork?.executions.find(candidate => candidate.id === binding.executionId)
       if (!rootWork || rootWork.collaboration.generation !== binding.generation || rootWork.collaboration.cancelGeneration !== binding.cancelGeneration || rootWork.collaboration.status !== 'running' || execution?.status !== 'running') return state
@@ -756,17 +796,22 @@ export function createCollaborationRunner({
 
   async function summaryProjection(binding) {
     const state = await store.read()
+    return summaryProjectionFromState(state, binding)
+  }
+
+  function summaryProjectionFromState(state, binding) {
     const rootWork = state.works.find(work => work.id === binding.rootWorkId)
     const entries = rootWork.plan.items.map(item => {
       const handoff = rootWork.handoffs.find(candidate => candidate.childWorkId === item.childWorkId && candidate.status === 'current')
       const child = state.works.find(work => work.id === item.childWorkId)
       const result = handoff && child.results.find(candidate => candidate.id === handoff.resultRefs[0])
       if (!handoff || !result) throw runtimeError('TOOL_CHAIN_INVALID', '后置汇总投影缺少当前持久结果')
+      const authorization = handoffProjection(state, rootWork, child, handoff, rootWork.employeeId)
       if (handoff.knowledgeRefs.some(ref => !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, child.employeeId)
         || !currentKnowledgeReference(state, ref, rootWork.ownerMemberId, rootWork.employeeId))) throw runtimeError('KNOWLEDGE_REFERENCE_INVALID', '汇总知识引用已失效')
       const payload = structuredClone(result.payload)
       if (typeof payload?.explanation === 'string') payload.explanation = redactInternalReferences(payload.explanation, state, rootWork)
-      return { itemId: item.id, goal: item.goal, employeeId: child.employeeId, employeeName: employeeLabel(state, child.employeeId, '协作员工'), resultId: result.id, handoffId: handoff.id, kind: result.kind, payload, source: result.source, explanation: redactInternalReferences(result.explanation, state, rootWork), knowledgeRefs: handoff.knowledgeRefs }
+      return { itemId: item.id, goal: item.goal, employeeId: child.employeeId, employeeName: employeeLabel(state, child.employeeId, '协作员工'), resultId: result.id, handoffId: handoff.id, kind: result.kind, payload, source: result.source, explanation: redactInternalReferences(result.explanation, state, rootWork), knowledgeRefs: handoff.knowledgeRefs, authorization }
     })
     const confirmations = state.confirmations.filter(item => item.ownerMemberId === rootWork.ownerMemberId && item.employeeId === rootWork.employeeId && item.status === 'active').sort((left, right) => left.id.localeCompare(right.id))
     return { rootWorkId: rootWork.id, generation: binding.generation, resultRefs: entries.map(item => item.resultId), entries, confirmations: confirmations.map(item => ({ id: item.id, revision: item.revision, value: item.value })), confirmationRefs: confirmations.map(item => ({ id: item.id, revision: item.revision })) }
@@ -801,7 +846,7 @@ function collaborationResult(id, work, parsed, sessionId, usage, now, generation
   return {
     id, kind: base.kind, capabilityId: work.capabilityId, skillId: work.skillId, schemaVersion: 1,
     input: structuredClone(work.input), payload, explanation: work.inputProvenance ? `用户提供的计算条件下平均分摊：${parsed.explanation}` : parsed.explanation, source: base.source,
-    createdAt: now, toolName: base.toolName, pluginId: base.pluginId, pluginVersion: base.pluginVersion,
+    createdAt: base.kind === KIVO_TPM_RESULT_KIND ? payload.queriedAt : now, toolName: base.toolName, pluginId: base.pluginId, pluginVersion: base.pluginVersion,
     dshSessionRef: sessionId, contextConfirmationRefs, employeeId: work.employeeId, handoffRefs: [], usage,
     knowledgeDependencyRefs, generation, ...(work.inputProvenance ? { inputProvenance: structuredClone(work.inputProvenance) } : {}),
   }
@@ -882,12 +927,13 @@ function employeeLabel(state, employeeId, fallback) {
   return name && name !== employeeId ? name : fallback
 }
 
-function childPrompt(work, toolName, confirmations) {
+function childPrompt(work, toolName, confirmations, dependencies) {
   const knowledge = work.knowledgeQuery
     ? ` Call ${KNOWLEDGE_TOOLS.search} with {"query":${JSON.stringify(work.knowledgeQuery)}}, use only returned segments, then call ${KNOWLEDGE_TOOLS.submitReferences} with at least one exact returned reference.`
     : ''
   const confirmed = confirmations.length ? ` Current confirmed facts: ${JSON.stringify(confirmations.map(item => ({ id: item.id, revision: item.revision, value: item.value })))}.` : ''
-  return `SCENARIO:${work.planItemId} Complete this registered work: ${work.goal}.${confirmed} Call ${toolName} exactly once with ${JSON.stringify(work.input)}.${knowledge} Then call structured_output with {"status":"done","explanation":"your concise factual explanation"}.`
+  const facts = dependencies.length ? ` Current authorized facts handed off by the explicit prerequisite steps: ${JSON.stringify(dependencies)}. Use these facts for the requested comparison; do not replace them by an earlier explanation or a repeated source read.` : ''
+  return `SCENARIO:${work.planItemId} Complete this registered work: ${work.goal}.${confirmed}${facts} Call ${toolName} exactly once with ${JSON.stringify(work.input)}.${knowledge} Then call structured_output with {"status":"done","explanation":"your concise factual explanation"}.`
 }
 
 function usageFromEvents(events) {
@@ -956,6 +1002,7 @@ function localCapture(options, environment) {
 }
 
 function safeRuntimeCause(error) {
+  if (error?.code === 'CAPABILITY_RETIRED') return { code: 'CAPABILITY_RETIRED', message: '旧来源已停止新执行，可查看历史记录' }
   if (error?.code === 'MODEL_NOT_CONFIGURED') return { code: 'MODEL_NOT_CONFIGURED', message: '模型路由不可用' }
   if (error?.code === 'BUDGET_EXHAUSTED') return { code: 'BUDGET_EXHAUSTED', message: '协作模型请求预算已耗尽' }
   if (error?.code === 'FORBIDDEN') return { code: 'FORBIDDEN', message: '当前执行授权已失效' }

@@ -10,9 +10,9 @@ import { createDshRunner } from './dsh-runner.mjs'
 import { createCollaborationRunner } from './collaboration-runner.mjs'
 import { readRuntimeConfig } from './runtime-config.mjs'
 import { readConnectionCatalog } from './connection-catalog.mjs'
-import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
+import { TPM_FILTERS } from './domain/tpm.mjs'
+import { testKivoTpmConnection } from '../plugins/kivo-tpm.mjs'
 import { createFeishuRuntime } from '../plugins/feishu.mjs'
-import { createGearJobEventReceiver, readGearJobEventRuntimeConfig } from '../plugins/gearjob-events.mjs'
 import { ChannelServiceError, createChannelService } from './channel-service.mjs'
 import { AutomationServiceError, createAutomationRuntime, createAutomationService } from './automation-service.mjs'
 
@@ -23,6 +23,7 @@ const WORK_FIELDS = ['employeeId', 'skillId', 'capabilityId', 'connectionId', 'c
 const COLLABORATION_ROOT_FIELDS = ['workType', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'conversationId', 'goal', 'clientRequestId', 'items']
 const COLLABORATION_ITEM_FIELDS = ['id', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'goal', 'input', 'workOrderId', 'availableSeconds', 'quantity', 'knowledgeQuery', 'dependsOn']
 const BUSINESS_INPUT_FIELDS = ['workOrderId', 'availableSeconds', 'quantity']
+const WORK_INPUT_FIELDS = [...BUSINESS_INPUT_FIELDS, 'recordType', 'reference', 'filters']
 
 export async function start() {
   const port = positivePort(process.env.GENEWAY_PORT ?? 3471)
@@ -40,32 +41,29 @@ export async function start() {
 
   const runtimeConfig = readRuntimeConfig({ ...process.env, GENEWAY_STATE: statePath }, root)
   process.env.DSH_HOME = runtimeConfig.dshHome
-  const gearJobEventConfig = await readGearJobEventRuntimeConfig(process.env, root)
   const store = createFileStore(statePath)
   const connectionCatalog = await readConnectionCatalog(runtimeConfig.connectionCatalogFile, root)
   const runner = createDshRunner({ root, config: runtimeConfig })
-  const collaborationRunner = createCollaborationRunner({ store, root, dshHome: runtimeConfig.dshHome, secretRoot: runtimeConfig.secretRoot })
+  const collaborationRunner = createCollaborationRunner({ store, root, dshHome: runtimeConfig.dshHome, secretRoot: runtimeConfig.secretRoot, connectionCatalog })
   const knowledge = collaborationRunner.getKnowledgeService()
-  let channelRuntime, automationRuntime, gearJobEventReceiver
+  let channelRuntime, automationRuntime
   const service = createWorkService({
     store, runner, collaborationRunner,
     connectionCatalog,
     policyPaths: { stateFile: runtimeConfig.stateFile, dataRoot: runtimeConfig.dataRoot, secretRoot: runtimeConfig.secretRoot },
-    connectionTester: async connection => {
-      const workOrderId = connection.allowedObjectIds?.[0]
-      if (!workOrderId) throw Object.assign(new Error('连接没有可测试的只读对象'), { code: 'INVALID_REQUEST' })
-      const result = await readGearJobWorkOrder({ workOrderId, connection, secretRoot: runtimeConfig.secretRoot })
-      return result.sourceRecordId
+    connectionTester: async (connection, { authorize }) => {
+      if (connection.kind !== 'kivo-mcp') throw Object.assign(new Error('旧来源已停止新执行，可查看历史'), { code: 'CAPABILITY_RETIRED' })
+      const result = await testKivoTpmConnection({ connection, secretRoot: runtimeConfig.secretRoot, authorize })
+      return `MCP ${result.protocolVersion}；工具目录：${result.toolNames.join('、')}。目录测试通过不代表机器账号对象范围非空。`
     },
     onAutomationTerminal: () => channelRuntime?.sendAutomationNotifications({ ownerCheck: () => automationRuntime?.ownsLock() === true }),
   })
   const conversationService = createConversationService({ store, runner: collaborationRunner })
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
-  const automation = createAutomationService({ store, workService: service, connectionCatalog, eventSourceId: gearJobEventConfig?.sourceId, eventSourceReady: () => automationRuntime?.ownsLock() === true && gearJobEventReceiver?.isListening() === true })
+  const automation = createAutomationService({ store, workService: service, connectionCatalog })
   automationRuntime = createAutomationRuntime({
     store, automationService: automation, workService: service, dataRoot: runtimeConfig.dataRoot,
-    onOwnerLost: async () => { const receiver = gearJobEventReceiver; gearJobEventReceiver = undefined; await receiver?.close() },
     onError: error => console.error(error),
   })
   const channel = createChannelService({ store, workService: service })
@@ -73,14 +71,9 @@ export async function start() {
   try {
     await automationRuntime.start()
     await conversationService.ensureReady()
-    if (gearJobEventConfig) {
-      gearJobEventReceiver = createGearJobEventReceiver({ automationRuntime, ...gearJobEventConfig })
-      await gearJobEventReceiver.start()
-    }
     await channelRuntime.start()
   } catch (error) {
     const ownsStore = automationRuntime.ownsLock()
-    await gearJobEventReceiver?.close?.().catch(() => undefined)
     await automationRuntime.stop().catch(() => undefined)
     await channelRuntime.close().catch(() => undefined)
     await conversationService.close().catch(() => undefined)
@@ -100,7 +93,7 @@ export async function start() {
   const shutdown = async code => {
     if (shuttingDown) return
     shuttingDown = true
-    await shutdownServer(server, service, channelRuntime, automationRuntime, gearJobEventReceiver, conversationService)
+    await shutdownServer(server, service, channelRuntime, automationRuntime, undefined, conversationService)
     process.exit(code)
   }
   process.once('SIGTERM', () => shutdown(0))
@@ -237,14 +230,14 @@ export function createGenewayServer({ service, conversationService, knowledge, c
       if (request.method === 'POST' && url.pathname === '/api/works') {
         exactQuery(url)
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, [...WORK_FIELDS, 'workType', 'items'])
-        if (body.workType === undefined) { exactObject(body, WORK_FIELDS); if (body.input !== undefined) exactObject(body.input, BUSINESS_INPUT_FIELDS); return resultResponse(response, await service.createWork(actor, body)) }
+        if (body.workType === undefined) { exactObject(body, WORK_FIELDS); if (body.input !== undefined) exactWorkInput(body.input); return resultResponse(response, await service.createWork(actor, body)) }
         if (body.workType !== 'collaboration') throw httpError('INVALID_REQUEST', '工作类型无效')
         exactObject(body, COLLABORATION_ROOT_FIELDS)
         if (!Array.isArray(body.items)) throw httpError('INVALID_REQUEST', '协作计划必须是数组')
         for (const item of body.items) {
           exactObject(item, COLLABORATION_ITEM_FIELDS)
           if (item.input !== undefined) {
-            exactObject(item.input, BUSINESS_INPUT_FIELDS)
+            exactWorkInput(item.input)
             if (BUSINESS_INPUT_FIELDS.some(key => item[key] !== undefined)) throw httpError('INVALID_REQUEST', '协作计划项不能同时使用 input 与直接输入字段')
           }
         }
@@ -277,10 +270,10 @@ export function createGenewayServer({ service, conversationService, knowledge, c
               : action === 'refresh' && !collaboration ? ['clientRequestId'] : []
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, allowed)
         if ((action === 'recheck' && !collaboration) || (collaboration && ['refresh', 'follow-up'].includes(action))) throw httpError('INVALID_REQUEST', '工作类型不支持此操作')
-        if (body.input !== undefined) exactObject(body.input, BUSINESS_INPUT_FIELDS)
+        if (body.input !== undefined) exactWorkInput(body.input)
         if (body.inputs !== undefined) {
           exactObject(body.inputs, current.value.workType === 'collaboration' ? current.value.plan.items.map(item => item.id) : [])
-          for (const value of Object.values(body.inputs)) exactObject(value, BUSINESS_INPUT_FIELDS)
+          for (const value of Object.values(body.inputs)) exactWorkInput(value)
         }
         const result = action === 'continue' ? current.value.workType === 'collaboration'
           ? await service.continueCollaboration(actor, id, body)
@@ -554,9 +547,14 @@ async function readJson(request, allowed) {
 function configFields(kind, create, collectionPatch = false) {
   const id = create || collectionPatch ? ['id'] : []
   if (kind === 'employees') return [...id, 'name', 'description', 'instructions', 'enabled', 'modelRouteId', 'connectionIds', 'skillIds', 'memberIds', ...(!create ? ['expectedRevision'] : [])]
-  if (kind === 'connections') return [...id, 'name', 'kind', 'targetIdentity', 'baseUrl', 'hostHeader', 'credentialRef', 'allowedObjectIds', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'enabled', 'skillIds']
+  if (kind === 'connections') return [...id, 'name', 'kind', 'targetIdentity', 'baseUrl', 'issuer', 'clientId', 'hostHeader', 'credentialRef', 'allowedObjectIds', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'enabled', 'skillIds']
   if (kind === 'skills') return [...id, 'name', 'capabilityId', 'enabled']
   return [...id, 'provider', 'model', 'displayName', 'enabled', 'credentialRef']
+}
+
+function exactWorkInput(input) {
+  exactObject(input, WORK_INPUT_FIELDS)
+  if (input.filters !== undefined) exactObject(input.filters, Object.values(TPM_FILTERS).flat())
 }
 
 function resultResponse(response, result) { return result.ok ? sendJson(response, 200, result.value) : sendJson(response, result.error.status, { error: clientError(result.error) }) }

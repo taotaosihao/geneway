@@ -4,7 +4,7 @@ import { closeSync, constants as fsConstants, fchmodSync, fstatSync, openSync } 
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join, parse, resolve } from 'node:path'
 import { assertTrustedConnection } from './connection-catalog.mjs'
-import { validateCapabilityInput } from './capabilities.mjs'
+import { getCapability, validateCapabilityInput } from './capabilities.mjs'
 
 const CAPABILITY_ID = 'gearjob-work-order-read'
 const MODEL_PROVIDER = 'zenmux'
@@ -28,9 +28,11 @@ export function createAutomationService({ store, workService = null, clock = () 
 
   return {
     eventSourceCapability() {
+      if (getCapability(CAPABILITY_ID).retired) return { status: 'unavailable', code: 'CAPABILITY_RETIRED' }
       return eventSourceAvailable() ? { status: 'ready', sourceId: eventSourceId } : { status: 'unavailable', code: 'SOURCE_NOT_CONFIGURED' }
     },
     async acceptDailyOccurrence({ ruleId, scheduledDate, scheduledAt, ownerCheck } = {}) {
+      requireAutomationCapability()
       const occurrenceKey = dailyOccurrenceKey(ruleId, scheduledDate)
       await workService?.ensureReady?.()
       if (ownerCheck && !ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
@@ -71,6 +73,7 @@ export function createAutomationService({ store, workService = null, clock = () 
     },
 
     async acceptManualOccurrence(actor, id, input = {}) {
+      requireAutomationCapability()
       exactInput(input, ['expectedRevision', 'clientRequestId', 'ownerCheck'])
       const clientRequestId = requestId(input.clientRequestId), occurrenceKey = `${required(id, 'ruleId')}:manual:${clientRequestId}`, ownerCheck = input.ownerCheck
       if (ownerCheck !== undefined && typeof ownerCheck !== 'function') throw serviceError('INVALID_REQUEST', 'ownerCheck 无效')
@@ -93,6 +96,7 @@ export function createAutomationService({ store, workService = null, clock = () 
     },
 
     async acceptGearJobEvent(input = {}) {
+      requireAutomationCapability()
       exactInput(input, ['sourceId', 'workOrderId', 'sourceRevision', 'digest', 'ownerCheck'])
       const sourceId = required(input.sourceId, 'sourceId'), workOrderId = required(input.workOrderId, 'workOrderId')
       const sourceRevision = required(input.sourceRevision, 'sourceRevision')
@@ -154,6 +158,7 @@ export function createAutomationService({ store, workService = null, clock = () 
       let created
       await store.update(state => {
         const member = requireMember(state, actor)
+        requireAutomationCapability()
         exactInput(input, ['employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
         const fields = ruleFields(state, member, input, connectionCatalog, eventSourceId, eventSourceAvailable)
         const now = timestamp(clock())
@@ -178,6 +183,7 @@ export function createAutomationService({ store, workService = null, clock = () 
       let updated
       await store.update(state => {
         const member = requireMember(state, actor), rule = ownedRule(state, member, id)
+        requireAutomationCapability()
         exactInput(input, ['expectedRevision', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
         requireRevision(rule, input.expectedRevision)
         if (rule.status === 'revoked') throw serviceError('INVALID_STATE', '已撤销规则不可修改')
@@ -237,6 +243,7 @@ export function createAutomationService({ store, workService = null, clock = () 
       requireRevision(rule, input?.expectedRevision)
       if (rule.status !== from) throw serviceError('INVALID_STATE', `规则只能从 ${from} 转为 ${to}`)
       if (enteringActive) {
+        requireAutomationCapability()
         normalizeTrigger(rule.trigger)
         if (rule.trigger.kind === 'gearjob-work-order-update') requireEventCapability(eventSourceId, eventSourceAvailable, rule.trigger.sourceId)
         validateBinding(state, member, rule, connectionCatalog)
@@ -639,6 +646,9 @@ function exactInput(value, allowed) {
 function replaceById(items, value) { return items.map(item => item.id === value.id ? value : item) }
 function requireEventCapability(configuredSourceId, available, requestedSourceId) {
   if (!available() || configuredSourceId !== requestedSourceId) throw serviceError('SOURCE_NOT_CONFIGURED', 'GearJob 事件来源未配置')
+}
+function requireAutomationCapability() {
+  if (getCapability(CAPABILITY_ID).retired) throw serviceError('CAPABILITY_RETIRED', '旧来源已停止新执行，可查看历史记录')
 }
 function identityChanged(rule, fields) { return ['employeeId', 'skillId', 'connectionId', 'workOrderId'].some(key => rule[key] !== fields[key]) || JSON.stringify(rule.trigger) !== JSON.stringify(fields.trigger) }
 function gearJobRevisionMicros(value) {

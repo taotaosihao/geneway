@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { getCapability, listCapabilities, validateCapabilityInput, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
 import { createObservation } from './domain/work-order.mjs'
+import { KIVO_TPM_RESULT_KIND } from './domain/tpm.mjs'
 import { assertTrustedConnection, CONNECTION_IDENTITY_FIELDS } from './connection-catalog.mjs'
-import { correlationMappingContext } from './execution-grant.mjs'
+import { connectionInputAllowed, connectionSnapshot, correlationMappingContext } from './execution-grant.mjs'
 import { currentKnowledgeReference, sweepKnowledgeDependencies } from './knowledge-service.mjs'
 
 export const ERROR_STATUS = {
@@ -13,7 +15,7 @@ export const ERROR_STATUS = {
   NON_FINITE_RESULT: 400, CAPABILITY_NOT_FOUND: 400, UNAUTHORIZED: 401, FORBIDDEN: 403,
   NOT_FOUND: 404, BUSY: 409, SOURCE_NOT_CONFIGURED: 503, MODEL_NOT_CONFIGURED: 503,
   UPSTREAM_TIMEOUT: 504, UPSTREAM_ERROR: 502, INVALID_SOURCE: 502,
-  REVISION_CONFLICT: 409, CAPACITY_EXCEEDED: 400, BUDGET_EXHAUSTED: 409,
+  REVISION_CONFLICT: 409, CAPACITY_EXCEEDED: 400, BUDGET_EXHAUSTED: 409, CAPABILITY_RETIRED: 409,
   KNOWLEDGE_PLUGIN_DISABLED: 503, KNOWLEDGE_REFERENCE_INVALID: 409,
 }
 
@@ -38,6 +40,7 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   KNOWLEDGE_REFERENCE_INVALID: '知识引用无效或已失效',
   CANCELLED: '本次执行已停止',
   FORBIDDEN: '执行授权已失效',
+  CAPABILITY_RETIRED: '旧来源已停止新执行，可查看历史记录',
   NOT_FOUND: '业务对象不存在',
   INVALID_REQUEST: '请求参数无效',
 })
@@ -81,6 +84,9 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
 
     async dispatchAutomationWork(workId, executionId, acceptedAt, options = {}) {
       await recover()
+      const state = await store.read()
+      const work = state.works.find(item => item.id === workId)
+      if (work) requireExecutableWork(state, work)
       try {
         if (options.ownerCheck && !options.ownerCheck()) throw serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效')
         const accepted = parseInstant(acceptedAt)
@@ -138,12 +144,13 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           reservation = { error: binding }
           return state
         }
+        if (binding.capability.retired) { reservation = { error: failure('CAPABILITY_RETIRED', SAFE_ERROR_MESSAGES.CAPABILITY_RETIRED) }; return state }
         const parsed = parseInput(binding.capability.id, requestInput(body, binding.capability), true)
         if (!parsed.ok) {
           reservation = { error: parsed }
           return state
         }
-        if (!inputAllowed(binding, parsed.input)) {
+        if (!inputAllowed(binding, parsed.input, parsed.missing.length > 0)) {
           reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }
           return state
         }
@@ -184,6 +191,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         if (!Array.isArray(body.items) || body.items.length < 1 || body.items.length > 4) { reservation = { error: failure('INVALID_REQUEST', '协作计划需要 1 至 4 项') }; return state }
         const leader = authorizedBinding(state, member, body, connectionCatalog)
         if (!leader.ok) { reservation = { error: leader }; return state }
+        if (leader.capability.retired) { reservation = { error: failure('CAPABILITY_RETIRED', SAFE_ERROR_MESSAGES.CAPABILITY_RETIRED) }; return state }
         const goal = clean(body.goal)
         if (!goal || goal.length > 4000) { reservation = { error: failure('INVALID_REQUEST', '协作目标无效') }; return state }
         const conversationId = conversationBinding(state, member, leader.employee.id, body.conversationId)
@@ -195,9 +203,10 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           itemIds.add(itemId)
           const binding = authorizedBinding(state, member, raw ?? {}, connectionCatalog)
           if (!binding.ok) { reservation = { error: binding }; return state }
+          if (binding.capability.retired) { reservation = { error: failure('CAPABILITY_RETIRED', SAFE_ERROR_MESSAGES.CAPABILITY_RETIRED) }; return state }
           const parsed = parseInput(binding.capability.id, requestInput(raw, binding.capability), true)
           if (!parsed.ok) { reservation = { error: parsed }; return state }
-          if (!inputAllowed(binding, parsed.input)) { reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }; return state }
+          if (!inputAllowed(binding, parsed.input, parsed.missing.length > 0)) { reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }; return state }
           const childWorkId = `work-${randomUUID()}`, executionId = `exec-${randomUUID()}`
           const itemGoal = clean(raw.goal) ?? binding.capability.action
           const knowledgeQuery = raw.knowledgeQuery === undefined ? undefined : validKnowledgeQuery(raw.knowledgeQuery)
@@ -213,14 +222,6 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           planItems.push({ id: itemId, childWorkId, goal: itemGoal, employeeId: binding.employee.id, status: waiting ? 'waiting_input' : 'not_started', dependsOn: raw.dependsOn ?? [] })
         }
         if (planItems.some(item => !stringIds(item.dependsOn) || item.dependsOn.some(id => !itemIds.has(id) || id === item.id)) || hasDependencyCycle(planItems)) { reservation = { error: failure('INVALID_REQUEST', '协作计划依赖无效') }; return state }
-        for (let index = 0; index < planItems.length; index += 1) {
-          const item = planItems[index], child = childWorks[index], raw = body.items[index]
-          if (child.capabilityId === 'cycle-time-calculate' && item.dependsOn.some(id => childWorks.find(work => work.planItemId === id)?.capabilityId === 'gearjob-work-order-read')
-            && (Object.hasOwn(raw, 'quantity') || plainObject(raw.input) && Object.hasOwn(raw.input, 'quantity'))) {
-            reservation = { error: failure('INVALID_INPUT', '剩余数量必须来自当前 GearJob 工单观察') }
-            return state
-          }
-        }
         const rootExecutionId = `exec-${randomUUID()}`
         const rootWork = {
           id: rootWorkId, ownerMemberId: member.id, employeeId: leader.employee.id, skillId: leader.skill.id,
@@ -246,6 +247,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       await store.update(state => {
         const member = requireMember(state, actor), work = findOwned(state, member, id)
         if (!work?.collaboration) throw serviceError('NOT_FOUND', '协作工作不存在')
+        requireExecutableWork(state, work)
         if (!Number.isSafeInteger(body.expectedRevision) || body.expectedRevision !== work.plan.revision) throw serviceError('BUSY', '工作计划 revision 已变化')
         if (!Array.isArray(body.items) || !body.items.length) throw serviceError('INVALID_REQUEST', '计划修改为空')
         const changes = new Map()
@@ -265,7 +267,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           let employeeId = item.employeeId
           const binding = authorizedBinding(state, member, { ...child, employeeId: change.employeeId ?? employeeId }, connectionCatalog)
           if (!binding.ok) throw serviceError(binding.error.code, binding.error.message)
-          if (!inputAllowed(binding, child.input)) throw serviceError('FORBIDDEN', '业务对象不在当前连接允许范围内')
+          if (!inputAllowed(binding, child.input, child.status === 'waiting_input')) throw serviceError('FORBIDDEN', '业务对象不在当前连接允许范围内')
           employeeId = binding.employee.id
           childChanges.set(child.id, { goal: change.goal ?? item.goal, employeeId })
           return { ...item, goal: change.goal ?? item.goal, employeeId }
@@ -298,6 +300,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       await store.update(state => {
         const member = requireMember(state, actor)
         const work = findOwned(state, member, id)
+        if (work) requireExecutableWork(state, work)
         if (!work) {
           reservation = { error: failure('NOT_FOUND', '工作不存在') }
           return state
@@ -331,7 +334,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           reservation = { error: parsed }
           return state
         }
-        if (!inputAllowed(binding, parsed.input)) {
+        if (!inputAllowed(binding, parsed.input, parsed.missing.length > 0)) {
           reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }
           return state
         }
@@ -561,13 +564,24 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       requireAdmin(state, actor)
       const connection = state.connections.find(item => item.id === id)
       if (!connection) throw serviceError('NOT_FOUND', '连接不存在')
+      if (connection.kind !== 'kivo-mcp') throw serviceError('CAPABILITY_RETIRED', SAFE_ERROR_MESSAGES.CAPABILITY_RETIRED)
       if (connection.enabled !== true) throw serviceError('FORBIDDEN', '连接已停用')
       try { assertTrustedConnection(connectionCatalog, connection) } catch { throw serviceError('FORBIDDEN', '连接目标未在主机可信目录登记') }
       if (typeof connectionTester !== 'function') throw serviceError('SOURCE_NOT_CONFIGURED', '连接测试器未配置')
       const testedAt = clock()
       let detail
       try {
-        detail = await connectionTester(connection)
+        const snapshot = connectionSnapshot(connection)
+        const authorize = async () => {
+          const current = await store.read()
+          requireAdmin(current, actor)
+          const candidate = current.connections.find(item => item.id === id && item.enabled === true)
+          if (!candidate || !isDeepStrictEqual(connectionSnapshot(candidate), snapshot)) throw serviceError('FORBIDDEN', '连接测试授权已变化')
+          assertTrustedConnection(connectionCatalog, candidate)
+        }
+        await authorize()
+        detail = await connectionTester(connection, { authorize })
+        await authorize()
       } catch (error) {
         const detail = safeError(error, 'UPSTREAM_ERROR')
         const lastTest = { ok: false, testedAt, ...detail }
@@ -576,11 +590,16 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       }
       const lastTest = compact({ ok: true, testedAt, detail: clean(detail) })
       let applied = false
-      await store.update(current => ({ ...current, connections: current.connections.map(item => {
-        if (item.id !== id || item.revision !== connection.revision) return item
-        applied = true
-        return { ...item, status: 'ready', lastTest }
-      }) }))
+      await store.update(current => {
+        requireAdmin(current, actor)
+        return { ...current, connections: current.connections.map(item => {
+          if (item.id !== id || item.revision !== connection.revision) return item
+          if (item.enabled !== true || !isDeepStrictEqual(connectionSnapshot(item), connectionSnapshot(connection))) throw serviceError('FORBIDDEN', '连接测试授权已变化')
+          assertTrustedConnection(connectionCatalog, item)
+          applied = true
+          return { ...item, status: 'ready', lastTest }
+        }) }
+      })
       if (!applied) throw serviceError('BUSY', '连接配置已变化，请重新测试')
       return lastTest
     },
@@ -617,6 +636,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const member = requireMember(state, actor)
       const work = findOwned(state, member, id)
       if (!work) { reservation = { error: failure('NOT_FOUND', '工作不存在') }; return state }
+      requireExecutableWork(state, work)
       const key = reservationKey(member.id, id, operation, requestId)
       if (state.reservations[key]) { reservation = { deduplicated: true, ...state.reservations[key] }; return state }
       if (activeExecution(work)) { reservation = { error: failure('BUSY', '当前工作已有执行正在进行') }; return state }
@@ -644,6 +664,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     await store.update(state => {
       const member = requireMember(state, actor), rootWork = findOwned(state, member, id)
       if (!rootWork?.collaboration) { reservation = { error: failure('NOT_FOUND', '协作工作不存在') }; return state }
+      requireExecutableWork(state, rootWork)
       const key = reservationKey(member.id, id, recheck ? 'recheck' : 'continue', requestId)
       if (state.reservations[key]) { reservation = { deduplicated: true, ...state.reservations[key] }; return state }
       if (recheck ? rootWork.collaboration.status !== 'stale' : !['waiting_input', 'failed', 'interrupted', 'cancelled'].includes(rootWork.collaboration.status)) { reservation = { error: failure('BUSY', recheck ? '当前协作工作不需要重新核对' : '当前协作工作状态不可继续') }; return state }
@@ -659,13 +680,9 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         if (!binding.ok) { reservation = { error: binding }; return state }
         const supplied = body.inputs?.[item.id]
         if (supplied !== undefined && !plainObject(supplied)) { reservation = { error: failure('INVALID_INPUT', '协作补充输入必须是对象') }; return state }
-        if (child.capabilityId === 'cycle-time-calculate' && Object.hasOwn(supplied ?? {}, 'quantity') && item.dependsOn.some(id => {
-          const dependency = rootWork.plan.items.find(candidate => candidate.id === id)
-          return state.works.find(work => work.id === dependency?.childWorkId)?.capabilityId === 'gearjob-work-order-read'
-        })) { reservation = { error: failure('INVALID_INPUT', '剩余数量必须来自当前 GearJob 工单观察') }; return state }
         const parsed = parseInput(child.capabilityId, { ...child.input, ...(supplied ?? {}) }, false)
         if (!parsed.ok) { reservation = { error: parsed }; return state }
-        if (!inputAllowed(binding, parsed.input)) { reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }; return state }
+        if (!inputAllowed(binding, parsed.input, parsed.missing.length > 0)) { reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }; return state }
         childUpdates.set(child.id, { ...child, input: parsed.input, requiredInputs: [] })
       }
       const rootExecutionId = `exec-${randomUUID()}`, cancelGeneration = rootWork.collaboration.cancelGeneration
@@ -693,6 +710,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     if (rule?.status !== 'active') return failure('FORBIDDEN', '自动规则当前不可执行')
     const binding = authorizedBinding(state, member, rule, connectionCatalog)
     if (!binding.ok) return binding
+    if (binding.capability.retired) return failure('CAPABILITY_RETIRED', SAFE_ERROR_MESSAGES.CAPABILITY_RETIRED)
     const parsed = parseInput(binding.capability.id, { workOrderId: rule.workOrderId }, false)
     if (!parsed.ok) return parsed
     if (!inputAllowed(binding, parsed.input)) return failure('FORBIDDEN', '业务对象不在当前连接允许范围内')
@@ -766,8 +784,8 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       }
       const model = await explain(runnerOptions, entry)
       assertNotAborted(entry)
-      if (operation === 'follow-up') await finishFollowUp(workId, executionId, question, model)
-      else await finishBusinessResult(workId, executionId, model, context.work, entry)
+      if (operation === 'follow-up') await finishFollowUp(workId, executionId, question, model, context)
+      else await finishBusinessResult(workId, executionId, model, context, entry)
     } catch (error) {
       const finalError = entry.deadlineExpired && !entry.userCancelled ? timeoutError() : error
       if (!entry.ownerLost && finalError?.code !== 'OWNER_LOCK_LOST') await finishError(workId, executionId, finalError)
@@ -799,6 +817,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const execution = work?.executions.find(item => item.id === executionId)
       if (!work || !execution || execution.status !== 'running') throw serviceError('CANCELLED', '本次执行已停止')
       const member = requireMember(state, { id: work.ownerMemberId })
+      requireExecutableWork(state, work)
       const binding = authorizedBinding(state, member, work, connectionCatalog)
       if (!binding.ok) throw serviceError(binding.error.code, binding.error.message)
       const parsed = validateCapabilityInput(work.capabilityId, work.input)
@@ -854,12 +873,12 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     return outcome.value
   }
 
-  async function finishBusinessResult(workId, executionId, model, originalWork, entry) {
+  async function finishBusinessResult(workId, executionId, model, context, entry) {
     if (!model?.result) throw serviceError('TOOL_CHAIN_INVALID', 'DSH 未返回规范化能力结果')
-    await finishResult(workId, executionId, businessEnvelope(model, originalWork, clock()), model, entry?.deadlineAt, entry)
+    await finishResult(workId, executionId, businessEnvelope(model, context.work, clock()), model, entry?.deadlineAt, entry, context)
   }
 
-  async function finishFollowUp(workId, executionId, question, model) {
+  async function finishFollowUp(workId, executionId, question, model, context) {
     const work = await findWork(workId)
     const result = compact({
       id: `follow-${randomUUID()}`, kind: 'assistant.follow-up', capabilityId: work?.capabilityId, skillId: work?.skillId,
@@ -869,10 +888,10 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       contextConfirmationRefs: model?.contextConfirmationRefs ?? [],
     })
     if (!result.explanation || !result.dshSessionRef) throw serviceError('TOOL_CHAIN_INVALID', '追问结果不完整')
-    await finishResult(workId, executionId, result, model)
+    await finishResult(workId, executionId, result, model, undefined, undefined, context)
   }
 
-  async function finishResult(workId, executionId, result, model, deadlineAt, entry) {
+  async function finishResult(workId, executionId, result, model, deadlineAt, entry, context) {
     const beforeCommit = () => { if (entry) { assertAutomationOwner(entry); assertNotAborted(entry) } }
     await store.update(state => {
       beforeCommit()
@@ -887,6 +906,14 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       if (deadlineAt && deadlineReachedAt(deadlineAt, clock())) {
         const nextExecution = { ...execution, status: 'failed', completedAt: clock(), error: safeError(timeoutError()) }
         return { ...state, works: replaceById(state.works, { ...work, status: 'failed', executions: replaceById(work.executions, nextExecution) }) }
+      }
+      if (getCapability(work.capabilityId)?.resultKind === KIVO_TPM_RESULT_KIND) {
+        const authorized = authorizeWorkBinding(state, { id: work.ownerMemberId }, work, connectionCatalog)
+        if (!context || authorized.binding.route.id !== context.metadata.modelRouteId
+          || !isDeepStrictEqual(work.input, context.work.input) || !isDeepStrictEqual(execution.input, context.work.input)
+          || !isDeepStrictEqual(connectionSnapshot(authorized.binding.connection), connectionSnapshot(context.connection))
+          || context.confirmations.some(ref => !state.confirmations.some(item => item.id === ref.id && item.revision === ref.revision
+            && item.ownerMemberId === work.ownerMemberId && item.employeeId === work.employeeId && item.status === 'active'))) throw serviceError('FORBIDDEN', '执行结果提交时授权已失效')
       }
       const legacy = result.kind === 'gearjob.work-order.observation' ? { resultObservationId: result.id } : result.kind === 'assistant.follow-up' ? { resultFollowUpId: result.id } : {}
       const nextExecution = compact({ ...execution, status: 'completed', completedAt: clock(), dshSessionRef: result.dshSessionRef,
@@ -946,7 +973,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
   }
 
   async function projectOwned(actor, work) {
-    if (!work.results.some(result => result.knowledgeDependencyRefs?.length) && !work.handoffs?.some(handoff => handoff.knowledgeRefs?.length)) return publicWork({ works: [work] }, { id: actor?.id }, work)
+    if (!work.collaboration && !work.rootWorkId && !work.results.some(result => result.knowledgeDependencyRefs?.length) && !work.handoffs?.some(handoff => handoff.knowledgeRefs?.length)) return publicWork({ works: [work] }, { id: actor?.id }, work)
     const state = await store.read()
     const member = requireMember(state, actor)
     const current = findOwned(state, member, work.id)
@@ -967,7 +994,7 @@ function businessEnvelope(model, work, now) {
     Object.assign(payload, compact({ explanation: clean(model.explanation), dshSessionRef: clean(model.dshSessionRef),
       continuedFromDshSessionRef: clean(model.continuedFromDshSessionRef), contextObservationId: clean(model.contextResultId ?? model.contextObservationId), continuity: clean(model.continuity) }))
   }
-  if (base.kind === 'manufacturing.work-order-device-correlation') createdAt = clean(payload.queriedAt)
+  if (base.kind === 'manufacturing.work-order-device-correlation' || base.kind === KIVO_TPM_RESULT_KIND) createdAt = clean(payload.queriedAt)
   const result = compact({
     id, kind: base.kind, capabilityId: work.capabilityId, skillId: work.skillId, schemaVersion: 1,
     input: structuredClone(work.input), payload, explanation: clean(model.explanation), source: base.source, createdAt,
@@ -1026,9 +1053,16 @@ export function authorizeWorkBinding(state, actor, workOrId, connectionCatalog =
   return { member, work, binding, input: parsed.input }
 }
 
-function inputAllowed(binding, input) {
+function inputAllowed(binding, input, allowMissing = false) {
   if (binding.capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY) return binding.connections.gearJob.allowedObjectIds?.includes(input.workOrderId)
-  return !binding.capability.requiresConnection || input.workOrderId === undefined || binding.connection.allowedObjectIds?.includes(input.workOrderId)
+  if (!binding.capability.requiresConnection) return true
+  if (allowMissing) {
+    const partial = validateCapabilityInput(binding.capability.id, input, { allowMissing: true })
+    if (!partial.ok || !partial.missing.length) return false
+    if (binding.connection.kind === 'kivo-mcp') return Array.isArray(binding.connection.allowedObjectIds) && binding.connection.allowedObjectIds.length === 0
+    return input.workOrderId === undefined || binding.connection.allowedObjectIds?.includes(input.workOrderId)
+  }
+  return connectionInputAllowed(binding.connection, binding.capability.id, input)
 }
 
 function requireMember(state, actor) {
@@ -1058,6 +1092,7 @@ function businessResults(work) { return work.results.filter(item => item.kind !=
 function followUpFact(result) {
   if (result.kind === 'manufacturing.takt') return { kind: result.kind, payload: pick(result.payload, ['availableSeconds', 'quantity', 'secondsPerUnit', 'unit']) }
   if (result.kind === 'manufacturing.work-order-device-correlation') return { kind: result.kind, payload: structuredClone(result.payload), source: structuredClone(result.source) }
+  if (result.kind === KIVO_TPM_RESULT_KIND) return { kind: result.kind, payload: structuredClone(result.payload), source: structuredClone(result.source) }
   return compact({
     kind: result.kind,
     payload: pick(result.payload, ['workOrderId', 'status', 'plannedQuantity', 'completedQuantity', 'unit', 'sourceTime', 'sourceRecordId', 'sourceRevision', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']),
@@ -1086,6 +1121,7 @@ function skillConfig(body, current) {
   const capabilityId = body.capabilityId ?? current?.capabilityId, capability = getCapability(capabilityId)
   const id = current?.id ?? clean(body.id), name = clean(body.name ?? current?.name), enabled = body.enabled ?? current?.enabled ?? true
   if (!capability || id !== capability.skillId || !name || typeof enabled !== 'boolean') throw serviceError('INVALID_REQUEST', 'Skill 必须绑定可信 capability catalog')
+  if (capability.retired && (!current || enabled)) throw serviceError('CAPABILITY_RETIRED', SAFE_ERROR_MESSAGES.CAPABILITY_RETIRED)
   return { id, name, capabilityId, enabled }
 }
 function employeeConfig(state, body, current) {
@@ -1123,6 +1159,7 @@ function invalidatePendingApprovals(state, affected, now) {
 function connectionConfig(state, body, current, now, connectionCatalog) {
   const result = { id: current?.id ?? clean(body.id), name: clean(body.name ?? current?.name), kind: body.kind ?? current?.kind,
     targetIdentity: clean(body.targetIdentity ?? current?.targetIdentity), baseUrl: clean(body.baseUrl ?? current?.baseUrl),
+    ...((body.kind ?? current?.kind) === 'kivo-mcp' ? { issuer: clean(body.issuer ?? current?.issuer), clientId: clean(body.clientId ?? current?.clientId) } : {}),
     ...(body.hostHeader !== undefined || current?.hostHeader !== undefined ? { hostHeader: clean(body.hostHeader ?? current?.hostHeader) } : {}),
     credentialRef: clean(body.credentialRef ?? current?.credentialRef), allowedObjectIds: body.allowedObjectIds ?? current?.allowedObjectIds ?? [],
     sourceSystem: clean(body.sourceSystem ?? current?.sourceSystem), sourceInstance: clean(body.sourceInstance ?? current?.sourceInstance),
@@ -1131,7 +1168,9 @@ function connectionConfig(state, body, current, now, connectionCatalog) {
     status: 'unknown', skillIds: body.skillIds ?? current?.skillIds ?? [], revision: current ? current.revision + 1 : 1,
     updatedAt: now }
   if (current && CONNECTION_IDENTITY_FIELDS.some(key => result[key] !== current[key])) throw serviceError('INVALID_REQUEST', '连接目标/来源 identity 不可原地更换')
-  if (!result.id || !result.name || !['gearjob-rest', 'hive-tenant-records'].includes(result.kind) || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef) || !stringIds(result.allowedObjectIds) || !stringIds(result.skillIds) || typeof result.enabled !== 'boolean') throw serviceError('INVALID_REQUEST', '连接配置无效')
+  if (!result.id || !result.name || !['gearjob-rest', 'hive-tenant-records', 'kivo-mcp'].includes(result.kind) || !result.targetIdentity || !result.baseUrl || !simpleRef(result.credentialRef) || !stringIds(result.allowedObjectIds) || !stringIds(result.skillIds) || typeof result.enabled !== 'boolean') throw serviceError('INVALID_REQUEST', '连接配置无效')
+  if (result.kind === 'kivo-mcp' ? result.allowedObjectIds.length !== 0 : body.issuer !== undefined || body.clientId !== undefined) throw serviceError('INVALID_REQUEST', '连接机器账号或范围字段无效')
+  if (!current && result.kind !== 'kivo-mcp') throw serviceError('CAPABILITY_RETIRED', SAFE_ERROR_MESSAGES.CAPABILITY_RETIRED)
   if (result.kind === 'hive-tenant-records' && (!uuid(result.targetIdentity) || result.allowedObjectIds.length !== 1)) throw serviceError('INVALID_REQUEST', 'Hive 连接必须绑定 tenant UUID 与一个 device code')
   if (result.skillIds.some(id => !state.skills.some(item => item.id === id && capabilityAcceptsConnectionKind(getCapability(item.capabilityId), result.kind)))) throw serviceError('INVALID_REQUEST', '连接 Skill 绑定无效')
   for (const key of ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']) if (!result[key]) throw serviceError('INVALID_REQUEST', `连接缺少 ${key}`)
@@ -1157,7 +1196,7 @@ function publicWork(state, member, work) {
     return refs.length === handoff.knowledgeRefs.length ? handoff : { ...handoff, knowledgeRefs: [], knowledgeUnavailable: true }
   })
   value.executions = value.executions.map(execution => execution.error ? { ...execution, error: safeError(execution.error) } : execution)
-  return { ...value, observations, followUps }
+  return { ...value, retired: isRetiredWork(state, work), observations, followUps }
 }
 function projectResult(state, member, root, work, result) {
   const value = structuredClone(result)
@@ -1187,7 +1226,15 @@ function visibleConnection(connection, catalog) {
   if (value.lastTest?.ok === false) value.lastTest = { ...value.lastTest, ...safeError(value.lastTest) }
   try { assertTrustedConnection(catalog, connection); return value } catch { return { ...value, status: 'unavailable' } }
 }
-function publicCapability(capability) { return { id: capability.id, skillId: capability.skillId, action: capability.action, requiredInputs: [...capability.requiredInputs], requiresConnection: capability.requiresConnection, resultKind: capability.resultKind } }
+function publicCapability(capability) { return { id: capability.id, retired: capability.retired, skillId: capability.skillId, action: capability.action, requiredInputs: [...capability.requiredInputs], requiresConnection: capability.requiresConnection, resultKind: capability.resultKind } }
+
+export function isRetiredWork(state, work) {
+  const rootId = work.rootWorkId ?? work.id
+  return [work, ...state.works.filter(item => item.id === rootId || item.rootWorkId === rootId)].some(item => getCapability(item.capabilityId)?.retired === true)
+}
+function requireExecutableWork(state, work) {
+  if (isRetiredWork(state, work)) throw serviceError('CAPABILITY_RETIRED', SAFE_ERROR_MESSAGES.CAPABILITY_RETIRED)
+}
 function workConnectionFields(binding) {
   return binding.connections
     ? { connectionIds: { gearJob: binding.connections.gearJob.id, hive: binding.connections.hive.id } }

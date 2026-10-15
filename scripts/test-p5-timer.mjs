@@ -58,21 +58,30 @@ async function sameDueChecks() {
 
 async function missedWindowAndNoBackfillChecks() {
   let now = '2026-09-20T23:59:30.000Z'
-  let state = timerState()
+  let state = { ...timerState(), works: [] }
+  const calls = []
+  let prepared = 0
   const store = {
     async read() { return structuredClone(state) },
     async update(mutator) { state = await mutator(structuredClone(state)); return structuredClone(state) },
   }
-  const workService = { async ensureReady() {}, async automationOwnerLost() {}, prepareAutomationWork() { throw new Error('missed window must not prepare work') } }
+  const workService = { async ensureReady() {}, async automationOwnerLost() {}, prepareAutomationWork() { prepared += 1; assert.fail('missed window must not prepare work') } }
   const automation = createAutomationService({ store, workService, clock: () => now, idFactory: () => 'missed' })
   const timers = fakeTimers()
-  const runtime = createAutomationRuntime({ store, automationService: automation, workService, dataRoot: '/tmp/geneway-p5-fake-owner', clock: () => now, timerFactory: timers.set, clearTimer: timers.clear, lockFactory: fakeLock })
+  const runtime = createAutomationRuntime({ store, automationService: { async acceptDailyOccurrence(value) { calls.push(value) } }, workService, dataRoot: '/tmp/geneway-p5-fake-owner', clock: () => now, timerFactory: timers.set, clearTimer: timers.clear, lockFactory: fakeLock })
   await runtime.start()
   now = '2026-09-21T00:01:00.001Z'
   timers.pending.shift().callback()
-  await waitFor(() => state.automationOccurrences.length === 1)
-  assert.deepEqual({ status: state.automationOccurrences[0].status, reason: state.automationOccurrences[0].reason, workId: state.automationOccurrences[0].workId }, { status: 'skipped', reason: 'missed-window', workId: null })
+  await waitFor(() => calls.length === 1)
+  assert.deepEqual({ ruleId: calls[0].ruleId, scheduledDate: calls[0].scheduledDate, scheduledAt: calls[0].scheduledAt }, { ruleId: 'rule-a', scheduledDate: '2026-09-21', scheduledAt: '2026-09-21T00:00:00.000Z' })
+  assert.equal(calls[0].ownerCheck(), true)
+  assert.equal(prepared, 0)
+  await assert.rejects(automation.acceptDailyOccurrence(calls[0]), { code: 'CAPABILITY_RETIRED' })
+  assert.deepEqual(state.automationOccurrences, [])
+  assert.deepEqual(state.works, [])
+  assert.equal(prepared, 0, 'retired GearJob must not prepare work even after the window elapsed')
   await runtime.close()
+  assert.equal(calls[0].ownerCheck(), false)
 
   now = '2026-09-21T01:00:00.000Z'
   state = timerState()

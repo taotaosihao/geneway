@@ -117,11 +117,9 @@
     includeHarnessIdentity: false
     includeRuntimeContext: false
 - insert:
-    - id: gearjob-work-order
-      name: ../plugins/gearjob-work-order.mjs
+    - id: kivo-tpm
+      name: ../plugins/kivo-tpm.mjs
     - id: cycle-time
       name: ../plugins/cycle-time.mjs
-    - id: work-order-device-correlation
-      name: ../plugins/work-order-device-correlation.mjs
     - id: execution-request-guard
       name: ../plugins/execution-request-guard.mjs

@@ -12,6 +12,7 @@ export const KIVO_TPM_RECORD_LIST_CAPABILITY = 'kivo-tpm-record-list'
 const capabilities = Object.freeze({
   'gearjob-work-order-read': Object.freeze({
     id: 'gearjob-work-order-read',
+    retired: true,
     skillId: 'skill-gearjob-work-order-read',
     action: 'gearjob.work-order.read',
     toolName: GEARJOB_TOOL,
@@ -28,6 +29,7 @@ const capabilities = Object.freeze({
   }),
   'cycle-time-calculate': Object.freeze({
     id: 'cycle-time-calculate',
+    retired: false,
     skillId: 'skill-cycle-time-calculate',
     action: 'manufacturing.cycle-time.calculate',
     toolName: CYCLE_TIME_TOOL,
@@ -43,6 +45,7 @@ const capabilities = Object.freeze({
   }),
   [WORK_ORDER_DEVICE_CORRELATION_CAPABILITY]: Object.freeze({
     id: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY,
+    retired: true,
     skillId: 'skill-manufacturing-work-order-device-correlate',
     action: 'manufacturing.work-order-device.correlate',
     toolName: WORK_ORDER_DEVICE_CORRELATION_TOOL,
@@ -59,6 +62,7 @@ const capabilities = Object.freeze({
   }),
   [KIVO_TPM_RECORD_READ_CAPABILITY]: Object.freeze({
     id: KIVO_TPM_RECORD_READ_CAPABILITY,
+    retired: false,
     skillId: 'skill-kivo-tpm-record-read',
     action: 'kivo.tpm.record.read',
     toolName: KIVO_TPM_TOOLS.readRecord,
@@ -74,6 +78,7 @@ const capabilities = Object.freeze({
   }),
   [KIVO_TPM_RECORD_LIST_CAPABILITY]: Object.freeze({
     id: KIVO_TPM_RECORD_LIST_CAPABILITY,
+    retired: false,
     skillId: 'skill-kivo-tpm-record-list',
     action: 'kivo.tpm.record.list',
     toolName: KIVO_TPM_TOOLS.listRecords,

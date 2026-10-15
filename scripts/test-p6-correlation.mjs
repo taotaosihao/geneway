@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash, createHmac } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getCapability, parseCapabilityToolResult, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, WORK_ORDER_DEVICE_CORRELATION_TOOL } from '../src/capabilities.mjs'
@@ -25,7 +25,7 @@ try {
   await authorizationChecks()
   await serviceAndStoreChecks()
   await runnerChecks()
-  console.log('P6 correlation checks passed; three GETs, dual authorization, strict typed result, raw leakage=0')
+  console.log('Retained correlation checks passed; injected source, dual authorization, strict typed history, retired dispatch blocked')
 } finally {
   await rm(root, { recursive: true, force: true })
 }
@@ -37,6 +37,7 @@ async function capabilityAndSourceChecks() {
   assert.equal(capability.pluginId, 'geneway-work-order-device-correlation')
   assert.equal(capability.resultKind, 'manufacturing.work-order-device-correlation')
   assert.deepEqual(capability.requiredInputs, ['workOrderId'])
+  assert.equal(capability.retired, true)
 
   const calls = [], auth = []
   const result = await correlate({ calls, auth })
@@ -187,50 +188,51 @@ async function authorizationChecks() {
 async function serviceAndStoreChecks() {
   const statePath = join(root, 'state.json')
   const store = createFileStore(statePath)
-  await store.update(() => fixtureState())
+  const state = fixtureState()
+  const historicalWork = state.works.find(work => work.id === 'work-correlation')
+  historicalWork.results = [{
+    ...parseCapabilityToolResult(WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, { ok: true, ...successfulResult() }, historicalWork.input),
+    id: 'result-correlation', capabilityId: historicalWork.capabilityId, skillId: historicalWork.skillId, schemaVersion: 1,
+    input: historicalWork.input, explanation: '已核对唯一工单设备关联。', createdAt: queriedAt,
+    dshSessionRef: 'session-correlation', continuity: 'new', contextConfirmationRefs: [],
+  }]
+  for (const work of state.works) {
+    work.status = 'completed'
+    for (const execution of work.executions) Object.assign(execution, { status: 'completed', completedAt: queriedAt })
+  }
+  Object.assign(historicalWork.executions[0], { resultId: 'result-correlation', dshSessionRef: 'session-correlation', mappingRevision: null, mappingIdentity: null })
+  await store.update(() => state)
   const captures = []
   const runner = {
     configured: true,
     async run(options) {
       captures.push(structuredClone(options))
-      return { result: parseCapabilityToolResult(WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, { ok: true, ...successfulResult() }, options.input), explanation: '已核对唯一工单设备关联。', dshSessionRef: 'session-correlation', continuity: 'new', contextConfirmationRefs: [], eventCount: 2 }
+      throw new Error('退休能力不得派发到 runner')
     },
     async close() {},
   }
   const service = createWorkService({ store, runner, clock: () => queriedAt, connectionCatalog: catalog(), policyPaths: { stateFile: statePath, dataRoot: root, secretRoot } })
+  const historical = await service.getWork({ id: 'member-a' }, historicalWork.id)
+  assert.equal(historical.ok, true)
+  assert.deepEqual(historical.value.results, historicalWork.results)
+  assert.deepEqual(historical.value.executions, historicalWork.executions)
+  assert.deepEqual(historical.value.connectionIds, { gearJob: 'connection-gear', hive: 'connection-hive' })
+  assert.equal(Object.hasOwn(historical.value, 'connectionId'), false)
+  assert.deepEqual(historical.value.actions, [])
+  assert.equal(JSON.stringify(historical.value).includes('RAW-CANARY'), false)
+  const before = await store.read()
   const created = await service.createWork({ id: 'member-a' }, { employeeId: 'employee-a', skillId: 'skill-manufacturing-work-order-device-correlate', capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, connectionIds: { gearJob: 'connection-gear', hive: 'connection-hive' }, input: { workOrderId: 'WO-1' }, clientRequestId: 'p6-correlation' })
-  assert.equal(created.ok, true)
-  const completed = await waitFor(() => store.read().then(value => value.works.find(work => work.id === created.value.id)), value => value?.status === 'completed' || value?.status === 'failed')
-  assert.equal(completed.status, 'completed', JSON.stringify(completed.executions.at(-1)?.error))
-  assert.deepEqual(completed.connectionIds, { gearJob: 'connection-gear', hive: 'connection-hive' })
-  assert.equal(Object.hasOwn(completed, 'connectionId'), false)
-  assert.deepEqual(completed.actions, [])
-  assert.equal(completed.results[0].kind, 'manufacturing.work-order-device-correlation')
-  assert.equal(JSON.stringify(completed).includes('RAW-CANARY'), false)
-  assert.deepEqual(captures[0].sessionMetadata.connectionIds, { gearJob: 'connection-gear', hive: 'connection-hive' })
-  assert.deepEqual(captures[0].sessionMetadata.connectionRevisions, { gearJob: 1, hive: 1 })
-  assert.equal(captures[0].sessionMetadata.mappingRevision, null)
-  assert.equal(captures[0].sessionMetadata.mappingIdentity, null)
-  assert.equal(completed.executions.at(-1).mappingRevision, null)
-  assert.equal(completed.executions.at(-1).mappingIdentity, null)
-  assert.deepEqual(Object.keys(captures[0].grant.connections), ['gearJob', 'hive'])
-  assert.equal(captures[0].grant.mappingRevision, null)
-  assert.equal(captures[0].grant.mappingIdentity, null)
-  assert.equal(Object.hasOwn(captures[0].grant, 'connection'), false)
-  const refreshed = await service.refreshWork({ id: 'member-a' }, completed.id, { clientRequestId: 'p6-refresh' })
-  assert.equal(refreshed.ok, true)
-  const refreshedWork = await waitFor(() => store.read().then(value => value.works.find(work => work.id === completed.id)), value => value?.results.length === 2 || value?.status === 'failed')
-  assert.equal(refreshedWork.status, 'completed')
-  assert.equal(captures[1].sessionMetadata.mappingRevision, successfulResult().gearJob.sourceRevision)
-  assert.deepEqual(captures[1].sessionMetadata.mappingIdentity, successfulResult().mapping)
-  assert.equal(captures[1].grant.mappingRevision, successfulResult().gearJob.sourceRevision)
-  assert.deepEqual(captures[1].grant.mappingIdentity, successfulResult().mapping)
-  assert.equal(refreshedWork.executions.at(-1).mappingRevision, successfulResult().gearJob.sourceRevision)
-  assert.deepEqual(refreshedWork.executions.at(-1).mappingIdentity, successfulResult().mapping)
+  assert.equal(created.ok, false)
+  assert.equal(created.error.code, 'CAPABILITY_RETIRED')
+  await assert.rejects(service.refreshWork({ id: 'member-a' }, historicalWork.id, { clientRequestId: 'p6-refresh' }), { code: 'CAPABILITY_RETIRED' })
+  await assert.rejects(service.continueWork({ id: 'member-a' }, historicalWork.id, { clientRequestId: 'p6-continue' }), { code: 'CAPABILITY_RETIRED' })
+  await assert.rejects(service.followUp({ id: 'member-a' }, historicalWork.id, '解释已有事实', { clientRequestId: 'p6-follow-up' }), { code: 'CAPABILITY_RETIRED' })
   await service.close()
 
   const saved = await store.read()
-  const savedWork = saved.works.find(work => work.id === created.value.id)
+  assert.deepEqual(saved, before, '退休拒绝不得新增 work、execution、结果或修改历史')
+  assert.deepEqual(captures, [], '退休拒绝必须发生在 runner、模型及来源请求前')
+  const savedWork = saved.works.find(work => work.id === historicalWork.id)
   assert.equal(saved.version, STATE_VERSION)
   const replaceSavedWork = candidate => saved.works.map(work => work.id === savedWork.id ? candidate : work)
   assert.throws(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, connectionIds: { gearJob: 'connection-gear', hive: 'connection-hive', extra: 'x' } }) }), /connectionIds/)
@@ -239,6 +241,8 @@ async function serviceAndStoreChecks() {
   assert.throws(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, results: savedWork.results.map((result, index) => index ? result : { ...result, payload: { ...result.payload, sample: { ...result.payload.sample, quality: 'good' }, unknowns: [] } }) }) }), /必须保持 unknown/)
   const withEmptyAlarmCode = { ...savedWork.results[0], payload: { ...savedWork.results[0].payload, machineFacts: { ...savedWork.results[0].payload.machineFacts, alarm_code: '' } } }
   assert.doesNotThrow(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, results: savedWork.results.map((result, index) => index ? result : withEmptyAlarmCode) }) }))
+  const unknownEnum = { ...savedWork.results[0], payload: { ...savedWork.results[0].payload, unknowns: ['UNKNOWN_ENUM', 'PLATFORM_RECEIVED_AT_NOT_PROVIDED'] } }
+  assert.throws(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, results: [unknownEnum] }) }), /unknowns/)
   for (const [key, value] of [['alarm_code', '\u0000'], ['alarm_code', []], ['alarm_code', Number.POSITIVE_INFINITY], ['mode', ''], ['mode', 'AUTO\n']]) {
     const invalid = { ...withEmptyAlarmCode, payload: { ...withEmptyAlarmCode.payload, machineFacts: { ...withEmptyAlarmCode.payload.machineFacts, [key]: value } } }
     assert.throws(() => migrateState({ ...saved, works: replaceSavedWork({ ...savedWork, results: savedWork.results.map((result, index) => index ? result : invalid) }) }), /machineFacts/)
@@ -257,42 +261,30 @@ async function runnerChecks() {
     root: process.cwd(),
     config: { model: { configured: true, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'model.key', credentialEnv: 'ZENMUX_API_KEY' }, source: { configured: true }, dshHome, stateFile: join(root, 'state.json'), dataRoot: root, secretRoot },
     harnessFactory() {
-      const index = harnesses.length
-      const harness = { closed: 0, async run() { return { events, finalResponse: '关联完成', sessionId: `session-${index + 1}` } }, async close() { this.closed += 1 } }
-      harnesses.push(harness)
-      return harness
+      harnesses.push('unexpected-harness')
+      throw new Error('退休能力不得创建 Harness')
     },
   })
   const base = { executionId: 'exec-runner-1', capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, input: { workOrderId: 'WO-1' }, operation: 'create', sessionMetadata: correlationMetadata(1), grant: correlationRunnerGrant(1) }
-  const first = await runner.run(base)
+  await assert.rejects(runner.run(base), { code: 'CAPABILITY_RETIRED' })
   assert.equal(base.sessionMetadata.mappingRevision, null)
-  const second = await runner.run({ ...base, executionId: 'exec-runner-2', sessionId: first.dshSessionRef })
-  assert.equal(harnesses.length, 1)
-  assert.equal(second.continuity, 'same-session')
+  await assert.rejects(runner.run({ ...base, executionId: 'exec-runner-2', sessionId: 'session-correlation' }), { code: 'CAPABILITY_RETIRED' })
   const mappingA = successfulResult().mapping, revisionA = successfulResult().gearJob.sourceRevision
-  const third = await runner.run({ ...base, executionId: 'exec-runner-3', sessionId: second.dshSessionRef, sessionMetadata: correlationMetadata(1, revisionA, mappingA), grant: correlationRunnerGrant(1, revisionA, mappingA) })
-  assert.equal(harnesses.length, 2)
-  assert.equal(third.continuity, 'successor')
-  const fourth = await runner.run({ ...base, executionId: 'exec-runner-4', sessionId: third.dshSessionRef, sessionMetadata: correlationMetadata(1, revisionA, mappingA), grant: correlationRunnerGrant(1, revisionA, mappingA) })
-  assert.equal(harnesses.length, 2)
-  assert.equal(fourth.continuity, 'same-session')
+  await assert.rejects(runner.run({ ...base, executionId: 'exec-runner-3', sessionId: 'session-correlation', sessionMetadata: correlationMetadata(1, revisionA, mappingA), grant: correlationRunnerGrant(1, revisionA, mappingA) }), { code: 'CAPABILITY_RETIRED' })
+  await assert.rejects(runner.run({ ...base, executionId: 'exec-runner-4', sessionId: 'session-correlation', sessionMetadata: correlationMetadata(1, revisionA, mappingA), grant: correlationRunnerGrant(1, revisionA, mappingA) }), { code: 'CAPABILITY_RETIRED' })
   const mappingB = { ...mappingA, hiveUnitId: 'DEVICE-CODE-B' }
-  const fifth = await runner.run({ ...base, executionId: 'exec-runner-5', sessionId: fourth.dshSessionRef, sessionMetadata: correlationMetadata(1, revisionA, mappingB), grant: correlationRunnerGrant(1, revisionA, mappingB) })
-  assert.equal(harnesses.length, 3)
-  assert.equal(fifth.continuity, 'successor')
+  await assert.rejects(runner.run({ ...base, executionId: 'exec-runner-5', sessionId: 'session-correlation', sessionMetadata: correlationMetadata(1, revisionA, mappingB), grant: correlationRunnerGrant(1, revisionA, mappingB) }), { code: 'CAPABILITY_RETIRED' })
   const revisionB = 'modified:2026-09-21T09:59:00.000000Z'
-  const sixth = await runner.run({ ...base, executionId: 'exec-runner-6', sessionId: fifth.dshSessionRef, sessionMetadata: correlationMetadata(1, revisionB, mappingB), grant: correlationRunnerGrant(1, revisionB, mappingB) })
-  assert.equal(harnesses.length, 4)
-  assert.equal(sixth.continuity, 'successor')
+  await assert.rejects(runner.run({ ...base, executionId: 'exec-runner-6', sessionId: 'session-correlation', sessionMetadata: correlationMetadata(1, revisionB, mappingB), grant: correlationRunnerGrant(1, revisionB, mappingB) }), { code: 'CAPABILITY_RETIRED' })
+  await assert.rejects(runner.run({ ...base, executionId: 'exec-runner-follow-up', operation: 'follow-up', sessionId: 'session-correlation', question: '解释已有事实' }), { code: 'CAPABILITY_RETIRED' })
   await writeFile(join(secretRoot, 'model.key'), 'synthetic-rotated-correlation-key', { mode: 0o600 })
-  const resumed = { ...base, executionId: 'exec-runner-revoked-key', sessionId: sixth.dshSessionRef, sessionMetadata: correlationMetadata(1, revisionB, mappingB), grant: correlationRunnerGrant(1, revisionB, mappingB) }
-  await assert.rejects(runner.run(resumed), { code: 'MODEL_NOT_CONFIGURED' })
-  assert.equal(harnesses.length, 4)
-  assert.equal(harnesses[3].closed, 1)
+  const resumed = { ...base, executionId: 'exec-runner-revoked-key', sessionId: 'session-correlation', sessionMetadata: correlationMetadata(1, revisionB, mappingB), grant: correlationRunnerGrant(1, revisionB, mappingB) }
+  await assert.rejects(runner.run(resumed), { code: 'CAPABILITY_RETIRED' })
   await rm(join(secretRoot, 'model.key'))
-  await assert.rejects(runner.run({ ...resumed, executionId: 'exec-runner-missing-key' }), { code: 'MODEL_NOT_CONFIGURED' })
-  assert.equal(harnesses.length, 4)
+  await assert.rejects(runner.run({ ...resumed, executionId: 'exec-runner-missing-key' }), { code: 'CAPABILITY_RETIRED' })
   await runner.close()
+  assert.deepEqual(harnesses, [])
+  await assert.rejects(access(dshHome), { code: 'ENOENT' })
 }
 
 async function correlate(options = {}) {
@@ -353,4 +345,3 @@ function oldGrant(state) { const work = state.works.find(item => item.id === 'wo
 function correlationMetadata(revision, mappingRevision = null, mappingIdentity = null) { return { ownerMemberId: 'member-a', workId: 'work-correlation', employeeId: 'employee-a', skillId: 'skill-manufacturing-work-order-device-correlate', capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, modelRouteId: 'route-a', confirmationFingerprint: 'empty', confirmationRefs: [], connectionIds: { gearJob: 'connection-gear', hive: 'connection-hive' }, connectionRevisions: { gearJob: revision, hive: revision }, mappingRevision, mappingIdentity } }
 function correlationRunnerGrant(revision, mappingRevision = null, mappingIdentity = null) { return { connections: correlationConnections(revision), mappingRevision, mappingIdentity, policyFile: join(root, 'state.json'), policyRoot: root, secretRoot } }
 function runEvents(result) { const callId = 'call-correlation'; return [{ type: 'tool/call', data: { name: WORK_ORDER_DEVICE_CORRELATION_TOOL, callId, arguments: JSON.stringify({ workOrderId: 'WO-1' }) } }, { type: 'tool/result', data: { message: { role: 'tool', source: { kind: 'tool', callId }, isError: false, toolCallId: callId, content: [{ type: 'text', text: JSON.stringify({ ok: true, ...result }) }] } } }] }
-async function waitFor(read, predicate) { for (let attempt = 0; attempt < 200; attempt += 1) { const value = await read(); if (predicate(value)) return value; await new Promise(resolve => setTimeout(resolve, 5)) } throw new Error('timed out') }

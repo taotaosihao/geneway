@@ -36,6 +36,7 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       const capabilityId = text(options.capabilityId) ?? 'gearjob-work-order-read'
       const capability = getCapability(capabilityId)
       if (!capability) throw runnerError('CAPABILITY_NOT_FOUND', '能力不存在')
+      if (capability.retired) throw runnerError('CAPABILITY_RETIRED', '旧来源已停止新执行，可查看历史记录')
       const isFollowUp = operation === 'follow-up'
       const input = isFollowUp ? undefined : normalizedInput(capabilityId, options)
       const requestInput = isFollowUp ? normalizedInput(capabilityId, options) : input

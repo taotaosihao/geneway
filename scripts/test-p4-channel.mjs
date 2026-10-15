@@ -209,18 +209,18 @@ try {
 }
 
 function checkMigrations() {
-  assert.equal(STATE_VERSION, 8)
+  assert.equal(STATE_VERSION, 9)
   const fromV3 = migrateState({ version: 3 })
-  assert.equal(fromV3.version, 8)
+  assert.equal(fromV3.version, 9)
   for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.deepEqual(fromV3[key], [])
   const v4 = v4Fixture(), fromV4 = migrateState(v4)
-  assert.equal(fromV4.version, 8)
-  assert.deepEqual(fromV4.works, v4.works.map(work => ({ ...work, actions: [] })))
+  assert.equal(fromV4.version, 9)
+  assert.deepEqual(fromV4.works, v4.works.map(work => ({ ...work, actions: [], conversationId: null })))
   const v5 = v5Fixture(), fromV5 = migrateState(v5)
-  assert.equal(fromV5.version, 8)
+  assert.equal(fromV5.version, 9)
   assert.deepEqual(fromV5.knowledgeMaterials, v5.knowledgeMaterials)
   assert.deepEqual(migrateState(structuredClone(fromV5)), fromV5)
-  assert.throws(() => migrateState({ version: 9 }), /未来/)
+  assert.throws(() => migrateState({ version: 10 }), /未来/)
 }
 
 function checkClosedGraph(state) {

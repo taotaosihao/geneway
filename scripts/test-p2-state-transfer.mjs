@@ -74,6 +74,7 @@ try {
     linkCodes: 0,
     automationRules: 0,
     automationOccurrences: 0,
+    conversations: 0,
     works: 5,
     sessionRefs: ['session-a', 'session-b', 'session-cycle'],
   })
@@ -393,8 +394,8 @@ function fixtureState() {
     createdAt: '2026-09-19T02:00:00.000Z', dshSessionRef: 'session-cycle', continuity: 'new', contextConfirmationRefs: [],
     toolName: 'geneway_calculate_cycle_time', pluginId: 'geneway-cycle-time', pluginVersion: '2',
   }
-  return {
-    version: STATE_VERSION,
+  return migrateState({
+    version: 8,
     members: [
       { id: 'member-admin', loginName: 'admin', displayName: '管理员', role: 'admin', enabled: true, authRef: 'member-admin', sessionVersion: 3, employeeIds: ['employee-a', 'employee-b'] },
       { id: 'member-user', loginName: 'user', displayName: '成员', role: 'member', enabled: true, authRef: 'member-user', sessionVersion: 2, employeeIds: ['employee-b'] },
@@ -445,5 +446,5 @@ function fixtureState() {
     linkCodes: [],
     automationRules: [],
     automationOccurrences: [],
-  }
+  })
 }

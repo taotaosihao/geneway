@@ -113,7 +113,7 @@ async function restore(inputArg, dataRootArg) {
     if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
     const stateFile = files.find(item => item.path === STATE_PATH)
     const sourceStateBuffer = await readFileFromStart(stateFile.file.handle)
-    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, STATE_VERSION], migrate: false })
+    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, 8, STATE_VERSION], migrate: false })
     const sessionRefs = collectSessionRefs(sourceState)
     const expectedSchema = schemaSummary(sourceState, sessionRefs)
     if (JSON.stringify(manifest.schema) !== JSON.stringify(expectedSchema)) throw new Error('备份 schema 摘要不匹配')
@@ -194,7 +194,12 @@ function interruptActiveForBackup(state, interruptedAt) {
     changed = true
     return { ...work, status: 'interrupted', executions }
   })
-  return changed ? { ...state, works } : state
+  const conversations = (state.conversations ?? []).map(conversation => {
+    const next = interruptConversation(conversation, interruptedAt)
+    if (next !== conversation) changed = true
+    return next
+  })
+  return changed ? { ...state, works, ...(state.version >= 9 ? { conversations } : {}) } : state
 }
 
 export function prepareRestoredState(sourceState, timestamp = new Date().toISOString()) {
@@ -204,6 +209,7 @@ export function prepareRestoredState(sourceState, timestamp = new Date().toISOSt
   const conversationIds = new Set(state.linkCodes.filter(link => closingLinks.has(link.id)).map(link => link.matchedConversationId).filter(Boolean))
   return migrateState(recoverActionFacts({
     ...state,
+    conversations: state.conversations.map(conversation => interruptConversation(conversation, timestamp)),
     automationRules: state.automationRules.map(rule => rule.status === 'active'
       ? { ...rule, status: 'paused', revision: rule.revision + 1, updatedAt: timestamp }
       : rule),
@@ -221,6 +227,12 @@ export function prepareRestoredState(sourceState, timestamp = new Date().toISOSt
       : delivery),
     linkCodes: state.linkCodes.map(link => closingLinks.has(link.id) ? { ...link, status: 'cancelled', updatedAt: timestamp } : link),
   }, timestamp))
+}
+
+function interruptConversation(conversation, interruptedAt) {
+  if (!conversation.turns.some(turn => ACTIVE_STATUS.has(turn.status))) return conversation
+  return { ...conversation, updatedAt: interruptedAt, turns: conversation.turns.map(turn => ACTIVE_STATUS.has(turn.status)
+    ? { ...turn, status: 'interrupted', completedAt: interruptedAt, error: { code: 'BACKUP_INTERRUPTED', message: '备份时回复未完成' } } : turn) }
 }
 
 function parseManifest(buffer) {
@@ -246,6 +258,7 @@ function collectSessionRefs(state) {
   visit(state.works ?? [], (key, value) => {
     if ((key === 'dshSessionRef' || key === 'continuedFromDshSessionRef') && typeof value === 'string' && value.trim()) refs.add(value)
   })
+  for (const conversation of state.conversations ?? []) for (const session of conversation.sessions) refs.add(session.id)
   return [...refs].sort()
 }
 
@@ -292,6 +305,7 @@ function schemaSummary(state, sessionRefs) {
       automationRules: count('automationRules'),
       automationOccurrences: count('automationOccurrences'),
     } : {}),
+    ...(state.version >= 9 ? { conversations: count('conversations') } : {}),
     works: count('works'),
     sessionRefs,
   }

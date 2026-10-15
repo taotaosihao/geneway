@@ -54,7 +54,7 @@ async function legacyV4Restore() {
     ['manifest-v1', value => { value.version = 1 }, /manifest 无效/],
     ['manifest-v3', value => { value.version = 3 }, /manifest 无效/],
     ['state-v3', value => { value.schema.stateVersion = 3 }, /版本不受支持|schema 摘要/],
-    ['state-v9', value => { value.schema.stateVersion = 9 }, /版本不受支持|schema 摘要/],
+    ['state-v10', value => { value.schema.stateVersion = 10 }, /版本不受支持|schema 摘要/],
   ]) {
     const bad = join(temp, name)
     await copyBackup(input, bad)
@@ -94,7 +94,7 @@ async function legacyV5Restore() {
   assert.deepEqual(await treeDigest(input), before)
   const restored = JSON.parse(await readFile(join(output, 'state.json'), 'utf8'))
   assert.deepEqual(restored, migrateState(state))
-  assert.equal(restored.version, 8)
+  assert.equal(restored.version, 9)
   assert.ok(restored.works.every(work => Array.isArray(work.actions)))
   assert.equal(restored.knowledgeMaterials.find(item => item.id === 'knowledge-active').body, 'CURRENT KNOWLEDGE BODY')
   for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.deepEqual(restored[key], [])
@@ -119,7 +119,7 @@ async function legacyV6Restore() {
   await run(['restore', '--input', input, '--data-root', output])
   const restored = JSON.parse(await readFile(join(output, 'state.json'), 'utf8'))
   assert.equal(restored.works.length, state.works.length)
-  assert.equal(restored.version, 8)
+  assert.equal(restored.version, 9)
   assert.ok(restored.works.every(work => Array.isArray(work.actions)))
   assert.deepEqual(restored.automationRules, [])
   assert.deepEqual(restored.automationOccurrences, [])
@@ -134,7 +134,7 @@ async function completeV6Transfer() {
   const rawSourceState = v6State()
   const sourceState = migrateState(structuredClone(rawSourceState))
   assert.equal(rawSourceState.version, 6)
-  assert.equal(sourceState.version, 8)
+  assert.equal(sourceState.version, 9)
   assert.deepEqual(sourceState.automationRules, [])
   assert.deepEqual(sourceState.automationOccurrences, [])
   await put(source, 'state.json', bytes(sourceState))

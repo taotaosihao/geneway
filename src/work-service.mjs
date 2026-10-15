@@ -149,8 +149,10 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         }
         const now = clock()
         const workId = `work-${randomUUID()}`
+        const conversationId = conversationBinding(state, member, binding.employee.id, body.conversationId)
         const work = {
           id: workId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
+          conversationId,
           capabilityId: binding.capability.id, ...workConnectionFields(binding),
           goal: clean(body.goal) ?? binding.capability.action, input: parsed.input, requiredInputs: parsed.missing,
           status: parsed.missing.length ? 'waiting_input' : 'accepted', acceptedAt: now, results: [], actions: [], executions: [],
@@ -184,6 +186,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         if (!leader.ok) { reservation = { error: leader }; return state }
         const goal = clean(body.goal)
         if (!goal || goal.length > 4000) { reservation = { error: failure('INVALID_REQUEST', '协作目标无效') }; return state }
+        const conversationId = conversationBinding(state, member, leader.employee.id, body.conversationId)
         const now = clock(), rootWorkId = `work-${randomUUID()}`, generation = 1
         const childWorks = [], planItems = [], itemIds = new Set()
         for (const raw of body.items) {
@@ -221,6 +224,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         const rootExecutionId = `exec-${randomUUID()}`
         const rootWork = {
           id: rootWorkId, ownerMemberId: member.id, employeeId: leader.employee.id, skillId: leader.skill.id,
+          conversationId,
           capabilityId: leader.capability.id, ...workConnectionFields(leader),
           goal, input: {}, requiredInputs: [], status: 'accepted', acceptedAt: now, results: [], actions: [],
           executions: [{ ...newExecution(rootExecutionId, 'collaboration-root', requestId, {}, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: leader.employee.id }],
@@ -1035,6 +1039,14 @@ function requireMember(state, actor) {
 }
 function requireAdmin(state, actor) { const member = requireMember(state, actor); if (member.role !== 'admin') throw serviceError('FORBIDDEN', '需要管理员权限'); return member }
 function findOwned(state, member, id) { return state.works.find(item => item.id === id && item.ownerMemberId === member.id) }
+function conversationBinding(state, member, employeeId, value) {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string' || !value.trim() || value.length > 200) throw serviceError('INVALID_REQUEST', '对话引用无效')
+  const conversation = state.conversations.find(item => item.id === value && item.ownerMemberId === member.id)
+  if (!conversation) throw serviceError('NOT_FOUND', '对话不存在')
+  if (conversation.employeeId !== employeeId || conversation.archivedAt) throw serviceError('FORBIDDEN', '当前对话不能关联该工作')
+  return conversation.id
+}
 
 function parseInput(capabilityId, input, allowMissing) {
   let parsed

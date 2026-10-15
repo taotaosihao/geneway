@@ -5,6 +5,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path'
 import { createAuthRuntime, isSessionCurrent } from './auth.mjs'
 import { createFileStore } from './store/file-store.mjs'
 import { createWorkService, ERROR_STATUS, safeServiceError, serviceFailure } from './work-service.mjs'
+import { createConversationService } from './conversation-service.mjs'
 import { createDshRunner } from './dsh-runner.mjs'
 import { createCollaborationRunner } from './collaboration-runner.mjs'
 import { readRuntimeConfig } from './runtime-config.mjs'
@@ -18,8 +19,8 @@ import { AutomationServiceError, createAutomationRuntime, createAutomationServic
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
 const JSON_TYPE = 'application/json'
-const WORK_FIELDS = ['employeeId', 'skillId', 'capabilityId', 'connectionId', 'goal', 'input', 'workOrderId', 'availableSeconds', 'quantity', 'clientRequestId']
-const COLLABORATION_ROOT_FIELDS = ['workType', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'goal', 'clientRequestId', 'items']
+const WORK_FIELDS = ['employeeId', 'skillId', 'capabilityId', 'connectionId', 'conversationId', 'goal', 'input', 'workOrderId', 'availableSeconds', 'quantity', 'clientRequestId']
+const COLLABORATION_ROOT_FIELDS = ['workType', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'conversationId', 'goal', 'clientRequestId', 'items']
 const COLLABORATION_ITEM_FIELDS = ['id', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'goal', 'input', 'workOrderId', 'availableSeconds', 'quantity', 'knowledgeQuery', 'dependsOn']
 const BUSINESS_INPUT_FIELDS = ['workOrderId', 'availableSeconds', 'quantity']
 
@@ -58,6 +59,7 @@ export async function start() {
     },
     onAutomationTerminal: () => channelRuntime?.sendAutomationNotifications({ ownerCheck: () => automationRuntime?.ownsLock() === true }),
   })
+  const conversationService = createConversationService({ store, runner: collaborationRunner })
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
   const automation = createAutomationService({ store, workService: service, connectionCatalog, eventSourceId: gearJobEventConfig?.sourceId, eventSourceReady: () => automationRuntime?.ownsLock() === true && gearJobEventReceiver?.isListening() === true })
@@ -70,27 +72,35 @@ export async function start() {
   channelRuntime = createFeishuRuntime({ store, channelService: channel, secretRoot: process.env.GENEWAY_SECRET_ROOT?.trim() ? runtimeConfig.secretRoot : undefined, automationOwnerCheck: () => automationRuntime.ownsLock() })
   try {
     await automationRuntime.start()
+    await conversationService.ensureReady()
     if (gearJobEventConfig) {
       gearJobEventReceiver = createGearJobEventReceiver({ automationRuntime, ...gearJobEventConfig })
       await gearJobEventReceiver.start()
     }
     await channelRuntime.start()
   } catch (error) {
+    const ownsStore = automationRuntime.ownsLock()
     await gearJobEventReceiver?.close?.().catch(() => undefined)
     await automationRuntime.stop().catch(() => undefined)
     await channelRuntime.close().catch(() => undefined)
-    await service.close().catch(() => undefined)
+    await conversationService.close().catch(() => undefined)
+    if (ownsStore) await service.close().catch(() => undefined)
+    else {
+      // work.close 会写回全库；未持锁实例只关闭自己的运行资源。
+      await runner.close().catch(() => undefined)
+      await collaborationRunner.close().catch(() => undefined)
+    }
     await automationRuntime.close().catch(() => undefined)
     throw error
   }
-  const server = createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntime, automation, automationRuntime, store, auth, index, trustedOrigin })
+  const server = createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, automation, automationRuntime, store, auth, index, trustedOrigin })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
   let shuttingDown = false
   const shutdown = async code => {
     if (shuttingDown) return
     shuttingDown = true
-    await shutdownServer(server, service, channelRuntime, automationRuntime, gearJobEventReceiver)
+    await shutdownServer(server, service, channelRuntime, automationRuntime, gearJobEventReceiver, conversationService)
     process.exit(code)
   }
   process.once('SIGTERM', () => shutdown(0))
@@ -98,7 +108,7 @@ export async function start() {
   return server
 }
 
-export function createGenewayServer({ service, knowledge, collaborationRunner, channel, channelRuntime, automation, automationRuntime, store, auth, index = '', trustedOrigin }) {
+export function createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, automation, automationRuntime, store, auth, index = '', trustedOrigin }) {
   if (!service || !store || !auth || !trustedOrigin) throw new Error('server dependencies are required')
   channel ??= createChannelService({ store, workService: service })
   const channelRuntimeReady = channelAppId => channelRuntime?.isAvailable?.(channelAppId) === true
@@ -136,6 +146,43 @@ export function createGenewayServer({ service, knowledge, collaborationRunner, c
       const context = await authenticated(request, store, auth)
       const actor = context.member
       if (request.method === 'GET' && url.pathname === '/api/bootstrap') { exactQuery(url); return sendJson(response, 200, await service.bootstrap(actor)) }
+      if (url.pathname === '/api/conversations') {
+        if (request.method === 'GET') {
+          exactQuery(url, ['includeArchived'])
+          const includeArchived = url.searchParams.get('includeArchived')
+          if (includeArchived !== null && !['true', 'false'].includes(includeArchived)) throw httpError('INVALID_REQUEST', 'includeArchived 必须为 true 或 false')
+          return sendJson(response, 200, { conversations: await conversationCall(conversationService, 'listConversations', actor, { includeArchived: includeArchived === 'true' }) })
+        }
+        if (request.method === 'POST') {
+          exactQuery(url)
+          const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'title'])
+          return sendJson(response, 201, await conversationCall(conversationService, 'createConversation', actor, body))
+        }
+      }
+      const conversationMatch = url.pathname.match(/^\/api\/conversations\/([^/]+)(?:\/(turns)(?:\/([^/]+)\/(cancel))?)?$/)
+      if (conversationMatch) {
+        const id = decode(conversationMatch[1])
+        if (request.method === 'GET' && !conversationMatch[2]) {
+          exactQuery(url)
+          return sendJson(response, 200, await conversationCall(conversationService, 'getConversation', actor, id))
+        }
+        if (request.method === 'PATCH' && !conversationMatch[2]) {
+          exactQuery(url)
+          const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['title', 'archived'])
+          return sendJson(response, 200, await conversationCall(conversationService, 'updateConversation', actor, id, body))
+        }
+        if (request.method === 'POST' && conversationMatch[2] && !conversationMatch[3]) {
+          exactQuery(url)
+          const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['text', 'clientRequestId'])
+          const result = await conversationCall(conversationService, 'sendTurn', actor, id, body)
+          return sendJson(response, result.deduplicated ? 200 : 202, result)
+        }
+        if (request.method === 'POST' && conversationMatch[4] === 'cancel') {
+          exactQuery(url)
+          await protectedWrite(request, context.token, auth, trustedOrigin, [])
+          return sendJson(response, 200, await conversationCall(conversationService, 'cancelTurn', actor, id, decode(conversationMatch[3])))
+        }
+      }
       if (request.method === 'GET' && url.pathname === '/api/automations') {
         exactQuery(url)
         return sendJson(response, 200, automation ? { rules: await automation.listRules(actor), occurrences: await automation.listOccurrences(actor), eventSource: automation.eventSourceCapability() } : { rules: [], occurrences: [], eventSource: { status: 'unavailable', code: 'SOURCE_NOT_CONFIGURED' } })
@@ -425,6 +472,19 @@ const AUTOMATION_ERROR_STATUS = {
   OWNER_NOT_RUNNING: 503, OWNER_LOCK_LOST: 503,
 }
 
+const CONVERSATION_ERROR_STATUS = {
+  INVALID_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404,
+  CONFLICT: 409, IDEMPOTENCY_CONFLICT: 409, HISTORY_UNAVAILABLE: 409, MODEL_NOT_CONFIGURED: 503,
+}
+
+async function conversationCall(service, method, ...args) {
+  if (!service) throw httpError('UNAVAILABLE', '对话服务尚未就绪')
+  try { return await service[method](...args) } catch (error) {
+    if (Object.hasOwn(CONVERSATION_ERROR_STATUS, error?.code)) throw Object.assign(new Error(error.message), { code: error.code, status: CONVERSATION_ERROR_STATUS[error.code] })
+    throw error
+  }
+}
+
 function safeChannelState(value) {
   const workChannels = [...new Map(value.messages.filter(item => item.status === 'accepted' && item.direction === 'inbound' && item.workId && item.conversationId).map(item => [`${item.workId}:${item.conversationId}`, { workId: item.workId, channelAppId: item.channelAppId, conversationId: item.conversationId }])).values()]
   return {
@@ -445,11 +505,12 @@ function maskOfficialId(value) {
   return text.length <= 4 ? '•'.repeat(text.length) : `…${text.slice(-4)}`
 }
 
-export async function shutdownServer(server, service, channelRuntime, automationRuntime, gearJobEventReceiver) {
+export async function shutdownServer(server, service, channelRuntime, automationRuntime, gearJobEventReceiver, conversationService) {
   const intakeClosed = new Promise((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose()))
   await gearJobEventReceiver?.close?.().catch(() => undefined)
   await automationRuntime?.stop?.().catch(() => undefined)
   await channelRuntime?.close?.().catch(() => undefined)
+  await conversationService?.close?.().catch(() => undefined)
   await service.close().catch(() => undefined)
   await intakeClosed
   await automationRuntime?.close?.().catch(() => undefined)

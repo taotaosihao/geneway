@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 
-export const STATE_VERSION = 8
+export const STATE_VERSION = 9
 export const KNOWLEDGE_LIMITS = Object.freeze({
   maxMaterials: 100,
   maxBodyBytes: 32 * 1024,
@@ -50,6 +50,7 @@ const EMPTY_STATE = {
   linkCodes: [],
   automationRules: [],
   automationOccurrences: [],
+  conversations: [],
   works: [],
   reservations: {},
 }
@@ -84,6 +85,7 @@ export function createFileStore(filePath, fsOps = {}) {
         const immutableBaseline = structuredClone(current)
         const next = migrateState(await mutator(current))
         assertActionFactsImmutable(immutableBaseline, next)
+        assertConversationFactsImmutable(immutableBaseline, next)
         await io.mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
         const fileName = filePath.split('/').pop()
         const tempPath = join(dirname(filePath), `.${fileName}.${process.pid}.tmp`)
@@ -116,12 +118,13 @@ export function migrateState(value) {
   if (value.version !== undefined && !Number.isInteger(value.version)) throw new Error('产品状态版本无效')
   const version = value.version ?? 3
   if (version > STATE_VERSION) throw new Error(`不支持未来产品状态版本：${version}`)
-  if (version === STATE_VERSION) return normalizeV8(value)
-  if (version === 7) return migrateV7ToV8(normalizeV7(value))
-  if (version === 6) return migrateV7ToV8(migrateV6ToV7(value))
-  if (version === 5) return migrateV7ToV8(migrateV6ToV7(migrateV5(value)))
-  if (version === 4) return migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(value))))
-  if (version === 3) return migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(migrateV3(value)))))
+  if (version === STATE_VERSION) return normalizeV9(value)
+  if (version === 8) return migrateV8ToV9(normalizeV8(value))
+  if (version === 7) return migrateV8ToV9(migrateV7ToV8(normalizeV7(value)))
+  if (version === 6) return migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(value)))
+  if (version === 5) return migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(migrateV5(value))))
+  if (version === 4) return migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(value)))))
+  if (version === 3) return migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(migrateV3(value))))))
   throw new Error(`不支持产品状态版本：${version}`)
 }
 
@@ -185,7 +188,11 @@ function migrateV6ToV7(value) {
 }
 
 function migrateV7ToV8(value) {
-  return normalizeV8({ ...value, version: STATE_VERSION, works: value.works.map(work => ({ ...work, actions: [] })) })
+  return normalizeV8({ ...value, version: 8, works: value.works.map(work => ({ ...work, actions: [] })) })
+}
+
+function migrateV8ToV9(value) {
+  return normalizeV9({ ...value, version: 9, conversations: value.conversations ?? [] })
 }
 
 function migrateEmployee(employee) {
@@ -639,7 +646,105 @@ function normalizeV8(value) {
     if (new Set(actions.map(action => action.proposalKey)).size !== actions.length) throw new Error(`工作 ${work.id} 的动作 proposalKey 重复`)
     return { ...work, actions }
   })
-  return { ...common, version: STATE_VERSION, works }
+  return { ...common, version: 8, works }
+}
+
+function normalizeV9(value) {
+  const common = normalizeV8({ ...value, version: 8 })
+  const conversations = requiredArray(value, 'conversations').map(normalizeConversation)
+  uniqueIds(conversations, '对话')
+  const sessions = conversations.flatMap(conversation => conversation.sessions.map(session => session.id))
+  if (new Set(sessions).size !== sessions.length) throw new Error('原生 Session 不得跨对话复用')
+  const works = common.works.map(work => {
+    const conversationId = work.conversationId === undefined || work.conversationId === null ? null : requiredText(work.conversationId, '工作对话引用无效')
+    if (conversationId) {
+      const conversation = conversations.find(item => item.id === conversationId)
+      if (!conversation || conversation.ownerMemberId !== work.ownerMemberId || conversation.employeeId !== work.employeeId || work.rootWorkId) throw new Error(`工作 ${work.id} 对话归属不匹配`)
+    }
+    return { ...work, conversationId }
+  })
+  return { ...common, version: 9, conversations, works }
+}
+
+function normalizeConversation(value) {
+  if (!record(value)) throw new Error('对话状态无效')
+  exactKeys(value, ['id', 'ownerMemberId', 'employeeId', 'employeeName', 'title', 'source', 'channelIdentityId', 'createdAt', 'updatedAt', 'archivedAt', 'sessions', 'turns'], '对话')
+  const id = requiredText(value.id, '对话 ID 无效')
+  for (const key of ['ownerMemberId', 'employeeId', 'employeeName', 'title']) requiredText(value[key], `对话 ${id} ${key} 无效`)
+  if (value.title.length > 200 || value.source !== 'web' || value.channelIdentityId !== null) throw new Error(`对话 ${id} 来源或标题无效`)
+  const createdAt = isoTimestamp(value.createdAt, `对话 ${id} createdAt`), updatedAt = isoTimestamp(value.updatedAt, `对话 ${id} updatedAt`)
+  if (Date.parse(updatedAt) < Date.parse(createdAt)) throw new Error(`对话 ${id} 时间无效`)
+  if (value.archivedAt !== null && Date.parse(isoTimestamp(value.archivedAt, `对话 ${id} archivedAt`)) < Date.parse(createdAt)) throw new Error(`对话 ${id} 归档时间无效`)
+  const sessions = requiredArray(value, 'sessions').map(session => {
+    if (!record(session)) throw new Error(`对话 ${id} Session 无效`)
+    exactKeys(session, ['id', 'definitionFingerprint', 'createdAt'], '对话 Session')
+    requiredText(session.id, '原生 Session ID 无效')
+    if (!/^[a-f0-9]{64}$/.test(session.definitionFingerprint)) throw new Error('Session 定义指纹无效')
+    isoTimestamp(session.createdAt, 'Session createdAt')
+    return session
+  })
+  uniqueIds(sessions, '对话 Session')
+  const turns = requiredArray(value, 'turns').map(turn => normalizeConversationTurn(turn, sessions))
+  uniqueIds(turns, '对话回复')
+  if (new Set(turns.map(turn => turn.clientRequestId)).size !== turns.length) throw new Error('对话请求标识重复')
+  if (turns.filter(turn => ['accepted', 'running'].includes(turn.status)).length > 1) throw new Error('一个对话只能有一个活动回复')
+  if (value.archivedAt && turns.some(turn => ['accepted', 'running'].includes(turn.status))) throw new Error('活动回复不能归档')
+  const messageRefs = turns.filter(turn => turn.userMessageId).map(turn => `${turn.sessionId}\0${turn.userMessageId}`)
+  if (new Set(messageRefs).size !== messageRefs.length) throw new Error('原生用户消息不得绑定多个回复')
+  if (sessions.some(session => !turns.some(turn => turn.sessionId === session.id))) throw new Error('对话包含未关联回复的 Session')
+  return { ...value, sessions, turns }
+}
+
+function normalizeConversationTurn(value, sessions) {
+  if (!record(value)) throw new Error('对话回复无效')
+  exactKeys(value, ['id', 'clientRequestId', 'userText', 'status', 'createdAt', 'startedAt', 'completedAt', 'error', 'definition', 'definitionFingerprint', 'sessionId', 'userMessageId', 'assistantMessageIds'], '对话回复')
+  const id = requiredText(value.id, '回复 ID 无效')
+  for (const [key, maximum] of [['clientRequestId', 200], ['userText', 16_000]]) {
+    const text = requiredRawText(value[key], `回复 ${id} ${key} 无效`)
+    if (text.length > maximum || !text.isWellFormed()) throw new Error(`回复 ${id} ${key} 无效`)
+  }
+  if (!['accepted', 'running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(value.status)) throw new Error('回复状态无效')
+  const definition = value.definition
+  if (!record(definition)) throw new Error('回复冻结定义无效')
+  exactKeys(definition, ['employeeRevision', 'instructions', 'modelRouteId'], '回复冻结定义')
+  if (!Number.isSafeInteger(definition.employeeRevision) || definition.employeeRevision < 1 || typeof definition.instructions !== 'string' || definition.instructions.length > 16_000) throw new Error('回复冻结定义无效')
+  requiredText(definition.modelRouteId, '回复模型引用无效')
+  const normalizedDefinition = { employeeRevision: definition.employeeRevision, instructions: definition.instructions, modelRouteId: definition.modelRouteId }
+  const fingerprint = createHash('sha256').update(JSON.stringify(normalizedDefinition)).digest('hex')
+  if (value.definitionFingerprint !== fingerprint) throw new Error('回复定义指纹不匹配')
+  const sessionId = value.sessionId === null ? null : requiredText(value.sessionId, '回复 Session 引用无效')
+  if (sessionId && !sessions.some(session => session.id === sessionId && session.definitionFingerprint === fingerprint)) throw new Error('回复 Session 定义不匹配')
+  const userMessageId = value.userMessageId === null ? null : requiredText(value.userMessageId, '用户消息引用无效')
+  const assistantMessageIds = uniqueTextArray(value.assistantMessageIds, '助手消息引用')
+  if ((userMessageId || assistantMessageIds.length) && !sessionId) throw new Error('消息引用缺少 Session')
+  const createdAt = isoTimestamp(value.createdAt, '回复 createdAt')
+  for (const key of ['startedAt', 'completedAt']) if (value[key] !== null && Date.parse(isoTimestamp(value[key], `回复 ${key}`)) < Date.parse(createdAt)) throw new Error('回复时间无效')
+  const active = ['accepted', 'running'].includes(value.status)
+  if (active && (value.completedAt !== null || value.error !== null) || !active && value.completedAt === null || value.status === 'running' && value.startedAt === null) throw new Error('回复状态与时间不匹配')
+  if (value.status === 'completed' && (!userMessageId || !assistantMessageIds.length || value.startedAt === null || value.error !== null)) throw new Error('已完成回复缺少原生消息引用')
+  if (value.error !== null) {
+    if (!record(value.error)) throw new Error('回复错误无效')
+    exactKeys(value.error, ['code', 'message'], '回复错误')
+    if (!['FORBIDDEN', 'MODEL_NOT_CONFIGURED', 'HISTORY_UNAVAILABLE', 'UPSTREAM_ERROR', 'UPSTREAM_TIMEOUT', 'CANCELLED', 'PROCESS_RESTARTED', 'PROCESS_SHUTDOWN', 'BACKUP_INTERRUPTED'].includes(value.error.code)) throw new Error('回复错误代码无效')
+    requiredText(value.error.message, '回复错误消息无效')
+  }
+  return { ...value, definition: normalizedDefinition, sessionId, userMessageId, assistantMessageIds }
+}
+
+function assertConversationFactsImmutable(before, after) {
+  for (const previous of before.conversations) {
+    const current = after.conversations.find(item => item.id === previous.id)
+    if (!current || ['ownerMemberId', 'employeeId', 'source', 'channelIdentityId', 'createdAt'].some(key => current[key] !== previous[key])) throw new Error('对话归属和来源不可变更或删除')
+    if (previous.archivedAt && current.archivedAt !== previous.archivedAt) throw new Error('已归档对话不可恢复')
+    for (const session of previous.sessions) if (JSON.stringify(current.sessions.find(item => item.id === session.id)) !== JSON.stringify(session)) throw new Error('原生 Session 谱系不可改写')
+    for (const turn of previous.turns) {
+      const next = current.turns.find(item => item.id === turn.id)
+      if (!next || ['clientRequestId', 'userText', 'createdAt', 'definitionFingerprint'].some(key => next[key] !== turn[key])) throw new Error('回复输入和冻结定义不可改写')
+      if (turn.userMessageId && (next.sessionId !== turn.sessionId || next.userMessageId !== turn.userMessageId)) throw new Error('原生回复绑定不可改写')
+      if (!['accepted', 'running'].includes(turn.status) && JSON.stringify(next) !== JSON.stringify(turn)) throw new Error('已结束回复不可改写')
+      if (turn.status === 'running' && next.status === 'accepted') throw new Error('运行中回复不可回退')
+    }
+  }
 }
 
 function normalizeAction(action, work) {

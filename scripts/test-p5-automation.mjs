@@ -89,7 +89,7 @@ async function historicalBindingChecks() {
   await localService.revokeRule({ id: 'member-owner' }, active.id, { expectedRevision: 4 })
   const persisted = await localStore.read()
   assert.deepEqual(persisted.automationOccurrences, [historicalOccurrence])
-  assert.deepEqual(persisted.works, [historicalWork])
+  assert.deepEqual(persisted.works, [{ ...historicalWork, conversationId: null }])
 }
 
 async function ruleChecks() {
@@ -218,12 +218,12 @@ async function migrationChecks() {
       if (version < 6) for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) delete value[key]
     }
     const migrated = migrateState(value)
-    assert.equal(migrated.version, 8)
+    assert.equal(migrated.version, 9)
     assert.ok(migrated.works.every(work => Array.isArray(work.actions)))
     assert.deepEqual(migrated.automationRules, [])
     assert.deepEqual(migrated.automationOccurrences, [])
   }
-  assert.throws(() => migrateState({ version: 9 }), /未来/)
+  assert.throws(() => migrateState({ version: 10 }), /未来/)
   const broken = fixture().current
   broken.automationRules = [{ ...broken.automationRules[0], id: 'bad' }]
   assert.throws(() => migrateState(broken), /自动规则/)

@@ -334,8 +334,8 @@ function successfulResult() {
 }
 
 function fixtureState() {
-  return {
-    version: STATE_VERSION,
+  return migrateState({
+    version: 8,
     members: [{ id: 'member-a', loginName: 'member', displayName: 'Member', role: 'member', enabled: true, authRef: 'member-a', sessionVersion: 1, employeeIds: ['employee-a'], createdAt: queriedAt, updatedAt: queriedAt }],
     modelRoutes: [{ id: 'route-a', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     employees: [{ id: 'employee-a', name: 'Employee', description: '', enabled: true, modelRouteId: 'route-a', connectionIds: ['connection-gear', 'connection-hive'], skillIds: ['skill-manufacturing-work-order-device-correlate', 'skill-gearjob-work-order-read'] }],
@@ -343,7 +343,7 @@ function fixtureState() {
     skills: [{ id: 'skill-manufacturing-work-order-device-correlate', name: '关联', capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, enabled: true }, { id: 'skill-gearjob-work-order-read', name: '工单', capabilityId: 'gearjob-work-order-read', enabled: true }],
     confirmations: [], knowledgeMaterials: [], channelApps: [], channelIdentities: [], channelConversations: [], channelMessages: [], deliveries: [], linkCodes: [], automationRules: [], automationOccurrences: [],
     works: [correlationWork(), oldWork()], reservations: {},
-  }
+  })
 }
 function correlationWork() { return { id: 'work-correlation', ownerMemberId: 'member-a', employeeId: 'employee-a', skillId: 'skill-manufacturing-work-order-device-correlate', capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, connectionIds: { gearJob: 'connection-gear', hive: 'connection-hive' }, goal: 'correlate', input: { workOrderId: 'WO-1' }, requiredInputs: [], status: 'running', acceptedAt: queriedAt, results: [], actions: [], executions: [{ id: 'exec-correlation', operation: 'create', clientRequestId: 'request-correlation', input: { workOrderId: 'WO-1' }, status: 'running', acceptedAt: queriedAt }] } }
 function oldWork() { return { id: 'work-old', ownerMemberId: 'member-a', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-gear', goal: 'read', input: { workOrderId: 'WO-1' }, requiredInputs: [], status: 'running', acceptedAt: queriedAt, results: [], actions: [], executions: [{ id: 'exec-old', operation: 'create', clientRequestId: 'request-old', input: { workOrderId: 'WO-1' }, status: 'running', acceptedAt: queriedAt }] } }

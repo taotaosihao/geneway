@@ -44,6 +44,7 @@ export function createCollaborationRunner({
   let knowledgeMounting
   let knowledgeLifecycle = Promise.resolve()
   let knowledgeEnabled = true
+  let closing = false
   const bindings = new WeakMap()
   const knowledgeSelections = new WeakMap()
   const summaryContexts = new WeakMap()
@@ -51,11 +52,43 @@ export function createCollaborationRunner({
   const requestFailures = new WeakMap()
   const gates = new Map()
   const activeRoots = new Map()
+  const activeChats = new Map()
+  const historyReads = new Set()
   const knowledgeService = createKnowledgeService({ store, clock })
 
   return {
     isKnowledgeEnabled() { return knowledgeEnabled },
     getKnowledgeService() { return knowledgeService },
+
+    async runChatTurn(options) {
+      if (!options || typeof options.conversationId !== 'string' || !options.conversationId || typeof options.turnId !== 'string' || !options.turnId
+        || typeof options.text !== 'string' || !options.text.trim() || typeof options.instructions !== 'string'
+        || typeof options.authorize !== 'function' || typeof options.onSession !== 'function'
+        || options.sessionId !== null && (typeof options.sessionId !== 'string' || !options.sessionId)) throw runtimeError('INVALID_REQUEST', '对话执行参数无效')
+      if (closing) throw runtimeError('PROCESS_SHUTDOWN', '进程正在关闭')
+      if (activeChats.has(options.conversationId)) throw runtimeError('BUSY', '当前对话回复尚未结束')
+      const entry = { turnId: options.turnId, controller: new AbortController(), handle: undefined, promise: undefined, failure: undefined }
+      activeChats.set(options.conversationId, entry)
+      entry.promise = executeChatTurn(options, entry).finally(() => { if (activeChats.get(options.conversationId) === entry) activeChats.delete(options.conversationId) })
+      return entry.promise
+    },
+
+    async cancelChatTurn(conversationId, turnId) {
+      const entry = activeChats.get(conversationId)
+      if (!entry || entry.turnId !== turnId) return false
+      entry.controller.abort(runtimeError('CANCELLED', '本次回复已停止'))
+      entry.handle?.agent.cancel({ kind: 'user' })
+      await entry.promise.catch(() => undefined)
+      return true
+    },
+
+    async readChatHistory(sessionIds) {
+      if (!Array.isArray(sessionIds) || sessionIds.some(id => typeof id !== 'string' || !id)) throw runtimeError('INVALID_REQUEST', '历史引用无效')
+      if (!sessionIds.length) return []
+      const operation = readChatHistory([...new Set(sessionIds)])
+      historyReads.add(operation)
+      try { return await operation } finally { historyReads.delete(operation) }
+    },
 
     async run(rootWorkId) {
       const state = await store.read()
@@ -133,6 +166,12 @@ export function createCollaborationRunner({
     },
 
     async close() {
+      closing = true
+      await Promise.all([...activeChats.values()].map(async entry => {
+        entry.controller.abort(runtimeError('PROCESS_SHUTDOWN', '进程关闭时未完成'))
+        entry.handle?.agent.cancel({ kind: 'user' })
+        await entry.promise.catch(() => undefined)
+      }))
       const ids = [...activeRoots.keys()]
       await Promise.all(ids.map(async id => {
         await interrupt(id)
@@ -142,6 +181,7 @@ export function createCollaborationRunner({
       }))
       await Promise.all([...activeRoots.values()].map(entry => entry.promise.catch(() => undefined)))
       activeRoots.clear()
+      await Promise.allSettled([...historyReads])
       await knowledgeLifecycle
       await knowledgeFiber?.dispose()
       knowledgeFiber = undefined
@@ -153,10 +193,91 @@ export function createCollaborationRunner({
   }
 
   async function context() {
+    if (closing) throw runtimeError('PROCESS_SHUTDOWN', '进程正在关闭')
     if (runtime) return runtime.ctx
     if (!booting) booting = boot()
     runtime = await booting
     return runtime.ctx
+  }
+
+  async function executeChatTurn(options, entry) {
+    let result, failure
+    try {
+      await options.authorize()
+      const ctx = await context(), signal = entry.controller.signal
+      signal.throwIfAborted()
+      const setup = (agentCtx, agent) => {
+        agentCtx.tools.restrict({ allow: [] })
+        agentCtx.tools.guard(() => 'This conversation does not allow tools')
+        agentCtx.systemPrompt.section({ name: 'geneway-conversation', order: 0, interpolate: false, complete: true,
+          text: buildAgentPrompt('你是该成员的 Geneway 对话助手。请根据本对话可见内容回答。', options.instructions),
+        })
+        agentCtx.on('agent/request', async ({ signal }, next) => {
+          entry.controller.signal.throwIfAborted()
+          await untilAbort(Promise.resolve(options.authorize()), signal)
+          return next()
+        })
+        agentCtx.on('agent/error', event => { entry.failure ??= event.error })
+      }
+      if (options.sessionId) {
+        try { entry.handle = await ctx.agents.resume({ resumeSessionId: options.sessionId, agentOptions, setup, signal }) }
+        catch (error) {
+          if (signal.aborted) throw signal.reason
+          throw runtimeError('HISTORY_UNAVAILABLE', '历史记录暂时不可用')
+        }
+        // A resumed inbox may contain input from an interrupted process; never replay it.
+        entry.handle.agent.cancel({ kind: 'user' })
+        await entry.handle.agent.whenIdle()
+      } else {
+        entry.handle = await ctx.agents.create({ sessionId: `conversation-${randomUUID()}`, meta: { cwd: workspaceRoot }, agentOptions, setup, signal })
+      }
+      signal.throwIfAborted()
+      const agent = entry.handle.agent
+      if (agent.session.header.origin === 'subagent') throw runtimeError('HISTORY_UNAVAILABLE', '对话历史类型不匹配')
+      const message = createUserMessage({ content: [{ type: 'text', text: options.text }], source: { kind: 'user' } })
+      await options.onSession({ sessionId: agent.id, userMessageId: message.id })
+      signal.throwIfAborted()
+      await options.authorize()
+      signal.throwIfAborted()
+      const offset = agent.session.snapshotEvents().length
+      agent.followup(message)
+      await agent.whenIdle()
+      const events = agent.session.snapshotEvents().slice(offset)
+      const reason = events.filter(event => event.type === 'turn/end').at(-1)?.data.reason
+      const requestFailure = requestFailures.get(agent) ?? entry.failure
+      if (events.some(event => event.type === 'tool/call')) throw runtimeError('TOOL_CHAIN_INVALID', '对话不允许执行工具')
+      const assistantMessageIds = events.filter(event => event.type === 'assistant/message').map(event => event.data.message.id)
+      if (reason?.kind === 'completed' && !assistantMessageIds.length) throw runtimeError('UPSTREAM_ERROR', '本次回复未能完成')
+      await ctx.sessionPersistence.flush()
+      result = { sessionId: agent.id, userMessageId: message.id,
+        assistantMessageIds,
+        stopReason: reason?.kind ?? 'error',
+        ...(requestFailure || reason?.kind === 'error' ? { error: safeRuntimeCause(requestFailure ?? reason.error) } : {}),
+      }
+    } catch (error) { failure = error }
+    finally {
+      try { await entry.handle?.dispose() }
+      catch (error) { failure = failure ? new AggregateError([failure, error], '对话执行和清理失败', { cause: failure }) : error }
+    }
+    if (failure) throw failure
+    return result
+  }
+
+  async function readChatHistory(sessionIds) {
+    let ctx
+    try { ctx = await context(); await ctx.sessionPersistence.flush() }
+    catch { return sessionIds.map(sessionId => ({ sessionId, status: 'unavailable', error: { code: 'HISTORY_UNAVAILABLE', message: '历史记录暂时不可用' } })) }
+    return Promise.all(sessionIds.map(async sessionId => {
+      let handle
+      try {
+        handle = await ctx.sessionPersistence.open(sessionId, 'read')
+        const { events } = await handle.read()
+        await handle.close(); handle = undefined
+        return { sessionId, status: 'available', events }
+      } catch {
+        return { sessionId, status: 'unavailable', error: { code: 'HISTORY_UNAVAILABLE', message: '历史记录暂时不可用' } }
+      } finally { await handle?.close().catch(() => undefined) }
+    }))
   }
 
   async function boot() {

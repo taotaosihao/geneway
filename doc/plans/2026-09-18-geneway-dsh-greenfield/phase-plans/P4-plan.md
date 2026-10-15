@@ -166,6 +166,8 @@ K0-C接口准确化（两原Astra独立读码后共识，独立过度设计静�
 
 K0退出GearJob的新产品装配、创建和事件/Comment执行路径，保留旧typed结果、来源/时间、Session、动作事实只读及必要测试。不能把GearJob历史用TPM映射重算。J6调整为A读设备TPM工单/计划，B检索获准维护标准核对缺项，负责人引用汇总；复用动态委派、计划调整、等待/取消，不把产量/节拍硬套TPM。
 
+旧工作只读边界准确化（两原Astra分别读码后交换形成共识，独立过度设计静态消融通过，实施前固定）：GearJob及其关联旧工作仅按当前访问权限读取既有typed结果、原来源/时间、Session、已保存追问与动作事实，不再接受follow-up、refresh、continue或其他新增执行。现有follow-up虽禁用工具，仍创建execution、调用模型并追加结果，不能视为历史读取；当前Kivo工作追问不受此限。在既有capability目录保留固定退休属性，历史getCapability与typed解析继续可用；work、直接runner、自动任务受理/派发及Comment预览/批准/回读执行入口在新增执行、模型请求或业务I/O之前失败关闭。停止、撤销及未知效果事实保留，不伪报完成。server退出GearJob事件配置/秘密读取与receiver生产装配，保留owner锁；不提前实现P5-K1事件链，不新增history-QA、legacy开关或退休框架。最小验证覆盖拒绝后零新execution/结果/Session消息/模型及业务请求，旧历史与访问隔离仍有效，停止/撤销仍可操作。
+
 ### 5.5 FMS收尾
 
 窄化规划于2026-10-15T11:48:38Z收敛，实施前由原两名Astra独立规划（p4_product_planner、p4_engineering_planner），root合成；独立p4_overdesign_v44完成六项静态消融并通过，受审正文blob为48b689e2b27d6a9ecd47ed4a0bb66c0d204ad733。只收敛用户已准的专属FMS机器锁定例外，不重开P4或提前开放TPM创建维修单；本节现已具备按依赖实施条件。共享/MES只读候选先完成审查和独立本地提交，避免修改仍在复审的公共接口。

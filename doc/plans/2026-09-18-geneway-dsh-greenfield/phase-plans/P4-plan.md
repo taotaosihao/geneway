@@ -154,6 +154,10 @@ OAuth只实现client_credentials + private_key_jwt；issuer、token认证算法�
 
 Geneway固定工具名+输入/输出schema指纹allowlist；未知/新增/漂移工具不暴露并使连接测试明确失败，不信readOnlyHint。写工具不进入模型清单。工具实际I/O前重新核对成员、Agent、技能、连接、对象范围；传x-trace-id。
 
+K0-C接口准确化（两原Astra独立读码后共识，独立过度设计静态消融通过，实施前固定）：Geneway仅提供两个封闭领域入口`geneway_kivo_tpm_read_record({recordType,reference})`与`geneway_kivo_tpm_list_records({recordType,filters})`，分别映射6个固定get和5个固定list；read前三种工单随后读取同实例关联设备，所有二跳/分页/重试也逐次复权。不得传任意远端toolName/path/query。11项实际wire目录的工具名及输入/输出canonical schema指纹全部匹配后才能使用官方client返回的定义，新增/未知/schema漂移均使连接测试失败，不只检查将要调用的一项。
+
+新`kind=kivo-mcp`以Kivo当前机器账号的组织范围和权限作为对象范围唯一权威，不复制Geneway逐单清单或组织列表。成员获准使用连接，即可在本次grant绑定输入及固定工具范围内读取该账号当前获准数据；本次仍只配置已准synthetic组织。Geneway每I/O及重试复核当前成员、Agent、Skill、工作/执行/取消状态、连接快照与固定参数；Kivo每请求执行当前账号/密钥/权限/组织检查。旧GearJob/Hive精确allowedObjectIds和空数组拒绝语义及历史grant不变；新Kivo拒绝非空旧字段，空仅表示该旧字段不适用，未知kind拒绝，不写共用“空即全部”。界面明确“对象范围由Kivo机器账号控制”。完整resource、issuer、clientId纳入可信catalog和connectionSnapshot，一连接固定一实例/账号；秘密只存ref，同账号轮换不等于改账号，改实例或账号须明确重新绑定并使旧执行失效，无同编号跨实例fallback。scope_empty与正常零结果区分，跨范围404、设备二跳及分页total均不得泄漏。新增回归必须覆盖非空旧字段拒绝、旧空范围仍拒绝、grant改参、成员/连接撤权、上游范围收缩/轮换、两实例同号和二跳/重试范围。
+
 结果保留单号、类型、原始及规范状态、设备、负责人、计划/到期/开始/完成、来源时间和查询时间。程序负责规范化与逾期判断；无基线不判断，未知状态/时区不猜。latest查询形成新观察，不覆盖旧结果。
 
 K0退出GearJob的新产品装配、创建和事件/Comment执行路径，保留旧typed结果、来源/时间、Session、动作事实只读及必要测试。不能把GearJob历史用TPM映射重算。J6调整为A读设备TPM工单/计划，B检索获准维护标准核对缺项，负责人引用汇总；复用动态委派、计划调整、等待/取消，不把产量/节拍硬套TPM。

@@ -5,26 +5,26 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { apply as applyCycle } from '../plugins/cycle-time.mjs'
-import { apply as applyGearJob } from '../plugins/gearjob-work-order.mjs'
+import { apply as applyCycle, createCycleTimeTool } from '../plugins/cycle-time.mjs'
 import { createAuthRuntime, initializeAuthFile } from '../src/auth.mjs'
-import { CYCLE_TIME_TOOL, GEARJOB_TOOL, parseCapabilityToolResult } from '../src/capabilities.mjs'
+import { CYCLE_TIME_TOOL, parseCapabilityToolResult } from '../src/capabilities.mjs'
 import { createGenewayServer } from '../src/server.mjs'
 import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 
-const requireFromDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
-const { Context } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/cordis')).href)
-const { default: SystemPrompt } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/dsh-system-prompt')).href)
+const args = process.argv.slice(2)
+assert(args.every(arg => arg === '--harness-check'), '本测试仅接受 --harness-check；默认入口包含实际 cycle 插件卸载与 HTTP 历史检查')
+const harnessCheck = args.includes('--harness-check')
 const root = await mkdtemp(join(tmpdir(), 'geneway-p2-plugin-combo-'))
 const statePath = join(root, 'state.json')
 const secretRoot = join(root, 'secrets')
 const authPath = join(root, 'private', 'auth.json')
 const store = createFileStore(statePath)
-const host = new Context()
+const previousDshHome = process.env.DSH_HOME, previousGrant = process.env.GENEWAY_DSH_GRANT_FILE
+const originalFetch = globalThis.fetch
+process.env.DSH_HOME = join(root, 'dsh')
+let host, pureCycle
 let cycleFiber
-let gearFiber
 let service
 let server
 
@@ -32,12 +32,20 @@ try {
   await mkdir(secretRoot, { mode: 0o700 })
   await store.update(seedState)
   await initializeAuthFile(authPath, { 'member-user': 'member password' }, { mode: 'create', allowedMemberIds: ['member-user'] })
-  await host.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false })
-  await host.plugin(ToolRuntime, { mode: 'native' })
-  cycleFiber = host.plugin(Object.assign(applyCycle, { inject: ['tools'] }))
-  gearFiber = host.plugin(Object.assign(applyGearJob, { inject: ['tools'] }))
-  await Promise.all([cycleFiber, gearFiber])
-  assert.deepEqual(host.tools.schemas().map(item => item.name).sort(), [CYCLE_TIME_TOOL, GEARJOB_TOOL])
+  if (harnessCheck) {
+    pureCycle = createCycleTimeTool()
+  } else {
+    const requireFromDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
+    const { Context } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/cordis')).href)
+    const { default: SystemPrompt } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/dsh-system-prompt')).href)
+    const { ToolRuntime } = await import('@deepseek-ai/dsh-tools')
+    host = new Context()
+    await host.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false })
+    await host.plugin(ToolRuntime, { mode: 'native' })
+    cycleFiber = host.plugin(Object.assign(applyCycle, { inject: ['tools'] }))
+    await cycleFiber
+    assert.deepEqual(host.tools.schemas().map(item => item.name), [CYCLE_TIME_TOOL])
+  }
 
   const runner = {
     configured: true,
@@ -63,12 +71,10 @@ try {
         secretRoot: options.grant.secretRoot,
       }), { mode: 0o600 })
       process.env.GENEWAY_DSH_GRANT_FILE = grantPath
-      const toolResult = await host.tools.execute({
-        callId: options.executionId,
-        name: CYCLE_TIME_TOOL,
-        arguments: options.input,
-        signal: new AbortController().signal,
-      })
+      const invocation = { callId: options.executionId, name: CYCLE_TIME_TOOL, arguments: options.input, signal: new AbortController().signal }
+      const toolResult = harnessCheck
+        ? { isError: false, value: await pureCycle.execute(options.input, invocation) }
+        : await host.tools.execute(invocation)
       assert.equal(toolResult.isError, false)
       assert.equal(toolResult.value.ok, true)
       return {
@@ -86,6 +92,7 @@ try {
   const auth = createAuthRuntime({ filePath: authPath })
   const port = await freePort()
   const origin = `http://127.0.0.1:${port}`
+  if (harnessCheck) globalThis.fetch = (input, init) => { assert.equal(new URL(typeof input === 'string' || input instanceof URL ? input : input.url).origin, origin, 'harness-check permits only its own loopback HTTP server'); return originalFetch(input, init) }
   server = createGenewayServer({ service, store, auth, index: '<!doctype html><title>plugin-combo</title>', trustedOrigin: origin })
   await new Promise(resolve => server.listen(port, '127.0.0.1', resolve))
 
@@ -101,12 +108,16 @@ try {
   assert.equal(completed.results[0].payload.secondsPerUnit, 60)
   const savedResult = structuredClone(completed.results[0])
 
-  await cycleFiber.dispose()
-  cycleFiber = undefined
-  assert.deepEqual(host.tools.schemas().map(item => item.name), [GEARJOB_TOOL])
-  const disposed = await host.tools.execute({ callId: 'disposed-cycle', name: CYCLE_TIME_TOOL, arguments: { availableSeconds: 3600, quantity: 60 }, signal: new AbortController().signal })
-  assert.equal(disposed.isError, true)
-  assert.equal(disposed.error.info.code, 'UNKNOWN_TOOL')
+  if (harnessCheck) {
+    pureCycle = undefined
+  } else {
+    await cycleFiber.dispose()
+    cycleFiber = undefined
+    assert.deepEqual(host.tools.schemas().map(item => item.name), [])
+    const disposed = await host.tools.execute({ callId: 'disposed-cycle', name: CYCLE_TIME_TOOL, arguments: { availableSeconds: 3600, quantity: 60 }, signal: new AbortController().signal })
+    assert.equal(disposed.isError, true)
+    assert.equal(disposed.error.info.code, 'UNKNOWN_TOOL')
+  }
 
   const page = await fetch(origin)
   assert.equal(page.status, 200)
@@ -116,15 +127,23 @@ try {
   assert.deepEqual(historical.body.results, [savedResult])
   assert.equal(historical.body.executions[0].resultId, savedResult.id)
   assert.equal(historical.body.results[0].toolName, CYCLE_TIME_TOOL)
-  console.log('P2 actual plugin combination, Web/API continuity, and typed result history checks passed')
+  console.log(harnessCheck
+    ? 'P2 pure cycle tool/grant + loopback HTTP typed history checks passed; native mount/dispose/UNKNOWN_TOOL skipped (--harness-check)'
+    : 'P2 actual cycle plugin disposal, Web/API continuity, and typed result history checks passed')
 } finally {
-  delete process.env.GENEWAY_DSH_GRANT_FILE
-  if (server) await new Promise(resolve => server.close(resolve))
-  await service?.close()
-  await gearFiber?.dispose()
-  await cycleFiber?.dispose()
-  await host.fiber.dispose()
-  await rm(root, { recursive: true, force: true })
+  try {
+    if (server) await new Promise(resolve => server.close(resolve))
+    await service?.close()
+    await cycleFiber?.dispose()
+    await host?.fiber.dispose()
+  } finally {
+    if (previousGrant === undefined) delete process.env.GENEWAY_DSH_GRANT_FILE
+    else process.env.GENEWAY_DSH_GRANT_FILE = previousGrant
+    if (previousDshHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousDshHome
+    globalThis.fetch = originalFetch
+    await rm(root, { recursive: true, force: true })
+  }
 }
 
 async function request(origin, path, options = {}) {

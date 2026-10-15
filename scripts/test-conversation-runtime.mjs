@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict'
 import { execFile as execFileCallback } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { runProfile } from '@deepseek-ai/dsh/profile-boot'
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
-import { createCollaborationRunner } from '../src/collaboration-runner.mjs'
-import { createConversationService } from '../src/conversation-service.mjs'
+import { createCollaborationRunner, CONVERSATION_WORK_TOOLS } from '../src/collaboration-runner.mjs'
+import { createConversationService, newConversationRecord } from '../src/conversation-service.mjs'
 import { createDshRunner } from '../src/dsh-runner.mjs'
 import { readRuntimeConfig } from '../src/runtime-config.mjs'
 import { createFileStore, STATE_VERSION } from '../src/store/file-store.mjs'
@@ -22,6 +21,7 @@ const modelKey = 'synthetic-conversation-model-key', model = readRuntimeConfig({
 const actor = { id: 'member-a' }, peer = { id: 'member-b' }, admin = { id: 'admin' }
 const store = createFileStore(stateFile), capture = await startCapture()
 let chat, work, collaborationRunner, sdkRunner, hosts = 0, harnesses = 0, failure, report
+let revokeOnRead
 try {
   process.env.HOME = temp
   process.env.DSH_HOME = dshHome
@@ -34,6 +34,7 @@ try {
   const providerPatch = `- id: llm-pi-ai\n  config:\n    providers:\n      zenmux:\n        displayName: Local conversation capture\n        api: openai-completions\n        apiKeyEnv: ZENMUX_API_KEY\n        baseURL: ${capture.address}/v1\n        models:\n          - id: ${model}\n            contextWindow: 200000\n            maxOutputTokens: 4096\n`
   await writeFile(patch, `- id: sdk-app-startup\n  disabled: true\n- id: sdk-jsonrpc-server\n  disabled: true\n${providerPatch}`, { mode: 0o600 })
   await writeFile(join(temp, 'sdk-capture.patch.yml'), providerPatch, { mode: 0o600 })
+  await writeFile(join(temp, 'host.patch.yml'), `${await readFile(join(root, 'config/p3-runtime.patch.yml'), 'utf8')}\n${await readFile(patch, 'utf8')}`, { mode: 0o600 })
   await store.update(state => ({ ...state,
     members: [member(actor.id, ['public', 'private']), member(peer.id, ['public']), { ...member(admin.id, ['public']), role: 'admin' }],
     employees: ['public', 'private'].map(id => ({ id, name: id, enabled: true, modelRouteId: 'route', revision: 1, instructions: 'INSTRUCTION_V1', skillIds: ['skill-cycle-time-calculate'], connectionIds: [] })),
@@ -42,6 +43,9 @@ try {
   }))
   createServices()
   await chat.ensureReady()
+  if (process.argv.includes('--shutdown-probe')) await shutdownProbe()
+  else if (process.argv.includes('--channel-work-only')) await channelWorkChecks()
+  else {
   const a = await chat.createConversation(actor, { employeeId: 'public' }), b = await chat.createConversation(peer, { employeeId: 'public' })
   const a2 = await chat.createConversation(actor, { employeeId: 'public' })
   assert.equal(a.historyStatus, 'empty')
@@ -143,7 +147,7 @@ try {
   const backup = join(temp, 'backup')
   await execFile(process.execPath, ['scripts/state-transfer.mjs', 'backup', '--output', backup], { cwd: root, env: { ...process.env, GENEWAY_STATE: stateFile } })
   const manifest = JSON.parse(await readFile(join(backup, 'manifest.json'), 'utf8'))
-  assert.equal(manifest.schema.stateVersion, 9)
+  assert.equal(manifest.schema.stateVersion, STATE_VERSION)
   assert.equal(manifest.schema.conversations, (await store.read()).conversations.length)
   for (const conversation of (await store.read()).conversations) for (const session of conversation.sessions) assert(manifest.schema.sessionRefs.includes(session.id))
   assert(manifest.entries.every(entry => entry.path === 'state.json' || entry.path.startsWith('dsh/sessions/')))
@@ -160,6 +164,7 @@ try {
   assert.equal(capture.requests.every(request => request.model === model && !request.credentialLeak && !request.sessionLog), true)
   report = { ok: true, mode: 'native-controlled-loopback', actualProvider: 'local capture', requestedModel: model, nativeHosts: hosts, nativeSdkHarnesses: harnesses, modelRequests: capture.requests.length,
     emptyConversation: true, ownerAndSessionIsolation: true, frozenInstructions: true, cleanSuccessor: true, nativeRestartHistory: true, interruptedNotReplayed: true, exactTurnCancellation: true, workCancellationIndependent: true, relatedWorks: 2, conversationBackup: true, completedWithMissingHistory: true, chatBusinessTools: [], credentialCanaryLeaks: 0, sessionLogAttachments: 0 }
+  }
 } catch (error) { failure = error }
 finally {
   for (const cleanup of [() => chat?.close(), () => work ? work.close() : collaborationRunner?.close(), () => capture.close(), () => rm(temp, { recursive: true, force: true })]) {
@@ -171,14 +176,184 @@ if (failure) throw failure
 console.log(JSON.stringify(report, null, 2))
 
 function createServices() {
-  const patch = join(temp, 'capture.patch.yml'), config = readRuntimeConfig({ ...process.env, GENEWAY_STATE: stateFile }, root)
-  collaborationRunner = createCollaborationRunner({ store, root, dshHome, runProfileImpl: async options => { hosts += 1; return runProfile({ ...options, patchFiles: [...options.patchFiles, patch] }) } })
+  const config = readRuntimeConfig({ ...process.env, GENEWAY_STATE: stateFile }, root)
+  collaborationRunner = createCollaborationRunner({ store, root, dshHome, getWorkService: () => ({ ...work, async getWork(...args) {
+    const value = await work.getWork(...args)
+    if (args[1] === revokeOnRead) await store.update(state => ({ ...state, members: state.members.map(item => item.id === actor.id ? { ...item, employeeIds: [] } : item) }))
+    return value
+  } }), patchPath: join(temp, 'host.patch.yml'), testHooks: { onKivoMounted() { hosts += 1 } } })
   sdkRunner = createDshRunner({ root, config, harnessFactory: options => {
     harnesses += 1
-    return new DeepSeekHarness({ ...options, patches: [...options.patches, join(temp, 'sdk-capture.patch.yml')], env: { ...options.env, ...Object.fromEntries(['NODE_OPTIONS', 'GENEWAY_NETWORK_AUDIT_LOG', 'GENEWAY_NETWORK_SECRET_CANARY'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])) } })
+    return new DeepSeekHarness({ ...options, patches: [...options.patches, join(temp, 'sdk-capture.patch.yml')], env: { ...options.env, ...auditEnvironment() } })
   } })
   chat = createConversationService({ store, runner: collaborationRunner })
   work = createWorkService({ store, runner: sdkRunner, collaborationRunner, policyPaths: { stateFile, dataRoot: temp, secretRoot } })
+}
+function auditEnvironment() {
+  // The current audit injects --import and its binding only at the verified SDK spawn.
+  if (process.env.GENEWAY_NETWORK_AUDIT_ROLE === 'host') return {}
+  return Object.fromEntries(['NODE_OPTIONS', 'GENEWAY_NETWORK_AUDIT_LOG', 'GENEWAY_NETWORK_SECRET_CANARY'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
+}
+async function shutdownProbe() {
+  assert.equal(typeof process.send, 'function', '--shutdown-probe requires its isolated IPC launcher')
+  let finish, reject, stopping = false
+  const stopped = new Promise((resolve, fail) => { finish = resolve; reject = fail })
+  // This test handler mirrors Geneway's service-close order; it is not server.start() acceptance.
+  const stop = () => {
+    if (stopping) return
+    stopping = true
+    Promise.resolve().then(async () => { await chat.close(); await work.close() }).then(finish, reject)
+  }
+  process.once('SIGTERM', stop)
+  try {
+    const conversation = await chat.createConversation(actor, { employeeId: 'public' })
+    await turn(conversation.id, 'SHUTDOWN_PROBE_BOOT', 'shutdown-chat')
+    const works = await Promise.all([60, 62].map((seconds, index) => work.createWork(actor, workBody(conversation.id, seconds, 2, `shutdown-work-${index}`))))
+    assert(works.every(result => result.ok))
+    await Promise.all(works.map(result => waitWork(result.value.id, 'completed')))
+    assert.equal(hosts, 1); assert.equal(harnesses, 2)
+    assert.equal(capture.requests.filter(request => request.chat).length, 1)
+    assert(capture.requests.every(request => !request.credentialLeak && !request.sessionLog))
+    const fixturePatchHashes = await Promise.all(['host.patch.yml', 'sdk-capture.patch.yml'].map(async name => ({ name, sha256: createHash('sha256').update(await readFile(join(temp, name))).digest('hex') })))
+    process.send({ kind: 'shutdown-probe-ready', pid: process.pid, temp, nativeHosts: hosts, nativeSdkHarnesses: harnesses, modelRequests: capture.requests.length, fixturePatchHashes })
+    await stopped
+    report = { ok: true, mode: 'native-controlled-loopback-shutdown', signal: 'SIGTERM', shutdownHandler: 'test-service-order-equivalent', serverStartAcceptance: false,
+      actualProvider: 'local capture', nativeHosts: hosts, nativeSdkHarnesses: harnesses, modelRequests: capture.requests.length, servicesClosed: true }
+  } finally { process.off('SIGTERM', stop); if (process.connected) process.disconnect() }
+}
+async function channelWorkChecks() {
+  const now = new Date().toISOString(), tools = CONVERSATION_WORK_TOOLS
+  rejectedToolTurnChecks()
+  await store.update(state => {
+    const bound = { ...state,
+      channelApps: [{ id: 'synthetic-app', provider: 'feishu', providerAppId: 'synthetic-app', providerTenantId: 'synthetic-tenant', credentialRef: 'synthetic-no-platform-secret', enabled: true, status: 'active', revision: 1, allowedScopes: ['result'], createdAt: now, updatedAt: now }],
+      channelIdentities: [{ id: 'synthetic-identity', channelAppId: 'synthetic-app', providerUserId: 'synthetic-user', memberId: actor.id, verificationMethod: 'link-code', status: 'active', revision: 1, defaultEmployeeId: null, activeConversationId: null, createdAt: now, updatedAt: now }],
+    }
+    return { ...bound, conversations: [newConversationRecord(bound, actor, { id: 'synthetic-channel-conversation', employeeId: 'public', source: 'feishu', channelIdentityId: 'synthetic-identity' }, now)] }
+  })
+  const id = 'synthetic-channel-conversation', plain = await chat.createConversation(actor, { employeeId: 'public' })
+  await turn(plain.id, 'PLAIN_WEB_NO_WORK', 'plain-web')
+  assert.deepEqual(capture.requests.at(-1).tools, [])
+  assert.equal((await store.read()).works.length, 0)
+  await turn(id, 'PLAIN_CHANNEL_NO_WORK', 'plain-channel')
+  assert.deepEqual(capture.requests.at(-1).tools.sort(), Object.values(tools).sort())
+  assert.equal((await store.read()).works.length, 0)
+
+  const partial = { skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 60 } }
+  await operation('create-partial', tools.create, partial)
+  const first = (await store.read()).works[0]
+  assert.equal(first.status, 'waiting_input'); assert.deepEqual(first.requiredInputs, ['quantity'])
+  assert.equal(first.conversationId, id); assert.equal(first.ownerMemberId, actor.id)
+  const beforeReplay = capture.requests.length
+  assert.equal((await chat.sendTurn(actor, id, { text: command(tools.create, partial), clientRequestId: 'create-partial' })).deduplicated, true)
+  assert.equal(capture.requests.length, beforeReplay)
+  await operation('owner-injection', tools.create, { ...partial, ownerMemberId: peer.id })
+  assert.equal((await store.read()).works.length, 1)
+  await operation('complete-input', tools.continue, { workId: first.id, input: { quantity: 2 } })
+  const completed = await waitWork(first.id, 'completed')
+  assert.equal(completed.results[0].payload.secondsPerUnit, 30)
+  const beforeFacts = capture.requests.length
+  await operation('read-facts', tools.status, { workId: first.id })
+  const factsTurn = (await store.read()).conversations.find(item => item.id === id).turns.at(-1)
+  assert.deepEqual(factsTurn.workDependencyRefs, [{ workId: first.id, resultId: completed.results[0].id, connectionRevision: null }])
+  const factRequest = capture.requests.slice(beforeFacts).find(item => item.hasToolResult)
+  assert(factRequest?.serialized.includes('secondsPerUnit'))
+  assert.equal(factRequest.serialized.includes(completed.results[0].dshSessionRef), false)
+  await operation('fact-follow-up', tools.followUp, { workId: first.id, text: '这份节拍依据是什么？' })
+  const followed = await waitWork(first.id, 'completed')
+  assert.equal(followed.results.length, 2)
+  assert.equal(followed.results.at(-1).kind, 'assistant.follow-up')
+  const outside = await work.createWork(actor, { ...workBody(plain.id, 60, 2, 'outside-fixture'), input: {} })
+  await operation('wrong-conversation', tools.status, { workId: outside.value.id })
+  assert(capture.requests.at(-1).serialized.includes('FORBIDDEN'))
+  await operation('selection', tools.status, {})
+  assert(capture.requests.at(-1).serialized.includes('requiresSelection'))
+
+  await operation('held-w1', tools.create, { skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 64, quantity: 2 } })
+  await capture.waitFor('WORK:64')
+  await operation('held-w2', tools.create, { skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 66, quantity: 3 } })
+  await capture.waitFor('WORK:66')
+  const held = (await store.read()).works.filter(item => [64, 66].includes(item.input.availableSeconds))
+  const w1 = held.find(item => item.input.availableSeconds === 64), w2 = held.find(item => item.input.availableSeconds === 66)
+  await operation('stop-w1', tools.stop, { workId: w1.id })
+  await waitWork(w1.id, 'cancelled')
+  assert(capture.pending.has('WORK:66'))
+  capture.release('WORK:66'); await waitWork(w2.id, 'completed')
+  assert.equal(hosts, 1)
+
+  // Revoke between the existing service read and the product tool's fact commit.
+  const beforeLate = capture.requests.length
+  revokeOnRead = first.id
+  const admitted = await chat.sendTurn(actor, id, { text: command(tools.status, { workId: first.id }), clientRequestId: 'late-revocation' })
+  let late
+  await waitFor(async () => { late = (await store.read()).conversations.find(item => item.id === id).turns.find(item => item.id === admitted.turn.id); return !['accepted', 'running'].includes(late.status) })
+  assert.equal(late.status, 'failed'); assert.equal(late.error.code, 'FORBIDDEN')
+  assert.equal(capture.requests.length - beforeLate, 1, 'revocation must block the model continuation after a rejected tool result')
+  const [lateHistory] = await collaborationRunner.readChatHistory([late.sessionId])
+  const latePublic = (await chat.getConversation(actor, id)).turns.find(item => item.id === late.id)
+  const rejectedToolTurn = assertRejectedToolTurn({ turn: late, history: lateHistory, publicTurn: latePublic, toolName: tools.status, workId: first.id }, evidence => console.log(JSON.stringify({ kind: 'rejected-tool-turn-evidence', ...evidence })))
+  assert(capture.requests.every(item => item.model === model && !item.credentialLeak && !item.sessionLog))
+  report = { ok: true, mode: 'native-controlled-loopback-channel-work', actualProvider: 'local capture', requestedModel: model, nativeHosts: hosts, nativeSdkHarnesses: harnesses, modelRequests: capture.requests.length,
+    fixedProductTools: Object.values(tools), webTools: [], plainChatWorks: 0, partialInputWithoutExecution: true, continuationSameWork: true, replayWithoutRequest: true, ownerInjectionRejected: true, sameConversationOnly: true,
+    factsCommittedBeforeModel: true, nativeIdsExcludedFromToolOutput: true, factualFollowUpWithoutRefresh: true, explicitSelection: true, independentWorkStop: true, lateRevocationBlocksContinuation: true, failedTurnPersisted: true, rejectedToolTurn, credentialCanaryLeaks: 0, sessionLogAttachments: 0,
+  }
+  function command(name, args) { return `CHANNEL_WORK:${JSON.stringify({ name, args })}` }
+  async function operation(request, name, args) { return turn(id, command(name, args), request) }
+}
+function assertRejectedToolTurn({ turn, history, publicTurn, toolName, workId }, onEvidence) {
+  assert.equal(history.status, 'available'); assert.equal(history.sessionId, turn.sessionId)
+  const user = history.events.findIndex(event => event.type === 'user/message' && event.data?.id === turn.userMessageId)
+  assert(user >= 0)
+  const number = history.events.slice(0, user + 1).findLast(event => event.type === 'turn/start')?.data.turn
+  assert(Number.isSafeInteger(number))
+  const next = history.events.findIndex((event, index) => index > user && event.type === 'turn/start')
+  const events = history.events.slice(user, next < 0 ? undefined : next)
+  const assistants = events.filter(event => event.type === 'assistant/message')
+  const calls = events.filter(event => event.type === 'tool/call'), results = events.filter(event => event.type === 'tool/result')
+  onEvidence?.({ eventTypes: events.map(event => event.type), assistantContentTypes: assistants.map(event => event.data.message.content.map(block => block.type)), storedIdsMatch: JSON.stringify(assistants.map(event => event.data.message.id)) === JSON.stringify(turn.assistantMessageIds), publicAssistantTextNull: publicTurn.assistantText === null })
+  assert.equal(assistants.length, 1); assert.equal(assistants[0].data.turn, number)
+  assert.deepEqual(assistants.map(event => event.data.message.id), turn.assistantMessageIds)
+  const content = assistants[0].data.message.content
+  assert.equal(content.length, 1); assert.equal(content[0].type, 'tool-call')
+  assert.equal(content[0].name, toolName); assert.deepEqual(JSON.parse(content[0].arguments), { workId })
+  assert.equal(calls.length, 1); assert.equal(calls[0].data.callId, content[0].id)
+  assert.equal(calls[0].data.name, toolName); assert.deepEqual(JSON.parse(calls[0].data.arguments), { workId })
+  assert.equal(results.length, 1)
+  const message = results[0].data.message
+  assert.equal(message.role, 'tool'); assert.equal(message.source.kind, 'tool')
+  assert.equal(message.source.callId, content[0].id); assert.equal(message.toolCallId, content[0].id)
+  assert.equal(message.content.length, 1); assert.equal(message.content[0].type, 'text')
+  const value = JSON.parse(message.content[0].text)
+  assert.deepEqual(Object.keys(value).sort(), ['error', 'ok']); assert.equal(value.ok, false)
+  assert.deepEqual(Object.keys(value.error).sort(), ['code', 'message'])
+  assert.equal(value.error.code, 'FORBIDDEN')
+  assert.equal(value.error.message, '工作操作未完成，请核对当前会话的明确工作、技能、连接和输入；其他工作请到 Web 继续。')
+  assert.equal(publicTurn.id, turn.id); assert.equal(publicTurn.status, 'failed')
+  assert.equal(publicTurn.error.code, 'FORBIDDEN'); assert.equal(publicTurn.assistantText, null)
+  return { exactNativeTurn: true, storedIdsMatched: true, toolCallOnly: true, noAssistantText: true, forbiddenResultWithoutFacts: true, publicAssistantTextNull: true }
+}
+function rejectedToolTurnChecks() {
+  const toolName = 'geneway_work_status', workId = 'synthetic-work', callId = 'synthetic-call', args = JSON.stringify({ workId })
+  const fixture = { turn: { id: 'turn', sessionId: 'session', userMessageId: 'user', assistantMessageIds: ['assistant'] }, publicTurn: { id: 'turn', status: 'failed', error: { code: 'FORBIDDEN' }, assistantText: null }, toolName, workId,
+    history: { status: 'available', sessionId: 'session', events: [
+      { type: 'turn/start', data: { turn: 1 } }, { type: 'user/message', data: { id: 'old-user' } }, { type: 'assistant/message', data: { turn: 1, message: { id: 'old-assistant', content: [{ type: 'text', text: 'OLD_FACT' }] } } },
+      { type: 'turn/start', data: { turn: 2 } }, { type: 'user/message', data: { id: 'user' } },
+      { type: 'assistant/message', data: { turn: 2, message: { id: 'assistant', content: [{ type: 'tool-call', id: callId, name: toolName, arguments: args }] } } },
+      { type: 'tool/call', data: { callId, name: toolName, arguments: args } },
+      { type: 'tool/result', data: { message: { role: 'tool', source: { kind: 'tool', callId }, toolCallId: callId, content: [{ type: 'text', text: JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: '工作操作未完成，请核对当前会话的明确工作、技能、连接和输入；其他工作请到 Web 继续。' } }) }] } } },
+      { type: 'turn/end', data: { turn: 2, reason: { kind: 'error' } } },
+      { type: 'turn/start', data: { turn: 3 } }, { type: 'user/message', data: { id: 'next-user' } }, { type: 'assistant/message', data: { turn: 3, message: { id: 'next-assistant', content: [{ type: 'text', text: 'LATER_FACT' }] } } },
+    ] },
+  }
+  assert.equal(assertRejectedToolTurn(fixture).exactNativeTurn, true)
+  for (const change of [
+    value => { value.history.sessionId = 'other-session' },
+    value => { value.turn.assistantMessageIds = ['old-assistant'] },
+    value => { value.history.events[5].data.message.content.push({ type: 'text', text: 'UNAUTHORIZED_FACT' }) },
+    value => { value.history.events[6].data.callId = 'other-call' },
+    value => { value.history.events[7].data.message.content[0].text = JSON.stringify({ ok: false, error: { code: 'FORBIDDEN' }, work: { results: ['UNAUTHORIZED_FACT'] } }) },
+    value => { value.publicTurn.assistantText = 'UNAUTHORIZED_FACT' },
+  ]) { const invalid = structuredClone(fixture); change(invalid); assert.throws(() => assertRejectedToolTurn(invalid)) }
 }
 async function turn(id, text, clientRequestId, owner = actor) { const result = await chat.sendTurn(owner, id, { text, clientRequestId }); return waitTurn(id, result.turn.id, 'completed', owner) }
 async function waitTurn(id, turnId, status, owner = actor) {
@@ -199,15 +374,19 @@ async function startCapture() {
     const text = body.messages.filter(message => message.role === 'user').map(message => typeof message.content === 'string' ? message.content : message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')).join('\n')
     const last = body.messages.filter(message => message.role === 'user').at(-1), lastText = typeof last?.content === 'string' ? last.content : last?.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? ''
     const cycle = tools.includes('geneway_calculate_cycle_time') && !body.messages.some(message => message.role === 'tool')
+    const lastUserIndex = body.messages.findLastIndex(message => message.role === 'user')
+    const hasToolResult = body.messages.slice(lastUserIndex + 1).some(message => message.role === 'tool')
+    const channelWork = lastText.startsWith('CHANNEL_WORK:') && !hasToolResult ? JSON.parse(lastText.slice('CHANNEL_WORK:'.length)) : null
     const input = cycle ? JSON.parse(text.match(/参数必须精确为 (\{[^}\n]*\})/)?.[1] ?? '{}') : undefined
     const label = lastText.startsWith('HOLD:') ? lastText : cycle && [64, 66].includes(input.availableSeconds) ? `WORK:${input.availableSeconds}` : null
-    requests.push({ model: body.model, serialized, tools, chat: tools.length === 0, credentialLeak: raw.includes(modelKey), sessionLog: Object.hasOwn(body, 'dsh_session_log') })
+    requests.push({ model: body.model, serialized, tools, chat: tools.length === 0, hasToolResult, credentialLeak: raw.includes(modelKey), sessionLog: Object.hasOwn(body, 'dsh_session_log') })
     const send = () => {
       if (response.destroyed) return
       const id = `capture-${randomUUID()}`, chunk = (delta, finish_reason) => response.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', model: body.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
       response.writeHead(200, { 'content-type': 'text/event-stream' })
-      chunk(cycle ? { role: 'assistant', tool_calls: [{ index: 0, id: `tool-${randomUUID()}`, type: 'function', function: { name: 'geneway_calculate_cycle_time', arguments: JSON.stringify(input) } }] } : { role: 'assistant', content: `LOCAL_REPLY:${lastText}` }, null)
-      chunk({}, cycle ? 'tool_calls' : 'stop')
+      const call = channelWork ?? (cycle ? { name: 'geneway_calculate_cycle_time', args: input } : null)
+      chunk(call ? { role: 'assistant', tool_calls: [{ index: 0, id: `tool-${randomUUID()}`, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.args) } }] } : { role: 'assistant', content: `LOCAL_REPLY:${lastText}` }, null)
+      chunk({}, call ? 'tool_calls' : 'stop')
       response.end('data: [DONE]\n\n')
     }
     if (label) { pending.set(label, send); response.once('close', () => { if (pending.get(label) === send) pending.delete(label) }) }

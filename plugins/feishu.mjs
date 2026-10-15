@@ -10,9 +10,11 @@ const READY_TIMEOUT_MS = 15_000
 const CLOSE_DRAIN_TIMEOUT_MS = 10_000
 const silentLogger = Object.fromEntries(['error', 'warn', 'info', 'debug', 'trace'].map(name => [name, () => {}]))
 
-export function createFeishuRuntime({ store, channelService, secretRoot, sdk = Lark, httpTimeoutMs = HTTP_TIMEOUT_MS, readyTimeoutMs = READY_TIMEOUT_MS, closeDrainTimeoutMs = CLOSE_DRAIN_TIMEOUT_MS, automationOwnerCheck } = {}) {
+export function createFeishuRuntime({ store, channelService, secretRoot, sdk = Lark, httpTimeoutMs = HTTP_TIMEOUT_MS, readyTimeoutMs = READY_TIMEOUT_MS, closeDrainTimeoutMs = CLOSE_DRAIN_TIMEOUT_MS, automationOwnerCheck, recover = true, flushOnStart = true } = {}) {
   if (!store?.read || !channelService?.recover || !channelService?.setChannelAppRuntime) throw new TypeError('Feishu runtime dependencies are required')
   for (const [name, value] of Object.entries({ httpTimeoutMs, readyTimeoutMs, closeDrainTimeoutMs })) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError(`${name} must be a positive integer`)
+  if (typeof recover !== 'boolean') throw new TypeError('recover must be boolean')
+  if (typeof flushOnStart !== 'boolean') throw new TypeError('flushOnStart must be boolean')
   const instances = new Map()
   let stopping = false
   let syncChain = Promise.resolve()
@@ -184,7 +186,8 @@ export function createFeishuRuntime({ store, channelService, secretRoot, sdk = L
 
   async function flushAutomationNotifications({ ownerCheck = automationOwnerCheck } = {}) {
     const created = await channelService.ensureAutomationDeliveries({ ownerCheck })
-    for (const delivery of created.deliveries) if (delivery.status === 'pending') {
+    const state = await store.read()
+    for (const delivery of created.deliveries) if (delivery.status === 'pending' && state.channelApps.some(app => app.id === delivery.channelAppId && app.provider === 'feishu')) {
       try { await sendDelivery(delivery.id, { ownerCheck }) } catch (error) { if (!['INVALID_STATE', 'DELIVERY_FORBIDDEN'].includes(error?.code)) throw error }
     }
     return created
@@ -193,9 +196,9 @@ export function createFeishuRuntime({ store, channelService, secretRoot, sdk = L
   return {
     async start() {
       if (stopping) throw runtimeError('UNAVAILABLE', 'Feishu runtime is stopping')
-      await channelService.recover()
+      if (recover) await channelService.recover()
       await this.sync()
-      await flushAutomationNotifications()
+      if (flushOnStart) await flushAutomationNotifications()
     },
     sync() {
       syncChain = syncChain.then(reconcile, reconcile)
@@ -212,7 +215,7 @@ export function createFeishuRuntime({ store, channelService, secretRoot, sdk = L
       stopping = true
       const closing = [...instances.values()]
       for (const entry of closing) closeEntry(entry)
-      await channelService.recover()
+      if (recover) await channelService.recover()
       const drained = await settleWithin(Promise.all(closing.map(waitForDrain)), closeDrainTimeoutMs)
       if (!drained) await Promise.all(closing.flatMap(entry => [...entry.inflight].map(ensureDeliveryFacts)))
       await Promise.all(closing.map(entry => channelService.setChannelAppRuntime({
@@ -242,10 +245,13 @@ export function createFeishuRuntime({ store, channelService, secretRoot, sdk = L
       }
       return
     }
-    await channelService.handleInbound(inbound)
+    const receipt = await channelService.handleInbound(inbound)
+    if (receipt.code === 'OFFICIAL_ID_CONFLICT') return
     const created = await ensureDeliveryFacts(inbound)
     if (stopping || !current(entry)) return
-    for (const delivery of created?.deliveries ?? []) if (delivery.status === 'pending') await sendDelivery(delivery.id)
+    for (const delivery of created?.deliveries ?? []) if (delivery.status === 'pending') {
+      try { await sendDelivery(delivery.id) } catch (error) { if (!['INVALID_STATE', 'DELIVERY_FORBIDDEN'].includes(error?.code)) throw error }
+    }
   }
 
   async function ensureDeliveryFacts(inbound) {

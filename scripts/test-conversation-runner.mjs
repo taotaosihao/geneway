@@ -96,6 +96,62 @@ try {
   assert.equal((await service.getConversation(actor, conversation.id)).activeTurnId, null)
   await service.close()
   await empty.runner.close()
+  const bootPending = fixture({ holdBoot: true })
+  const bootTurn = bootPending.runner.runChatTurn(options('late-boot', 'one'))
+  void bootTurn.catch(() => undefined)
+  const bootHistory = bootPending.runner.readChatHistory(['late-native'])
+  const bootKnowledge = bootPending.runner.enableKnowledge()
+  void bootKnowledge.catch(() => undefined)
+  await waitFor(() => bootPending.boots === 1)
+  const bootClose = bootPending.runner.close()
+  assert.equal(bootPending.runner.close(), bootClose)
+  let bootClosed = false
+  void bootClose.then(() => { bootClosed = true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(bootClosed, false)
+  bootPending.releaseBoot()
+  await assert.rejects(bootTurn, { code: 'PROCESS_SHUTDOWN' })
+  await assert.rejects(bootKnowledge, { code: 'PROCESS_SHUTDOWN' })
+  assert.equal((await bootHistory)[0].status, 'unavailable')
+  await bootClose
+  assert.equal(bootPending.boots, 1); assert.equal(bootPending.shutdowns, 1)
+  assert.equal(bootPending.pluginCalls, 0); assert.equal(bootPending.handles.length, 0); assert.equal(bootPending.opened.length, 0)
+
+  const installPending = fixture({ holdInstall: true })
+  const installing = installPending.runner.enableKnowledge()
+  void installing.catch(() => undefined)
+  await waitFor(() => installPending.installHooks === 1)
+  const installClose = installPending.runner.close()
+  installPending.releaseInstall()
+  await assert.rejects(installing, { code: 'PROCESS_SHUTDOWN' })
+  await installClose
+  assert.equal(installPending.toolRegistrations, 0); assert.equal(installPending.pluginCalls, 1); assert.equal(installPending.shutdowns, 1)
+
+  for (const phase of ['bootError', 'installError']) {
+    const original = new Error(`synthetic ${phase}`), failed = fixture({ [phase]: original })
+    await assert.rejects(failed.runner.enableKnowledge(), error => error === original)
+    await failed.runner.close()
+    assert.equal(failed.shutdowns, phase === 'bootError' ? 0 : 1)
+  }
+  const originalInstall = new Error('synthetic install failure'), originalCleanup = new Error('synthetic Host cleanup failure')
+  const failedCleanup = fixture({ installError: originalInstall, shutdownError: originalCleanup })
+  await assert.rejects(failedCleanup.runner.enableKnowledge(), error => error instanceof AggregateError && error.cause === originalInstall && error.errors[0] === originalInstall && error.errors[1] === originalCleanup)
+  await assert.rejects(failedCleanup.runner.close(), error => error === originalCleanup)
+  assert.equal(failedCleanup.shutdowns, 1)
+
+  const publication = fixture({ closeAtPublication: true })
+  assert.equal((await publication.runner.readChatHistory(['never-open-after-close']))[0].status, 'unavailable')
+  await publication.runner.close()
+  assert.equal(publication.opened.length, 0); assert.equal(publication.shutdowns, 1)
+
+  const closing = fixture({ holdShutdown: true })
+  await closing.runner.runChatTurn(options('close-once', 'one'))
+  const firstClose = closing.runner.close()
+  assert.equal(closing.runner.close(), firstClose)
+  await waitFor(() => closing.shutdowns === 1)
+  await assert.rejects(closing.runner.runChatTurn(options('closed', 'one')), { code: 'PROCESS_SHUTDOWN' })
+  closing.releaseShutdown(); await firstClose
+  assert.equal(closing.shutdowns, 1)
   console.log('Conversation runner checks passed: binding failure precedes followup/dispose, deny-all tools, precise cancellation, pending creation cancellation, shared Host, native decoder/history and resume inbox discard (injected runtime; native/model/network starts=0)')
 } finally {
   if (previousHome === undefined) delete process.env.DSH_HOME
@@ -104,11 +160,15 @@ try {
 }
 
 function options(conversationId, turnId, overrides = {}) { return { conversationId, turnId, sessionId: null, text: 'SYNTHETIC_INPUT', instructions: 'FROZEN_INSTRUCTIONS', authorize: async () => undefined, onSession: async () => undefined, ...overrides } }
-function fixture({ held = false, holdCreate = false, unexpectedTool = false, emptyReply = false } = {}) {
+function fixture({ held = false, holdCreate = false, unexpectedTool = false, emptyReply = false, holdBoot = false, holdInstall = false, holdShutdown = false, closeAtPublication = false, bootError, installError, shutdownError } = {}) {
   const sessions = new Map(), handles = [], scopes = [], prompts = [], opened = []
   let releaseCreate
   const createGate = new Promise(resolve => { releaseCreate = resolve })
   const state = { handles, scopes, prompts, opened, releaseCreate, boots: 0, followups: 0, disposals: 0, cancellations: 0, shutdowns: 0, readCloses: 0 }
+  const bootGate = new Promise(resolve => { state.releaseBoot = resolve })
+  const installGate = new Promise(resolve => { state.releaseInstall = resolve })
+  const shutdownGate = new Promise(resolve => { state.releaseShutdown = resolve })
+  state.pluginCalls = 0; state.installHooks = 0; state.toolRegistrations = 0
   async function handle(options) {
     const id = options.resumeSessionId ?? options.sessionId, events = sessions.get(id) ?? []
     sessions.set(id, events)
@@ -139,7 +199,7 @@ function fixture({ held = false, holdCreate = false, unexpectedTool = false, emp
     return value
   }
   const ctx = {
-    on() {}, tools: { register() {}, guard() {}, schemas: () => [] }, plugin: () => ({ async dispose() {} }),
+    on() {}, tools: { register() { state.toolRegistrations += 1 }, guard() { if (closeAtPublication) queueMicrotask(() => queueMicrotask(() => { void state.runner.close() })) }, schemas: () => [] }, plugin: () => { state.pluginCalls += 1; return { async dispose() {} } },
     agents: { create: handle, resume: handle },
     sessionPersistence: { async flush() {}, async open(id, mode) {
       assert.equal(mode, 'read'); opened.push(id)
@@ -147,7 +207,10 @@ function fixture({ held = false, holdCreate = false, unexpectedTool = false, emp
       return { async read() { return { events: sessions.get(id) } }, async close() { state.readCloses += 1 } }
     } },
   }
-  state.runner = createCollaborationRunner({ store: {}, dshHome: home, runProfileImpl: async () => { state.boots += 1; return { ctx, shutdown: { async shutdown() { state.shutdowns += 1 } } } } })
+  state.runner = createCollaborationRunner({ store: {}, dshHome: home,
+    testHooks: { async onKivoMounted() { state.installHooks += 1; if (holdInstall) await installGate; if (installError) throw installError } },
+    runProfileImpl: async () => { state.boots += 1; if (holdBoot) await bootGate; if (bootError) throw bootError; return { ctx, shutdown: { async shutdown() { state.shutdowns += 1; if (holdShutdown) await shutdownGate; if (shutdownError) throw shutdownError } } } },
+  })
   return state
 }
 async function waitFor(check) { for (let count = 0; count < 200; count += 1) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 1)) } assert.fail('injected conversation runner condition timed out') }

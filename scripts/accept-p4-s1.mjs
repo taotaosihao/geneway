@@ -43,12 +43,14 @@ if (process.env.GENEWAY_S1_OBSERVER === '1' && resolve(process.argv[1] ?? '') ==
     a: process.env.GENEWAY_S1_CANARY_A,
     b: process.env.GENEWAY_S1_CANARY_B,
   }, value => appendFileSync(logfile, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), ...value }) + '\n', { mode: 0o600 }))
-} else {
+} else if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const options = argumentsFor(process.argv.slice(2))
   if (options.help) console.log(usage())
   else if (options['harness-check']) await harnessCheck()
   else await acceptance(options)
 }
+
+export { command, connect, firstLine, freePort, interruptHandlers, networkAudit, poll, recordingCoverage, runCleanup, stop, systemEnvironment, watchRecording }
 
 function argumentsFor(args) {
   const { values } = parseArgs({ args, options: { help: { type: 'boolean' }, 'harness-check': { type: 'boolean' }, run: { type: 'boolean' }, output: { type: 'string' }, 'network-guard': { type: 'string' } } })
@@ -81,7 +83,8 @@ async function acceptance(options) {
   const passwords = Object.fromEntries(['admin', 'a', 'b'].map(id => [id, randomBytes(24).toString('base64url')]))
   const port = await freePort(), origin = `http://127.0.0.1:${port}`
   const candidate = await candidateState(), guardSha256 = hash(await readFile(options['network-guard'])), children = [], browsers = {}, sessions = {}, observations = [], apiChecks = new Map()
-  const serverEnv = runtimeEnvironment({ scratch, stateFile, authFile, dshHome, origin, auditFile, contextFile, canaries, guard: options['network-guard'] })
+  const auditBinding = { runId: 'p4-s1-' + randomBytes(12).toString('hex'), candidate: hash(JSON.stringify(candidate)), guardSha256 }
+  const serverEnv = runtimeEnvironment({ scratch, stateFile, authFile, dshHome, origin, auditFile, contextFile, canaries, guard: options['network-guard'], auditBinding })
   let server, xvfb, recorder, recording, display, recordingAt, stoppedAt, failure, report, restarting = false
   const abort = new AbortController()
   let settleOperation
@@ -338,13 +341,15 @@ async function acceptance(options) {
     await cleanup.run()
     const network = await jsonLines(auditFile), chat = await jsonLines(contextFile)
     const finalState = await readFile(stateFile, 'utf8').then(JSON.parse).catch(error => { failure ??= error; return { conversations: [] } })
-    if (!failure && (!network.some(item => item.kind === 'fetch' && item.host === 'zenmux.ai') || network.some(item => item.permitted === false))) failure = new Error('the isolated server network audit did not pass')
+    let audited = { ok: false, scope: 'selected-node-sdk-and-network-apis' }
+    try { audited = networkAudit(network, { ...auditBinding, hostPids: children.filter(child => child.auditRole === 'host').map(child => child.pid), hostInterruptions: children.map(child => child.auditInterruption).filter(Boolean) }) }
+    catch (error) { failure ??= error }
     report = {
-      ok: !failure, dataMode: 'synthetic', sourceEnvironment: 'isolated-local', entrypoint: 'node src/server.mjs', candidate, model: { provider: 'zenmux', model, chatAuditPids: [...new Set(chat.map(item => item.pid))], chatRequests: chat.length, workChildAudit: 'SDK child does not inherit the Host audit preload; work tool/result and candidate are checked separately' },
+      ok: !failure, dataMode: 'synthetic', sourceEnvironment: 'isolated-local', entrypoint: 'node src/server.mjs', candidate, model: { provider: 'zenmux', model, chatAuditPids: [...new Set(chat.map(item => item.pid))], chatRequests: chat.length, workChildAudit: audited.sdkChildren ?? [] },
       nativeLineage: Object.fromEntries((finalState.conversations ?? []).map(item => [item.id, nativeReferences(item).map(hash)])),
       scope: '渠道为模拟验收；本视频覆盖 S1 Web；无 GearJob、Hive、Kivo 或真实渠道连接。',
       steps: observations, incomplete: steps.filter(step => !observations.some(item => item.id === step.id && item.result === 'passed')).map(step => step.id),
-      instrumentation: { guardSha256, hostPreloadOnly: true }, apiChecks: [...apiChecks.values()], network: { pids: [...new Set(network.map(item => item.pid))], records: network.length, blocked: network.filter(item => item.permitted === false).length }, chatContext: chat,
+      instrumentation: { ...auditBinding, scope: audited.scope, sdkLaunchCorrelationRequired: true, wholeMachineCoverage: false }, apiChecks: [...apiChecks.values()], network: { ...audited, pids: [...new Set(network.map(item => item.pid))], records: network.length, blocked: network.filter(item => item.permitted === false).length }, chatContext: chat,
       browser: Object.fromEntries(Object.entries(browsers).map(([actor, page]) => [actor, { viewport: page.size(), errors: page.errors, unexpectedResponses: page.responses.filter(item => item.status >= 500 && !item.duringRestart), loginPosts: page.loginPosts() }])),
       cancellation: { bothWorksActiveBeforeStop: observations.some(item => item.id === 'related-works' && item.result === 'passed'), w2SecondsPerUnit: refs.w2 && observations.some(item => item.id === 'related-works' && item.result === 'passed') ? 60 : null },
       media: { video: 'p4-s1.mp4', seconds: recordingAt ? (stoppedAt - recordingAt) / 1000 : 0, recorder: recording?.state ?? null },
@@ -395,6 +400,8 @@ async function acceptance(options) {
   }
   async function bootServer() {
     const child = launch(process.execPath, [join(root, 'src/server.mjs')], { env: serverEnv })
+    child.auditRole = 'host'
+    child.auditFile = auditFile; child.auditBinding = auditBinding
     await poll(async () => {
       abort.signal.throwIfAborted()
       if (child.spawnError || child.exitCode !== null || child.signalCode !== null) throw new Error('isolated server failed to start')
@@ -551,12 +558,13 @@ async function acceptance(options) {
 function systemEnvironment() {
   return Object.fromEntries(['PATH', 'HOME', 'USER', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR'].filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]))
 }
-function runtimeEnvironment({ scratch, stateFile, authFile, dshHome, origin, auditFile, contextFile, canaries, guard }) {
+function runtimeEnvironment({ scratch, stateFile, authFile, dshHome, origin, auditFile, contextFile, canaries, guard, auditBinding }) {
   return { ...systemEnvironment(), DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED', GENEWAY_DSH_HOME: dshHome,
     GENEWAY_STATE: stateFile, GENEWAY_AUTH_FILE: authFile, GENEWAY_PORT: new URL(origin).port, GENEWAY_HOST: '127.0.0.1', GENEWAY_TRUSTED_ORIGIN: origin,
     GENEWAY_CONNECTION_CATALOG: join(scratch, 'connection-catalog.json'), GENEWAY_SECRET_ROOT: join(root, 'var/secrets'), GENEWAY_MODEL_CREDENTIAL_REF: 'zenmux-p4-model.key',
     NODE_OPTIONS: `--import=${pathToFileURL(guard).href} --import=${pathToFileURL(fileURLToPath(import.meta.url)).href}`,
-    GENEWAY_NETWORK_AUDIT_LOG: auditFile, GENEWAY_S1_OBSERVER: '1', GENEWAY_S1_CONTEXT_AUDIT_LOG: contextFile, GENEWAY_S1_CANARY_A: canaries.a, GENEWAY_S1_CANARY_B: canaries.b,
+    GENEWAY_NETWORK_AUDIT_RUN_ID: auditBinding.runId, GENEWAY_NETWORK_AUDIT_CANDIDATE: auditBinding.candidate, GENEWAY_NETWORK_AUDIT_LOG: auditFile, GENEWAY_NETWORK_AUDIT_ROLE: 'host',
+    GENEWAY_S1_OBSERVER: '1', GENEWAY_S1_CONTEXT_AUDIT_LOG: contextFile, GENEWAY_S1_CANARY_A: canaries.a, GENEWAY_S1_CANARY_B: canaries.b,
   }
 }
 
@@ -704,6 +712,71 @@ function recordingCoverage(recording, probe, observations) {
   return { duration, expectedCoverageSeconds, coverageToleranceSeconds }
 }
 
+function networkAudit(rows, { runId, candidate, guardSha256, hostPids, hostInterruptions = [] }) {
+  assert(rows.length && hostPids.length && hostPids.every(pid => Number.isInteger(pid) && pid > 0), 'network audit has no owned Host')
+  for (const row of rows) {
+    assert(row.runId === runId && row.candidate === candidate && row.guardSha256 === guardSha256, 'network audit binding differs')
+    assert(Number.isInteger(row.pid) && row.pid > 0 && Number.isInteger(row.ppid) && row.ppid > 0, 'network audit PID is invalid')
+    assert(['host', 'sdk'].includes(row.role), 'network audit role is invalid')
+    assert(row.permitted !== false && !row.sessionLogAttached && !row.credentialInPayload, 'network audit recorded a blocked or unsafe request')
+    if (row.kind === 'fetch' && row.host === 'zenmux.ai') assert(row.model === model && row.permitted === true && !row.unexpectedBodyFields, 'model audit route or fields differ')
+    if (row.role === 'host') assert(hostPids.includes(row.pid), 'network audit Host is not owned by this run')
+  }
+  const interruptions = new Map(), hosts = []
+  for (const evidence of hostInterruptions) {
+    assert(evidence.runId === runId && evidence.candidate === candidate && evidence.guardSha256 === guardSha256, 'Host interruption binding differs')
+    assert(hostPids.includes(evidence.pid) && evidence.processGroupId === evidence.pid && !interruptions.has(evidence.pid), 'Host interruption ownership is invalid')
+    assert(evidence.requestedSignal === 'SIGKILL' && evidence.signalDelivered === true && evidence.observedExitCode === null && evidence.observedSignal === 'SIGKILL', 'Host interruption lacks the observed requested SIGKILL')
+    assert(evidence.pidExited === true && evidence.groupExited === true, 'interrupted Host PID or owned process group remains')
+    assert(Number.isInteger(evidence.auditRowsBeforeSignal) && evidence.auditRowsBeforeSignal > 0 && evidence.auditRowsBeforeSignal <= rows.length, 'Host interruption audit boundary is invalid')
+    assert(Number.isFinite(evidence.requestedAt) && evidence.observedExitAt >= evidence.requestedAt && evidence.checkedAt >= evidence.observedExitAt, 'Host interruption observation times are invalid')
+    const before = rows.slice(0, evidence.auditRowsBeforeSignal)
+    assert(before.some(row => row.kind === 'guard-ready' && row.role === 'host' && row.pid === evidence.pid), 'Host interruption precedes its guard readiness')
+    const pids = before.filter(row => row.kind === 'sdk-spawn' && row.role === 'host' && row.pid === evidence.pid && row.parentPid === evidence.pid).map(row => row.childPid).sort((a, b) => a - b)
+    assert.deepEqual([...evidence.sdkPidsExited].sort((a, b) => a - b), pids, 'Host interruption did not verify the exact prior SDK PIDs')
+    interruptions.set(evidence.pid, evidence)
+  }
+  for (const pid of hostPids) {
+    const own = rows.filter(row => row.role === 'host' && row.pid === pid)
+    assert.equal(own.filter(row => row.kind === 'guard-ready').length, 1, 'Host guard readiness missing or duplicated')
+    const exited = own.filter(row => row.kind === 'process-exit'), interruption = interruptions.get(pid)
+    if (interruption) {
+      assert.equal(exited.length, 0, 'interrupted Host must not be presented as a normal guard exit')
+      hosts.push({ pid, outcome: 'harness-observed-SIGKILL', interruption })
+    } else {
+      assert.equal(exited.length, 1, 'Host process exit audit missing or duplicated')
+      assert.equal(exited[0].code, 0, 'owned Host did not exit normally')
+      hosts.push({ pid, outcome: 'normal-guard-exit', exitCode: exited[0].code })
+    }
+  }
+  const sdkChildren = [], spawns = rows.filter(row => row.kind === 'sdk-spawn')
+  assert(spawns.length, 'no actual SDK work launch was audited')
+  for (const spawn of spawns) {
+    assert(spawn.role === 'host' && spawn.parentPid === spawn.pid && Number.isInteger(spawn.childPid) && spawn.childPid > 0, 'SDK spawn ownership is invalid')
+    assert.equal(spawns.filter(row => row.childPid === spawn.childPid).length, 1, 'SDK child PID was reused in the audit')
+    const child = rows.filter(row => row.role === 'sdk' && row.pid === spawn.childPid)
+    assert(child.every(row => row.ppid === spawn.parentPid), 'SDK child parent differs from its launch')
+    const exits = rows.filter(row => row.kind === 'sdk-exit' && row.role === 'host' && row.pid === spawn.parentPid && row.parentPid === spawn.parentPid && row.childPid === spawn.childPid)
+    const interruption = interruptions.get(spawn.parentPid)
+    const groupInterrupted = exits.length === 0 && interruption && rows.indexOf(spawn) < interruption.auditRowsBeforeSignal && interruption.sdkPidsExited.includes(spawn.childPid)
+    assert(exits.length === 1 || groupInterrupted, 'SDK parent exit correlation missing or duplicated')
+    const exited = exits[0]
+    if (exited) assert(Number.isInteger(exited.code) && exited.signal === null || exited.code === null && typeof exited.signal === 'string', 'SDK exit status is invalid')
+    const ready = child.filter(row => row.kind === 'guard-ready')
+    const fetches = child.filter(row => row.kind === 'fetch' && row.host === 'zenmux.ai')
+    const failedBeforeReady = ready.length === 0 && child.length === 0 && exited && (Number.isInteger(exited.code) && exited.code !== 0 || exited.signal !== null)
+    assert(ready.length === 1 || failedBeforeReady, 'SDK guard readiness missing or duplicated')
+    assert(!fetches.length || ready.length === 1, 'SDK model request lacks guard readiness')
+    sdkChildren.push({ parentPid: spawn.parentPid, pid: spawn.childPid, ready: ready.length === 1, modelFetches: fetches.length, parentExitObserved: Boolean(exited), exitCode: exited?.code ?? null, signal: exited?.signal ?? null,
+      exitEvidence: groupInterrupted ? 'harness-observed-parent-and-owned-group-SIGKILL' : 'Host-guard-sdk-exit', outcome: failedBeforeReady ? 'failed-before-ready' : fetches.length ? 'model-request-observed' : 'no-model-request-observed' })
+  }
+  assert(rows.filter(row => row.role === 'sdk').every(row => spawns.some(spawn => spawn.childPid === row.pid && spawn.parentPid === row.ppid)), 'SDK audit row has no owned launch')
+  assert(rows.filter(row => row.kind === 'sdk-exit').every(row => spawns.some(spawn => spawn.parentPid === row.pid && spawn.childPid === row.childPid)), 'SDK exit has no owned launch')
+  assert(sdkChildren.some(child => child.modelFetches > 0), 'no actual SDK work model request was audited')
+  return { ok: true, scope: 'selected-node-sdk-and-network-apis', hostPids, hosts, hostModelFetches: rows.filter(row => row.role === 'host' && row.kind === 'fetch' && row.host === 'zenmux.ai').length, sdkChildren,
+    limitation: 'Only selected Node Host/SDK launch and network APIs; not whole-machine or other subprocess coverage' }
+}
+
 function interruptHandlers(host, interrupt) {
   const state = { interruptedBy: null, forced: false }
   let count = 0
@@ -758,12 +831,33 @@ async function command(executable, args, signal) {
 }
 async function stop(child, signal = 'SIGTERM') {
   if (!child || !Number.isInteger(child.pid) || child.exitCode !== null || child.signalCode !== null) return
+  const interruption = child.auditRole === 'host' && signal === 'SIGKILL' ? {
+    ...child.auditBinding, pid: child.pid, processGroupId: child.pid, requestedSignal: signal,
+    auditRowsBeforeSignal: 0, sdkPidsExited: [],
+  } : null
+  let priorSdkPids = []
+  if (interruption) {
+    const rows = await jsonLines(child.auditFile)
+    interruption.auditRowsBeforeSignal = rows.length
+    priorSdkPids = rows.filter(row => row.kind === 'sdk-spawn' && row.role === 'host' && row.pid === child.pid && row.parentPid === child.pid).map(row => row.childPid)
+    assert(child.exitCode === null && child.signalCode === null, 'Host exited before its hard-restart signal')
+  }
   const exited = new Promise(resolveExit => child.once('exit', resolveExit))
-  try { process.kill(-child.pid, signal) } catch (error) { if (error.code !== 'ESRCH') throw error }
+  let delivered = false
+  if (interruption) interruption.requestedAt = Date.now()
+  try { delivered = process.kill(-child.pid, signal) } catch (error) { if (error.code !== 'ESRCH') throw error }
   let timeout
   const completed = await Promise.race([exited.then(() => true), new Promise(resolveTimeout => { timeout = setTimeout(() => resolveTimeout(false), 10_000) })])
   clearTimeout(timeout)
   if (!completed) { try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') throw error } await exited }
+  if (interruption) {
+    Object.assign(interruption, { signalDelivered: delivered, observedExitCode: child.exitCode, observedSignal: child.signalCode, observedExitAt: Date.now() })
+    assert(delivered && child.exitCode === null && child.signalCode === 'SIGKILL', 'hard restart did not observe its requested Host SIGKILL')
+    const gone = pid => { try { process.kill(pid, 0); return false } catch (error) { if (error.code === 'ESRCH') return true; throw error } }
+    await poll(() => [child.pid, -child.pid, ...priorSdkPids].every(gone), 'interrupted owned Host group and SDK PID exit', 10_000)
+    Object.assign(interruption, { pidExited: true, groupExited: true, sdkPidsExited: priorSdkPids, checkedAt: Date.now() })
+    child.auditInterruption = interruption
+  }
 }
 async function firstLine(stream, child) {
   let text = ''
@@ -810,7 +904,7 @@ function escape(value) { return String(value ?? '').replace(/[&<>"']/g, char => 
 function clock(seconds) { return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}` }
 function manual(report) {
   const cleanupText = (report.cleanup?.allOwnedProcessesExited === true ? '本轮隔离服务已关闭。' : '本轮隔离服务的退出状态尚未确认，需由维护者核对。') + (report.cleanup?.authRemoved === true ? '临时登录凭据已删除。' : '本轮登录凭据的清理尚未确认，需由维护者核对。')
-  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Geneway S1 Web 操作与验收说明</title><style>body{max-width:1100px;margin:40px auto;padding:0 24px;font:17px/1.7 system-ui,sans-serif;color:#172033;background:#f5f7fb}h1,h2{line-height:1.4}section{background:white;border:1px solid #dce2ed;border-radius:14px;padding:24px;margin:24px 0}video,img{max-width:100%;height:auto;border-radius:8px}code{overflow-wrap:anywhere}.result{padding:12px;background:#edf6ee}.failed{background:#fff1ed}a{color:#1949a8}</style><h1>Geneway S1 Web 操作与验收说明</h1><p>渠道为模拟验收；本视频覆盖 S1 Web。所有账号、对话和节拍输入均为本机隔离的 synthetic 验收数据，不连接生产业务或真实成员渠道。</p><p>模型：ZenMux ${escape(report.model.model)}。候选：<code>${escape(report.candidate.head)}</code>；相关文件的 SHA-256 见同目录 observations.json。界面以桌面 1440×900、手机 390×844 实际操作。</p><p class="result ${report.ok ? '' : 'failed'}">本轮${report.ok ? '已完成脚本列出的 S1 检查，用户最终验收另行确认。' : '尚未通过，需修复未完成步骤后复验；具体原因见同目录检查记录。'}</p><p><a href="p4-s1.mp4">打开完整操作视频</a> · <a href="observations.json">查看实际检查记录</a></p><video controls preload="metadata" src="p4-s1.mp4"></video><section><h2>开始前</h2><p>管理员在后台维护员工、执行指令和开放成员；成员只能使用当前获准员工。登录后进入“我的对话”，选择员工即可新建空白上下文的对话。历史仅本人可读，工作在关联对话中保留独立执行和停止入口。</p><p>本说明使用一次性验收账号。${cleanupText}复验需由获准维护者重新运行验收入口。视频、截图及本说明可离线查看，无需外部字体或网络。</p></section>${report.steps.map((step, index) => `<section><h2>${index + 1}. ${escape(step.title)}</h2><p>操作身份：${escape(step.actor === 'admin' ? '管理员' : '成员 ' + step.actor.toUpperCase())}。入口：${escape(step.control)}。</p><p class="result ${step.result === 'passed' ? '' : 'failed'}">${escape(step.result === 'passed' ? step.observed : '本步未达到预期：' + step.expected + ' 当前尚未取得通过结果；具体原因见同目录检查记录。')}</p>${step.screenshots?.length ? step.screenshots.map(shot => `<figure><img alt="${escape(shot.label)}" src="data:image/png;base64,${shot.image}"><figcaption>${escape(shot.label)}</figcaption></figure>`).join('') : '<p>本步未取得可用截图。</p>'}<p>对应视频 ${clock(step.startSeconds)}–${clock(step.endSeconds ?? step.startSeconds)}。</p></section>`).join('')}${report.incomplete.length ? `<section class="failed"><h2>未完成的步骤</h2><p>${escape(report.incomplete.map(id => steps.find(step => step.id === id)?.title).join('；'))}</p></section>` : ''}<section><h2>结果确认与恢复</h2><p>回复结束后可点“刷新历史”读取已完成内容。员工撤权、停用或对话归档时，旧历史按页面原因保持只读；不要重新创建对话来绕过授权。停止本次回复只影响该回复，停止工作只影响选定工作。若服务中断，当前回复显示“回复中断”，已有结果保留；历史不可用时先刷新历史，不把缺失历史当成新的空白上下文。</p><p>本次 W1、W2 分别使用 601 秒、600 秒与 10 件的独立输入；两项工作仍在执行时停止 W1，再核对 W2 的节拍结果为 60 秒/件。服务端共享 Host 的聊天请求有独立外发审计；节拍 SDK 子进程不继承该审计预载，不能据本轮日志宣称覆盖其全部网络行为。</p></section></html>`
+  return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Geneway S1 Web 操作与验收说明</title><style>body{max-width:1100px;margin:40px auto;padding:0 24px;font:17px/1.7 system-ui,sans-serif;color:#172033;background:#f5f7fb}h1,h2{line-height:1.4}section{background:white;border:1px solid #dce2ed;border-radius:14px;padding:24px;margin:24px 0}video,img{max-width:100%;height:auto;border-radius:8px}code{overflow-wrap:anywhere}.result{padding:12px;background:#edf6ee}.failed{background:#fff1ed}a{color:#1949a8}</style><h1>Geneway S1 Web 操作与验收说明</h1><p>渠道为模拟验收；本视频覆盖 S1 Web。所有账号、对话和节拍输入均为本机隔离的 synthetic 验收数据，不连接生产业务或真实成员渠道。</p><p>模型：ZenMux ${escape(report.model.model)}。候选：<code>${escape(report.candidate.head)}</code>；相关文件的 SHA-256 见同目录 observations.json。界面以桌面 1440×900、手机 390×844 实际操作。</p><p class="result ${report.ok ? '' : 'failed'}">本轮${report.ok ? '已完成脚本列出的 S1 检查，用户最终验收另行确认。' : '尚未通过，需修复未完成步骤后复验；具体原因见同目录检查记录。'}</p><p><a href="p4-s1.mp4">打开完整操作视频</a> · <a href="observations.json">查看实际检查记录</a></p><video controls preload="metadata" src="p4-s1.mp4"></video><section><h2>开始前</h2><p>管理员在后台维护员工、执行指令和开放成员；成员只能使用当前获准员工。登录后进入“我的对话”，选择员工即可新建空白上下文的对话。历史仅本人可读，工作在关联对话中保留独立执行和停止入口。</p><p>本说明使用一次性验收账号。${cleanupText}复验需由获准维护者重新运行验收入口。视频、截图及本说明可离线查看，无需外部字体或网络。</p></section>${report.steps.map((step, index) => `<section><h2>${index + 1}. ${escape(step.title)}</h2><p>操作身份：${escape(step.actor === 'admin' ? '管理员' : '成员 ' + step.actor.toUpperCase())}。入口：${escape(step.control)}。</p><p class="result ${step.result === 'passed' ? '' : 'failed'}">${escape(step.result === 'passed' ? step.observed : '本步未达到预期：' + step.expected + ' 当前尚未取得通过结果；具体原因见同目录检查记录。')}</p>${step.screenshots?.length ? step.screenshots.map(shot => `<figure><img alt="${escape(shot.label)}" src="data:image/png;base64,${shot.image}"><figcaption>${escape(shot.label)}</figcaption></figure>`).join('') : '<p>本步未取得可用截图。</p>'}<p>对应视频 ${clock(step.startSeconds)}–${clock(step.endSeconds ?? step.startSeconds)}。</p></section>`).join('')}${report.incomplete.length ? `<section class="failed"><h2>未完成的步骤</h2><p>${escape(report.incomplete.map(id => steps.find(step => step.id === id)?.title).join('；'))}</p></section>` : ''}<section><h2>结果确认与恢复</h2><p>回复结束后可点“刷新历史”读取已完成内容。员工撤权、停用或对话归档时，旧历史按页面原因保持只读；不要重新创建对话来绕过授权。停止本次回复只影响该回复，停止工作只影响选定工作。若服务中断，当前回复显示“回复中断”，已有结果保留；历史不可用时先刷新历史，不把缺失历史当成新的空白上下文。</p><p>本次 W1、W2 分别使用 601 秒、600 秒与 10 件的独立输入；两项工作仍在执行时停止 W1，再核对 W2 的节拍结果为 60 秒/件。本轮要求共享 Host 与其精确官方 SDK 子进程具有同一运行和候选绑定，父进程启动记录、子进程预载就绪、实际模型请求及退出须能够关联；缺失时本轮不通过。正常退出依据 guard 日志核对；强制重启的 SIGKILL 单独依据实际信号、PID 和自有进程组消失证据核对，不填造正常退出日志或 SDK 自身退出状态。实际子进程数量和请求数见检查记录。该审计仅覆盖所选 Node 启动与网络 API，不代表整台机器或其他子进程的网络覆盖。</p></section></html>`
 }
 
 async function harnessCheck() {
@@ -819,10 +913,12 @@ async function harnessCheck() {
   assert.throws(() => argumentsFor(['--run', '--output', join(root, 'artifacts'), '--network-guard', '/tmp/approved.mjs']), /outside/)
   assert.throws(() => argumentsFor(['--run', '--harness-check']), /exactly one/)
   assert.equal(new Set(steps.map(step => step.id)).size, steps.length)
-  const env = runtimeEnvironment({ scratch: '/tmp/s1-check', stateFile: '/tmp/s1-check/state.json', authFile: '/tmp/s1-check/auth.json', dshHome: '/tmp/s1-check/dsh', origin: 'http://127.0.0.1:12345', auditFile: '/tmp/s1-check/network.jsonl', contextFile: '/tmp/s1-check/context.jsonl', canaries: { a: 'A_ONLY', b: 'B_ONLY' }, guard: '/tmp/approved.mjs' })
+  const binding = { runId: 's1-pure-check', candidate: 'a'.repeat(64), guardSha256: 'b'.repeat(64) }
+  const env = runtimeEnvironment({ scratch: '/tmp/s1-check', stateFile: '/tmp/s1-check/state.json', authFile: '/tmp/s1-check/auth.json', dshHome: '/tmp/s1-check/dsh', origin: 'http://127.0.0.1:12345', auditFile: '/tmp/s1-check/network.jsonl', contextFile: '/tmp/s1-check/context.jsonl', canaries: { a: 'A_ONLY', b: 'B_ONLY' }, guard: '/tmp/approved.mjs', auditBinding: binding })
   assert.equal(env.GENEWAY_SECRET_ROOT, join(root, 'var/secrets'))
   assert.equal(env.GENEWAY_MODEL_CREDENTIAL_REF, 'zenmux-p4-model.key')
   assert.equal(env.DSH_HOME, env.GENEWAY_DSH_HOME)
+  assert.equal(env.GENEWAY_NETWORK_AUDIT_ROLE, 'host'); assert.equal(env.GENEWAY_NETWORK_AUDIT_RUN_ID, binding.runId); assert.equal(env.GENEWAY_NETWORK_AUDIT_CANDIDATE, binding.candidate)
   assert(!Object.keys(env).some(key => /GEARJOB|FEISHU|HIVE|KIVO|ZENMUX_API_KEY/.test(key)))
   assert(!within(root, env.GENEWAY_AUTH_FILE))
   const records = [], credential = 'synthetic-credential-must-never-be-recorded'
@@ -847,9 +943,49 @@ async function harnessCheck() {
     assert(!failed.includes('本轮隔离服务已关闭')); assert(!failed.includes('登录凭据已删除'))
     assert(failed.includes('退出状态尚未确认')); assert(failed.includes('登录凭据的清理尚未确认'))
   }
+  networkChecks()
   await recordingChecks()
   await interruptCleanupChecks()
-  console.log(JSON.stringify({ ok: true, mode: 'harness-check', requiredSteps: steps.length, checks: ['explicit-run-boundary', 'environment-and-credential-reference', 'synthetic-context-observer', 'public-dto', 'native-reference-deduplication', 'offline-guide-escaping', 'cleanup-prose-follows-observed-state', 'recorder-early-and-abnormal-exit', 'recording-duration-and-last-screenshot-coverage', 'signal-cleanup-idempotence-and-escalation', 'auth-initializer-drain-and-cleanup-failure'], nativeStarts: 0, modelRequests: 0, browserStarts: 0, serverStarts: 0, realSecretReads: 0 }, null, 2))
+  console.log(JSON.stringify({ ok: true, mode: 'harness-check', requiredSteps: steps.length, checks: ['explicit-run-boundary', 'environment-and-credential-reference', 'synthetic-context-observer', 'public-dto', 'native-reference-deduplication', 'offline-guide-escaping', 'cleanup-prose-follows-observed-state', 'recorder-early-and-abnormal-exit', 'recording-duration-and-last-screenshot-coverage', 'signal-cleanup-idempotence-and-escalation', 'auth-initializer-drain-and-cleanup-failure', 'Host-SDK-ready-fetch-exit-correlation-and-cancel-before-fetch', 'observed-hard-restart-and-bounded-SDK-parent-exit-gap'], nativeStarts: 0, modelRequests: 0, browserStarts: 0, serverStarts: 0, realSecretReads: 0 }, null, 2))
+
+  function networkChecks() {
+    const host = value => ({ ...binding, pid: 123, ppid: 100, role: 'host', ...value })
+    const sdk = value => ({ ...binding, pid: 456, ppid: 123, role: 'sdk', ...value })
+    const rows = [host({ kind: 'guard-ready' }), host({ kind: 'sdk-spawn', parentPid: 123, childPid: 456 }), sdk({ kind: 'guard-ready' }), sdk({ kind: 'fetch', host: 'zenmux.ai', model, permitted: true }), sdk({ kind: 'process-exit', code: 0 }), host({ kind: 'sdk-exit', parentPid: 123, childPid: 456, code: 0, signal: null }), host({ kind: 'process-exit', code: 0 })]
+    assert.equal(networkAudit(rows, { ...binding, hostPids: [123] }).sdkChildren[0].modelFetches, 1)
+    for (const change of [
+      value => value.filter(row => !(row.role === 'sdk' && row.kind === 'guard-ready')),
+      value => value.map(row => row.role === 'sdk' ? { ...row, ppid: 999 } : row),
+      value => value.map(row => ({ ...row, candidate: 'c'.repeat(64) })),
+      value => value.filter(row => row.kind !== 'sdk-exit'),
+      value => value.filter(row => !(row.role === 'host' && row.kind === 'process-exit')),
+    ]) assert.throws(() => networkAudit(change(structuredClone(rows)), { ...binding, hostPids: [123] }))
+    const cancelled = [...rows, host({ kind: 'sdk-spawn', parentPid: 123, childPid: 457 }), sdk({ kind: 'guard-ready', pid: 457 }), host({ kind: 'sdk-exit', parentPid: 123, childPid: 457, code: null, signal: 'SIGTERM' })]
+    assert.equal(networkAudit(cancelled, { ...binding, hostPids: [123] }).sdkChildren[1].outcome, 'no-model-request-observed')
+    const failed = [...rows, host({ kind: 'sdk-spawn', parentPid: 123, childPid: 458 }), host({ kind: 'sdk-exit', parentPid: 123, childPid: 458, code: 1, signal: null })]
+    assert.equal(networkAudit(failed, { ...binding, hostPids: [123] }).sdkChildren[1].outcome, 'failed-before-ready')
+    assert.equal(networkAudit([...rows, host({ pid: 124, kind: 'guard-ready' }), host({ pid: 124, kind: 'process-exit', code: 0 })], { ...binding, hostPids: [123, 124] }).hostPids.length, 2)
+    const prefix = rows.filter(row => !['process-exit', 'sdk-exit'].includes(row.kind))
+    const hardRestart = [...prefix, host({ pid: 124, kind: 'guard-ready' }), host({ pid: 124, kind: 'process-exit', code: 0 })]
+    const evidence = { ...binding, pid: 123, processGroupId: 123, requestedSignal: 'SIGKILL', signalDelivered: true, observedExitCode: null, observedSignal: 'SIGKILL', pidExited: true, groupExited: true, sdkPidsExited: [456], auditRowsBeforeSignal: prefix.length, requestedAt: 1, observedExitAt: 2, checkedAt: 3 }
+    const restarted = options => networkAudit(hardRestart, { ...binding, hostPids: [123, 124], hostInterruptions: [evidence], ...options })
+    assert.throws(() => restarted({ hostInterruptions: [] }), /Host process exit/)
+    const interrupted = restarted()
+    assert.equal(interrupted.hosts[0].outcome, 'harness-observed-SIGKILL')
+    assert.equal(interrupted.hosts[1].outcome, 'normal-guard-exit')
+    assert.equal(interrupted.sdkChildren[0].parentExitObserved, false)
+    assert.equal(interrupted.sdkChildren[0].exitCode, null); assert.equal(interrupted.sdkChildren[0].signal, null)
+    for (const change of [
+      value => { value.candidate = 'c'.repeat(64) }, value => { value.runId = 'other-run' }, value => { value.guardSha256 = 'c'.repeat(64) }, value => { value.pid = 999 },
+      value => { value.observedSignal = 'SIGTERM' }, value => { value.observedExitCode = 0 },
+      value => { value.signalDelivered = false }, value => { value.groupExited = false }, value => { value.pidExited = false },
+      value => { value.sdkPidsExited = [] }, value => { value.auditRowsBeforeSignal = 1 },
+    ]) { const invalid = structuredClone(evidence); change(invalid); assert.throws(() => restarted({ hostInterruptions: [invalid] })) }
+    const late = [...hardRestart, host({ kind: 'sdk-spawn', parentPid: 123, childPid: 789 }), sdk({ kind: 'guard-ready', pid: 789 })]
+    assert.throws(() => networkAudit(late, { ...binding, hostPids: [123, 124], hostInterruptions: [evidence] }), /SDK parent exit/)
+    assert.throws(() => networkAudit(hardRestart.filter(row => !(row.pid === 124 && row.kind === 'process-exit')), { ...binding, hostPids: [123, 124], hostInterruptions: [evidence] }), /Host process exit/)
+    assert.throws(() => networkAudit(hardRestart.filter(row => !(row.role === 'sdk' && row.kind === 'guard-ready')), { ...binding, hostPids: [123, 124], hostInterruptions: [evidence] }), /SDK guard readiness/)
+  }
 
   function childFixture() {
     return Object.assign(new EventEmitter(), { pid: 12345, exitCode: null, signalCode: null, stdin: Object.assign(new EventEmitter(), { end: () => undefined }) })

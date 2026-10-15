@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import QRCode from 'qrcode'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, relative, resolve, sep } from 'node:path'
@@ -13,6 +14,8 @@ import { readConnectionCatalog } from './connection-catalog.mjs'
 import { TPM_FILTERS } from './domain/tpm.mjs'
 import { testKivoTpmConnection } from '../plugins/kivo-tpm.mjs'
 import { createFeishuRuntime } from '../plugins/feishu.mjs'
+import { createWeixinChannelRuntime } from '../plugins/weixin.mjs'
+import { createChannelSecretStore } from './channel-secret-store.mjs'
 import { ChannelServiceError, createChannelService } from './channel-service.mjs'
 import { AutomationServiceError, createAutomationRuntime, createAutomationService } from './automation-service.mjs'
 
@@ -25,7 +28,7 @@ const COLLABORATION_ITEM_FIELDS = ['id', 'employeeId', 'skillId', 'capabilityId'
 const BUSINESS_INPUT_FIELDS = ['workOrderId', 'availableSeconds', 'quantity']
 const WORK_INPUT_FIELDS = [...BUSINESS_INPUT_FIELDS, 'recordType', 'reference', 'filters']
 
-export async function start() {
+export async function start({ feishuSdk, weixinApi } = {}) {
   const port = positivePort(process.env.GENEWAY_PORT ?? 3471)
   const host = process.env.GENEWAY_HOST ?? '127.0.0.1'
   const statePath = resolve(process.env.GENEWAY_STATE ?? join(root, 'var', 'state.json'))
@@ -44,9 +47,9 @@ export async function start() {
   const store = createFileStore(statePath)
   const connectionCatalog = await readConnectionCatalog(runtimeConfig.connectionCatalogFile, root)
   const runner = createDshRunner({ root, config: runtimeConfig })
-  const collaborationRunner = createCollaborationRunner({ store, root, dshHome: runtimeConfig.dshHome, secretRoot: runtimeConfig.secretRoot, connectionCatalog })
+  const collaborationRunner = createCollaborationRunner({ store, root, dshHome: runtimeConfig.dshHome, secretRoot: runtimeConfig.secretRoot, connectionCatalog, getWorkService: () => service })
   const knowledge = collaborationRunner.getKnowledgeService()
-  let channelRuntime, automationRuntime
+  let channelRuntime, automationRuntime, channel, weixinRuntime
   const service = createWorkService({
     store, runner, collaborationRunner,
     connectionCatalog,
@@ -58,7 +61,12 @@ export async function start() {
     },
     onAutomationTerminal: () => channelRuntime?.sendAutomationNotifications({ ownerCheck: () => automationRuntime?.ownsLock() === true }),
   })
-  const conversationService = createConversationService({ store, runner: collaborationRunner })
+  const conversationService = createConversationService({ store, runner: collaborationRunner, connectionCatalog, onError: error => console.error('渠道回复处理失败', /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code) ? error.code : 'INTERNAL_ERROR'), onTurnTerminal: async refs => {
+    const created = await channel.ensureConversationDeliveries(refs)
+    for (const delivery of created.deliveries) if (delivery.status === 'pending') {
+      try { await channelRuntime.sendDelivery(delivery.id) } catch (error) { if (!['INVALID_STATE', 'DELIVERY_FORBIDDEN'].includes(error?.code)) throw error }
+    }
+  } })
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
   const automation = createAutomationService({ store, workService: service, connectionCatalog })
@@ -66,8 +74,10 @@ export async function start() {
     store, automationService: automation, workService: service, dataRoot: runtimeConfig.dataRoot,
     onError: error => console.error(error),
   })
-  const channel = createChannelService({ store, workService: service })
-  channelRuntime = createFeishuRuntime({ store, channelService: channel, secretRoot: process.env.GENEWAY_SECRET_ROOT?.trim() ? runtimeConfig.secretRoot : undefined, automationOwnerCheck: () => automationRuntime.ownsLock() })
+  channel = createChannelService({ store, workService: service, conversationService, connectionCatalog, onIdentityChanged: () => weixinRuntime?.sync() })
+  const feishuRuntime = createFeishuRuntime({ store, channelService: channel, secretRoot: process.env.GENEWAY_SECRET_ROOT?.trim() ? runtimeConfig.secretRoot : undefined, recover: false, flushOnStart: false, sdk: feishuSdk })
+  weixinRuntime = createWeixinChannelRuntime({ store, channelService: channel, secrets: createChannelSecretStore(runtimeConfig.secretRoot), api: weixinApi })
+  channelRuntime = createChannelRuntime({ store, channelService: channel, feishuRuntime, weixinRuntime, ownerCheck: () => automationRuntime.ownsLock() })
   try {
     await automationRuntime.start()
     await conversationService.ensureReady()
@@ -86,7 +96,7 @@ export async function start() {
     await automationRuntime.close().catch(() => undefined)
     throw error
   }
-  const server = createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, automation, automationRuntime, store, auth, index, trustedOrigin })
+  const server = createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog, store, auth, index, trustedOrigin })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
   let shuttingDown = false
@@ -101,9 +111,9 @@ export async function start() {
   return server
 }
 
-export function createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, automation, automationRuntime, store, auth, index = '', trustedOrigin }) {
+export function createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog = [], store, auth, index = '', trustedOrigin }) {
   if (!service || !store || !auth || !trustedOrigin) throw new Error('server dependencies are required')
-  channel ??= createChannelService({ store, workService: service })
+  channel ??= createChannelService({ store, workService: service, conversationService, connectionCatalog })
   const channelRuntimeReady = channelAppId => channelRuntime?.isAvailable?.(channelAppId) === true
   return createServer(async (request, response) => {
     try {
@@ -182,7 +192,7 @@ export function createGenewayServer({ service, conversationService, knowledge, c
       }
       if (automation && request.method === 'POST' && url.pathname === '/api/automations') {
         exactQuery(url)
-        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationIdentityId'])
         const rule = await automation.createRule(actor, body)
         return sendJson(response, 200, rule)
       }
@@ -194,7 +204,7 @@ export function createGenewayServer({ service, conversationService, knowledge, c
       }
       if (automation && automationMatch && request.method === 'PATCH' && !automationMatch[2]) {
         exactQuery(url)
-        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationIdentityId'])
         const rule = await automation.updateRule(actor, decode(automationMatch[1]), body)
         await automationRuntime?.refresh?.()
         return sendJson(response, 200, rule)
@@ -296,6 +306,42 @@ export function createGenewayServer({ service, conversationService, knowledge, c
         exactQuery(url)
         return sendJson(response, 200, safeChannelState(await channel.memberChannelState(actor)))
       }
+      if (channel && url.pathname === '/api/admin/channel-defaults') {
+        exactQuery(url)
+        if (request.method === 'GET') return sendJson(response, 200, await channel.getChannelDefaults(actor))
+        if (request.method === 'PATCH') {
+          const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['defaultChannelEmployeeId'])
+          return sendJson(response, 200, await channel.setChannelDefaults(actor, body))
+        }
+      }
+      if (channel && request.method === 'POST' && url.pathname === '/api/channels/weixin/bindings') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['channelAppId'])
+        if (!weixinRuntime) throw httpError('UNAVAILABLE', '微信扫码暂不可用')
+        return sendJson(response, 201, safeLink(await weixinRuntime.beginBinding(actor, body)))
+      }
+      const weixinBindingMatch = url.pathname.match(/^\/api\/channels\/weixin\/bindings\/([^/]+)$/)
+      if (channel && weixinBindingMatch && request.method === 'DELETE') {
+        exactQuery(url)
+        await protectedWrite(request, context.token, auth, trustedOrigin, [])
+        const result = weixinRuntime ? await weixinRuntime.cancelBinding(actor, { linkCodeId: decode(weixinBindingMatch[1]) }) : await channel.cancelWeixinBinding(actor, { linkCodeId: decode(weixinBindingMatch[1]) })
+        return sendJson(response, 200, safeLink(result))
+      }
+      const weixinQrMatch = url.pathname.match(/^\/api\/channels\/weixin\/bindings\/([^/]+)\/qr$/)
+      if (channel && weixinQrMatch && request.method === 'GET') {
+        exactQuery(url)
+        const link = (await channel.memberChannelState(actor)).linkCodes.find(item => item.id === decode(weixinQrMatch[1]) && item.kind === 'weixin-qr' && item.status === 'active')
+        if (!link || Date.parse(link.expiresAt) <= Date.now()) throw httpError('NOT_FOUND', '扫码已结束，请重新生成二维码')
+        if (typeof link.qrcodeUrl !== 'string' || Buffer.byteLength(link.qrcodeUrl) > 2048) throw httpError('INVALID_REQUEST', '扫码地址暂不可用，请重新生成')
+        const svg = await QRCode.toString(link.qrcodeUrl, { type: 'svg' })
+        return send(response, 200, svg, 'image/svg+xml; charset=utf-8', { 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox" })
+      }
+      const rotationMatch = url.pathname.match(/^\/api\/channels\/identities\/([^/]+)\/conversations$/)
+      if (channel && rotationMatch && request.method === 'POST') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId'])
+        return sendJson(response, 201, await channel.rotateConversation(actor, { identityId: decode(rotationMatch[1]), ...body }))
+      }
       if (channel && request.method === 'POST' && url.pathname === '/api/channels/link-codes') {
         exactQuery(url)
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['channelAppId'])
@@ -305,14 +351,16 @@ export function createGenewayServer({ service, conversationService, knowledge, c
       const linkMatch = url.pathname.match(/^\/api\/channels\/link-codes\/([^/]+)\/confirm$/)
       if (channel && linkMatch && request.method === 'POST') {
         exactQuery(url)
-        await protectedWrite(request, context.token, auth, trustedOrigin, [])
-        return sendJson(response, 200, await channel.confirmLink(actor, { linkCodeId: decode(linkMatch[1]) }))
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId'])
+        const linkCodeId = decode(linkMatch[1])
+        if (!(await channel.memberChannelState(actor)).linkCodes.some(item => item.id === linkCodeId)) throw httpError('NOT_FOUND', '本人关联码不存在')
+        return sendJson(response, 200, safeLink(await channel.confirmLink(actor, { linkCodeId, ...body })))
       }
       const identityMatch = url.pathname.match(/^\/api\/channels\/identities\/([^/]+)$/)
       if (channel && identityMatch && request.method === 'DELETE') {
         exactQuery(url)
         await protectedWrite(request, context.token, auth, trustedOrigin, [])
-        return sendJson(response, 200, await channel.unlinkIdentity(actor, { identityId: decode(identityMatch[1]) }))
+        return sendJson(response, 200, safeIdentity(await channel.unlinkIdentity(actor, { identityId: decode(identityMatch[1]) })))
       }
       const dispatchMatch = url.pathname.match(/^\/api\/channels\/conversations\/([^/]+)\/default-dispatch$/)
       if (channel && dispatchMatch && request.method === 'PATCH') {
@@ -327,21 +375,29 @@ export function createGenewayServer({ service, conversationService, knowledge, c
       }
       if (channel && request.method === 'POST' && url.pathname === '/api/channels/deliveries') {
         exactQuery(url)
-        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['requestId', 'workId', 'resultId'])
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['requestId', 'workId', 'resultId', 'identityId', 'conversationId', 'turnId'])
+        const conversationReply = body.conversationId !== undefined || body.turnId !== undefined || body.identityId !== undefined
+        exactObject(body, conversationReply ? ['requestId', 'identityId', 'conversationId', 'turnId'] : ['requestId', 'workId', 'resultId'])
         const channelState = await channel.memberChannelState(actor)
-        const originApps = new Set(channelState.messages.filter(item => item.workId === body.workId && item.status === 'accepted' && item.command?.type === 'create').map(item => item.channelAppId))
-        if (originApps.size === 1 && !channelRuntimeReady([...originApps][0])) throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，未建立待发回复')
-        const created = await channel.createWorkDelivery(actor, body)
-        if (created.delivery.status !== 'pending') return sendJson(response, 200, created)
-        if (!channelRuntimeReady(created.delivery.channelAppId)) throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，回复保留为待发送')
+        if (conversationReply) {
+          const identity = channelState.identities.find(item => item.id === body.identityId)
+          if (!identity) throw httpError('NOT_FOUND', '本人渠道身份不存在')
+          if (!channelRuntimeReady(identity.channelAppId)) throw httpError('UNAVAILABLE', '渠道当前不可用，未建立待发回复')
+        } else {
+          const targets = channelState.workChannels?.filter(item => item.workId === body.workId) ?? []
+          if (targets.length === 1 && !channelRuntimeReady(targets[0].channelAppId)) throw httpError('UNAVAILABLE', '渠道当前不可用，未建立待发回复')
+        }
+        const created = conversationReply ? await channel.createConversationDelivery(actor, body) : await channel.createWorkDelivery(actor, body)
+        if (created.delivery.status !== 'pending') return sendJson(response, 200, { ...created, delivery: safeDelivery(created.delivery) })
+        if (!channelRuntimeReady(created.delivery.channelAppId)) throw httpError('UNAVAILABLE', '渠道当前不可用，回复保留为待发送')
         const delivery = await channelRuntime.sendDelivery(created.delivery.id)
-        return sendJson(response, 200, { ...created, delivery })
+        return sendJson(response, 200, { ...created, delivery: safeDelivery(delivery) })
       }
       const deliveryMatch = url.pathname.match(/^\/api\/channels\/deliveries\/([^/]+)(?:\/(retry))?$/)
       if (channel && deliveryMatch && request.method === 'DELETE' && !deliveryMatch[2]) {
         exactQuery(url)
         await protectedWrite(request, context.token, auth, trustedOrigin, [])
-        return sendJson(response, 200, await channel.cancelDelivery(actor, { deliveryId: decode(deliveryMatch[1]) }))
+        return sendJson(response, 200, safeDelivery(await channel.cancelDelivery(actor, { deliveryId: decode(deliveryMatch[1]) })))
       }
       if (channel && deliveryMatch && request.method === 'POST' && deliveryMatch[2] === 'retry') {
         exactQuery(url)
@@ -349,7 +405,7 @@ export function createGenewayServer({ service, conversationService, knowledge, c
         const delivery = (await channel.memberChannelState(actor)).deliveries.find(item => item.id === decode(deliveryMatch[1]))
         if (!delivery) throw httpError('NOT_FOUND', '投递不存在')
         if (!channelRuntimeReady(delivery.channelAppId)) throw httpError('UNAVAILABLE', '真实渠道发送尚未启用，投递状态未改变')
-        return sendJson(response, 200, await channelRuntime.sendDelivery(delivery.id, { retry: true }))
+        return sendJson(response, 200, safeDelivery(await channelRuntime.sendDelivery(delivery.id, { retry: true })))
       }
 
       if (channel && request.method === 'GET' && url.pathname === '/api/admin/channel-apps') {
@@ -445,7 +501,7 @@ export function createGenewayServer({ service, conversationService, knowledge, c
       return notFound(response)
     } catch (error) {
       const result = serviceFailure(error)
-      if (error instanceof ChannelServiceError) result.error.status = CHANNEL_ERROR_STATUS[error.code] ?? 500
+      if (error instanceof ChannelServiceError || Object.hasOwn(CHANNEL_ERROR_STATUS, error?.code)) result.error.status = CHANNEL_ERROR_STATUS[error.code] ?? 500
       else if (error instanceof AutomationServiceError) result.error.status = AUTOMATION_ERROR_STATUS[error.code] ?? 500
       else if (Number.isInteger(error?.status)) result.error.status = error.status
       return sendJson(response, result.error.status, { error: clientError(result.error) })
@@ -455,12 +511,13 @@ export function createGenewayServer({ service, conversationService, knowledge, c
 
 const CHANNEL_ERROR_STATUS = {
   INVALID_REQUEST: 400, LINK_CODE_INVALID: 400, UNAUTHORIZED: 401, FORBIDDEN: 403,
-  DELIVERY_FORBIDDEN: 403, NOT_FOUND: 404, CONFLICT: 409, INVALID_STATE: 409, UNAVAILABLE: 503,
+  DELIVERY_FORBIDDEN: 403, NOT_FOUND: 404, CONFLICT: 409, INVALID_STATE: 409, SOURCE_RETIRED: 409, UNAVAILABLE: 503,
+  CHANNEL_BUSY: 409, CHANNEL_DEFAULT_REQUIRED: 400, MODEL_NOT_CONFIGURED: 503, WEIXIN_BINDING_UNAVAILABLE: 503,
 }
 
 const AUTOMATION_ERROR_STATUS = {
   INVALID_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404,
-  REVISION_CONFLICT: 409, INVALID_STATE: 409, BUDGET_EXHAUSTED: 409, CONFLICT: 409,
+  REVISION_CONFLICT: 409, INVALID_STATE: 409, BUDGET_EXHAUSTED: 409, CONFLICT: 409, CAPABILITY_RETIRED: 409,
   SOURCE_NOT_CONFIGURED: 503,
   OWNER_NOT_RUNNING: 503, OWNER_LOCK_LOST: 503,
 }
@@ -478,24 +535,65 @@ async function conversationCall(service, method, ...args) {
   }
 }
 
-function safeChannelState(value) {
-  const workChannels = [...new Map(value.messages.filter(item => item.status === 'accepted' && item.direction === 'inbound' && item.workId && item.conversationId).map(item => [`${item.workId}:${item.conversationId}`, { workId: item.workId, channelAppId: item.channelAppId, conversationId: item.conversationId }])).values()]
-  return {
-    identities: value.identities.map(item => ({ id: item.id, channelAppId: item.channelAppId, status: item.status, externalIdentity: maskOfficialId(item.providerUserId), updatedAt: item.updatedAt })),
-    conversations: value.conversations.map(item => ({ id: item.id, channelAppId: item.channelAppId, identityId: item.identityId, type: item.type, status: item.status, externalConversation: maskOfficialId(item.providerConversationId), defaultDispatch: item.defaultDispatch, updatedAt: item.updatedAt })),
-    deliveries: value.deliveries.map(item => ({ id: item.id, channelAppId: item.channelAppId, workId: item.workId, resultId: item.resultId, targetConversationId: item.targetConversationId, status: item.status, attempts: item.attempts, error: item.error, createdAt: item.createdAt, updatedAt: item.updatedAt })),
-    linkCodes: value.linkCodes.map(item => ({ id: item.id, channelAppId: item.channelAppId, status: item.status, expiresAt: item.expiresAt, matchedIdentityId: item.matchedIdentityId, matchedConversationId: item.matchedConversationId, updatedAt: item.updatedAt })),
-    workChannels,
-  }
+function safeIdentity(item) {
+  return { id: item.id, channelAppId: item.channelAppId, status: item.status, externalIdentity: maskOfficialId(item.providerUserId), defaultEmployeeId: item.defaultEmployeeId ?? null, activeConversationId: item.activeConversationId ?? null,
+    ...(item.weixin ? { runtimeState: item.weixin.runtimeState, runtimeError: item.weixin.error?.code } : {}), updatedAt: item.updatedAt }
 }
-
+function safeDelivery(item) {
+  return { id: item.id, channelAppId: item.channelAppId, workId: item.workId, resultId: item.resultId, sourceRef: item.sourceRef, targetIdentityId: item.targetIdentityId, targetConversationId: item.targetConversationId, status: item.status, attempts: item.attempts, error: item.error,
+    ...(item.sendProgress ? { progress: { acknowledgedParts: item.sendProgress.acknowledgedParts.length, totalParts: item.sendProgress.totalParts } } : {}), createdAt: item.createdAt, updatedAt: item.updatedAt }
+}
+function safeLink(item) {
+  return { id: item.id, kind: item.kind, channelAppId: item.channelAppId, status: item.status, expiresAt: item.expiresAt, matchedIdentityId: item.matchedIdentityId, matchedConversationId: item.matchedConversationId,
+    ...(item.status === 'active' && item.qrcodeUrl ? { qrcodeUrl: item.qrcodeUrl } : {}), error: item.error, updatedAt: item.updatedAt }
+}
+function safeChannelState(value) {
+  const legacy = value.messages.filter(item => item.status === 'accepted' && item.direction === 'inbound' && item.workId && item.conversationId).map(item => ({ workId: item.workId, channelAppId: item.channelAppId, conversationId: item.conversationId }))
+  const workChannels = [...new Map([...legacy, ...(value.workChannels ?? [])].map(item => [`${item.workId}:${item.conversationId}`, item])).values()]
+  return { defaultChannelEmployeeId: value.defaultChannelEmployeeId ?? null,
+    identities: value.identities.map(safeIdentity),
+    conversations: value.conversations.map(item => ({ id: item.id, channelAppId: item.channelAppId, identityId: item.identityId, type: item.type, status: item.status, externalConversation: maskOfficialId(item.providerConversationId), defaultDispatch: item.defaultDispatch, updatedAt: item.updatedAt })),
+    deliveries: value.deliveries.map(safeDelivery), linkCodes: value.linkCodes.map(safeLink), workChannels }
+}
 function safeMemberChannelApps(items, runtimeReady) {
-  return items.filter(item => item.enabled === true && item.status === 'active' && runtimeReady(item.id)).map(item => ({ id: item.id, provider: item.provider, runtimeStatus: 'ready' }))
+  return items.map(item => ({ id: item.id, provider: item.provider, enabled: item.enabled, status: item.status, runtimeStatus: runtimeReady(item.id) ? 'ready' : 'unavailable' }))
 }
 
 function maskOfficialId(value) {
   const text = String(value ?? '')
   return text.length <= 4 ? '•'.repeat(text.length) : `…${text.slice(-4)}`
+}
+
+export function createChannelRuntime({ store, channelService, feishuRuntime, weixinRuntime, ownerCheck } = {}) {
+  let started = false, closed = false
+  const runtimeFor = app => app?.provider === 'feishu' ? feishuRuntime : app?.provider === 'weixin' ? weixinRuntime : undefined
+  async function sendDelivery(deliveryId, options) {
+    if (closed) throw httpError('UNAVAILABLE', '渠道运行时已关闭')
+    const state = await store.read(), delivery = state.deliveries.find(item => item.id === deliveryId), app = state.channelApps.find(item => item.id === delivery?.channelAppId), runtime = runtimeFor(app)
+    if (!runtime) throw httpError('UNAVAILABLE', '渠道运行时不可用')
+    return runtime.sendDelivery(deliveryId, options)
+  }
+  async function sendAutomationNotifications({ ownerCheck: currentOwner = ownerCheck } = {}) {
+    const created = await channelService.ensureAutomationDeliveries({ ownerCheck: currentOwner })
+    for (const delivery of created.deliveries) if (delivery.status === 'pending') {
+      try { await sendDelivery(delivery.id, { ownerCheck: currentOwner }) } catch (error) { if (!['INVALID_STATE', 'DELIVERY_FORBIDDEN'].includes(error?.code)) throw error }
+    }
+    return created
+  }
+  return {
+    async start() { started = true; await channelService.recover(); await feishuRuntime.start(); await weixinRuntime.start(); await sendAutomationNotifications() },
+    async sync() { await Promise.all([feishuRuntime.sync(), weixinRuntime.sync()]) },
+    isAvailable(id) { return !closed && (feishuRuntime.isAvailable(id) || weixinRuntime.isAvailable(id)) },
+    sendDelivery, sendAutomationNotifications,
+    async close() {
+      if (closed) return
+      closed = true
+      const results = await Promise.allSettled([feishuRuntime.close(), weixinRuntime.close()])
+      if (started) await channelService.recover()
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed) throw failed.reason
+    },
+  }
 }
 
 export async function shutdownServer(server, service, channelRuntime, automationRuntime, gearJobEventReceiver, conversationService) {

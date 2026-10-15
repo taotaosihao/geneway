@@ -88,7 +88,7 @@ try {
   await writeFile(join(old, 'manifest.json'), JSON.stringify({ format: 'geneway-state-transfer', version: 2, createdAt: now, candidate: null, schema, entries: [{ path: 'state.json', bytes: oldBytes.length, sha256: digest(oldBytes) }] }))
   await run(['restore', '--input', old, '--data-root', oldRoot])
   const oldRestored = JSON.parse(await readFile(join(oldRoot, 'state.json'), 'utf8'))
-  assert.equal(oldRestored.version, 9)
+  assert.equal(oldRestored.version, STATE_VERSION)
   assert.deepEqual(oldRestored.conversations, [])
   assert.equal(oldRestored.works[0].conversationId, null)
   console.log('Conversation state checks passed: explicit v8 migration/restore, immutable ownership and native lineage, atomic rejection, active backup/restore interruption and terminal preservation (stdlib only; native/model/network starts=0)')

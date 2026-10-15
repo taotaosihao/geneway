@@ -15,7 +15,7 @@ try {
   await authorizationCommitChecks()
   await durableCommitChecks()
   await recoveryChecks()
-  console.log('P6 state/store checks passed; state=v9; durable faults=5; recovery replay/dispatch=0')
+  console.log(`P6 state/store checks passed; state=v${STATE_VERSION}; durable faults=5; recovery replay/dispatch=0`)
 } finally {
   await rm(root, { recursive: true, force: true })
 }
@@ -48,10 +48,10 @@ async function authorizationCommitChecks() {
 
 function migrationAndValidationChecks() {
   const migrated = migrateState(v7State())
-  assert.equal(STATE_VERSION, 9)
-  assert.equal(migrated.version, 9)
+  assert.equal(STATE_VERSION, 10)
+  assert.equal(migrated.version, STATE_VERSION)
   assert.deepEqual(migrated.works[0].actions, [])
-  assert.throws(() => migrateState({ ...migrated, version: 10 }), /未来/)
+  assert.throws(() => migrateState({ ...migrated, version: STATE_VERSION + 1 }), /未来/)
 
   const valid = actionState(action())
   assert.deepEqual(migrateState(structuredClone(valid)), valid)

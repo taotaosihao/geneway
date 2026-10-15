@@ -6,6 +6,7 @@ import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import { migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
 import { recoverActionFacts } from '../src/work-service.mjs'
+import { resolveCredentialFile } from '../src/execution-grant.mjs'
 
 const scriptPath = fileURLToPath(import.meta.url)
 const root = dirname(dirname(scriptPath))
@@ -17,27 +18,29 @@ const SESSION_PATH = /^dsh\/sessions\/[^/]+\/([^/]+)\/session\.v[1-9]\d*\.jsonl(
 const ACTIVE_STATUS = new Set(['accepted', 'running', 'cancel_requested'])
 
 if (resolve(process.argv[1] ?? '') === scriptPath) {
-  if (command === 'backup') await backup(args.output)
-  else if (command === 'restore') await restore(args.input, args.dataRoot)
+  if (command === 'backup') await backup(args.output, args)
+  else if (command === 'restore') await restore(args.input, args.dataRoot, args)
   else {
-    console.error('用法：node scripts/state-transfer.mjs backup --output <空目录> | restore --input <备份目录> --data-root <空目录>')
+    console.error('用法：node scripts/state-transfer.mjs backup --output <空目录> [--secret-output <独立空目录> --secret-root <秘密根>] | restore --input <备份目录> --data-root <空目录> [--secret-input <秘密包> --secret-root <独立空目录>]')
     process.exitCode = 2
   }
 }
 
-async function backup(outputArg) {
+async function backup(outputArg, options = {}) {
   if (!outputArg) throw new Error('backup 需要 --output')
   const output = resolve(outputArg)
   const statePath = resolve(process.env.GENEWAY_STATE ?? join(root, 'var', STATE_PATH))
   const dshHome = resolve(process.env.GENEWAY_DSH_HOME ?? join(root, 'var', 'dsh'))
   const target = await emptyTarget(output)
   await requireNoSymlinkComponents(output, '备份输出路径')
+  const secretPaths = await secretOptions(options, 'backup', [output, statePath, dshHome])
   const opened = []
   try {
     const stateFile = await openRegular(statePath)
     opened.push(stateFile)
     const sourceStateBuffer = await readFileFromStart(stateFile.handle)
     const sourceState = parseState(sourceStateBuffer, { versions: [STATE_VERSION] })
+    const sourceHash = digest(sourceStateBuffer)
     const createdAt = new Date().toISOString()
     const state = interruptActiveForBackup(sourceState, createdAt)
     migrateState(structuredClone(state))
@@ -69,6 +72,13 @@ async function backup(outputArg) {
       schema: schemaSummary(state, sessionRefs),
       entries: files.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 })),
     }
+    let secrets
+    if (secretPaths) {
+      // Reopen the live path: the original descriptor can point at a pre-rename state inode.
+      await unchangedState(statePath, sourceHash)
+      secrets = await openSecrets(secretPaths.root, collectSecretRefs(state), opened)
+      await unchangedState(statePath, sourceHash)
+    }
     await buildAndPublish(output, target, async stage => {
       for (const file of files) await copyOpenFile(file, join(stage, ...file.path.split('/')))
       const manifestPath = join(stage, 'manifest.json')
@@ -76,13 +86,19 @@ async function backup(outputArg) {
       await chmod(manifestPath, 0o600)
       await verifyBuilt(stage, manifest.entries)
     })
+    if (secretPaths) {
+      try {
+        await unchangedState(statePath, sourceHash)
+        await publishSecrets(secretPaths.package, secretPaths.target, secrets, { stateSha256: digest(stateBuffer), createdAt })
+      } catch (cause) { throw new Error('普通备份已写入，秘密包未完成；请使用新目标重新制作配对备份', { cause }) }
+    }
     console.log(JSON.stringify({ command: 'backup', output, entries: files.length, bytes: files.reduce((total, item) => total + item.bytes, 0), sessionRefs: includedSessionRefs.length }))
   } finally {
     await Promise.allSettled(opened.map(item => item.handle.close()))
   }
 }
 
-async function restore(inputArg, dataRootArg) {
+async function restore(inputArg, dataRootArg, options = {}) {
   if (!inputArg || !dataRootArg) throw new Error('restore 需要 --input 和 --data-root')
   const input = resolve(inputArg)
   const dataRoot = resolve(dataRootArg)
@@ -91,6 +107,7 @@ async function restore(inputArg, dataRootArg) {
   const target = await emptyTarget(dataRoot)
   await requireNoSymlinkComponents(input, '备份路径')
   await requireNoSymlinkComponents(dataRoot, '恢复路径')
+  const secretPaths = await secretOptions(options, 'restore', [input, dataRoot])
   const opened = []
   try {
     const manifestFile = await openRegularPath(input, 'manifest.json')
@@ -113,7 +130,8 @@ async function restore(inputArg, dataRootArg) {
     if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
     const stateFile = files.find(item => item.path === STATE_PATH)
     const sourceStateBuffer = await readFileFromStart(stateFile.file.handle)
-    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, 8, STATE_VERSION], migrate: false })
+    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, 8, 9, STATE_VERSION], migrate: false })
+    const secrets = secretPaths ? await verifySecretPackage(secretPaths.package, digest(sourceStateBuffer), collectSecretRefs(sourceState), opened) : undefined
     const sessionRefs = collectSessionRefs(sourceState)
     const expectedSchema = schemaSummary(sourceState, sessionRefs)
     if (JSON.stringify(manifest.schema) !== JSON.stringify(expectedSchema)) throw new Error('备份 schema 摘要不匹配')
@@ -137,6 +155,13 @@ async function restore(inputArg, dataRootArg) {
       for (const file of restoredEntries) await copyOpenFile(file, join(stage, ...file.path.split('/')))
       await verifyBuilt(stage, restoredEntries)
     })
+    if (secretPaths) {
+      try { await buildAndPublish(secretPaths.root, secretPaths.target, async stage => {
+        const entries = secrets.map(file => ({ ...file, path: basename(file.path) }))
+        for (const file of entries) await copyOpenFile(file, join(stage, file.path))
+        await verifyBuilt(stage, entries)
+      }) } catch (cause) { throw new Error('产品状态已恢复且外部收发关闭，秘密恢复未完成；请使用新目标重新恢复配对备份', { cause }) }
+    }
     console.log(JSON.stringify({ command: 'restore', input, dataRoot, entries: files.length, sessionRefs: includedSessionRefs.length }))
   } finally {
     await Promise.allSettled(opened.map(item => item.handle.close()))
@@ -151,7 +176,7 @@ function parseArgs(argv) {
     if (!key.startsWith('--') || typeof argv[index + 1] !== 'string') continue
     result[key.slice(2).replaceAll('-', '')] = argv[++index]
   }
-  return { output: result.output, input: result.input, dataRoot: result.dataroot }
+  return { output: result.output, input: result.input, dataRoot: result.dataroot, secretOutput: result.secretoutput, secretInput: result.secretinput, secretRoot: result.secretroot }
 }
 
 function parseState(buffer, { versions, migrate = true } = {}) {
@@ -206,7 +231,7 @@ export function prepareRestoredState(sourceState, timestamp = new Date().toISOSt
   const state = sourceState.version === STATE_VERSION ? structuredClone(sourceState) : migrateState(structuredClone(sourceState))
   const closingLinks = new Set(state.linkCodes.filter(link => ['active', 'matched'].includes(link.status)).map(link => link.id))
   const identityIds = new Set(state.linkCodes.filter(link => closingLinks.has(link.id)).map(link => link.matchedIdentityId).filter(Boolean))
-  const conversationIds = new Set(state.linkCodes.filter(link => closingLinks.has(link.id)).map(link => link.matchedConversationId).filter(Boolean))
+  const rebindIds = new Set(state.channelIdentities.filter(identity => identity.status !== 'unlinked' && (identity.weixin || identityIds.has(identity.id) && identity.status === 'pending')).map(identity => identity.id))
   return migrateState(recoverActionFacts({
     ...state,
     conversations: state.conversations.map(conversation => interruptConversation(conversation, timestamp)),
@@ -216,16 +241,20 @@ export function prepareRestoredState(sourceState, timestamp = new Date().toISOSt
     channelApps: state.channelApps.map(app => app.enabled || app.status !== 'disabled'
       ? { ...app, enabled: false, status: 'disabled', revision: app.revision + 1, updatedAt: timestamp }
       : app),
-    channelIdentities: state.channelIdentities.map(identity => identityIds.has(identity.id) && identity.status === 'pending'
-      ? { ...identity, status: 'unlinked', revision: identity.revision + 1, updatedAt: timestamp, unlinkedAt: timestamp }
+    channelIdentities: state.channelIdentities.map(identity => rebindIds.has(identity.id) && identity.status !== 'rebind-required'
+      ? { ...identity, status: 'rebind-required', activeConversationId: null, revision: identity.revision + 1, updatedAt: timestamp,
+        ...(identity.weixin ? { weixin: { ...identity.weixin, runtimeState: 'unavailable', error: { code: 'RESTORE_REBIND_REQUIRED' } } } : {}),
+      }
       : identity),
-    channelConversations: state.channelConversations.map(conversation => conversationIds.has(conversation.id) && conversation.status === 'pending'
-      ? { ...conversation, status: 'unlinked', revision: conversation.revision + 1, updatedAt: timestamp, unlinkedAt: timestamp }
+    channelConversations: state.channelConversations.map(conversation => rebindIds.has(conversation.identityId) && ['active', 'pending'].includes(conversation.status)
+      ? { ...conversation, status: 'rebind-required', revision: conversation.revision + 1, updatedAt: timestamp }
       : conversation),
     deliveries: state.deliveries.map(delivery => delivery.status === 'sending'
       ? { ...delivery, status: 'unknown', error: { code: 'RECOVERY_UNKNOWN', message: '发送效果待核对' }, updatedAt: timestamp }
-      : delivery),
-    linkCodes: state.linkCodes.map(link => closingLinks.has(link.id) ? { ...link, status: 'cancelled', updatedAt: timestamp } : link),
+      : delivery.status === 'pending' && rebindIds.has(delivery.targetIdentityId)
+        ? { ...delivery, status: 'blocked', error: { code: 'RESTORE_REBIND_REQUIRED', message: '恢复后请重新绑定渠道身份' }, updatedAt: timestamp }
+        : delivery),
+    linkCodes: state.linkCodes.map(link => closingLinks.has(link.id) ? { ...link, status: 'cancelled', error: { code: 'RESTORE_BINDING_CLOSED', message: '恢复后请重新绑定渠道身份' }, updatedAt: timestamp } : link),
   }, timestamp))
 }
 
@@ -260,6 +289,100 @@ function collectSessionRefs(state) {
   })
   for (const conversation of state.conversations ?? []) for (const session of conversation.sessions) refs.add(session.id)
   return [...refs].sort()
+}
+
+function collectSecretRefs(state) {
+  const refs = new Set()
+  const add = ref => {
+    if (ref === null || ref === undefined) return
+    if (typeof ref !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(ref) || ref === '.' || ref === '..') throw new Error('秘密引用无效')
+    refs.add(ref)
+  }
+  for (const key of ['modelRoutes', 'connections', 'channelApps']) for (const item of state[key] ?? []) add(item.credentialRef)
+  for (const identity of state.channelIdentities ?? []) if (identity.weixin) for (const key of ['tokenRef', 'cursorRef', 'contextRef']) add(identity.weixin[key])
+  // QR references are allocated before login; only the published challenge exists at this stage.
+  for (const link of state.linkCodes ?? []) if (link.kind === 'weixin-qr' && link.qrcodeUrl) add(link.loginRef)
+  return [...refs].sort()
+}
+
+async function secretOptions(options, mode, ordinaryPaths) {
+  const packageArg = mode === 'backup' ? options.secretOutput : options.secretInput
+  if (mode === 'backup' && options.secretInput !== undefined || mode === 'restore' && options.secretOutput !== undefined) throw new Error('秘密包参数不适用于当前命令')
+  if (packageArg === undefined && options.secretRoot === undefined) return undefined
+  if (typeof packageArg !== 'string' || !packageArg.trim() || typeof options.secretRoot !== 'string' || !options.secretRoot.trim()) throw new Error('秘密包与 --secret-root 必须同时显式提供')
+  const packagePath = resolve(packageArg), secretRoot = resolve(options.secretRoot)
+  const paths = [...ordinaryPaths, packagePath, secretRoot]
+  for (let left = 0; left < paths.length; left += 1) for (let right = left + 1; right < paths.length; right += 1) {
+    if ((left >= ordinaryPaths.length || right >= ordinaryPaths.length) && overlaps(paths[left], paths[right])) throw new Error('秘密包、秘密根与普通数据路径不得重叠')
+  }
+  await requireNoSymlinkComponents(packagePath, '秘密包路径')
+  await requireNoSymlinkComponents(secretRoot, '秘密根路径')
+  const outputPath = mode === 'backup' ? packagePath : secretRoot
+  const inputPath = mode === 'backup' ? secretRoot : packagePath
+  await requirePrivateDirectory(inputPath)
+  const target = await emptyTarget(outputPath)
+  if (target.exists) await requirePrivateDirectory(outputPath)
+  return { package: packagePath, root: secretRoot, target }
+}
+
+async function requirePrivateDirectory(path) {
+  await requireDirectory(path, '受限秘密目录')
+  const metadata = await lstat(path)
+  if (metadata.uid !== process.getuid() || (metadata.mode & 0o777) !== 0o700) throw new Error('秘密目录必须由当前用户持有且权限为 0700')
+}
+
+function requirePrivateFile(file) {
+  if (file.stat.uid !== process.getuid() || (file.stat.mode & 0o077) !== 0) throw new Error('秘密文件权限不安全')
+}
+
+async function unchangedState(statePath, expectedHash) {
+  const current = await openRegular(statePath)
+  try { if (await sha256(current.handle) !== expectedHash) throw new Error('秘密备份期间产品状态已变化，请重新备份') }
+  finally { await current.handle.close() }
+}
+
+async function openSecrets(secretRoot, refs, opened) {
+  const files = []
+  for (const ref of refs) {
+    const source = await resolveCredentialFile(secretRoot, ref)
+    const file = await openRegular(source)
+    opened.push(file)
+    requirePrivateFile(file)
+    files.push({ path: `secrets/${ref}`, bytes: file.stat.size, sha256: await sha256(file.handle), file })
+  }
+  return files
+}
+
+async function publishSecrets(packagePath, target, files, { stateSha256, createdAt }) {
+  const manifest = { format: 'geneway-secret-transfer', version: 1, createdAt, stateSha256, entries: files.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 })) }
+  await buildAndPublish(packagePath, target, async stage => {
+    for (const file of files) await copyOpenFile(file, join(stage, ...file.path.split('/')))
+    await writeFile(join(stage, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+    await verifyBuilt(stage, manifest.entries)
+  })
+}
+
+async function verifySecretPackage(packagePath, stateSha256, refs, opened) {
+  const manifestFile = await openRegularPath(packagePath, 'manifest.json')
+  opened.push(manifestFile)
+  requirePrivateFile(manifestFile)
+  let manifest
+  try { manifest = JSON.parse((await readFileFromStart(manifestFile.handle)).toString('utf8')) } catch { throw new Error('秘密包 manifest JSON 无效') }
+  if (!record(manifest) || Object.keys(manifest).sort().join(',') !== 'createdAt,entries,format,stateSha256,version'
+    || manifest.format !== 'geneway-secret-transfer' || manifest.version !== 1 || manifest.stateSha256 !== stateSha256
+    || typeof manifest.createdAt !== 'string' || !Number.isFinite(Date.parse(manifest.createdAt)) || !Array.isArray(manifest.entries)) throw new Error('秘密包与普通备份不匹配')
+  const paths = manifest.entries.map(entry => { validateEntry(entry); return safeRelative(entry.path) })
+  if (JSON.stringify(paths) !== JSON.stringify(refs.map(ref => `secrets/${ref}`))) throw new Error('秘密包引用集合与产品状态不匹配')
+  if (refs.length) await requirePrivateDirectory(join(packagePath, 'secrets'))
+  const files = []
+  for (const entry of manifest.entries) {
+    const file = await openRegularPath(packagePath, entry.path)
+    opened.push(file)
+    requirePrivateFile(file)
+    if (file.stat.size !== entry.bytes || await sha256(file.handle) !== entry.sha256) throw new Error('秘密包文件校验失败')
+    files.push({ ...entry, file })
+  }
+  return files
 }
 
 function visit(value, inspect, key = '') {

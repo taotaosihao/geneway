@@ -27,12 +27,12 @@ try {
   await contextOrderingChecks()
   await reconnectChecks()
   await deliveryChecks()
-  const lifecycle = protocolOnly ? { skipped: true, reason: '--protocol-only: SDK/Cordis not started; U0 decision pending' } : await lifecycleChecks()
+  const lifecycle = protocolOnly ? { skipped: true, reason: '--protocol-only: SDK/Cordis lifecycle intentionally not started' } : await lifecycleChecks()
   assert.deepEqual(simulator.failures, [])
   const serialized = JSON.stringify(publicValues)
   for (const value of ['test-secret-token-', 'test-secret-context-', 'test-secret-cursor-', 'context_token', 'bot_token', 'get_updates_buf']) assert.equal(serialized.includes(value), false, `public projection contains ${value}`)
   assert.equal(simulator.calls.some(call => /notifystart|notifystop|typing|config|upload|cdn/.test(call.endpoint)), false)
-  console.log(JSON.stringify({ ok: true, protocol: 'iLink HTTP simulator', package: '@xmanrui/dsh-im@4.39.0', channelAcceptance: 'protocol-only; C1 integration pending', httpCalls: simulator.calls.length, lifecycle, realPlatformCalls: 0, blindRetries: 0 }))
+  console.log(JSON.stringify({ ok: true, protocol: 'iLink HTTP simulator', package: '@xmanrui/dsh-im@4.39.0', channelAcceptance: 'iLink protocol; C1 transport/API checked separately', httpCalls: simulator.calls.length, lifecycle, realPlatformCalls: 0, blindRetries: 0 }))
 } finally {
   await Promise.allSettled(runtimes.map(runtime => runtime.close()))
   await simulator.close()
@@ -365,27 +365,38 @@ async function lifecycleChecks() {
   const requireFromDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
   const { Context } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/cordis')).href)
   const host = new Context(), originalHost = host
+  const registered = host.registry.size
   const h = await fixture()
-  let mounted
+  let mounted, plugin
   try {
     simulator.push(h.bot.id, [message(h, 'mounted', 1)])
-    mounted = host.plugin(createWeixinPlugin(h.runtime()))
+    mounted = host.plugin(plugin = createWeixinPlugin(h.runtime()))
     await mounted; await until(() => h.inbox.has('mounted'))
     await until(() => simulator.activePolls(h.bot.id) === 1)
+    assert.equal(host.registry.has(plugin), true)
+    assert.equal(host.registry.size, registered + 1)
+    await assert.rejects(acquireWeixinBot(h.bot.id), hasCode('OWNER_ALREADY_RUNNING'))
     await mounted.dispose(); mounted = undefined
     await until(() => simulator.activePolls(h.bot.id) === 0)
+    assert.equal(host.registry.has(plugin), false)
+    assert.equal(host.registry.size, registered)
+    const released = await acquireWeixinBot(h.bot.id); await released.release()
     const afterDispose = count(h, 'getupdates')
     simulator.push(h.bot.id, [message(h, 'remounted', 2)])
     await delay(30)
     assert.equal(count(h, 'getupdates'), afterDispose)
     assert.equal(h.inbox.has('remounted'), false)
-    mounted = host.plugin(createWeixinPlugin(h.runtime()))
+    mounted = host.plugin(plugin = createWeixinPlugin(h.runtime()))
     await mounted; await until(() => h.inbox.has('remounted'))
     assert.equal(host, originalHost)
     assert.equal(simulator.maxActivePolls(h.bot.id), 1)
     await mounted.dispose(); mounted = undefined
     await until(() => simulator.activePolls(h.bot.id) === 0)
-    return { sameHost: host === originalHost, dshVersion: requireFromDsh('./package.json').version, scope: 'installed candidate diagnostic; U0 compliance not asserted', disposedPolls: 0, maxConsumers: 1, remountReceived: true }
+    assert.equal(host.registry.has(plugin), false)
+    assert.equal(host.registry.size, registered)
+    const releasedAgain = await acquireWeixinBot(h.bot.id); await releasedAgain.release()
+    return { sameHost: host === originalHost, dshVersion: requireFromDsh('./package.json').version, cordisVersion: requireFromDsh('@deepseek-ai/cordis/package.json').version,
+      scope: 'actual plugin lifecycle on the installed candidate with local HTTP simulation', registryClean: true, lockReleased: true, disposedPolls: 0, maxConsumers: 1, remountReceived: true }
   } finally { await mounted?.dispose(); await host.fiber.dispose() }
 }
 

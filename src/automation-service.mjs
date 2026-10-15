@@ -159,7 +159,7 @@ export function createAutomationService({ store, workService = null, clock = () 
       await store.update(state => {
         const member = requireMember(state, actor)
         requireAutomationCapability()
-        exactInput(input, ['employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
+        exactInput(input, ['employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationIdentityId'])
         const fields = ruleFields(state, member, input, connectionCatalog, eventSourceId, eventSourceAvailable)
         const now = timestamp(clock())
         created = {
@@ -184,7 +184,7 @@ export function createAutomationService({ store, workService = null, clock = () 
       await store.update(state => {
         const member = requireMember(state, actor), rule = ownedRule(state, member, id)
         requireAutomationCapability()
-        exactInput(input, ['expectedRevision', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId'])
+        exactInput(input, ['expectedRevision', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationIdentityId'])
         requireRevision(rule, input.expectedRevision)
         if (rule.status === 'revoked') throw serviceError('INVALID_STATE', '已撤销规则不可修改')
         const fields = ruleFields(state, member, { ...rule, ...input }, connectionCatalog, eventSourceId, eventSourceAvailable)
@@ -416,7 +416,7 @@ export async function acquireAutomationOwner(dataRoot, { spawnImpl = spawn } = {
     const metadata = fstatSync(descriptor)
     if (!metadata.isFile() || (process.getuid && metadata.uid !== process.getuid())) throw serviceError('OWNER_LOCK_INVALID', 'automation owner lock 无效')
     fchmodSync(descriptor, 0o600)
-    const holder = spawnImpl('/bin/sh', ['-c', '/usr/bin/flock --nonblock --conflict-exit-code 73 3 || exit $?; printf ready; IFS= read -r _'], { stdio: ['pipe', 'pipe', 'ignore', descriptor] })
+    const holder = spawnImpl('/bin/sh', ['-c', '/usr/bin/flock --nonblock --conflict-exit-code 73 3 || exit $?; printf ready; IFS= read -r _ || test "$?" -eq 1'], { stdio: ['pipe', 'pipe', 'ignore', descriptor] })
     closeSync(descriptor)
     descriptor = undefined
     await waitForOwnerReady(holder)
@@ -429,7 +429,7 @@ export async function acquireAutomationOwner(dataRoot, { spawnImpl = spawn } = {
       async release() {
         releasing = true
         if (holder.exitCode !== null || holder.signalCode !== null) return
-        holder.stdin.end('\n')
+        holder.stdin.end()
         await waitForOwnerExit(holder)
       },
     }
@@ -574,10 +574,10 @@ function ruleFields(state, member, input, connectionCatalog, eventSourceId, even
     workOrderId: required(input.workOrderId, 'workOrderId'),
     trigger,
     maxRuns,
-    notificationConversationId: input.notificationConversationId === undefined ? null : nullableText(input.notificationConversationId),
+    notificationIdentityId: input.notificationIdentityId === undefined ? null : nullableText(input.notificationIdentityId),
   }
   validateBinding(state, member, fields, connectionCatalog)
-  validateNotification(state, member, fields.notificationConversationId)
+  validateNotification(state, member, fields.notificationIdentityId)
   return fields
 }
 
@@ -597,12 +597,11 @@ function validateBinding(state, member, value, connectionCatalog) {
 
 function validateNotification(state, member, id) {
   if (id === null) return
-  const conversation = state.channelConversations.find(item => item.id === id)
-  const identity = conversation && state.channelIdentities.find(item => item.id === conversation.identityId)
-  const app = conversation && state.channelApps.find(item => item.id === conversation.channelAppId)
-  if (!conversation || conversation.type !== 'private' || conversation.memberId !== member.id || conversation.status !== 'active'
-    || !identity || identity.status !== 'active' || identity.id !== conversation.identityId || identity.memberId !== member.id || identity.channelAppId !== conversation.channelAppId
-    || !app || app.enabled !== true || app.status !== 'active' || app.id !== conversation.channelAppId) throw serviceError('FORBIDDEN', '通知会话必须是本人已验证私聊')
+  const identity = state.channelIdentities.find(item => item.id === id)
+  const app = identity && state.channelApps.find(item => item.id === identity.channelAppId)
+  const endpoints = state.channelConversations.filter(item => item.identityId === id && item.channelAppId === app?.id && item.type === 'private' && item.memberId === member.id && item.status === 'active')
+  if (!identity || identity.status !== 'active' || identity.memberId !== member.id || endpoints.length !== 1
+    || !app || app.enabled !== true || app.status !== 'active') throw serviceError('FORBIDDEN', '通知身份必须是本人已验证私聊')
 }
 
 function normalizeTrigger(trigger) {
@@ -663,7 +662,7 @@ function gearJobRevisionMicros(value) {
 function instantMicros(value) { const millis = Date.parse(value); return Number.isFinite(millis) ? BigInt(millis) * 1000n : null }
 function timestamp(value) { const result = typeof value === 'string' ? value : value instanceof Date ? value.toISOString() : ''; if (!result || !Number.isFinite(Date.parse(result))) throw serviceError('INTERNAL_ERROR', '时钟无效'); return result }
 function required(value, label) { const result = text(value); if (!result) throw serviceError('INVALID_REQUEST', `${label} 无效`); return result }
-function nullableText(value) { if (value === null) return null; return required(value, 'notificationConversationId') }
+function nullableText(value) { if (value === null) return null; return required(value, 'notificationIdentityId') }
 function requestId(value) { const result = required(value, 'clientRequestId'); if (!/^[A-Za-z0-9._-]{1,128}$/.test(result)) throw serviceError('INVALID_REQUEST', 'clientRequestId 无效'); return result }
 function text(value) { return typeof value === 'string' && value.trim() ? value.trim() : undefined }
 function serviceError(code, message) { return new AutomationServiceError(code, message) }

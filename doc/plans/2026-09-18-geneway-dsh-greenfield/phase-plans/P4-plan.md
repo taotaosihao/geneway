@@ -123,6 +123,8 @@ S1/U0 的 runner、清单/lock、runtime-config、原生插件/桥及 state-tran
 
 模型仅从明确 Geneway 服务端秘密引用读取，移除默认扫描其他产品 settings。当前无合法可用引用时只阻塞真实模型验收，不能复制旧项目 secret、伪造真实调用或默换提供方。
 
+实施后原生宿主（2026-10-16）：共享 Host 通过 `src/dsh-host.mjs` 调用官方公开 `@deepseek-ai/dsh-app-boot` API，沿用官方 profile、resolution、patch、PluginPackages、代理与 fatal 非零退出处理。Geneway 负责正常 SIGTERM/SIGINT 的服务关闭顺序；关闭流程分别等待正在启动的共享 Host，以及工作 runner 中的 SDK 实际退出。关闭开始后不再发布可用 context 或安装工具；adapter 自己观察到的启动与清理双重失败标记为 `HOST_CLEANUP_FAILED` 并保留原 cause/errors，close 不吞掉异常。等价测试 handler 的关闭对照与真实 server 入口验收分别记录。
+
 ## 5. K0：Kivo 唯一 MCP 与 TPM 主链
 
 ### 5.1 独立工作目录与部署单元
@@ -245,6 +247,18 @@ owner稳定ID在确认时固定，只受理该owner私聊；同一bot同一时�
 
 未安装/停用渠道时Web、权限维护、解绑、历史仍可用；停知识能力后普通聊天/TPM仍能运行，撤销维护仍可阻止旧知识读取/注入/外发。只测实际有意义的最小装配，不穷举组合。K0-C及C2 owner还须在同一Host/同版本上实际卸载新增Kivo/微信插件，验证请求资源、轮询和注册已清理；再挂载验证没有重复工具/消费者且Web与历史维护仍可用。既有合成lifecycle probe不能代证这两种实际插件（AC-09）。
 
+实施后备份入口（2026-10-16）：先使目标数据根停止写入。以下路径变量须显式设为当前实例的 state、DSH 目录及独立目标；输出目录必须为空、互不重叠。普通包不含秘密；只有显式提供 secret 参数才按 state 引用制作独立秘密包，秘密目录 0700、文件 0600。配对恢复校验 state 哈希及引用集合；恢复后外部收发关闭、活动执行中断，需重绑身份不自动恢复。
+
+```sh
+GENEWAY_STATE="$state_file" GENEWAY_DSH_HOME="$dsh_home" \
+  node scripts/state-transfer.mjs backup --output "$backup_dir" \
+  --secret-output "$secret_package_dir" --secret-root "$secret_root"
+
+node scripts/state-transfer.mjs restore --input "$backup_dir" \
+  --data-root "$restore_dir" --secret-input "$secret_package_dir" \
+  --secret-root "$restored_secret_root"
+```
+
 ## 7. Team Sol执行责任、探针与验证
 
 ### 7.1 任务依赖和写入所有权
@@ -307,6 +321,8 @@ TZ=Asia/Shanghai node scripts/test-p6-correlation.mjs
 ```
 
 拟建并由相应任务落地：`scripts/test-p4-session.mjs`、`test-p4-kivo.mjs`、`test-p4-weixin.mjs`；`accept-p4-session.mjs`、`accept-p4-kivo.mjs`、`accept-p4.mjs`。名字可合并至已存在入口，不为每AC建脚本；当前不能记为已存在或通过。
+
+实施后检查入口（2026-10-16）：上文拟建名称保留规划时语境，现有聚合为 `pnpm test:p4:pure`（确定性及受控 loopback）、`pnpm test:p4:native`（实际 SDK/插件与受控协议链），`pnpm test:p4` 再串接受控 HTTP/Chrome；`pnpm test:p5` 保留历史自动化回归，不表示 P5-K1 已实施。pure 须显式指定获准 `GENEWAY_P1_RESTORE_STATE`，涉及 Kivo schema 的入口须显式指定脱敏 `GENEWAY_KIVO_WIRE_FIXTURE`。实际独立验收脚本为 `scripts/accept-p4-s1.mjs`、`scripts/accept-p4-kivo.mjs`、`scripts/accept-p4.mjs`，对应 `accept:p4-s1`、`accept:p4-kivo`、`accept:p4`。命令存在不等于运行通过；本机 pnpm workspace 前置检查失败与按原聚合逐项展开的实际结果分别保留在唯一验证记录中，不将后者称为 pnpm 聚合通过。每次候选、隔离、guard、退出码和未验证范围仍以该记录为准。
 
 Kivo在clone内读取package scripts后运行受影响包/API typecheck、目标单测/PG HTTP集成、`node scripts/check-boundaries.mjs`，必要OpenAPI/迁移检查；提交前Control lint按真实base。具体命令与退出码在唯一验证记录中落地，不预填不存在的filter脚本。
 

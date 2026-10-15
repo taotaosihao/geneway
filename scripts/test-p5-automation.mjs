@@ -9,14 +9,14 @@ import { createAutomationRuntime, createAutomationService, dailyOccurrenceKey, d
 import { createChannelService } from '../src/channel-service.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 import { createFeishuRuntime } from '../plugins/feishu.mjs'
-import { createFileStore, migrateState } from '../src/store/file-store.mjs'
+import { createFileStore, migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
 
 const execFile = promisify(execFileCallback)
 const transfer = fileURLToPath(new URL('./state-transfer.mjs', import.meta.url))
 const now = '2026-09-20T01:00:00.000Z'
 const catalog = [
-  { kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test' },
-  { kind: 'gearjob-rest', targetIdentity: 'gearjob-test-2', baseUrl: 'https://gearjob.test-2', hostHeader: 'gearjob.test-2', credentialRef: 'GEARJOB_TEST_2', sourceSystem: 'gearjob', sourceInstance: 'test-2', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test' },
+  { kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'test' },
+  { kind: 'gearjob-rest', targetIdentity: 'gearjob-test-2', baseUrl: 'https://gearjob.test-2', hostHeader: 'gearjob.test-2', credentialRef: 'GEARJOB_TEST_2', sourceSystem: 'gearjob', sourceInstance: 'test-2', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'test' },
 ]
 
 const state = fixture()
@@ -33,7 +33,7 @@ await historicalBindingChecks()
 await ruleChecks()
 await derivedChecks()
 await transferChecks()
-console.log('P5 automation checks passed; event trigger enabled; external effects=0')
+console.log('Retained automation checks passed; historical controls/derived values/restore; retired admission creates no facts')
 
 async function validatorChecks() {
   const base = fixture().current
@@ -65,15 +65,20 @@ async function historicalBindingChecks() {
     async read() { return structuredClone(local.current) },
     async update(mutator) { local.current = migrateState(await mutator(structuredClone(local.current))); return structuredClone(local.current) },
   }
-  const localService = createAutomationService({ store: localStore, clock: () => local.clock, idFactory: () => 'history', connectionCatalog: catalog })
-  const created = await localService.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: daily('08:00') })
-  const active = await localService.enableRule({ id: 'member-owner' }, created.id, { expectedRevision: 1 })
+  const localService = createAutomationService({ store: localStore, clock: () => local.clock, connectionCatalog: catalog })
+  const active = automationRule('historical-rule', 'active', daily('08:00'))
   const historicalWork = workRecord('historical-work')
   const historicalOccurrence = occurrenceRecord('historical-occurrence', active, '2026-09-20', historicalWork.id)
-  local.current = migrateState({ ...local.current, works: [historicalWork], automationOccurrences: [historicalOccurrence] })
-  await assert.rejects(localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 2, employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', workOrderId: 'WO-2' }), error => error.code === 'INVALID_STATE')
-  const updated = await localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 2, maxRuns: 9, notificationConversationId: null })
-  assert.equal(updated.revision, 3)
+  local.current = migrateState({ ...local.current, automationRules: [active], works: [historicalWork], automationOccurrences: [historicalOccurrence] })
+  const before = await localStore.read()
+  assert.equal((await localService.getRule({ id: 'member-owner' }, active.id)).usedRuns, 1)
+  assert.deepEqual(await localService.listOccurrences({ id: 'member-owner' }, active.id), [historicalOccurrence])
+  for (const id of ['member-peer', 'member-admin']) {
+    await assert.rejects(localService.getRule({ id }, active.id), error => error.code === 'NOT_FOUND')
+    await assert.rejects(localService.listOccurrences({ id }, active.id), error => error.code === 'NOT_FOUND')
+  }
+  await assert.rejects(localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 1, employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', workOrderId: 'WO-2' }), error => error.code === 'CAPABILITY_RETIRED')
+  assert.deepEqual(await localStore.read(), before)
   local.current = migrateState({
     ...local.current,
     members: local.current.members.map(member => member.id === 'member-owner' ? { ...member, employeeIds: ['employee-owner'] } : member),
@@ -81,108 +86,64 @@ async function historicalBindingChecks() {
     connections: local.current.connections.map(connection => connection.id === 'connection-owner' ? { ...connection, enabled: false, status: 'unavailable', allowedObjectIds: [] } : connection),
   })
   assert.doesNotThrow(() => migrateState(structuredClone(local.current)))
-  await assert.rejects(localService.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 3, maxRuns: 9 }), error => error.code === 'FORBIDDEN')
-  await assert.rejects(localService.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', workOrderId: 'WO-2', trigger: daily('08:00') }), error => error.code === 'FORBIDDEN')
-  const paused = await localService.pauseRule({ id: 'member-owner' }, active.id, { expectedRevision: 3 })
+  const paused = await localService.pauseRule({ id: 'member-owner' }, active.id, { expectedRevision: 1 })
   assert.equal(paused.status, 'paused')
-  await assert.rejects(localService.resumeRule({ id: 'member-owner' }, active.id, { expectedRevision: 4 }), error => error.code === 'FORBIDDEN')
-  await localService.revokeRule({ id: 'member-owner' }, active.id, { expectedRevision: 4 })
+  assert.equal(paused.revision, 2)
+  await assert.rejects(localService.resumeRule({ id: 'member-owner' }, active.id, { expectedRevision: 2 }), error => error.code === 'CAPABILITY_RETIRED')
+  await localService.revokeRule({ id: 'member-owner' }, active.id, { expectedRevision: 2 })
   const persisted = await localStore.read()
-  assert.deepEqual(persisted.automationOccurrences, [historicalOccurrence])
-  assert.deepEqual(persisted.works, [{ ...historicalWork, conversationId: null }])
+  assert.deepEqual(persisted.automationOccurrences, before.automationOccurrences)
+  assert.deepEqual(persisted.works, before.works)
 }
 
 async function ruleChecks() {
-  const created = await service.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: daily('08:00') })
-  assert.equal(created.status, 'draft')
-  assert.equal(created.revision, 1)
-  assert.equal(created.maxRuns, 10)
-  assert.equal(created.usedRuns, 0)
-  assert.equal(created.nextDueAt, null)
-  assert.deepEqual(Object.keys((await store.read()).automationRules[0]).sort(), ['connectionId', 'createdAt', 'effectiveFrom', 'employeeId', 'eventAcceptAfter', 'id', 'maxRuns', 'notificationConversationId', 'ownerMemberId', 'revision', 'revokedAt', 'skillId', 'status', 'trigger', 'updatedAt', 'workOrderId'])
-  await assert.rejects(service.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'event', source: 'gearjob' } }), error => error.code === 'INVALID_REQUEST')
-  await assert.rejects(service.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: daily('08:00'), maxRuns: 0 }), error => error.code === 'INVALID_REQUEST')
-  const enabled = await service.enableRule({ id: 'member-owner' }, created.id, { expectedRevision: 1 })
-  assert.equal(enabled.status, 'active')
-  assert.equal(enabled.revision, 2)
-  assert.equal(enabled.effectiveFrom, state.clock)
-  const currentRoutes = structuredClone(state.current.modelRoutes)
-  state.current.modelRoutes.find(route => route.id === 'route-owner').model = 'deepseek/deepseek-v4-pro'
-  await assert.rejects(service.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: daily('08:00') }), error => error.code === 'FORBIDDEN')
-  state.current.modelRoutes = currentRoutes
-  await assert.rejects(service.getRule({ id: 'member-peer' }, created.id), error => error.code === 'NOT_FOUND')
-  await assert.rejects(service.getRule({ id: 'member-admin' }, created.id), error => error.code === 'NOT_FOUND')
-  const channels = Object.fromEntries(['channelApps', 'channelIdentities', 'channelConversations'].map(key => [key, structuredClone(state.current[key])]))
-  const notificationInput = { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: daily('08:00'), notificationConversationId: 'conversation-owner' }
-  state.current = { ...state.current, channelIdentities: state.current.channelIdentities.map(item => item.id === 'identity-owner' ? { ...item, status: 'pending' } : item) }
-  await assert.rejects(service.createRule({ id: 'member-owner' }, notificationInput), error => error.code === 'FORBIDDEN')
-  state.current = { ...state.current, channelIdentities: state.current.channelIdentities.map(item => item.id === 'identity-owner' ? { ...item, status: 'unlinked', unlinkedAt: state.clock } : item) }
-  await assert.rejects(service.createRule({ id: 'member-owner' }, notificationInput), error => error.code === 'FORBIDDEN')
-  state.current = { ...state.current, channelIdentities: channels.channelIdentities.map(item => item.id === 'identity-owner' ? { ...item, status: 'active' } : item), channelConversations: state.current.channelConversations.map(item => item.id === 'conversation-owner' ? { ...item, identityId: 'identity-peer' } : item) }
-  await assert.rejects(service.createRule({ id: 'member-owner' }, notificationInput), error => error.code === 'FORBIDDEN')
-  state.current = { ...state.current, ...channels, channelApps: channels.channelApps.map(item => ({ ...item, enabled: false, status: 'disabled' })) }
-  await assert.rejects(service.createRule({ id: 'member-owner' }, notificationInput), error => error.code === 'FORBIDDEN')
-  state.current = migrateState({ ...state.current, ...channels })
-  const eventDraft = automationRule('event-service', 'draft', eventTrigger(), { effectiveFrom: null, eventAcceptAfter: null })
-  state.current = migrateState({ ...state.current, automationRules: [...state.current.automationRules, eventDraft] })
-  const unavailableEvents = createAutomationService({ store, clock: () => state.clock, connectionCatalog: catalog })
-  await assert.rejects(unavailableEvents.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: eventTrigger() }), error => error.code === 'SOURCE_NOT_CONFIGURED')
-  await assert.rejects(unavailableEvents.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 1, trigger: eventTrigger() }), error => error.code === 'SOURCE_NOT_CONFIGURED')
-  await assert.rejects(unavailableEvents.enableRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 1 }), error => error.code === 'SOURCE_NOT_CONFIGURED')
-  const updatedEvent = await service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 1, trigger: eventTrigger() })
-  assert.equal(updatedEvent.effectiveFrom, null); assert.equal(updatedEvent.eventAcceptAfter, null)
-  const enabledEvent = await service.enableRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 2 })
-  assert.equal(enabledEvent.effectiveFrom, null); assert.equal(enabledEvent.eventAcceptAfter, state.clock)
-  state.clock = '2026-09-20T01:15:00.000Z'
-  const retargetedNotification = await service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 3, maxRuns: 9, notificationConversationId: 'conversation-owner' })
-  assert.equal(retargetedNotification.eventAcceptAfter, enabledEvent.eventAcceptAfter)
-  const pausedEventService = await service.pauseRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 4 })
-  assert.equal(pausedEventService.eventAcceptAfter, enabledEvent.eventAcceptAfter)
-  await assert.rejects(unavailableEvents.resumeRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 5 }), error => error.code === 'SOURCE_NOT_CONFIGURED')
-  state.clock = '2026-09-20T01:30:00.000Z'
-  const resumedEvent = await service.resumeRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 5 })
-  assert.equal(resumedEvent.eventAcceptAfter, state.clock)
-  state.clock = '2026-09-20T01:45:00.000Z'
-  const retargetedEvent = await service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 6, employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', workOrderId: 'WO-2' })
-  assert.equal(retargetedEvent.eventAcceptAfter, state.clock)
-  const historicalEventWork = { ...workRecord('work-event-history'), employeeId: 'employee-owner-2', skillId: 'skill-owner-2', connectionId: 'connection-owner-2', input: { workOrderId: 'WO-2' } }
-  const historicalEvent = eventOccurrenceRecord('occurrence-event-history', retargetedEvent, historicalEventWork.id)
-  state.current = migrateState({ ...state.current, works: [...state.current.works, historicalEventWork], automationOccurrences: [...state.current.automationOccurrences, historicalEvent] })
-  await assert.rejects(service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 7, employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1' }), error => error.code === 'INVALID_STATE')
-  const historySafeEdit = await service.updateRule({ id: 'member-owner' }, eventDraft.id, { expectedRevision: 7, maxRuns: 9, notificationConversationId: null })
-  assert.equal(historySafeEdit.eventAcceptAfter, retargetedEvent.eventAcceptAfter)
-  state.current = migrateState({ ...state.current, works: state.current.works.filter(work => work.id !== historicalEventWork.id), automationOccurrences: state.current.automationOccurrences.filter(item => item.ruleId !== eventDraft.id), automationRules: state.current.automationRules.filter(rule => rule.id !== eventDraft.id) })
-  state.clock = '2026-09-20T02:00:00.000Z'
-  const updated = await service.updateRule({ id: 'member-owner' }, created.id, { expectedRevision: 2, maxRuns: 2, notificationConversationId: 'conversation-owner' })
-  assert.equal(updated.revision, 3)
-  assert.equal(updated.maxRuns, 2)
-  assert.equal(updated.effectiveFrom, state.clock)
-  await assert.rejects(service.updateRule({ id: 'member-owner' }, created.id, { expectedRevision: 2, maxRuns: 2 }), error => error.code === 'REVISION_CONFLICT')
-  const paused = await service.pauseRule({ id: 'member-owner' }, created.id, { expectedRevision: 3 })
-  assert.equal(paused.status, 'paused')
-  assert.equal(paused.revision, 4)
-  state.clock = '2026-09-20T03:00:00.000Z'
-  const resumed = await service.resumeRule({ id: 'member-owner' }, created.id, { expectedRevision: 4 })
-  assert.equal(resumed.status, 'active')
-  assert.equal(resumed.revision, 5)
-  assert.equal(resumed.effectiveFrom, state.clock)
-  state.current = migrateState({ ...state.current, employees: state.current.employees.map(item => item.id === 'employee-owner' ? { ...item, enabled: false } : item), connections: state.current.connections.map(item => item.id === 'connection-owner' ? { ...item, enabled: false, status: 'unavailable' } : item) })
-  const activeEvent = automationRule('event-containment', 'active', eventTrigger())
-  state.current = migrateState({ ...state.current, automationRules: [...state.current.automationRules, activeEvent] })
-  const pausedEvent = await service.pauseRule({ id: 'member-owner' }, activeEvent.id, { expectedRevision: 1 })
-  assert.equal(pausedEvent.status, 'paused')
-  assert.equal(pausedEvent.eventAcceptAfter, activeEvent.eventAcceptAfter)
-  state.current = migrateState({ ...state.current, automationRules: state.current.automationRules.filter(rule => rule.id !== activeEvent.id) })
-  const pausedAfterBindingLoss = await service.pauseRule({ id: 'member-owner' }, created.id, { expectedRevision: 5 })
-  assert.equal(pausedAfterBindingLoss.status, 'paused')
-  assert.equal(pausedAfterBindingLoss.revision, 6)
-  await assert.rejects(service.resumeRule({ id: 'member-owner' }, created.id, { expectedRevision: 6 }), error => error.code === 'FORBIDDEN')
-  const revoked = await service.revokeRule({ id: 'member-owner' }, created.id, { expectedRevision: 6 })
-  assert.equal(revoked.status, 'revoked')
-  assert.equal(revoked.revision, 7)
-  await assert.rejects(service.resumeRule({ id: 'member-owner' }, created.id, { expectedRevision: 7 }), error => error.code === 'INVALID_STATE')
-  const ownerRules = await service.listRules({ id: 'member-owner' })
-  assert.equal(ownerRules.length, 1)
+  const draft = automationRule('rule-draft', 'draft', daily('08:00'))
+  const active = automationRule('rule-active', 'active', daily('08:00'))
+  const paused = automationRule('rule-paused', 'paused', daily('08:00'))
+  const revoked = automationRule('rule-revoked', 'revoked', daily('08:00'))
+  const event = automationRule('rule-event', 'active', eventTrigger())
+  state.current = migrateState({ ...state.current, automationRules: [draft, active, paused, revoked, event] })
+  const projected = await service.getRule({ id: 'member-owner' }, draft.id)
+  assert.equal(projected.status, 'draft')
+  assert.equal(projected.revision, 1)
+  assert.equal(projected.maxRuns, 10)
+  assert.equal(projected.usedRuns, 0)
+  assert.equal(projected.nextDueAt, null)
+  assert.deepEqual(Object.keys(state.current.automationRules[0]).sort(), ['connectionId', 'createdAt', 'effectiveFrom', 'employeeId', 'eventAcceptAfter', 'id', 'maxRuns', 'notificationIdentityId', 'ownerMemberId', 'revision', 'revokedAt', 'skillId', 'status', 'trigger', 'updatedAt', 'workOrderId'])
+  const before = await store.read()
+  const input = { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: daily('08:00'), notificationIdentityId: 'identity-owner' }
+  for (const operation of [
+    () => service.createRule({ id: 'member-owner' }, input),
+    () => service.createRule({ id: 'member-owner' }, { ...input, trigger: { kind: 'event', source: 'gearjob' } }),
+    () => service.createRule({ id: 'member-owner' }, { ...input, maxRuns: 0 }),
+    () => service.updateRule({ id: 'member-owner' }, active.id, { expectedRevision: 1, maxRuns: 9 }),
+    () => service.enableRule({ id: 'member-owner' }, draft.id, { expectedRevision: 1 }),
+    () => service.resumeRule({ id: 'member-owner' }, paused.id, { expectedRevision: 1 }),
+    () => service.acceptDailyOccurrence({ ruleId: active.id, scheduledDate: '2026-09-20' }),
+    () => service.acceptManualOccurrence({ id: 'member-owner' }, active.id, { expectedRevision: 1, clientRequestId: 'retired' }),
+    () => service.acceptGearJobEvent({ sourceId: 'source-test', workOrderId: 'WO-1', sourceRevision: '2026-09-20 09:00:00.000001', digest: '1'.repeat(64) }),
+  ]) {
+    await assert.rejects(operation(), error => error.code === 'CAPABILITY_RETIRED')
+    assert.deepEqual(await store.read(), before, 'retired entry must not change rules/occurrences/work/delivery')
+    assert.equal(idCounter, 0)
+  }
+  for (const id of ['member-peer', 'member-admin']) {
+    assert.deepEqual(await service.listRules({ id }), [])
+    await assert.rejects(service.getRule({ id }, active.id), error => error.code === 'NOT_FOUND')
+    await assert.rejects(service.pauseRule({ id }, active.id, { expectedRevision: 1 }), error => error.code === 'NOT_FOUND')
+    await assert.rejects(service.revokeRule({ id }, active.id, { expectedRevision: 1 }), error => error.code === 'NOT_FOUND')
+  }
+  const stopped = await service.pauseRule({ id: 'member-owner' }, active.id, { expectedRevision: 1 })
+  assert.equal(stopped.status, 'paused')
+  assert.equal(stopped.revision, 2)
+  await assert.rejects(service.revokeRule({ id: 'member-owner' }, active.id, { expectedRevision: 1 }), error => error.code === 'REVISION_CONFLICT')
+  const eventStopped = await service.pauseRule({ id: 'member-owner' }, event.id, { expectedRevision: 1 })
+  assert.equal(eventStopped.eventAcceptAfter, event.eventAcceptAfter)
+  const contained = await service.revokeRule({ id: 'member-owner' }, active.id, { expectedRevision: 2 })
+  assert.equal(contained.status, 'revoked')
+  assert.equal(contained.revision, 3)
+  await assert.rejects(service.resumeRule({ id: 'member-owner' }, active.id, { expectedRevision: 3 }), error => error.code === 'INVALID_STATE')
+  assert.equal((await service.listRules({ id: 'member-owner' })).length, 5)
 }
 
 async function derivedChecks() {
@@ -203,14 +164,15 @@ async function derivedChecks() {
   assert.equal(nextDailyOccurrence(rule, '2026-09-22T01:00:00.000Z', []), '2026-09-23T00:00:00.000Z')
   assert.equal(nextDailyOccurrence(rule, '2026-09-19T23:00:00.000Z', [{ ruleId: rule.id, scheduledDate: '2026-09-20', workId: 'work-back' }]), '2026-09-21T00:00:00.000Z')
   const work = { id: 'work-1', ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', input: { workOrderId: 'WO-1' }, status: 'completed', results: [], actions: [], executions: [] }
-  state.current = migrateState({ ...state.current, works: [work], automationRules: [{ ...state.current.automationRules[0], status: 'revoked', effectiveFrom: state.current.automationRules[0].effectiveFrom, revokedAt: state.clock, revision: 7 }], automationOccurrences: [{ id: 'occurrence-1', occurrenceKey: dailyOccurrenceKey(state.current.automationRules[0].id, '2026-09-20'), ruleId: state.current.automationRules[0].id, ruleRevision: 7, scheduledDate: '2026-09-20', workId: 'work-1', status: null, reason: null, deliveryId: null, createdAt: state.clock }] })
+  const historicalRule = automationRule('rule-derived-history', 'revoked', daily('08:00'), { revision: 7 })
+  state.current = migrateState({ ...fixture().current, works: [work], automationRules: [historicalRule], automationOccurrences: [{ id: 'occurrence-1', occurrenceKey: dailyOccurrenceKey(historicalRule.id, '2026-09-20'), ruleId: historicalRule.id, ruleRevision: 7, scheduledDate: '2026-09-20', workId: 'work-1', status: null, reason: null, deliveryId: null, createdAt: state.clock }] })
   assert.equal(deriveUsedRuns(state.current.automationRules[0], state.current.automationOccurrences), 1)
   await assert.rejects(store.update(current => ({ ...current, automationOccurrences: [{ ...current.automationOccurrences[0], status: 'skipped', reason: 'bad' }] })), /结果不闭合/)
 }
 
 async function migrationChecks() {
   for (const version of [3, 4, 5, 6]) {
-    const value = version === 3 ? { version: 3 } : { ...fixture().current, version }
+    const value = version === 3 ? { version: 3 } : { ...fixture().legacy, version }
     if (version < 6) {
       delete value.automationRules
       delete value.automationOccurrences
@@ -218,12 +180,21 @@ async function migrationChecks() {
       if (version < 6) for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) delete value[key]
     }
     const migrated = migrateState(value)
-    assert.equal(migrated.version, 9)
+    assert.equal(migrated.version, STATE_VERSION)
     assert.ok(migrated.works.every(work => Array.isArray(work.actions)))
     assert.deepEqual(migrated.automationRules, [])
     assert.deepEqual(migrated.automationOccurrences, [])
   }
-  assert.throws(() => migrateState({ version: 10 }), /未来/)
+  assert.throws(() => migrateState({ version: STATE_VERSION + 1 }), /未来/)
+  for (const version of [8, 9]) {
+    const oldRule = automationRule('legacy-notification', 'active', daily('08:00'))
+    delete oldRule.notificationIdentityId
+    oldRule.notificationConversationId = 'conversation-owner'
+    const migrated = migrateState({ ...fixture().legacy, version, automationRules: [oldRule] })
+    assert.equal(migrated.version, STATE_VERSION)
+    assert.equal(migrated.automationRules[0].notificationIdentityId, 'identity-owner')
+    assert.equal(Object.hasOwn(migrated.automationRules[0], 'notificationConversationId'), false)
+  }
   const broken = fixture().current
   broken.automationRules = [{ ...broken.automationRules[0], id: 'bad' }]
   assert.throws(() => migrateState(broken), /自动规则/)
@@ -234,7 +205,7 @@ async function transferChecks() {
   try {
     const source = join(root, 'source'), backup = join(root, 'backup'), restored = join(root, 'restored')
     await mkdir(source, { recursive: true })
-    const rules = [automationRule('rule-active', 'active', daily('08:00'), { notificationConversationId: 'conversation-owner' }), automationRule('rule-draft', 'draft', daily('08:00')), automationRule('rule-paused', 'paused', daily('08:00')), automationRule('rule-revoked', 'revoked', daily('08:00')), automationRule('rule-event-active', 'active', eventTrigger())]
+    const rules = [automationRule('rule-active', 'active', daily('08:00'), { notificationIdentityId: 'identity-owner' }), automationRule('rule-draft', 'draft', daily('08:00')), automationRule('rule-paused', 'paused', daily('08:00')), automationRule('rule-revoked', 'revoked', daily('08:00')), automationRule('rule-event-active', 'active', eventTrigger())]
     const sendingWork = workRecord('work-sending'), pendingWork = workRecord('work-pending'), eventWork = workRecord('work-event')
     const sendingDelivery = automationDelivery('delivery-sending', sendingWork.id, 'sending'), pendingDelivery = automationDelivery('delivery-pending', pendingWork.id, 'pending')
     const sendingOccurrence = occurrenceRecord('occurrence-sending', rules[0], '2026-09-20', sendingWork.id, sendingDelivery.id)
@@ -307,16 +278,17 @@ function fixture() {
   const app = { id: 'app-owner', provider: 'feishu', providerAppId: 'app', providerTenantId: 'tenant', credentialRef: 'FEISHU_REF', enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now }
   const identity = { id: 'identity-owner', channelAppId: app.id, providerUserId: 'user-owner', memberId: 'member-owner', verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }
   const conversation = { id: 'conversation-owner', channelAppId: app.id, providerConversationId: 'conversation', identityId: identity.id, memberId: 'member-owner', type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }
-  const value = migrateState({
+  const legacy = {
     version: 8,
+    conversations: [],
     members: [member('member-owner', ['employee-owner', 'employee-owner-2']), member('member-peer', ['employee-peer']), member('member-admin', [])],
     modelRoutes: [route('route-owner'), route('route-owner-2'), route('route-peer')],
     employees: [employee('employee-owner', 'route-owner', 'connection-owner'), employee('employee-owner-2', 'route-owner-2', 'connection-owner-2'), employee('employee-peer', 'route-peer', 'connection-peer')],
     connections: [connection('connection-owner', 'WO-1'), connection('connection-owner-2', 'WO-2'), connection('connection-peer', 'WO-3')],
     skills: [skill(), { id: 'skill-owner-2', capabilityId: 'gearjob-work-order-read', enabled: true }, { id: 'skill-peer', capabilityId: 'gearjob-work-order-read', enabled: true }],
     confirmations: [], knowledgeMaterials: [], channelApps: [app], channelIdentities: [identity], channelConversations: [conversation], channelMessages: [], deliveries: [], linkCodes: [], works: [], reservations: {}, automationRules: [], automationOccurrences: [],
-  })
-  return { current: value, clock: now }
+  }
+  return { current: migrateState(structuredClone(legacy)), legacy, clock: now }
 }
 
 function member(id, employeeIds) { return { id, loginName: id, displayName: id, role: id === 'member-admin' ? 'admin' : 'member', enabled: true, authRef: id, sessionVersion: 1, employeeIds } }
@@ -329,7 +301,7 @@ function eventTrigger() { return { kind: 'gearjob-work-order-update', sourceId: 
 function automationRule(id, status, trigger, extra = {}) {
   const event = trigger.kind === 'gearjob-work-order-update'
   return {
-    id, ownerMemberId: 'member-owner', revision: 1, status, employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger, maxRuns: 10, notificationConversationId: null,
+    id, ownerMemberId: 'member-owner', revision: 1, status, employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger, maxRuns: 10, notificationIdentityId: null,
     effectiveFrom: event || status === 'draft' || status === 'revoked' ? null : now,
     eventAcceptAfter: event && ['active', 'paused'].includes(status) ? now : null,
     createdAt: now, updatedAt: now, revokedAt: status === 'revoked' ? now : null, ...extra,

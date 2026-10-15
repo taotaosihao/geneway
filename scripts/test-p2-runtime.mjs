@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
 import { mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import {
   CYCLE_TIME_TOOL,
   GEARJOB_TOOL,
@@ -19,23 +17,37 @@ import { createDshRunner, parseRunResult } from '../src/dsh-runner.mjs'
 import { authorizeExecutionGrant, connectionSnapshot, consumeExecutionGrant, resolveCredentialFile } from '../src/execution-grant.mjs'
 import { calculateCycleTime } from '../src/domain/cycle-time.mjs'
 import { apply as applyCycle } from '../plugins/cycle-time.mjs'
-import { apply as applyGearJob, normalizeGearJobRecord, readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
+import { normalizeGearJobRecord } from '../plugins/gearjob-work-order.mjs'
 
-const requireFromDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
-const { Context } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/cordis')).href)
-const { default: SystemPrompt } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/dsh-system-prompt')).href)
+const args = process.argv.slice(2)
+assert(args.every(arg => arg === '--pure-only'), '本测试仅接受 --pure-only；默认入口包含实际 cycle 插件生命周期检查')
+const pureOnly = args.includes('--pure-only')
 const root = await mkdtemp(join(tmpdir(), 'geneway-p2-runtime-'))
+const previousDshHome = process.env.DSH_HOME, previousGrant = process.env.GENEWAY_DSH_GRANT_FILE
+const originalFetch = globalThis.fetch
+let fetchCalls = 0
+if (pureOnly) globalThis.fetch = () => { fetchCalls += 1; throw new Error('--pure-only must not perform network I/O') }
+process.env.DSH_HOME = join(root, 'dsh-native')
 
 try {
   testCapabilities()
   testParsers()
-  await testGrantAndPlugins()
-  await testSourceSignalsAndMetadata()
+  const fixture = await testGrantAndCredentialBoundary()
+  testHistoricalSourceMetadata()
   await testSessionMetadata()
+  await testConnectionSessionMetadata()
   await testImmediateCancellation()
-  console.log('P2 runtime and capability checks passed')
+  if (!pureOnly) await testCyclePluginLifecycle(fixture)
+  if (pureOnly) assert.equal(fetchCalls, 0)
+  console.log(pureOnly
+    ? 'P2 pure capability/parser/grant/fake-harness checks passed; native cycle mount/dispose/remount skipped (--pure-only)'
+    : 'P2 runtime and capability checks passed (actual cycle plugin lifecycle included)')
 } finally {
-  delete process.env.GENEWAY_DSH_GRANT_FILE
+  if (previousGrant === undefined) delete process.env.GENEWAY_DSH_GRANT_FILE
+  else process.env.GENEWAY_DSH_GRANT_FILE = previousGrant
+  if (previousDshHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousDshHome
+  globalThis.fetch = originalFetch
   await rm(root, { recursive: true, force: true })
 }
 
@@ -102,35 +114,24 @@ function testParsers() {
   assert.throws(() => parseRunResult({ events: gear.events, finalResponse: 'ok' }, { operation: 'follow-up', capabilityId: 'gearjob-work-order-read' }), /禁止调用工具/)
 }
 
-async function testGrantAndPlugins() {
+async function testGrantAndCredentialBoundary() {
   const policyFile = join(root, 'state.json')
   const secretRoot = join(root, 'secrets')
   await import('node:fs/promises').then(({ mkdir }) => mkdir(secretRoot, { mode: 0o700 }))
-  await writeFile(join(secretRoot, 'source-a.json'), JSON.stringify({ token: 'test-token' }), { mode: 0o600 })
   const connection = sourceConnection('connection-a', 'http://127.0.0.1:1', 'A', 'real-frappe-rest')
   assert.throws(() => connectionSnapshot({ ...connection, revision: 0 }), /revision/)
   assert.throws(() => connectionSnapshot({ ...connection, revision: 1.5 }), /revision/)
-  const cycleState = stateFor({ capabilityId: 'cycle-time-calculate', skillId: 'skill-cycle-time-calculate', executionId: 'exec-cycle', connection: null })
+  const cycleState = stateFor('exec-cycle')
   await writeFile(policyFile, JSON.stringify(cycleState), { mode: 0o600 })
 
   const wrongGrant = join(root, 'wrong-grant.json')
-  await writeFile(wrongGrant, JSON.stringify(grantFor({ capabilityId: 'gearjob-work-order-read', skillId: 'skill-gearjob-work-order-read', executionId: 'exec-gear', connection, policyFile, secretRoot })), { mode: 0o600 })
-  await assert.rejects(() => consumeExecutionGrant({ filePath: wrongGrant, toolName: CYCLE_TIME_TOOL, input: { availableSeconds: 3600, quantity: 60 } }), error => error.code === 'FORBIDDEN')
-  await assert.rejects(() => consumeExecutionGrant({ filePath: wrongGrant, toolName: GEARJOB_TOOL, input: { workOrderId: 'WO-1' } }), /不可用/)
-
-  const gearState = stateFor({ capabilityId: 'gearjob-work-order-read', skillId: 'skill-gearjob-work-order-read', executionId: 'exec-gear', connection })
-  await writeFile(policyFile, JSON.stringify(gearState), { mode: 0o600 })
-  const gearGrantFile = join(root, 'gear-grant.json')
-  await writeFile(gearGrantFile, JSON.stringify(grantFor({ capabilityId: 'gearjob-work-order-read', skillId: 'skill-gearjob-work-order-read', executionId: 'exec-gear', connection, policyFile, secretRoot })), { mode: 0o600 })
-  const gearGrant = await consumeExecutionGrant({ filePath: gearGrantFile, toolName: GEARJOB_TOOL, input: { workOrderId: 'WO-1' } })
-  assert.equal((await authorizeExecutionGrant(gearGrant)).connection.revision, 1)
-  gearState.connections[0].revision = 2
-  await writeFile(policyFile, JSON.stringify(gearState), { mode: 0o600 })
-  await assert.rejects(() => authorizeExecutionGrant(gearGrant), error => error.code === 'FORBIDDEN' && /revision/.test(error.message))
+  await writeFile(wrongGrant, JSON.stringify(grantFor({ executionId: 'exec-cycle', policyFile, secretRoot })), { mode: 0o600 })
+  await assert.rejects(() => consumeExecutionGrant({ filePath: wrongGrant, toolName: GEARJOB_TOOL, input: { workOrderId: 'WO-1' } }), error => error.code === 'FORBIDDEN')
+  await assert.rejects(() => consumeExecutionGrant({ filePath: wrongGrant, toolName: CYCLE_TIME_TOOL, input: { availableSeconds: 3600, quantity: 60 } }), /不可用/)
 
   await writeFile(policyFile, JSON.stringify(cycleState), { mode: 0o600 })
   const cycleGrant = join(root, 'cycle-grant.json')
-  const cycleGrantValue = grantFor({ capabilityId: 'cycle-time-calculate', skillId: 'skill-cycle-time-calculate', executionId: 'exec-cycle', connection: null, policyFile, secretRoot })
+  const cycleGrantValue = grantFor({ executionId: 'exec-cycle', policyFile, secretRoot })
   await writeFile(cycleGrant, JSON.stringify(cycleGrantValue), { mode: 0o600 })
   const consumed = await consumeExecutionGrant({ filePath: cycleGrant, toolName: CYCLE_TIME_TOOL, input: { availableSeconds: 3600, quantity: 60 } })
   assert.equal((await authorizeExecutionGrant(consumed)).execution.id, 'exec-cycle')
@@ -165,16 +166,38 @@ async function testGrantAndPlugins() {
   await assert.rejects(() => authorizeExecutionGrant(confirmationConsumed), /确认信息 revision/)
   await writeFile(policyFile, JSON.stringify(cycleState), { mode: 0o600 })
 
+  const escape = join(root, 'credential-link')
+  await symlink('/etc/passwd', escape)
+  await assert.rejects(() => resolveCredentialFile(root, 'credential-link'), /符号链接/)
+  await writeFile(join(root, 'insecure-secret'), 'not-a-secret', { mode: 0o644 })
+  await assert.rejects(() => resolveCredentialFile(root, 'insecure-secret'), /0600/)
+  return { cycleState, cycleGrantValue, policyFile }
+}
+
+function testHistoricalSourceMetadata() {
+  const sourceA = sourceConnection('a', 'http://127.0.0.1:1', 'actual-A', 'real-frappe-rest')
+  const sourceB = { ...sourceConnection('b', 'http://127.0.0.1:1', 'controlled-B', 'controlled-frappe-compatible'), sourceSystem: 'GearJob-compatible', sourceEnvironment: 'controlled-test', dataMode: 'synthetic-controlled' }
+  const raw = { name: 'WO-1', status: 'Draft', qty: 10, produced_qty: 2, source_system: 'untrusted-upstream', source_environment: 'production' }
+  const a = normalizeGearJobRecord(raw, { id: 'WO-1', source: sourceA })
+  const b = normalizeGearJobRecord(raw, { id: 'WO-1', source: sourceB })
+  assert.deepEqual([a.sourceSystem, a.sourceInstance, a.sourceEnvironment, a.evidenceMode], ['GearJob', 'actual-A', 'external-test', 'real-frappe-rest'])
+  assert.deepEqual([b.sourceSystem, b.sourceInstance, b.sourceEnvironment, b.dataMode, b.evidenceMode], ['GearJob-compatible', 'controlled-B', 'controlled-test', 'synthetic-controlled', 'controlled-frappe-compatible'])
+}
+
+async function testCyclePluginLifecycle({ cycleState, cycleGrantValue, policyFile }) {
+  const requireFromDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
+  const { Context } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/cordis')).href)
+  const { default: SystemPrompt } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/dsh-system-prompt')).href)
+  const { ToolRuntime } = await import('@deepseek-ai/dsh-tools')
   const host = new Context()
   let cycleFiber
-  let gearFiber
   try {
     await host.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false })
     await host.plugin(ToolRuntime, { mode: 'native' })
     cycleFiber = host.plugin(Object.assign(applyCycle, { inject: ['tools'] }))
-    gearFiber = host.plugin(Object.assign(applyGearJob, { inject: ['tools'] }))
-    await Promise.all([cycleFiber, gearFiber])
-    assert.deepEqual(host.tools.schemas().map(item => item.name).sort(), [CYCLE_TIME_TOOL, GEARJOB_TOOL])
+    await cycleFiber
+    assert.deepEqual(host.tools.schemas().map(item => item.name), [CYCLE_TIME_TOOL])
+    await writeFile(policyFile, JSON.stringify(cycleState), { mode: 0o600 })
     const actualGrant = join(root, 'actual-cycle-grant.json')
     await writeFile(actualGrant, JSON.stringify(cycleGrantValue), { mode: 0o600 })
     process.env.GENEWAY_DSH_GRANT_FILE = actualGrant
@@ -184,24 +207,13 @@ async function testGrantAndPlugins() {
     assert.deepEqual(host.tools.get(CYCLE_TIME_TOOL).output.render({}, result.value), [{ type: 'text', text: JSON.stringify(result.value) }])
     await cycleFiber.dispose()
     cycleFiber = undefined
-    assert.deepEqual(host.tools.schemas().map(item => item.name), [GEARJOB_TOOL])
+    assert.deepEqual(host.tools.schemas().map(item => item.name), [])
     const unavailableCycle = await host.tools.execute({ callId: 'cycle-disposed', name: CYCLE_TIME_TOOL, arguments: { availableSeconds: 3600, quantity: 60 }, signal: new AbortController().signal })
     assert.equal(unavailableCycle.isError, true)
     assert.equal(unavailableCycle.error.info.code, 'UNKNOWN_TOOL')
-
-    const liveGearState = stateFor({ capabilityId: 'gearjob-work-order-read', skillId: 'skill-gearjob-work-order-read', executionId: 'exec-gear', connection })
-    await writeFile(policyFile, JSON.stringify(liveGearState), { mode: 0o600 })
-    const liveGearGrant = join(root, 'live-gear-grant.json')
-    await writeFile(liveGearGrant, JSON.stringify(grantFor({ capabilityId: 'gearjob-work-order-read', skillId: 'skill-gearjob-work-order-read', executionId: 'exec-gear', connection, policyFile, secretRoot })), { mode: 0o600 })
-    process.env.GENEWAY_DSH_GRANT_FILE = liveGearGrant
-    const remainingGear = await host.tools.execute({ callId: 'gear-after-cycle-dispose', name: GEARJOB_TOOL, arguments: { workOrderId: 'WO-1' }, signal: new AbortController().signal })
-    assert.equal(remainingGear.isError, false)
-    assert.equal(remainingGear.value.error.code, 'UPSTREAM_ERROR')
-
     cycleFiber = host.plugin(Object.assign(applyCycle, { inject: ['tools'] }))
     await cycleFiber
-    assert.deepEqual(host.tools.schemas().map(item => item.name).sort(), [CYCLE_TIME_TOOL, GEARJOB_TOOL])
-    await writeFile(policyFile, JSON.stringify(cycleState), { mode: 0o600 })
+    assert.deepEqual(host.tools.schemas().map(item => item.name), [CYCLE_TIME_TOOL])
     const remountGrant = join(root, 'remount-cycle-grant.json')
     await writeFile(remountGrant, JSON.stringify(cycleGrantValue), { mode: 0o600 })
     process.env.GENEWAY_DSH_GRANT_FILE = remountGrant
@@ -209,86 +221,8 @@ async function testGrantAndPlugins() {
     assert.equal(remountedCycle.isError, false)
     assert.equal(remountedCycle.value.secondsPerUnit, 60)
   } finally {
-    await gearFiber?.dispose()
     await cycleFiber?.dispose()
     await host.fiber.dispose()
-  }
-
-  const escape = join(root, 'credential-link')
-  await symlink('/etc/passwd', escape)
-  await assert.rejects(() => resolveCredentialFile(root, 'credential-link'), /符号链接/)
-  await writeFile(join(root, 'insecure-secret'), 'not-a-secret', { mode: 0o644 })
-  await assert.rejects(() => resolveCredentialFile(root, 'insecure-secret'), /0600/)
-}
-
-async function testSourceSignalsAndMetadata() {
-  const secretRoot = join(root, 'source-secrets')
-  await import('node:fs/promises').then(({ mkdir }) => mkdir(secretRoot, { mode: 0o700 }))
-  await writeFile(join(secretRoot, 'source.json'), JSON.stringify({ token: 'test-token' }), { mode: 0o600 })
-  let sourceCalls = 0
-  const server = createServer((request, response) => {
-    sourceCalls += 1
-    if (request.url?.endsWith('/REDIRECT')) { response.writeHead(302, { location: '/api/resource/Work%20Order/WO-1' }); return response.end() }
-    if (request.url?.endsWith('/TIMEOUT')) return setTimeout(() => response.end(JSON.stringify({ data: { name: 'TIMEOUT' } })), 200)
-    if (request.url?.endsWith('/BODY')) {
-      response.writeHead(200, { 'content-type': 'application/json' })
-      response.write('{"data":')
-      return setTimeout(() => response.end('{"name":"BODY"}}'), 200)
-    }
-    response.writeHead(200, { 'content-type': 'application/json' })
-    response.end(JSON.stringify({ data: { name: 'WO-1', status: 'Draft', qty: 10, produced_qty: 2, source_system: 'untrusted-upstream', source_environment: 'production' } }))
-  })
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  const baseUrl = `http://127.0.0.1:${server.address().port}`
-  try {
-    const sourceA = sourceConnection('a', baseUrl, 'actual-A', 'real-frappe-rest', ['WO-1', 'TIMEOUT', 'BODY', 'REDIRECT'])
-    const sourceB = { ...sourceConnection('b', baseUrl, 'controlled-B', 'controlled-frappe-compatible', ['WO-1']), sourceSystem: 'GearJob-compatible', sourceEnvironment: 'controlled-test', dataMode: 'synthetic-controlled' }
-    const a = await readGearJobWorkOrder({ workOrderId: 'WO-1', connection: sourceA, secretRoot })
-    const b = normalizeGearJobRecord({ name: 'WO-1', source_system: 'GearJob', source_environment: 'production' }, { id: 'WO-1', source: sourceB })
-    assert.deepEqual([a.sourceSystem, a.sourceInstance, a.sourceEnvironment, a.evidenceMode], ['GearJob', 'actual-A', 'external-test', 'real-frappe-rest'])
-    assert.deepEqual([b.sourceSystem, b.sourceInstance, b.sourceEnvironment, b.dataMode, b.evidenceMode], ['GearJob-compatible', 'controlled-B', 'controlled-test', 'synthetic-controlled', 'controlled-frappe-compatible'])
-    await assert.rejects(() => readGearJobWorkOrder({ workOrderId: 'REDIRECT', connection: sourceA, secretRoot }), error => error.code === 'UPSTREAM_ERROR')
-
-    const policyFile = join(root, 'source-state.json')
-    const toolConnection = { ...sourceA, id: 'connection-source' }
-    const state = stateFor({ capabilityId: 'gearjob-work-order-read', skillId: 'skill-gearjob-work-order-read', executionId: 'exec-source', connection: toolConnection })
-    await writeFile(policyFile, JSON.stringify(state), { mode: 0o600 })
-    const host = new Context()
-    let fiber
-    try {
-      await host.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false })
-      await host.plugin(ToolRuntime, { mode: 'native' })
-      fiber = host.plugin(Object.assign(applyGearJob, { inject: ['tools'] }))
-      await fiber
-      const toolGrant = join(root, 'source-tool-grant.json')
-      await writeFile(toolGrant, JSON.stringify(grantFor({ capabilityId: 'gearjob-work-order-read', skillId: 'skill-gearjob-work-order-read', executionId: 'exec-source', connection: toolConnection, policyFile, secretRoot })), { mode: 0o600 })
-      process.env.GENEWAY_DSH_GRANT_FILE = toolGrant
-      const toolResult = await host.tools.execute({ callId: 'gear-source', name: GEARJOB_TOOL, arguments: { workOrderId: 'WO-1' }, signal: new AbortController().signal })
-      assert.equal(toolResult.value.ok, true)
-      assert.equal(toolResult.value.sourceInstance, 'actual-A')
-
-      state.connections[0].enabled = false
-      await writeFile(policyFile, JSON.stringify(state), { mode: 0o600 })
-      const revokedGrant = join(root, 'source-revoked-grant.json')
-      await writeFile(revokedGrant, JSON.stringify(grantFor({ capabilityId: 'gearjob-work-order-read', skillId: 'skill-gearjob-work-order-read', executionId: 'exec-source', connection: toolConnection, policyFile, secretRoot })), { mode: 0o600 })
-      process.env.GENEWAY_DSH_GRANT_FILE = revokedGrant
-      const callsBeforeRevoked = sourceCalls
-      const denied = await host.tools.execute({ callId: 'gear-revoked', name: GEARJOB_TOOL, arguments: { workOrderId: 'WO-1' }, signal: new AbortController().signal })
-      assert.equal(denied.value.error.code, 'FORBIDDEN')
-      assert.equal(sourceCalls, callsBeforeRevoked)
-    } finally {
-      await fiber?.dispose()
-      await host.fiber.dispose()
-    }
-
-    await assert.rejects(() => readGearJobWorkOrder({ workOrderId: 'TIMEOUT', connection: sourceA, secretRoot, timeoutMs: 25 }), error => error.code === 'UPSTREAM_TIMEOUT')
-    const controller = new AbortController()
-    const body = readGearJobWorkOrder({ workOrderId: 'BODY', connection: sourceA, secretRoot, signal: controller.signal, timeoutMs: 500 })
-    setTimeout(() => controller.abort(), 25)
-    await assert.rejects(() => body, error => error.code === 'CANCELLED')
-  } finally {
-    server.closeAllConnections()
-    await new Promise(resolve => server.close(resolve))
   }
 }
 
@@ -345,6 +279,39 @@ async function testSessionMetadata() {
   await runner.close()
 }
 
+async function testConnectionSessionMetadata() {
+  const dshHome = join(root, 'connection-metadata-dsh')
+  let factories = 0, modelRuns = 0, closes = 0
+  const connection = {
+    id: 'connection-metadata', revision: 1, kind: 'kivo-mcp', targetIdentity: 'metadata-fixture',
+    baseUrl: 'http://127.0.0.1:41001/api/v1/mes/mcp', issuer: 'http://127.0.0.1:41001', clientId: '00000000-0000-4000-8000-000000000003',
+    credentialRef: 'metadata.pem', allowedObjectIds: [], sourceSystem: 'Kivo', sourceInstance: 'metadata-fixture', sourceEnvironment: 'test', dataMode: 'synthetic', evidenceMode: 'controlled',
+  }
+  const metadata = connectionRevision => ({ ...cycleSessionMetadata(), workId: 'work-tpm', skillId: 'skill-kivo-tpm-record-read', capabilityId: 'kivo-tpm-record-read', connectionId: connection.id, connectionRevision })
+  const options = connectionRevision => ({ executionId: `connection-revision-${connectionRevision}`, capabilityId: 'kivo-tpm-record-read', input: { recordType: 'repair', reference: 'R-1' }, sessionMetadata: metadata(connectionRevision), grant: { policyFile: join(root, 'state.json'), policyRoot: root, secretRoot: join(root, 'secrets'), connection } })
+  const runner = createDshRunner({
+    root: process.cwd(),
+    config: { model: { configured: true, provider: 'test', model: 'test' }, source: { configured: true }, dshHome, stateFile: join(root, 'state.json'), dataRoot: root, secretRoot: join(root, 'secrets') },
+    harnessFactory: () => {
+      factories += 1
+      return { async run() { modelRuns += 1; throw new Error('metadata checks must precede model run') }, async close() { closes += 1 } }
+    },
+  })
+  try {
+    for (const revision of [0, 1.5]) {
+      await assert.rejects(() => runner.run(options(revision)), error => error.code === 'INVALID_REQUEST' && /连接版本/.test(error.message))
+      assert.deepEqual([factories, modelRuns, closes], [0, 0, 0])
+      await assert.rejects(() => readdir(dshHome), { code: 'ENOENT' })
+    }
+    await assert.rejects(() => runner.run(options(2)), error => error.code === 'INVALID_REQUEST' && /连接快照不匹配/.test(error.message))
+    assert.deepEqual([factories, modelRuns, closes], [1, 0, 1])
+    assert.deepEqual(await readdir(join(dshHome, 'grants')), [])
+  } finally {
+    await runner.close()
+  }
+  assert.deepEqual([factories, modelRuns, closes], [1, 0, 1])
+}
+
 async function testImmediateCancellation() {
   const dshHome = join(root, 'cancel-dsh')
   let factories = 0
@@ -361,19 +328,10 @@ async function testImmediateCancellation() {
     },
     harnessFactory: () => {
       factories += 1
-      return { async run() { throw new Error('unexpected model run') }, async close() { closes += 1 } }
+      return { async run() { throw new Error('synthetic harness failure') }, async close() { closes += 1 } }
     },
   })
   await assert.rejects(() => runner.run({ executionId: 'missing-metadata', capabilityId: 'cycle-time-calculate', input: { availableSeconds: 3600, quantity: 60 } }), /Session metadata/)
-  for (const revision of [0, 1.5]) {
-    await assert.rejects(() => runner.run({
-      executionId: `bad-revision-${revision}`,
-      capabilityId: 'gearjob-work-order-read',
-      input: { workOrderId: 'WO-1' },
-      sessionMetadata: gearSessionMetadata(revision),
-      grant: { policyFile: join(root, 'state.json'), policyRoot: root, secretRoot: join(root, 'secrets'), connection: sourceConnection('connection-metadata', 'http://127.0.0.1:1', 'metadata', 'real-frappe-rest') },
-    }), /连接版本/)
-  }
   assert.equal(factories, 0)
   const pending = runner.run({
     executionId: 'cancel-before-initialize',
@@ -398,26 +356,27 @@ async function testImmediateCancellation() {
   assert.equal(factories, 0)
   assert.deepEqual(await readdir(join(dshHome, 'grants')), [])
   await assert.rejects(() => runner.run({
-    executionId: 'metadata-snapshot-mismatch',
-    capabilityId: 'gearjob-work-order-read',
-    input: { workOrderId: 'WO-1' },
-    sessionMetadata: gearSessionMetadata(2),
-    grant: { policyFile: join(root, 'state.json'), policyRoot: root, secretRoot: join(root, 'secrets'), connection: sourceConnection('connection-metadata', 'http://127.0.0.1:1', 'metadata', 'real-frappe-rest') },
-  }), /连接快照不匹配/)
+    executionId: 'failed-after-initialize',
+    capabilityId: 'cycle-time-calculate',
+    input: { availableSeconds: 3600, quantity: 60 },
+    sessionMetadata: cycleSessionMetadata(),
+    grant: { policyFile: join(root, 'state.json'), policyRoot: root, secretRoot: join(root, 'secrets') },
+  }), /synthetic harness failure/)
   assert.equal(factories, 1)
   assert.equal(closes, 1)
+  assert.deepEqual(await readdir(join(dshHome, 'grants')), [])
   await runner.close()
 }
 
-function gearSessionMetadata(connectionRevision) {
+function cycleSessionMetadata() {
   return {
     ownerMemberId: 'member-user',
-    workId: 'work-gear',
+    workId: 'work-cycle',
     employeeId: 'employee-b',
-    skillId: 'skill-gearjob-work-order-read',
-    capabilityId: 'gearjob-work-order-read',
-    connectionId: 'connection-metadata',
-    connectionRevision,
+    skillId: 'skill-cycle-time-calculate',
+    capabilityId: 'cycle-time-calculate',
+    connectionId: null,
+    connectionRevision: null,
     modelRouteId: 'model-zenmux',
     confirmationFingerprint: 'none',
     confirmationRefs: [],
@@ -452,21 +411,20 @@ function sourceConnection(id, baseUrl, sourceInstance, evidenceMode, allowedObje
   }
 }
 
-function grantFor({ capabilityId, skillId, executionId, connection, policyFile, secretRoot }) {
-  const cycle = capabilityId === 'cycle-time-calculate'
+function grantFor({ executionId, policyFile, secretRoot }) {
   return {
     version: 2,
     executionId,
     memberId: 'member-user',
     employeeId: 'employee-b',
-    skillId,
-    capabilityId,
-    workId: cycle ? 'work-cycle' : 'work-gear',
+    skillId: 'skill-cycle-time-calculate',
+    capabilityId: 'cycle-time-calculate',
+    workId: 'work-cycle',
     modelRouteId: 'model-zenmux',
     operation: 'create',
-    expectedTool: cycle ? CYCLE_TIME_TOOL : GEARJOB_TOOL,
-    input: cycle ? { availableSeconds: 3600, quantity: 60 } : { workOrderId: 'WO-1' },
-    connection,
+    expectedTool: CYCLE_TIME_TOOL,
+    input: { availableSeconds: 3600, quantity: 60 },
+    connection: null,
     confirmationFingerprint: 'none',
     confirmationRefs: [],
     policyFile,
@@ -475,16 +433,15 @@ function grantFor({ capabilityId, skillId, executionId, connection, policyFile, 
   }
 }
 
-function stateFor({ capabilityId, skillId, executionId, connection }) {
-  const cycle = capabilityId === 'cycle-time-calculate'
-  const workId = cycle ? 'work-cycle' : 'work-gear'
+function stateFor(executionId) {
+  const skillId = 'skill-cycle-time-calculate', capabilityId = 'cycle-time-calculate'
   return {
     version: 4,
     members: [{ id: 'member-user', enabled: true, employeeIds: ['employee-b'] }],
     modelRoutes: [{ id: 'model-zenmux', enabled: true }],
-    employees: [{ id: 'employee-b', enabled: true, modelRouteId: 'model-zenmux', skillIds: [skillId], connectionIds: connection ? [connection.id] : [] }],
+    employees: [{ id: 'employee-b', enabled: true, modelRouteId: 'model-zenmux', skillIds: [skillId], connectionIds: [] }],
     skills: [{ id: skillId, enabled: true, capabilityId }],
-    connections: connection ? [{ ...connection, enabled: true, status: 'ready', skillIds: [skillId] }] : [],
-    works: [{ id: workId, ownerMemberId: 'member-user', employeeId: 'employee-b', skillId, capabilityId, ...(connection ? { connectionId: connection.id } : {}), executions: [{ id: executionId, operation: 'create', status: 'running' }] }],
+    connections: [],
+    works: [{ id: 'work-cycle', ownerMemberId: 'member-user', employeeId: 'employee-b', skillId, capabilityId, executions: [{ id: executionId, operation: 'create', status: 'running' }] }],
   }
 }

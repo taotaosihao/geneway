@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict'
+import childProcess from 'node:child_process'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { syncBuiltinESMExports } from 'node:module'
+import { Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as Lark from '@larksuiteoapi/node-sdk'
 import { createFeishuRuntime } from '../plugins/feishu.mjs'
 import { createChannelService } from '../src/channel-service.mjs'
 import { createFileStore } from '../src/store/file-store.mjs'
-import { createWorkService } from '../src/work-service.mjs'
+import { createConversationService } from '../src/conversation-service.mjs'
+
+let nativeAttempts = 0, networkAttempts = 0
+for (const name of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) childProcess[name] = () => { nativeAttempts += 1; throw new Error('NATIVE_FORBIDDEN') }
+syncBuiltinESMExports()
+Socket.prototype.connect = globalThis.fetch = () => { networkAttempts += 1; throw new Error('NETWORK_FORBIDDEN') }
 
 const APP_A = 'cli_aaaaaaaaaaaaaaaa'
 const APP_B = 'cli_bbbbbbbbbbbbbbbb'
@@ -16,10 +24,26 @@ const BOT_B = 'ou_bot_b'
 const root = await mkdtemp(join(tmpdir(), 'geneway-p4-feishu-'))
 const secretRoot = join(root, 'secrets')
 const statePath = join(root, 'state.json')
-const store = createFileStore(statePath)
+const fileStore = createFileStore(statePath)
+let failInboxAcceptanceId
+const store = { read: () => fileStore.read(), update(mutator, options) { return fileStore.update(async state => {
+  const next = await mutator(state)
+  if (failInboxAcceptanceId && state.channelMessages.some(item => item.providerMessageId === failInboxAcceptanceId && item.status === 'reserved')
+    && next.channelMessages.some(item => item.providerMessageId === failInboxAcceptanceId && item.status === 'accepted')) {
+    failInboxAcceptanceId = undefined
+    throw new Error('controlled inbox acceptance write failure')
+  }
+  return next
+}, options) } }
 const runner = fakeRunner()
-const workService = createWorkService({ store, runner, connectionCatalog: [catalog()] })
-const channel = createChannelService({ store, workService, clock: () => '2026-09-20T10:00:00.000Z' })
+const modelErrors = []
+const conversations = createConversationService({ store, runner, onError: error => modelErrors.push(error), onTurnTerminal: async input => {
+  const created = await channel.ensureConversationDeliveries(input)
+  for (const delivery of created.deliveries) if (delivery.status === 'pending' && runtime.isAvailable(delivery.channelAppId)) {
+    try { await runtime.sendDelivery(delivery.id) } catch (error) { if (!['INVALID_STATE', 'DELIVERY_FORBIDDEN'].includes(error?.code)) throw error }
+  }
+} })
+const channel = createChannelService({ store, conversationService: conversations, clock: () => '2026-09-20T10:00:00.000Z' })
 const fake = fakePlatform()
 let holdInbound, failOutcomeOnce = false
 const runtimeChannel = {
@@ -54,8 +78,9 @@ try {
   await writeCredential('FEISHU_B', APP_B, 'secret_B_0123456789')
   await store.update(seed)
 
-  const recoveryWork = await createWork('WO-RECOVER', 'recover-work')
-  const recoveryDelivery = await channel.createDelivery(owner, deliveryInput('recover-delivery', recoveryWork))
+  await channel.rotateConversation(owner, { identityId: 'identity-owner' })
+  const recoveryTurn = await createTurn('SYNTHETIC_RECOVERY', 'recover-turn')
+  const recoveryDelivery = await channel.createConversationDelivery(owner, deliveryInput('recover-delivery', recoveryTurn))
   await channel.authorizeDelivery({ deliveryId: recoveryDelivery.delivery.id })
   assert.equal((await delivery(recoveryDelivery.delivery.id)).status, 'sending')
 
@@ -83,19 +108,24 @@ try {
   assert(fake.ws.every(item => item.dispatcher instanceof Lark.EventDispatcher))
 
   await callbackAvailability()
-  const privateWork = await inboundAdmission()
-  await sendOutcomes(privateWork)
+  const privateTurn = await inboundAdmission()
+  await duplicateAndInterruptedAdmission()
+  await sendOutcomes(privateTurn)
   await rotationAndStrictCredentials()
-  const strandedDeliveryId = await outcomeWriteFailure(privateWork)
+  const strandedDeliveryId = await outcomeWriteFailure(privateTurn)
   await shutdown(strandedDeliveryId)
 
   const disk = await readFile(statePath, 'utf8')
   for (const secret of ['secret_A_0123456789', 'secret_B_0123456789', 'rotated_A_01234567']) assert.equal(disk.includes(secret), false)
   assert.equal(fake.realPlatformCalls, 0)
-  console.log(`P4 Feishu adapter checks passed; fake SDK calls=${fake.sendCalls.length}; real platform calls=0; blind retries=0`)
+  assert.equal(nativeAttempts, 0)
+  assert.equal(networkAttempts, 0)
+  assert.deepEqual(modelErrors, [])
+  assert.deepEqual((await store.read()).works, [], 'natural text never restores the retired work dispatcher')
+  console.log(`P4 Feishu adapter checks passed; natural conversation turns=${runner.calls.length}; fake SDK calls=${fake.sendCalls.length}; native=0; real model=0; real platform calls=0; blind retries=0`)
 } finally {
   await runtime.close().catch(() => undefined)
-  await workService.close()
+  await conversations.close()
   await rm(root, { recursive: true, force: true })
 }
 
@@ -118,24 +148,25 @@ async function inboundAdmission() {
   const persisted = new Promise(resolve => { persistedResolve = resolve })
   holdInbound = { promise: hold.promise, persisted: persistedResolve }
   let settled = false
-  const accepted = ws.dispatcher.invoke(event({ eventId: 'event-private', messageId: 'message-private', chatId: 'private-owner', senderOpenId: 'open-owner', text: '交办 工单 WO-1' }), { needCheck: false })
+  const accepted = ws.dispatcher.invoke(event({ eventId: 'event-private', messageId: 'message-private', chatId: 'private-owner', senderOpenId: 'open-owner', text: 'SYNTHETIC_PRIVATE_TEXT' }), { needCheck: false })
   accepted.finally(() => { settled = true })
   const inbound = await persisted
-  assert.equal(inbound.code, 'WORK_ACCEPTED')
+  assert.equal(inbound.status, 'accepted')
   assert.equal((await store.read()).channelMessages.find(item => item.providerEventId === 'event-private').status, 'accepted')
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(settled, false)
   hold.resolve()
   await accepted
   assert.equal(settled, true)
-  const work = await waitWork(inbound.workId)
+  const turn = await waitTurn(inbound.conversationId, inbound.turnId)
+  await waitFor(async () => (await store.read()).deliveries.some(item => item.sourceRef?.turnId === turn.turnId && item.status === 'delivered'))
   assert.equal((await store.read()).channelMessages.length, before + 1)
 
-  const replayState = await store.read(), replayExecutions = replayState.works.find(item => item.id === work.id).executions.length, replaySends = fake.sendCalls.length
-  await ws.dispatcher.invoke(event({ eventId: 'event-private', messageId: 'message-private', chatId: 'private-owner', senderOpenId: 'open-owner', text: '交办 工单 WO-1' }), { needCheck: false })
+  const replayState = await store.read(), replayTurns = replayState.conversations.flatMap(item => item.turns).length, replaySends = fake.sendCalls.length
+  await ws.dispatcher.invoke(event({ eventId: 'event-private', messageId: 'message-private', chatId: 'private-owner', senderOpenId: 'open-owner', text: 'SYNTHETIC_PRIVATE_TEXT' }), { needCheck: false })
   const replayed = await store.read()
   assert.equal(replayed.works.length, replayState.works.length)
-  assert.equal(replayed.works.find(item => item.id === work.id).executions.length, replayExecutions)
+  assert.equal(replayed.conversations.flatMap(item => item.turns).length, replayTurns)
   assert.equal(fake.sendCalls.length, replaySends)
 
   const link = await channel.issueLinkCode(admin, { channelAppId: 'app-a' })
@@ -146,10 +177,10 @@ async function inboundAdmission() {
   assert.equal(linked.channelMessages.length, linkMessages)
   assert.equal(fake.sendCalls.length, linkSends)
 
-  const nontextWorks = linked.works.length, nontextSends = fake.sendCalls.length
+  const nontextTurns = runner.calls.length, nontextSends = fake.sendCalls.length
   await ws.dispatcher.invoke(event({ eventId: 'event-image', messageId: 'message-image', chatId: 'private-owner', senderOpenId: 'open-owner', messageType: 'image', content: JSON.stringify({ image_key: 'img-controlled' }) }), { needCheck: false })
   const nontext = await store.read()
-  assert.equal(nontext.works.length, nontextWorks)
+  assert.equal(runner.calls.length, nontextTurns)
   assert.equal(nontext.channelMessages.find(item => item.providerEventId === 'event-image').status, 'rejected')
   assert.equal(fake.sendCalls.length, nontextSends + 1)
 
@@ -157,6 +188,7 @@ async function inboundAdmission() {
   delete missingSenderType.event.sender.sender_type
   const ignored = [
     event({ eventId: 'event-self', messageId: 'message-self', chatId: 'private-owner', senderOpenId: BOT_A, senderType: 'app', text: '交办 工单 WO-1' }),
+    event({ eventId: 'event-self-user', messageId: 'message-self-user', chatId: 'private-owner', senderOpenId: BOT_A, text: 'SYNTHETIC_ECHO' }),
     event({ eventId: 'event-other-app', messageId: 'message-other-app', chatId: 'private-owner', senderOpenId: 'open-owner', senderType: 'app', text: '交办 工单 WO-1' }),
     event({ eventId: 'event-other-bot', messageId: 'message-other-bot', chatId: 'private-owner', senderOpenId: 'open-owner', senderType: 'bot', text: '交办 工单 WO-1' }),
     missingSenderType,
@@ -165,25 +197,40 @@ async function inboundAdmission() {
     event({ eventId: 'event-open', messageId: 'message-open', chatId: 'private-owner', senderOpenId: '', text: '交办 工单 WO-1' }),
     event({ eventId: 'event-chat', messageId: 'message-chat', chatId: '', senderOpenId: 'open-owner', text: '交办 工单 WO-1' }),
     event({ eventId: 'event-message', messageId: '', chatId: 'private-owner', senderOpenId: 'open-owner', text: '交办 工单 WO-1' }),
+    event({ eventId: '', messageId: 'message-event-missing', chatId: 'private-owner', senderOpenId: 'open-owner', text: 'SYNTHETIC_MISSING_EVENT' }),
     event({ eventId: 'event-no-mention', messageId: 'message-no-mention', chatId: 'group-owner', senderOpenId: 'open-owner', chatType: 'group', text: '交办 工单 WO-2' }),
     event({ eventId: 'event-wrong-mention', messageId: 'message-wrong-mention', chatId: 'group-owner', senderOpenId: 'open-owner', chatType: 'group', text: '@_user_1 交办 工单 WO-2', mentions: [{ key: '@_user_1', id: { open_id: 'ou_other_bot' } }] }),
   ]
-  const ignoredBefore = (await store.read()).channelMessages.length
+  const ignoredBefore = (await store.read()).channelMessages.length, ignoredTurns = runner.calls.length, ignoredSends = fake.sendCalls.length
   for (const value of ignored) await ws.dispatcher.invoke(value, { needCheck: false })
   assert.equal((await store.read()).channelMessages.length, ignoredBefore)
+  assert.equal(runner.calls.length, ignoredTurns); assert.equal(fake.sendCalls.length, ignoredSends)
 
-  await ws.dispatcher.invoke(event({ eventId: 'event-group', messageId: 'message-group', chatId: 'group-owner', senderOpenId: 'open-owner', chatType: 'group', text: '@_user_1 交办 工单 WO-2', mentions: [{ key: '@_user_1', id: { open_id: BOT_A } }] }), { needCheck: false })
-  const groupMessage = (await store.read()).channelMessages.find(item => item.providerEventId === 'event-group')
-  assert.equal(groupMessage.status, 'accepted')
-  assert.equal(groupMessage.text, '交办 工单 WO-2')
-  assert.equal((await store.read()).channelConversations.find(item => item.id === groupMessage.conversationId).type, 'group')
-  await waitWork(groupMessage.workId)
-  return work
+  const groupAt = fake.sendCalls.length, groupTurns = []
+  for (const member of ['owner', 'peer']) {
+    const text = `SYNTHETIC_GROUP_${member.toUpperCase()}`
+    await ws.dispatcher.invoke(event({ eventId: `event-group-${member}`, messageId: `message-group-${member}`, chatId: 'group-shared', senderOpenId: `open-${member}`, chatType: 'group', text: `@_user_1 ${text}`, mentions: [{ key: '@_user_1', id: { open_id: BOT_A } }] }), { needCheck: false })
+    const state = await store.read(), message = state.channelMessages.find(item => item.providerEventId === `event-group-${member}`)
+    assert.equal(message.status, 'accepted'); assert.equal(message.text, text)
+    assert.equal(state.channelConversations.find(item => item.id === message.conversationId).type, 'group')
+    await waitTurn(message.memberConversationId, message.turnId)
+    await waitFor(async () => (await store.read()).deliveries.filter(item => item.channelMessageId === message.id && item.status === 'delivered').length === 2)
+    groupTurns.push(message.memberConversationId)
+  }
+  assert.notEqual(groupTurns[0], groupTurns[1])
+  const groupSends = fake.sendCalls.slice(groupAt)
+  assert.equal(groupSends.filter(call => call.options.data.receive_id === 'group-shared').length, 2)
+  for (const call of groupSends) {
+    const body = JSON.parse(call.options.data.content).text, target = call.options.data.receive_id
+    assert.equal(body, target === 'group-shared' ? '已受理，后续仅通过已验证私聊反馈；详情请到 Web 查看。'
+      : target === 'private-owner' ? 'SYNTHETIC_PRIVATE_REPLY:SYNTHETIC_GROUP_OWNER' : 'SYNTHETIC_PRIVATE_REPLY:SYNTHETIC_GROUP_PEER')
+    assert(['group-shared', 'private-owner', 'private-peer'].includes(target))
+  }
+  return turn
 }
 
-async function sendOutcomes(work) {
-  const resultId = work.results[0].id
-  const successful = await channel.createWorkDelivery(owner, { workId: work.id, resultId, requestId: 'send-success' })
+async function sendOutcomes(turn) {
+  const successful = await channel.createConversationDelivery(owner, deliveryInput('send-success', turn))
   fake.outcomes.push('success')
   const orderAt = fake.order.length
   const delivered = await runtime.sendDelivery(successful.delivery.id)
@@ -195,7 +242,7 @@ async function sendOutcomes(work) {
   assert.equal(successfulCall.options.data.receive_id, 'private-owner')
   assert.match(successfulCall.options.data.uuid, /^[0-9a-f-]{36}$/)
 
-  const failedCandidate = await channel.createWorkDelivery(owner, { workId: work.id, resultId, requestId: 'send-failed' })
+  const failedCandidate = await channel.createConversationDelivery(owner, deliveryInput('send-failed', turn))
   fake.outcomes.push('failed')
   const beforeFailed = fake.sendCalls.length
   assert.equal((await runtime.sendDelivery(failedCandidate.delivery.id)).status, 'failed')
@@ -207,7 +254,7 @@ async function sendOutcomes(work) {
   assert.equal(retried.status, 'delivered')
   assert.equal(retried.attempts, 2)
 
-  const unknownCandidate = await channel.createWorkDelivery(owner, { workId: work.id, resultId, requestId: 'send-unknown' })
+  const unknownCandidate = await channel.createConversationDelivery(owner, deliveryInput('send-unknown', turn))
   fake.outcomes.push('throw')
   const beforeUnknown = fake.sendCalls.length
   assert.equal((await runtime.sendDelivery(unknownCandidate.delivery.id)).status, 'unknown')
@@ -215,11 +262,11 @@ async function sendOutcomes(work) {
   await assert.rejects(runtime.sendDelivery(unknownCandidate.delivery.id, { retry: true }), hasCode('INVALID_STATE'))
   assert.equal(fake.sendCalls.length, beforeUnknown + 1)
 
-  const mismatched = await channel.createWorkDelivery(owner, { workId: work.id, resultId, requestId: 'send-chat-mismatch' })
+  const mismatched = await channel.createConversationDelivery(owner, deliveryInput('send-chat-mismatch', turn))
   fake.outcomes.push('wrong-chat')
   assert.equal((await runtime.sendDelivery(mismatched.delivery.id)).status, 'unknown')
 
-  const timedOut = await channel.createWorkDelivery(owner, { workId: work.id, resultId, requestId: 'send-timeout' })
+  const timedOut = await channel.createConversationDelivery(owner, deliveryInput('send-timeout', turn))
   fake.outcomes.push('never')
   const timeoutStarted = Date.now()
   assert.equal((await runtime.sendDelivery(timedOut.delivery.id)).status, 'unknown')
@@ -229,6 +276,43 @@ async function sendOutcomes(work) {
   late.resolve({ code: 0, data: { message_id: 'om-late', chat_id: late.options.data.receive_id } })
   await new Promise(resolve => setImmediate(resolve))
   assert.equal((await delivery(timedOut.delivery.id)).status, 'unknown')
+}
+
+async function duplicateAndInterruptedAdmission() {
+  const ws = currentWs(APP_A), concurrent = event({ eventId: 'event-concurrent', messageId: 'message-concurrent', chatId: 'private-owner', senderOpenId: 'open-owner', text: 'SYNTHETIC_CONCURRENT' })
+  const before = runner.calls.length
+  await Promise.all([ws.dispatcher.invoke(concurrent, { needCheck: false }), ws.dispatcher.invoke(concurrent, { needCheck: false })])
+  const first = (await store.read()).channelMessages.find(item => item.providerMessageId === 'message-concurrent')
+  await waitTurn(first.memberConversationId, first.turnId)
+  await waitFor(async () => (await store.read()).deliveries.some(item => item.sourceRef?.turnId === first.turnId && item.status === 'delivered'))
+  assert.equal(runner.calls.length, before + 1)
+  assert.equal((await store.read()).channelMessages.filter(item => item.providerMessageId === 'message-concurrent').length, 1)
+
+  const interrupted = event({ eventId: 'event-committed-turn', messageId: 'message-committed-turn', chatId: 'private-owner', senderOpenId: 'open-owner', text: 'SYNTHETIC_COMMITTED_TURN' })
+  failInboxAcceptanceId = 'message-committed-turn'
+  await assert.rejects(ws.dispatcher.invoke(interrupted, { needCheck: false }), /controlled inbox acceptance write failure/)
+  const stranded = (await store.read()).channelMessages.find(item => item.providerMessageId === 'message-committed-turn')
+  assert.equal(stranded.status, 'reserved'); assert.equal(stranded.turnId, undefined)
+  const admitted = (await store.read()).conversations.find(item => item.id === stranded.memberConversationId).turns.find(item => item.clientRequestId === stranded.clientRequestId)
+  assert(admitted, 'the accepted conversation turn must exist before inbox acceptance fails')
+  await waitTurn(stranded.memberConversationId, admitted.id)
+  const turnsBeforeReplay = runner.calls.length
+  await ws.dispatcher.invoke(interrupted, { needCheck: false })
+  const accepted = (await store.read()).channelMessages.find(item => item.id === stranded.id)
+  assert.equal(accepted.status, 'accepted'); assert.equal(accepted.turnId, admitted.id)
+  assert.equal(runner.calls.length, turnsBeforeReplay)
+  await waitFor(async () => (await store.read()).deliveries.some(item => item.sourceRef?.turnId === admitted.id && item.status === 'delivered'))
+
+  const cross = event({ eventId: 'event-concurrent', messageId: 'message-committed-turn', chatId: 'private-owner', senderOpenId: 'open-owner', text: 'SYNTHETIC_ID_CONFLICT' })
+  const previous = await store.read(), sends = fake.sendCalls.length
+  await ws.dispatcher.invoke(cross, { needCheck: false }); await ws.dispatcher.invoke(cross, { needCheck: false })
+  const state = await store.read(), original = state.channelMessages.find(item => item.id === first.id)
+  assert.equal(original.status, 'accepted'); assert.equal(original.text, 'SYNTHETIC_CONCURRENT')
+  assert.equal(original.turnId, first.turnId); assert.equal(original.conflicts.length, 1)
+  assert.equal(original.conflicts[0].error.code, 'OFFICIAL_ID_CONFLICT')
+  assert.equal(state.channelMessages.length, previous.channelMessages.length)
+  assert.deepEqual(state.conversations, previous.conversations)
+  assert.equal(runner.calls.length, turnsBeforeReplay); assert.equal(fake.sendCalls.length, sends)
 }
 
 async function rotationAndStrictCredentials() {
@@ -271,8 +355,8 @@ async function rotationAndStrictCredentials() {
   assert.equal((await app('app-b')).status, 'disabled')
 }
 
-async function outcomeWriteFailure(work) {
-  const candidate = await channel.createWorkDelivery(owner, { workId: work.id, resultId: work.results[0].id, requestId: 'outcome-write-failure' })
+async function outcomeWriteFailure(turn) {
+  const candidate = await channel.createConversationDelivery(owner, deliveryInput('outcome-write-failure', turn))
   fake.outcomes.push('success')
   failOutcomeOnce = true
   await assert.rejects(runtime.sendDelivery(candidate.delivery.id), /controlled outcome write failure/)
@@ -282,17 +366,19 @@ async function outcomeWriteFailure(work) {
 
 async function shutdown(strandedDeliveryId) {
   const active = currentWs(APP_A)
+  const turnsBefore = runner.calls.length, releaseTurn = runner.holdNext()
   const hold = deferred()
   let persistedResolve
   const persisted = new Promise(resolve => { persistedResolve = resolve })
   holdInbound = { promise: hold.promise, persisted: persistedResolve }
-  const shutdownEvent = event({ eventId: 'event-shutdown', messageId: 'message-shutdown', chatId: 'private-owner', senderOpenId: 'open-owner', text: '交办 工单 WO-3' })
+  const shutdownEvent = event({ eventId: 'event-shutdown', messageId: 'message-shutdown', chatId: 'private-owner', senderOpenId: 'open-owner', text: 'SYNTHETIC_SHUTDOWN' })
   const invocation = active.dispatcher.invoke(shutdownEvent, { needCheck: false })
   const accepted = await persisted
-  assert.equal(accepted.code, 'WORK_ACCEPTED')
+  assert.equal(accepted.status, 'accepted')
   const acceptedState = await store.read(), acceptedMessage = acceptedState.channelMessages.find(item => item.providerEventId === 'event-shutdown')
   assert.equal(acceptedMessage.status, 'accepted')
   assert.equal(acceptedState.deliveries.some(item => item.channelMessageId === acceptedMessage.id), false)
+  await waitFor(() => runner.calls.length === turnsBefore + 1)
 
   await writeCredential('FEISHU_C', APP_C, 'secret_C_0123456789')
   fake.botOutcomes.set(APP_C, 'never')
@@ -308,21 +394,22 @@ async function shutdown(strandedDeliveryId) {
   assert.equal((await app('app-a')).status, 'unavailable')
   const closedState = await store.read()
   const fallbackDeliveries = closedState.deliveries.filter(item => item.channelMessageId === acceptedMessage.id)
-  assert.equal(fallbackDeliveries.length, 1)
-  assert.equal(fallbackDeliveries[0].status, 'pending')
+  assert.equal(fallbackDeliveries.length, 0, 'an unfinished turn has no fabricated delivery body')
   assert.equal(closedState.deliveries.find(item => item.id === strandedDeliveryId).status, 'unknown')
-  assert.equal(closedState.works.find(item => item.id === accepted.workId).executions.length, 1)
+  assert.equal(closedState.conversations.find(item => item.id === accepted.conversationId).turns.filter(item => item.id === accepted.turnId).length, 1)
   assert.equal(fake.sendCalls.length, sends)
 
+  releaseTurn()
+  await waitTurn(accepted.conversationId, accepted.turnId)
   hold.resolve()
   await invocation
   await syncing
   const drained = await store.read()
   assert.equal(drained.deliveries.filter(item => item.channelMessageId === acceptedMessage.id).length, 1)
   assert.equal(drained.deliveries.find(item => item.channelMessageId === acceptedMessage.id).status, 'pending')
-  const executions = drained.works.find(item => item.id === accepted.workId).executions.length
+  const turns = runner.calls.length
   await active.dispatcher.invoke(shutdownEvent, { needCheck: false })
-  assert.equal((await store.read()).works.find(item => item.id === accepted.workId).executions.length, executions)
+  assert.equal(runner.calls.length, turns)
   assert.equal(fake.sendCalls.length, sends)
 
   active.options.onReconnected()
@@ -381,19 +468,19 @@ function event({ eventId, messageId, chatId, senderOpenId, text, appId = APP_A, 
   }
 }
 
-async function createWork(workOrderId, clientRequestId) {
-  const accepted = await workService.createWork(owner, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', workOrderId, clientRequestId })
-  assert.equal(accepted.ok, true)
-  return waitWork(accepted.value.id)
+async function createTurn(text, clientRequestId) {
+  const identity = (await store.read()).channelIdentities.find(item => item.id === 'identity-owner')
+  const accepted = await conversations.sendTurn(owner, identity.activeConversationId, { text, clientRequestId })
+  return waitTurn(identity.activeConversationId, accepted.turn.id)
 }
 
-async function waitWork(workId) {
+async function waitTurn(conversationId, turnId) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const work = (await store.read()).works.find(item => item.id === workId)
-    if (work?.status === 'completed') return work
+    const turn = (await store.read()).conversations.find(item => item.id === conversationId)?.turns.find(item => item.id === turnId)
+    if (turn?.status === 'completed') return { conversationId, turnId }
     await new Promise(resolve => setTimeout(resolve, 5))
   }
-  throw new Error(`work did not complete: ${workId}`)
+  throw new Error(`synthetic turn did not complete: ${turnId}`)
 }
 
 async function waitFor(predicate) {
@@ -412,23 +499,24 @@ function seed(state) {
   const now = '2026-09-20T00:00:00.000Z'
   return {
     ...state,
+    defaultChannelEmployeeId: 'employee-owner',
     members: [
       { id: 'member-admin', loginName: 'admin', displayName: 'admin', role: 'admin', enabled: true, authRef: 'admin', sessionVersion: 1, employeeIds: [], createdAt: now, updatedAt: now },
       { id: 'member-owner', loginName: 'owner', displayName: 'owner', role: 'member', enabled: true, authRef: 'owner', sessionVersion: 1, employeeIds: ['employee-owner'], createdAt: now, updatedAt: now },
+      { id: 'member-peer', loginName: 'peer', displayName: 'peer', role: 'member', enabled: true, authRef: 'peer', sessionVersion: 1, employeeIds: ['employee-owner'], createdAt: now, updatedAt: now },
     ],
     modelRoutes: [{ id: 'model-1', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
-    employees: [{ id: 'employee-owner', name: '员工', enabled: true, modelRouteId: 'model-1', connectionIds: ['connection-owner'], skillIds: ['skill-gearjob-work-order-read'] }],
-    connections: [{ id: 'connection-owner', name: 'GearJob', ...catalog(), allowedObjectIds: ['WO-RECOVER', 'WO-1', 'WO-2', 'WO-3'], enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'], revision: 1 }],
-    skills: [{ id: 'skill-gearjob-work-order-read', name: '工单查询', capabilityId: 'gearjob-work-order-read', enabled: true }],
+    employees: [{ id: 'employee-owner', name: '合成员工', enabled: true, revision: 1, instructions: 'synthetic', modelRouteId: 'model-1', connectionIds: [], skillIds: [] }],
+    connections: [],
+    skills: [],
     channelApps: [channelApp('app-a', APP_A, 'tenant-a', 'FEISHU_A', now), channelApp('app-b', APP_B, 'tenant-b', 'FEISHU_B', now)],
-    channelIdentities: [{ id: 'identity-owner', channelAppId: 'app-a', providerUserId: 'open-owner', memberId: 'member-owner', verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }],
-    channelConversations: [{ id: 'conversation-owner', channelAppId: 'app-a', providerConversationId: 'private-owner', identityId: 'identity-owner', memberId: 'member-owner', type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'active', revision: 1, defaultDispatch: { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner' }, createdAt: now, updatedAt: now }],
+    channelIdentities: ['owner', 'peer'].map(member => ({ id: `identity-${member}`, channelAppId: 'app-a', providerUserId: `open-${member}`, memberId: `member-${member}`, verificationMethod: 'link-code', status: 'active', revision: 1, defaultEmployeeId: null, activeConversationId: null, createdAt: now, updatedAt: now })),
+    channelConversations: ['owner', 'peer'].map(member => ({ id: `conversation-${member}`, channelAppId: 'app-a', providerConversationId: `private-${member}`, identityId: `identity-${member}`, memberId: `member-${member}`, type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now })),
   }
 }
 
 function channelApp(id, providerAppId, providerTenantId, credentialRef, now) { return { id, provider: 'feishu', providerAppId, providerTenantId, credentialRef, enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now } }
-function catalog() { return { kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'http://127.0.0.1/gearjob', credentialRef: 'gearjob.json', sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled' } }
-function deliveryInput(requestId, work) { return { channelAppId: 'app-a', requestId, workId: work.id, resultId: work.results[0].id, targetIdentityId: 'identity-owner', targetConversationId: 'conversation-owner', contentScope: 'result' } }
+function deliveryInput(requestId, turn) { return { requestId, identityId: 'identity-owner', conversationId: turn.conversationId, turnId: turn.turnId } }
 function currentWs(appId) { const result = fake.ws.findLast(item => item.options.appId === appId && !item.closed); assert(result, `missing active WS ${appId}`); return result }
 async function app(id) { return (await store.read()).channelApps.find(item => item.id === id) }
 async function delivery(id) { return (await store.read()).deliveries.find(item => item.id === id) }
@@ -436,15 +524,23 @@ function hasCode(code) { return value => value?.code === code }
 function deferred() { let resolve; const promise = new Promise(ok => { resolve = ok }); return { promise, resolve } }
 
 function fakeRunner() {
-  let calls = 0
+  const calls = [], history = new Map()
+  let held, activeHold
   return {
-    configured: true,
-    async run(args) {
-      calls += 1
-      const source = { sourceRecordId: `Work Order:${args.input.workOrderId}`, sourceRevision: 'r1', sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled' }
-      return { explanation: 'fixture', dshSessionRef: `session-${calls}`, continuity: 'new', contextConfirmationRefs: [], eventCount: 1, result: { kind: 'gearjob.work-order.observation', payload: { workOrderId: args.input.workOrderId, status: 'In Process', plannedQuantity: 10, completedQuantity: 4, unit: 'Nos', ...source }, source, toolName: 'geneway_gearjob_read_work_order', pluginId: 'geneway-gearjob-work-order', pluginVersion: '2' } }
+    calls,
+    holdNext() { assert.equal(held, undefined); held = deferred(); return held.resolve },
+    async runChatTurn(args) {
+      calls.push({ conversationId: args.conversationId, text: args.text })
+      await args.authorize()
+      const gate = held; held = undefined; activeHold = gate; await gate?.promise; activeHold = undefined
+      const sessionId = args.sessionId ?? `synthetic-session-${args.turnId}`, userMessageId = `user-${args.turnId}`, assistantId = `assistant-${args.turnId}`
+      await args.onSession({ sessionId, userMessageId })
+      const events = history.get(sessionId) ?? [], turn = events.filter(item => item.type === 'turn/start').length + 1
+      events.push({ type: 'turn/start', data: { turn } }, { type: 'user/message', data: { id: userMessageId } }, { type: 'assistant/message', data: { turn, message: { id: assistantId, content: [{ type: 'text', text: `SYNTHETIC_PRIVATE_REPLY:${args.text}` }] } } })
+      history.set(sessionId, events)
+      return { sessionId, userMessageId, assistantMessageIds: [assistantId], stopReason: 'completed' }
     },
-    async cancel() {},
-    async close() {},
+    async readChatHistory(ids) { return ids.map(sessionId => ({ sessionId, status: history.has(sessionId) ? 'available' : 'unavailable', events: structuredClone(history.get(sessionId) ?? []) })) },
+    async cancelChatTurn() { held?.resolve(); activeHold?.resolve() },
   }
 }

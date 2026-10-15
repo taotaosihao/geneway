@@ -4,171 +4,334 @@ import { createServer as createNodeServer } from 'node:http'
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Script, createContext, runInContext } from 'node:vm'
 import { createAuthRuntime, initializeAuthFile } from '../src/auth.mjs'
-import { createAutomationService, dailyOccurrenceKey } from '../src/automation-service.mjs'
+import { createAutomationRuntime, createAutomationService, dailyOccurrenceKey, eventOccurrenceKey } from '../src/automation-service.mjs'
 import { createChannelService } from '../src/channel-service.mjs'
 import { createGenewayServer } from '../src/server.mjs'
-import { createFileStore } from '../src/store/file-store.mjs'
+import { createFileStore, migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 
-const nowDate = new Date(); nowDate.setUTCSeconds(0, 0)
-const now = nowDate.toISOString(), shanghaiNow = new Date(nowDate.getTime() + 8 * 60 * 60 * 1000)
-const scheduledDate = shanghaiNow.toISOString().slice(0, 10), triggerTime = shanghaiNow.toISOString().slice(11, 16)
-const temp = await mkdtemp(join(tmpdir(), 'geneway-p5-http-ui-'))
-const statePath = join(temp, 'state.json'), authPath = join(temp, 'auth.json')
-const store = createFileStore(statePath), origin = `http://127.0.0.1:${await freePort()}`
-let server, browser, releaseActive, runtimeOwned = true
-let runtimeRefreshes = 0
+const now = '2026-10-15T00:00:00.000Z', historicalAt = '2026-09-21T00:00:00.000Z', scheduledDate = '2026-09-21'
+const sourceId = 'gearjob:dev.localhost', sourceRevision = '2026-09-21 08:00:00.000001'
+const actor = { id: 'member-owner' }, retired = { status: 'unavailable', code: 'CAPABILITY_RETIRED' }
+const args = process.argv.slice(2)
+if (args.length === 1 && args[0] === '--harness-check') await harnessCheck()
+else if (args.length === 1 && args[0] === '--http-only') await main({ httpOnly: true })
+else if (args.length === 1 && args[0] === '--help') console.log('P4 保留回归：无参数执行受控 loopback HTTP 和隔离 Chrome 桌面/手机检查；实际运行须 controller 的候选/guard/GO。\n--http-only 仅运行同一受控 HTTP 回归，不代表浏览器检查通过。\n--harness-check 仅检查内存夹具、服务边界与实际 Web helpers，不监听端口或启动浏览器/native/model。')
+else { assert.equal(args.length, 0, '支持无参数、--http-only、--harness-check 或 --help'); await main() }
 
-try {
-  await store.update(seed)
-  await initializeAuthFile(authPath, { 'member-admin': 'admin password', 'member-owner': 'owner password', 'member-peer': 'peer password' }, { mode: 'create', allowedMemberIds: ['member-admin', 'member-owner', 'member-peer'] })
-  const service = createWorkService({ store, runner: runner(), connectionCatalog: [catalog()] })
-  const channel = createChannelService({ store, workService: service, clock: () => now })
-  const automation = createAutomationService({ store, workService: service, connectionCatalog: [catalog()], clock: () => now, eventSourceId: 'gearjob:dev.localhost' })
-  const auth = createAuthRuntime({ filePath: authPath }), index = await readFile(new URL('../web/index.html', import.meta.url), 'utf8')
-  const knowledge = { async listShareTargets() { return { members: [], employees: [] } }, async listMaterials() { return [] } }
-  const channelRuntime = {
-    isAvailable: id => id === 'app-feishu',
-    async sendDelivery(id, { retry = false } = {}) {
-      await (retry ? channel.retryDelivery({ deliveryId: id }) : channel.authorizeDelivery({ deliveryId: id }))
-      return channel.recordDeliveryOutcome({ deliveryId: id, status: 'delivered', providerMessageId: `message-${id}` })
-    },
+async function main({ httpOnly = false } = {}) {
+  const temp = await mkdtemp(join(tmpdir(), 'geneway-p5-http-ui-')), authPath = join(temp, 'auth.json')
+  const store = createFileStore(join(temp, 'state.json')), origin = `http://127.0.0.1:${await freePort()}`
+  const injectedRunner = controlledRunner()
+  let server, service, runtime, runtimeRefreshes = 0, transportAvailable = true, sends = 0
+  const request = client(origin)
+  try {
+    await store.update(() => fixture())
+    await initializeAuthFile(authPath, { 'member-admin': 'admin password', 'member-owner': 'owner password', 'member-peer': 'peer password' }, { mode: 'create', allowedMemberIds: ['member-admin', 'member-owner', 'member-peer'] })
+    service = createWorkService({ store, runner: injectedRunner, connectionCatalog: [catalog()] })
+    await service.ensureReady()
+    const channel = createChannelService({ store, workService: service, clock: () => now, connectionCatalog: [catalog()] })
+    const automation = createAutomationService({ store, workService: service, connectionCatalog: [catalog()], clock: () => now })
+    // No timer callback is executed: these are historical rules, not a restored event source.
+    runtime = createAutomationRuntime({ store, automationService: automation, workService: service, dataRoot: temp, clock: () => now, lockFactory: async () => ({ async release() {} }), timerFactory: () => ({ unref() {} }), clearTimer() {} })
+    const automationRuntime = { ...runtime, async refresh() { runtimeRefreshes += 1; await runtime.refresh() } }
+    const channelRuntime = {
+      isAvailable: id => id === 'app-feishu' && transportAvailable,
+      async sendDelivery(id, { retry = false } = {}) {
+        await (retry ? channel.retryDelivery({ deliveryId: id }) : channel.authorizeDelivery({ deliveryId: id }))
+        await channel.validateSendClaim({ deliveryId: id }); sends += 1
+        return channel.recordDeliveryOutcome({ deliveryId: id, status: 'delivered', providerMessageId: `controlled-message-${sends}` })
+      },
+    }
+    const index = await readFile(new URL('../web/index.html', import.meta.url), 'utf8')
+    server = createGenewayServer({ service, conversationService: { async listConversations() { return [] } }, knowledge: { async listShareTargets() { return { members: [], employees: [] } }, async listMaterials() { return [] } }, collaborationRunner: { isKnowledgeEnabled: () => true }, channel, channelRuntime, automation, automationRuntime, connectionCatalog: [catalog()], store, auth: createAuthRuntime({ filePath: authPath }), index, trustedOrigin: origin })
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(new URL(origin).port, '127.0.0.1', resolve) })
+    const login = (name, password) => request('/api/session', { method: 'POST', originHeader: origin, json: { loginName: name, password } })
+    const admin = await login('admin', 'admin password'), owner = await login('owner', 'owner password'), peer = await login('peer', 'peer password')
+    for (const session of [admin, owner, peer]) assert.equal(session.status, 200)
+    assert.equal((await request('/api/automations')).status, 401)
+    assert.equal((await request('/api/automations', { method: 'POST', cookie: owner.cookie, json: dailyBody() })).status, 403)
+    assert.equal((await request('/api/automations', { method: 'POST', session: owner, originHeader: 'http://evil.invalid', json: dailyBody() })).status, 403)
+    for (const extra of [{ unexpected: true }, { notificationConversationId: 'conversation-owner' }, { ownerMemberId: 'member-peer' }]) assert.equal((await request('/api/automations', { method: 'POST', session: owner, json: { ...dailyBody(), ...extra } })).status, 400)
+    assert.equal((await request('/api/automations?unexpected=true', { session: owner })).status, 400)
+    assert.deepEqual((await request('/api/automations', { session: owner })).body.eventSource, retired)
+    for (const session of [peer, admin]) {
+      assert.deepEqual((await request('/api/automations', { session })).body, { rules: [], occurrences: [], eventSource: retired })
+      assert.equal((await request('/api/automations/rule-http', { session })).status, 404)
+      assert.equal((await request('/api/works/work-http', { session })).status, 404)
+      for (const action of ['pause', 'revoke']) assert.equal((await request('/api/automations/rule-http/' + action, { method: 'POST', session, json: { expectedRevision: 1 } })).status, 404)
+      assert.equal((await request('/api/channels/deliveries/delivery-failed/retry', { method: 'POST', session, json: {} })).status, 404)
+    }
+    const history = (await request('/api/automations/rule-http', { session: owner })).body
+    assert.equal(history.occurrences.length, 1)
+    for (const key of ['work', 'delivery']) assert.equal(Object.hasOwn(history.occurrences[0], key), false)
+    const beforeUnavailable = await store.read()
+    const unavailable = await request('/api/automations/rule-http/check-now', { method: 'POST', session: owner, json: { expectedRevision: 1, clientRequestId: 'owner-unavailable' } })
+    assert.equal(unavailable.status, 503)
+    assert.deepEqual(unavailable.body, { error: { code: 'INTERNAL_ERROR', message: '服务暂时无法完成请求', status: 503 } })
+    assert.deepEqual(await store.read(), beforeUnavailable)
+    await runtime.start()
+    const retiredRequests = [
+      ['/api/automations', 'POST', dailyBody()],
+      ['/api/automations', 'POST', { ...dailyBody(), trigger: { kind: 'gearjob-work-order-update', sourceId } }],
+      ['/api/automations/rule-http', 'PATCH', { ...dailyBody(), expectedRevision: 1 }],
+      ['/api/automations/rule-draft/enable', 'POST', { expectedRevision: 1 }],
+      ['/api/automations/rule-paused/resume', 'POST', { expectedRevision: 2 }],
+      ['/api/automations/rule-http/check-now', 'POST', { expectedRevision: 1, clientRequestId: 'retired-manual' }],
+      ['/api/automations/rule-http/check-now', 'POST', { expectedRevision: 1, clientRequestId: 'retired-manual' }],
+      ['/api/works/work-http/continue', 'POST', { clientRequestId: 'retired-continue', input: { workOrderId: 'WO-HTTP' } }],
+      ['/api/works/work-http/refresh', 'POST', { clientRequestId: 'retired-refresh' }],
+      ['/api/works/work-http/follow-up', 'POST', { clientRequestId: 'retired-question', text: '补充核对' }],
+    ]
+    for (const [path, method, json] of retiredRequests) {
+      const before = await store.read(), response = await request(path, { method, json, session: owner })
+      assert.equal(response.status, 409, path + ' response: ' + JSON.stringify(response.body)); assert.equal(response.body.error.code, 'CAPABILITY_RETIRED', path)
+      assert.deepEqual(await store.read(), before, path + ' must not create rules, works, executions, reservations, occurrences or deliveries')
+    }
+    const beforePause = await store.read()
+    assert.equal((await request('/api/automations/rule-http/pause', { method: 'POST', session: owner, json: { expectedRevision: 9 } })).body.error.code, 'REVISION_CONFLICT')
+    assert.deepEqual(await store.read(), beforePause)
+    const paused = await request('/api/automations/rule-http/pause', { method: 'POST', session: owner, json: { expectedRevision: 1 } })
+    assert.equal(paused.status, 200); assert.equal(paused.body.status, 'paused'); assert.equal(paused.body.revision, 2)
+    const revoked = await request('/api/automations/rule-http/revoke', { method: 'POST', session: owner, json: { expectedRevision: 2 } })
+    assert.equal(revoked.status, 200); assert.equal(revoked.body.status, 'revoked'); assert.equal(revoked.body.revision, 3)
+    assert.equal(runtimeRefreshes, 2, 'successful pause and revoke refresh the existing owner')
+    assert.deepEqual(facts(await store.read()), facts(beforePause), 'pause/revoke preserve original occurrence, result, source, time and delivery facts')
+    assert.equal((await request('/api/channels/deliveries/delivery-unknown/retry', { method: 'POST', session: owner, json: {} })).body.error.code, 'INVALID_STATE')
+    assert.equal(sends, 0)
+    if (httpOnly) { assert.equal(injectedRunner.calls, 0); console.log('P4 retained controlled HTTP checks passed: auth/strict fields/owner history, exact retirement 409/code/no new facts, safe owner-unavailable 503 and pause/revoke CAS; browser skipped, native/real-model/upstream calls=0'); return }
+
+    // This independent cycle work is the only new execution; it is not an old automatic rule.
+    const created = await request('/api/works', { method: 'POST', session: owner, json: { employeeId: 'employee-owner', skillId: 'skill-cycle-time-calculate', goal: '停止合法节拍工作', input: { availableSeconds: 120, quantity: 2 }, clientRequestId: 'retained-cycle-stop' } })
+    assert.equal(created.status, 200)
+    await waitFor(async () => (await service.getWork(actor, created.body.id)).value.status === 'running')
+    const beforeBrowser = await store.read()
+    const browserResult = await browserJourney({ origin, temp, request, owner, activeWorkId: created.body.id, setTransportAvailable(value) { transportAvailable = value } })
+    const afterBrowser = await store.read()
+    assert.equal(afterBrowser.works.find(item => item.id === created.body.id).status, 'cancelled')
+    assert.equal(afterBrowser.deliveries.find(item => item.id === 'delivery-failed').status, 'delivered')
+    assert.equal(afterBrowser.deliveries.find(item => item.id === 'delivery-unknown').status, 'unknown')
+    assert.deepEqual(counts(afterBrowser), counts(beforeBrowser), 'UI pause/revoke/stop/notification retry must not create new work or execute again')
+    assert.deepEqual(afterBrowser.works.filter(item => item.id !== created.body.id), beforeBrowser.works.filter(item => item.id !== created.body.id))
+    assert.deepEqual(afterBrowser.automationOccurrences, beforeBrowser.automationOccurrences)
+    assert.equal(injectedRunner.calls, 1); assert.equal(sends, 1)
+    console.log('P4 retained automation HTTP/UI checks passed; synthetic history, controlled cycle runner/transport, no native/model/upstream calls', JSON.stringify(browserResult))
+  } finally {
+    if (server?.listening) await new Promise(resolve => server.close(resolve))
+    await runtime?.close(); await service?.close(); await injectedRunner.close()
+    await rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
-  const automationRuntime = { ownsLock: () => runtimeOwned, checkNow: (actor, id, input) => automation.acceptManualOccurrence(actor, id, { ...input, ownerCheck: () => runtimeOwned }), async refresh() { runtimeRefreshes += 1 } }
-  server = createGenewayServer({ service, knowledge, collaborationRunner: { isKnowledgeEnabled: () => true }, channel, channelRuntime, automation, automationRuntime, store, auth, index, trustedOrigin: origin })
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(new URL(origin).port, '127.0.0.1', resolve) })
-
-  const admin = await login('admin', 'admin password'), owner = await login('owner', 'owner password'), peer = await login('peer', 'peer password')
-  assert.equal((await request('/api/automations')).status, 401)
-  assert.equal((await request('/api/automations', { method: 'POST', cookie: owner.cookie, json: dailyBody('WO-HTTP') })).status, 403)
-  assert.equal((await request('/api/automations', { method: 'POST', session: owner, originHeader: 'http://evil.invalid', json: dailyBody('WO-HTTP') })).status, 403)
-  assert.equal((await request('/api/automations', { method: 'POST', session: owner, json: { ...dailyBody('WO-HTTP'), unexpected: true } })).status, 400)
-  const projected = await request('/api/automations', { cookie: owner.cookie })
-  assert.deepEqual(projected.body.eventSource, { status: 'ready', sourceId: 'gearjob:dev.localhost' })
-  const eventRule = await request('/api/automations', { method: 'POST', session: owner, json: { ...dailyBody('WO-HTTP'), trigger: { kind: 'gearjob-work-order-update', sourceId: 'gearjob:dev.localhost' } } })
-  assert.equal(eventRule.status, 200); assert.equal(eventRule.body.trigger.kind, 'gearjob-work-order-update')
-  const enabledEventRule = await request(`/api/automations/${eventRule.body.id}/enable`, { method: 'POST', session: owner, json: { expectedRevision: 1 } })
-  assert.equal(enabledEventRule.body.status, 'active')
-  const eventAdmission = await automation.acceptGearJobEvent({ sourceId: 'gearjob:dev.localhost', workOrderId: 'WO-HTTP', sourceRevision: `${shanghaiNow.toISOString().slice(0, 10)} ${shanghaiNow.toISOString().slice(11, 19)}.000001`, digest: 'f'.repeat(64) })
-  await waitFor(async () => (await service.getWork({ id: 'member-owner' }, eventAdmission.outcomes[0].workId)).value?.status === 'completed')
-  const historicalIdentityChange = await request(`/api/automations/${eventRule.body.id}`, { method: 'PATCH', session: owner, json: { ...dailyBody('WO-HTTP'), expectedRevision: 2 } })
-  assert.equal(historicalIdentityChange.status, 409); assert.equal(historicalIdentityChange.body.error.code, 'INVALID_STATE')
-
-  const created = await request('/api/automations', { method: 'POST', session: owner, json: dailyBody('WO-HTTP') })
-  assert.equal(created.status, 200); assert.equal(created.body.status, 'draft')
-  assert.equal((await request(`/api/automations/${created.body.id}`, { cookie: peer.cookie })).status, 404)
-  assert.equal((await request(`/api/automations/${created.body.id}`, { cookie: admin.cookie })).status, 404)
-  assert.deepEqual((await request('/api/automations', { cookie: peer.cookie })).body, { rules: [], occurrences: [], eventSource: { status: 'ready', sourceId: 'gearjob:dev.localhost' } })
-  assert.equal((await request(`/api/automations/${created.body.id}`, { method: 'PATCH', session: owner, json: { ...dailyBody('WO-HTTP'), expectedRevision: 9 } })).status, 409)
-  const enabled = await request(`/api/automations/${created.body.id}/enable`, { method: 'POST', session: owner, json: { expectedRevision: 1 } })
-  assert.equal(enabled.body.status, 'active')
-  assert.equal(runtimeRefreshes, 2, 'enabling each rule must refresh the automation owner')
-  const dailyAdmission = await automation.acceptDailyOccurrence({ ruleId: created.body.id, scheduledDate, scheduledAt: now })
-  await waitFor(async () => (await automation.listOccurrences({ id: 'member-owner' }, created.body.id)).length === 1)
-  await waitFor(async () => (await service.getWork({ id: 'member-owner' }, dailyAdmission.workId)).value?.status === 'completed')
-  const detailBeforeRevoke = await request(`/api/automations/${created.body.id}`, { cookie: owner.cookie })
-  assert.equal(detailBeforeRevoke.body.occurrences.length, 1); assert.equal(Object.hasOwn(detailBeforeRevoke.body.occurrences[0], 'work'), false); assert.equal(Object.hasOwn(detailBeforeRevoke.body.occurrences[0], 'delivery'), false)
-  runtimeOwned = false
-  assert.equal((await request(`/api/automations/${created.body.id}/check-now`, { method: 'POST', session: owner, json: { expectedRevision: 2, clientRequestId: 'http-manual-unavailable' } })).status, 503)
-  runtimeOwned = true
-  assert.equal((await request(`/api/automations/${created.body.id}/check-now`, { method: 'POST', session: peer, json: { expectedRevision: 2, clientRequestId: 'http-manual-peer' } })).status, 404)
-  assert.equal((await request(`/api/automations/${created.body.id}/check-now`, { method: 'POST', session: owner, json: { expectedRevision: 9, clientRequestId: 'http-manual-stale' } })).status, 409)
-  const manual = await request(`/api/automations/${created.body.id}/check-now`, { method: 'POST', session: owner, json: { expectedRevision: 2, clientRequestId: 'http-manual-once' } })
-  const manualReplay = await request(`/api/automations/${created.body.id}/check-now`, { method: 'POST', session: owner, json: { expectedRevision: 2, clientRequestId: 'http-manual-once' } })
-  assert.equal(manual.status, 200); assert.equal(manualReplay.body.deduplicated, true); assert.equal(manualReplay.body.workId, manual.body.workId)
-  await waitFor(async () => (await service.getWork({ id: 'member-owner' }, manual.body.workId)).value?.status === 'completed')
-
-  const failed = await fixtureRule(automation, service, channel, 'WO-FAILED', 'failed')
-  const unknown = await fixtureRule(automation, service, channel, 'WO-UNKNOWN', 'unknown')
-  const activeRule = await automation.createRule({ id: 'member-owner' }, dailyBody('WO-ACTIVE'))
-  const active = await automation.enableRule({ id: 'member-owner' }, activeRule.id, { expectedRevision: 1 })
-  const activeAdmission = await automation.acceptDailyOccurrence({ ruleId: active.id, scheduledDate, scheduledAt: now })
-  await waitFor(async () => (await service.getWork({ id: 'member-owner' }, activeAdmission.workId)).value?.status === 'running')
-  const missedDraft = await automation.createRule({ id: 'member-owner' }, dailyBody('WO-BROWSER')), missedRule = await automation.enableRule({ id: 'member-owner' }, missedDraft.id, { expectedRevision: 1 })
-  await store.update(state => ({ ...state, automationOccurrences: [...state.automationOccurrences, { id: 'missed-ui', occurrenceKey: dailyOccurrenceKey(missedRule.id, '2026-09-19'), ruleId: missedRule.id, ruleRevision: missedRule.revision, scheduledDate: '2026-09-19', workId: null, status: 'skipped', reason: 'missed-window', deliveryId: null, createdAt: now }] }))
-
-  const beforeHistory = (await store.read()).automationOccurrences.filter(item => item.ruleId === created.body.id).length
-  const revoked = await request(`/api/automations/${created.body.id}/revoke`, { method: 'POST', session: owner, json: { expectedRevision: 2 } })
-  assert.equal(revoked.body.status, 'revoked'); assert.equal((await store.read()).automationOccurrences.filter(item => item.ruleId === created.body.id).length, beforeHistory)
-  assert.equal((await request(`/api/automations/${created.body.id}/resume`, { method: 'POST', session: owner, json: { expectedRevision: 3 } })).status, 409)
-
-  const browserResult = await browserJourney({ activeRuleId: active.id, activeWorkId: activeAdmission.workId, eventHistoryRuleId: eventRule.body.id, missedRuleId: missedRule.id, failedRuleId: failed.rule.id, failedDeliveryId: failed.delivery.id, unknownRuleId: unknown.rule.id })
-  assert.deepEqual(browserResult, { desktopOverflow: false, mobileOverflow: false, eventEnabled: true, eventCreated: true, eventActionVisible: true, eventHasNoDailyControls: true, eventHistoryVisible: true, eventUnavailableDisabled: true, noNewNavigation: true, draftPreserved: true, focusPreserved: true, revisionDraftPreserved: true, manualOpened: true, manualAttentionCleared: true, mobileManualVisible: true, mobileRunningActionsVisible: true, paused: true, stopped: true, failedRetried: true, unavailableRecovery: true, unknownNoRetry: true, consoleErrors: 0, pageErrors: 0, networkErrors: 0 })
-  console.log('P5 HTTP/UI checks passed', JSON.stringify(browserResult))
-} finally {
-  releaseActive?.()
-  if (browser?.exitCode === null) { browser.kill('SIGKILL'); await new Promise(resolve => browser.once('exit', resolve)) }
-  if (server) await new Promise(resolve => server.close(resolve))
-  await rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
 }
 
-async function fixtureRule(automation, service, channel, workOrderId, deliveryStatus) {
-  const draft = await automation.createRule({ id: 'member-owner' }, dailyBody(workOrderId)), rule = await automation.enableRule({ id: 'member-owner' }, draft.id, { expectedRevision: 1 })
-  const admission = await automation.acceptDailyOccurrence({ ruleId: rule.id, scheduledDate, scheduledAt: now })
-  await waitFor(async () => ['completed', 'failed'].includes((await service.getWork({ id: 'member-owner' }, admission.workId)).value?.status))
-  const work = (await service.getWork({ id: 'member-owner' }, admission.workId)).value
-  assert.ok(work.results[0], JSON.stringify(work))
-  const created = await channel.createDelivery({ id: 'member-owner' }, { channelAppId: 'app-feishu', requestId: `delivery-${deliveryStatus}`, workId: work.id, resultId: work.results[0].id, targetIdentityId: 'identity-owner', targetConversationId: 'conversation-owner', contentScope: 'result' })
-  await channel.authorizeDelivery({ deliveryId: created.delivery.id })
-  await channel.recordDeliveryOutcome({ deliveryId: created.delivery.id, status: deliveryStatus })
-  await store.update(state => ({ ...state, automationOccurrences: state.automationOccurrences.map(item => item.id === admission.occurrence.id ? { ...item, deliveryId: created.delivery.id } : item) }))
-  return { rule, delivery: created.delivery }
+function dailyBody() { return { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-HTTP', trigger: { kind: 'daily-time', time: '08:00', timeZone: 'Asia/Shanghai' }, maxRuns: 10, notificationIdentityId: 'identity-owner' } }
+function ruleRecord(suffix, status = 'active', event = false) {
+  return { id: 'rule-' + suffix, ownerMemberId: actor.id, revision: status === 'paused' ? 2 : status === 'revoked' ? 3 : 1, status, ...dailyBody(), workOrderId: 'WO-' + suffix.toUpperCase(), trigger: event ? { kind: 'gearjob-work-order-update', sourceId } : dailyBody().trigger, effectiveFrom: status === 'draft' || event ? null : historicalAt, eventAcceptAfter: event && status !== 'draft' ? historicalAt : null, createdAt: historicalAt, updatedAt: historicalAt, revokedAt: status === 'revoked' ? historicalAt : null }
 }
-
-function dailyBody(workOrderId) { return { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId, trigger: { kind: 'daily-time', time: triggerTime, timeZone: 'Asia/Shanghai' }, maxRuns: 10, notificationConversationId: 'conversation-owner' } }
-function seed(state) {
-  const member = (id, loginName, role, employeeIds) => ({ id, loginName, displayName: loginName, role, enabled: true, authRef: id, sessionVersion: 1, employeeIds, createdAt: now, updatedAt: now })
-  return { ...state,
-    members: [member('member-admin', 'admin', 'admin', []), member('member-owner', 'owner', 'member', ['employee-owner']), member('member-peer', 'peer', 'member', [])],
-    modelRoutes: [{ id: 'model-1', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
-    employees: [{ id: 'employee-owner', name: '工单核对员', description: '核对工单', enabled: true, modelRouteId: 'model-1', connectionIds: ['connection-owner'], skillIds: ['skill-gearjob-work-order-read'] }],
-    connections: [{ id: 'connection-owner', name: 'GearJob 外部测试', ...catalog(), allowedObjectIds: ['WO-HTTP', 'WO-BROWSER', 'WO-EVENT', 'WO-FAILED', 'WO-UNKNOWN', 'WO-ACTIVE'], enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'], revision: 1 }],
-    skills: [{ id: 'skill-gearjob-work-order-read', name: '工单查询', capabilityId: 'gearjob-work-order-read', enabled: true }],
-    channelApps: [{ id: 'app-feishu', provider: 'feishu', providerAppId: 'official-app', providerTenantId: 'official-tenant', credentialRef: 'FEISHU_SECRET_REF', enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now }],
-    channelIdentities: [{ id: 'identity-owner', channelAppId: 'app-feishu', providerUserId: 'user-owner', memberId: 'member-owner', verificationMethod: 'link-code', status: 'active', revision: 1, createdAt: now, updatedAt: now }],
-    channelConversations: [{ id: 'conversation-owner', channelAppId: 'app-feishu', providerConversationId: 'conversation-owner', identityId: 'identity-owner', memberId: 'member-owner', type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'active', revision: 1, defaultDispatch: null, createdAt: now, updatedAt: now }],
-  }
+function workRecord(suffix, cycle = false) {
+  const capabilityId = cycle ? 'cycle-time-calculate' : 'gearjob-work-order-read', skillId = 'skill-' + capabilityId, resultId = 'result-' + suffix, session = 'historical-session-' + suffix
+  const input = cycle ? { availableSeconds: 60, quantity: 1 } : { workOrderId: 'WO-' + suffix.toUpperCase() }
+  const source = { sourceSystem: 'GearJob', sourceInstance: 'p5-http', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled', sourceRecordId: 'Work Order:' + input.workOrderId, sourceRevision }
+  const result = { id: resultId, kind: cycle ? 'manufacturing.takt' : 'gearjob.work-order.observation', capabilityId, skillId, schemaVersion: 1, input, payload: cycle ? { ...input, secondsPerUnit: 60, unit: 'seconds/unit' } : { observationId: resultId, ...input, status: 'In Process', plannedQuantity: 10, completedQuantity: 4, unit: 'Nos', completion: { ratio: 0.4, overPlan: false }, queriedAt: historicalAt, ...source, explanation: '原工单事实', dshSessionRef: session }, explanation: cycle ? '原节拍结果 60 秒/件' : '原工单事实', ...(cycle ? {} : { source }), createdAt: historicalAt, dshSessionRef: session, contextConfirmationRefs: [], toolName: cycle ? 'geneway_calculate_cycle_time' : 'geneway_gearjob_read_work_order', pluginId: cycle ? 'geneway-cycle-time' : 'geneway-gearjob-work-order', pluginVersion: '2' }
+  return { id: 'work-' + suffix, ownerMemberId: actor.id, employeeId: 'employee-owner', capabilityId, skillId, ...(cycle ? {} : { connectionId: 'connection-owner' }), goal: cycle ? '已保存的节拍工作' : '原工单核对', input, requiredInputs: [], status: 'completed', acceptedAt: historicalAt, results: [result], actions: [], executions: [{ id: 'exec-' + suffix, operation: cycle ? 'create' : 'automation', clientRequestId: cycle ? 'historical-cycle' : suffix === 'event' ? eventOccurrenceKey('rule-event', sourceId, sourceRevision, input.workOrderId) : dailyOccurrenceKey('rule-' + suffix, scheduledDate), input, status: 'completed', acceptedAt: historicalAt, completedAt: historicalAt, resultId }] }
+}
+function deliveryRecord(suffix, workId, status, automatic = false) {
+  return { id: 'delivery-' + suffix, channelAppId: 'app-feishu', requestId: 'historical-' + suffix, workId, resultId: 'result-' + workId.slice('work-'.length), targetConversationId: 'conversation-owner', targetIdentityId: 'identity-owner', contentScope: 'result', contentKey: automatic ? 'automation.completed' : 'result.gearjob', authorizationRevisions: { app: 1, identity: 1, conversation: 1 }, status, attempts: 1, ...(status === 'delivered' ? { providerMessageId: 'historical-message-' + suffix } : { error: { code: status === 'unknown' ? 'DELIVERY_UNKNOWN' : 'FEISHU_230001', message: status === 'unknown' ? '发送效果待核对' : '渠道发送失败' } }), createdAt: historicalAt, updatedAt: historicalAt }
+}
+function fixture() {
+  const member = (id, loginName, role, employeeIds) => ({ id, loginName, displayName: loginName, role, enabled: true, authRef: id, sessionVersion: 1, employeeIds, createdAt: historicalAt, updatedAt: historicalAt })
+  const rules = [ruleRecord('http'), ruleRecord('draft', 'draft'), ruleRecord('paused', 'paused'), ruleRecord('revoked', 'revoked'), ruleRecord('event', 'active', true), ruleRecord('mobile'), ruleRecord('conflict')]
+  const occurrences = ['http', 'paused', 'revoked', 'event', 'mobile'].map(suffix => {
+    const event = suffix === 'event' ? { sourceId, sourceRevision, digest: 'f'.repeat(64) } : null
+    return { id: 'occ-' + suffix, occurrenceKey: event ? eventOccurrenceKey('rule-' + suffix, sourceId, sourceRevision, 'WO-EVENT') : dailyOccurrenceKey('rule-' + suffix, scheduledDate), ruleId: 'rule-' + suffix, ruleRevision: 1, scheduledDate: event ? null : scheduledDate, event, workId: 'work-' + suffix, status: null, reason: null, deliveryId: suffix === 'http' ? 'delivery-delivered' : suffix === 'event' ? 'delivery-unknown' : null, createdAt: historicalAt }
+  })
+  occurrences.push({ id: 'occ-missed', occurrenceKey: dailyOccurrenceKey('rule-conflict', '2026-09-20'), ruleId: 'rule-conflict', ruleRevision: 1, scheduledDate: '2026-09-20', event: null, workId: null, status: 'skipped', reason: 'missed-window', deliveryId: null, createdAt: historicalAt })
+  return migrateState({ version: STATE_VERSION, defaultChannelEmployeeId: null,
+    members: [member('member-admin', 'admin', 'admin', []), member(actor.id, 'owner', 'member', ['employee-owner']), member('member-peer', 'peer', 'member', [])],
+    modelRoutes: [{ id: 'model-1', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: '受控模型替身', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
+    employees: [{ id: 'employee-owner', name: '工单核对员', description: '保留历史并执行独立节拍工作', instructions: '', revision: 1, enabled: true, modelRouteId: 'model-1', connectionIds: ['connection-owner'], skillIds: ['skill-gearjob-work-order-read', 'skill-cycle-time-calculate'] }],
+    connections: [{ id: 'connection-owner', name: 'GearJob 外部测试', ...catalog(), allowedObjectIds: rules.map(rule => rule.workOrderId), enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'], revision: 1 }],
+    skills: [{ id: 'skill-gearjob-work-order-read', name: '原工单查询', capabilityId: 'gearjob-work-order-read', enabled: true }, { id: 'skill-cycle-time-calculate', name: '节拍计算', capabilityId: 'cycle-time-calculate', enabled: true }],
+    channelApps: [{ id: 'app-feishu', provider: 'feishu', providerAppId: 'official-app', providerTenantId: 'official-tenant', credentialRef: 'FEISHU_SECRET_REF', enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: historicalAt, updatedAt: historicalAt }],
+    channelIdentities: [{ id: 'identity-owner', channelAppId: 'app-feishu', providerUserId: 'user-owner', memberId: actor.id, verificationMethod: 'link-code', status: 'active', revision: 1, defaultEmployeeId: null, activeConversationId: null, createdAt: historicalAt, updatedAt: historicalAt }],
+    channelConversations: [{ id: 'conversation-owner', channelAppId: 'app-feishu', providerConversationId: 'conversation-owner', identityId: 'identity-owner', memberId: actor.id, type: 'private', allowedScopes: ['result'], verificationMethod: 'link-code', status: 'active', revision: 1, defaultDispatch: null, createdAt: historicalAt, updatedAt: historicalAt }],
+    automationRules: rules, automationOccurrences: occurrences,
+    works: [...['http', 'paused', 'revoked', 'event', 'mobile'].map(suffix => workRecord(suffix)), workRecord('cycle-notify', true)],
+    deliveries: [deliveryRecord('delivered', 'work-http', 'delivered', true), deliveryRecord('unknown', 'work-event', 'unknown', true), deliveryRecord('failed', 'work-cycle-notify', 'failed')],
+    confirmations: [], knowledgeMaterials: [], channelMessages: [], linkCodes: [], conversations: [], reservations: {},
+  })
 }
 function catalog() { return { kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'http://127.0.0.1/gearjob', credentialRef: 'gearjob.json', sourceSystem: 'GearJob', sourceInstance: 'p5-http', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled' } }
-function runner() { return { configured: true, async run(args) { if (args.input.workOrderId === 'WO-ACTIVE') await new Promise(resolve => { releaseActive = resolve }); const source = { sourceRecordId: `Work Order:${args.input.workOrderId}`, sourceRevision: 'r1', sourceSystem: 'GearJob', sourceInstance: 'p5-http', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled' }; return { result: { kind: 'gearjob.work-order.observation', payload: { workOrderId: args.input.workOrderId, status: 'In Process', plannedQuantity: 10, completedQuantity: 4, unit: 'Nos', ...source }, source, toolName: 'geneway_gearjob_read_work_order', pluginId: 'geneway-gearjob-work-order', pluginVersion: '2' }, explanation: '工单事实已核对', dshSessionRef: 'session-p5-http', contextConfirmationRefs: [], eventCount: 1 } }, async cancel() { releaseActive?.() }, async close() { releaseActive?.() } } }
-
-async function login(name, password) { return request('/api/session', { method: 'POST', originHeader: origin, json: { loginName: name, password } }) }
-async function request(path, options = {}) { const headers = {}; if (options.originHeader) headers.origin = options.originHeader; if (options.session) { headers.origin = options.originHeader ?? origin; headers.cookie = cookiePair(options.session.cookie); headers['x-csrf-token'] = options.session.body.csrfToken } else if (options.cookie) headers.cookie = cookiePair(options.cookie); let body; if (options.json !== undefined) { headers['content-type'] = 'application/json'; body = JSON.stringify(options.json) } const response = await fetch(origin + path, { method: options.method ?? 'GET', headers, body }); const text = await response.text(); return { status: response.status, body: text ? JSON.parse(text) : undefined, cookie: response.headers.get('set-cookie') } }
-function cookiePair(value) { return String(value).split(';', 1)[0] }
-
-async function browserJourney(ids) {
-  const port = await freePort(), profile = join(temp, 'chrome'); await mkdir(profile, { recursive: true })
-  browser = spawn('/usr/bin/google-chrome', ['--headless=new', '--no-sandbox', '--disable-gpu', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--window-size=1440,900', `--app=${origin}`], { stdio: 'ignore' })
-  const target = await browserTarget(port), socket = new WebSocket(target.webSocketDebuggerUrl), pending = new Map(); let sequence = 0, consoleErrors = 0, pageErrors = 0, networkErrors = 0
-  await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }) })
-  socket.addEventListener('message', event => { const value = JSON.parse(event.data); if (value.method === 'Runtime.consoleAPICalled' && value.params.type === 'error') consoleErrors += 1; if (value.method === 'Runtime.exceptionThrown') pageErrors += 1; if (value.method === 'Network.loadingFailed' && !value.params.canceled) networkErrors += 1; if (!value.id) return; const entry = pending.get(value.id); pending.delete(value.id); value.error ? entry.reject(new Error(value.error.message)) : entry.resolve(value.result) })
-  const send = (method, params = {}) => new Promise((resolve, reject) => { const id = ++sequence; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params })) })
-  const evaluate = async expression => { const value = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, userGesture: true }); if (value.exceptionDetails) throw new Error(value.exceptionDetails.text); return value.result.value }
-  await send('Runtime.enable'); await send('Network.enable'); await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
-  await wait(evaluate, `Boolean(document.querySelector('#login-name'))`); await evaluate(`document.querySelector('#login-name').value='owner';document.querySelector('#login-password').value='owner password';document.querySelector('#login-button').click()`); await wait(evaluate, `!document.querySelector('#app').classList.contains('hidden')`)
-  await evaluate(`document.querySelector('[data-view="works"]').click()`); await wait(evaluate, `document.querySelector('#view-works').classList.contains('active')`)
-  const eventEnabled = await evaluate(`!document.querySelector('#automation-trigger option[value="gearjob-work-order-update"]').disabled`), noNewNavigation = await evaluate(`![...document.querySelectorAll('.nav')].some(node=>node.innerText.includes('自动'))`)
-  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });await evaluate(`document.querySelector('#new-automation').click();document.querySelector('#automation-binding').value=document.querySelector('#automation-binding option:not([value=""])').value;document.querySelector('#automation-binding').dispatchEvent(new Event('input'));document.querySelector('#automation-order').value='WO-EVENT';document.querySelector('#automation-order').dispatchEvent(new Event('input'));document.querySelector('#automation-trigger').value='gearjob-work-order-update';document.querySelector('#automation-trigger').dispatchEvent(new Event('input'))`)
-  const eventHasNoDailyControls=await evaluate(`document.querySelector('#automation-time-field').classList.contains('hidden')&&!document.querySelector('#automation-time').required`);await evaluate(`document.querySelector('#automation-form').requestSubmit()`);await wait(evaluate, `state.automationDetail?.rule?.workOrderId==='WO-EVENT'`);await evaluate(`document.querySelector('[data-rule-action="enable"]').click()`);await wait(evaluate, `state.automationDetail?.rule?.status==='active'`)
-  const eventCreated=await evaluate(`document.querySelector('#automation-detail').innerText.includes('GearJob 工单更新')&&document.querySelector('#automation-detail').innerText.includes('等待 GearJob 更新')&&!document.querySelector('#automation-detail [data-check-now]')&&!document.querySelector('#automation-edit-time')`),eventActionVisible=await evaluate(`(()=>{const button=document.querySelector('#automation-detail [data-rule-action="pause"]'),nav=document.querySelector('.mobile-nav'),rect=button?.getBoundingClientRect();return Boolean(rect?.width&&rect.left>=0&&rect.right<=innerWidth&&rect.bottom<=nav.getBoundingClientRect().top)})()`);await evaluate(`document.querySelector('#automation-detail [data-rule-action="pause"]').click()`);await wait(evaluate, `state.automationDetail?.rule?.status==='paused'`);await evaluate(`document.querySelector('#automation-detail [data-rule-action="resume"]').click()`);await wait(evaluate, `state.automationDetail?.rule?.status==='active'`);const eventMobileOverflow=await evaluate(`document.documentElement.scrollWidth>innerWidth`)
-  await evaluate(`openAutomation('${ids.eventHistoryRuleId}')`);await wait(evaluate, `state.automationDetail?.rule?.id==='${ids.eventHistoryRuleId}'`);const eventHistoryVisible=await evaluate(`document.querySelector('.automation-history').innerText.includes('事件：')&&document.querySelector('.automation-history').innerText.includes('接收：')&&document.querySelector('.automation-history').innerText.includes('查询：')&&document.querySelector('.automation-history').innerText.includes('工作：')&&!document.querySelector('.automation-history').innerText.includes('本人发起')`)
-  const eventUnavailableDisabled=await evaluate(`(()=>{const capability=state.eventSource;state.eventSource={status:'unavailable',code:'SOURCE_NOT_CONFIGURED'};renderAutomations();const ok=document.querySelector('#automation-trigger option[value="gearjob-work-order-update"]').disabled&&document.querySelector('#automation-detail').innerText.includes('事件来源当前不可用');state.eventSource=capability;renderAutomations();return ok})()`)
-  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
-  await evaluate(`document.querySelector('#new-automation').click();document.querySelector('#automation-binding').value=document.querySelector('#automation-binding option:not([value=""])').value;document.querySelector('#automation-binding').dispatchEvent(new Event('input'));document.querySelector('#automation-order').value='WO-BROWSER';document.querySelector('#automation-order').dispatchEvent(new Event('input'));document.querySelector('#automation-time').value='10:15';document.querySelector('#automation-time').dispatchEvent(new Event('input'));document.querySelector('#automation-budget').value='3';document.querySelector('#automation-budget').dispatchEvent(new Event('input'));document.querySelector('#automation-form').requestSubmit()`)
-  await wait(evaluate, `state.automations.some(rule=>rule.workOrderId==='WO-BROWSER')`); await wait(evaluate, `state.automationDetail?.rule?.workOrderId==='WO-BROWSER'`); await evaluate(`document.querySelector('[data-rule-action="enable"]').click()`); await wait(evaluate, `state.automationDetail?.rule?.status==='active'`)
-  await evaluate(`document.querySelector('#automation-edit-time').value='11:11';document.querySelector('#automation-edit-time').dispatchEvent(new Event('input'));api('/api/automations/'+encodeURIComponent(state.automationDetail.rule.id)+'/pause',{method:'POST',body:{expectedRevision:state.automationDetail.rule.revision}}).then(()=>document.querySelector('#automation-edit').requestSubmit())`); await wait(evaluate, `Boolean(document.querySelector('#automation-edit .danger-note'))`); const revisionDraftPreserved = await evaluate(`document.querySelector('#automation-edit-time').value==='11:11'&&state.automationDrafts[state.automationDetail.rule.id].dirty`); await evaluate(`document.querySelector('#automation-edit').requestSubmit()`); await wait(evaluate, `state.automationDetail?.rule?.trigger?.time==='11:11'&&!state.automationDrafts[state.automationDetail.rule.id]?.dirty`)
-  await evaluate(`document.querySelector('#new-automation').click();document.querySelector('#automation-order').value='LOCAL-DRAFT';document.querySelector('#automation-order').dispatchEvent(new Event('input'));document.querySelector('#automation-order').focus()`)
-  await evaluate(`reloadAll()`); await wait(evaluate, `state.automationCreateDraft.workOrderId==='LOCAL-DRAFT'`); const draftPreserved = await evaluate(`document.querySelector('#automation-order').value==='LOCAL-DRAFT'`), focusPreserved = await evaluate(`document.activeElement?.id==='automation-order'`)
-  await evaluate(`document.querySelector('#cancel-automation-edit').click();openAutomation('${ids.failedRuleId}')`); await wait(evaluate, `state.automationDetail?.rule?.id==='${ids.failedRuleId}'`); const failedRetryButton = await evaluate(`Boolean(document.querySelector('#automation-detail [data-retry-delivery="${ids.failedDeliveryId}"]'))`); const unavailableRecovery = await evaluate(`(()=>{const app=state.channelApps.find(item=>item.id==='app-feishu'),status=app.runtimeStatus;app.runtimeStatus='unavailable';renderAutomations();const ok=document.body.innerText.includes('当前渠道传输未启用，请先恢复渠道')&&!document.querySelector('#automation-detail [data-retry-delivery="${ids.failedDeliveryId}"]');app.runtimeStatus=status;renderAutomations();return ok})()`); await evaluate(`document.querySelector('#automation-detail [data-retry-delivery="${ids.failedDeliveryId}"]').click()`); await wait(evaluate, `state.channels.deliveries.find(item=>item.id==='${ids.failedDeliveryId}')?.status==='delivered'`)
-  await evaluate(`openAutomation('${ids.unknownRuleId}')`); await wait(evaluate, `state.automationDetail?.rule?.id==='${ids.unknownRuleId}'`); const unknownNoRetry = await evaluate(`document.body.innerText.includes('发送结果待核对，请勿重复发送')&&!document.querySelector('#automation-detail [data-retry-delivery]')`)
-  await evaluate(`openAutomation('${ids.missedRuleId}')`); await wait(evaluate, `state.automationDetail?.rule?.id==='${ids.missedRuleId}'`); assert.equal(await evaluate(`document.querySelector('#automation-detail').innerText.includes('工单核对员')&&document.querySelector('#automation-detail').innerText.includes('工单查询')&&document.querySelector('#automation-detail').innerText.includes('GearJob 外部测试')`), true); await evaluate(`document.querySelector('#automation-detail [data-check-now]').click()`); await wait(evaluate, `state.view==='work'&&state.currentWork?.input?.workOrderId==='WO-BROWSER'`); const manualOpened = await evaluate(`state.currentWork?.status==='accepted'||state.currentWork?.status==='running'||state.currentWork?.status==='completed'`); await wait(evaluate, `state.currentWork?.status==='completed'`); await evaluate(`document.querySelector('[data-view="works"]').click();reloadAll()`); await wait(evaluate, `state.bootstrap.works.some(item=>item.id===state.currentWork.id&&item.status==='completed')`); const manualAttentionCleared = await evaluate(`!document.querySelector('#automation-attention').innerText.includes('WO-BROWSER')`)
-  const desktopOverflow = await evaluate(`document.documentElement.scrollWidth>innerWidth`)
-  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }); await new Promise(resolve => setTimeout(resolve, 100)); await evaluate(`openAutomation('${ids.missedRuleId}')`); await wait(evaluate, `state.automationDetail?.rule?.id==='${ids.missedRuleId}'`); const mobileManualVisible = await evaluate(`(()=>{const button=document.querySelector('#automation-detail [data-check-now]'),nav=document.querySelector('.mobile-nav'),rect=button?.getBoundingClientRect(),navRect=nav?.getBoundingClientRect();return Boolean(rect?.width&&rect.left>=0&&rect.right<=innerWidth&&rect.bottom<=navRect.top)})()`); await evaluate(`openAutomation('${ids.activeRuleId}')`); await wait(evaluate, `state.automationDetail?.rule?.id==='${ids.activeRuleId}'`); const mobileRunningActionsVisible = await evaluate(`(()=>{const navTop=document.querySelector('.mobile-nav').getBoundingClientRect().top,buttons=[...document.querySelectorAll('#automation-detail [data-rule-action="pause"],#automation-detail [data-stop-automation-work]')];return buttons.length===2&&buttons.every(button=>button.getBoundingClientRect().bottom<=navTop)})()`); await evaluate(`document.querySelector('[data-rule-action="pause"]').click()`); await wait(evaluate, `state.automationDetail?.rule?.status==='paused'`); await evaluate(`document.querySelector('[data-stop-automation-work="${ids.activeWorkId}"]').click()`); await wait(evaluate, `!['accepted','running','cancel_requested'].includes(state.bootstrap.works.find(item=>item.id==='${ids.activeWorkId}')?.status)`)
-  const mobileOverflow = eventMobileOverflow||await evaluate(`document.documentElement.scrollWidth>innerWidth`), stopped = await evaluate(`state.bootstrap.works.find(item=>item.id==='${ids.activeWorkId}').status==='cancelled'`)
-  socket.close(); return { desktopOverflow, mobileOverflow, eventEnabled, eventCreated, eventActionVisible, eventHasNoDailyControls, eventHistoryVisible, eventUnavailableDisabled, noNewNavigation, draftPreserved, focusPreserved, revisionDraftPreserved, manualOpened, manualAttentionCleared, mobileManualVisible, mobileRunningActionsVisible, paused: true, stopped, failedRetried: failedRetryButton, unavailableRecovery, unknownNoRetry, consoleErrors, pageErrors, networkErrors }
+function facts(state) { return { works: state.works, occurrences: state.automationOccurrences, deliveries: state.deliveries, reservations: state.reservations } }
+function counts(state) { return { works: state.works.length, executions: state.works.reduce((sum, work) => sum + work.executions.length, 0), occurrences: state.automationOccurrences.length, deliveries: state.deliveries.length, reservations: Object.keys(state.reservations).length } }
+function controlledRunner() {
+  const gates = new Map()
+  return { configured: true, calls: 0,
+    async run(options) { assert.equal(options.capabilityId, 'cycle-time-calculate', 'no retired source may execute'); this.calls += 1; await new Promise(resolve => gates.set(options.executionId, resolve)); return { explanation: '受控节拍结果', dshSessionRef: 'controlled-cycle-session', contextConfirmationRefs: [], result: { kind: 'manufacturing.takt', payload: { ...options.input, secondsPerUnit: options.input.availableSeconds / options.input.quantity, unit: 'seconds/unit' }, toolName: 'geneway_calculate_cycle_time', pluginId: 'geneway-cycle-time', pluginVersion: '2' } } },
+    async cancel(executionId) { gates.get(executionId)?.(); gates.delete(executionId) }, async close() { for (const release of gates.values()) release(); gates.clear() },
+  }
 }
-async function browserTarget(port) { for (let i = 0; i < 100; i += 1) { try { const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(), target = targets.find(item => item.type === 'page' && item.url.startsWith(origin)); if (target) return target } catch {} await new Promise(resolve => setTimeout(resolve, 25)) } throw new Error('Chrome CDP startup timed out') }
-async function wait(evaluate, expression) { for (let i = 0; i < 500; i += 1) { if (await evaluate(expression)) return; await new Promise(resolve => setTimeout(resolve, 25)) } throw new Error(`browser condition timed out: ${expression}`) }
-async function waitFor(predicate) { for (let i = 0; i < 400; i += 1) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)) } throw new Error('condition did not become true') }
+function client(origin) {
+  return async (path, options = {}) => {
+    const headers = {}; if (options.originHeader) headers.origin = options.originHeader
+    if (options.session) { headers.origin = options.originHeader ?? origin; headers.cookie = String(options.session.cookie).split(';', 1)[0]; headers['x-csrf-token'] = options.session.body.csrfToken } else if (options.cookie) headers.cookie = String(options.cookie).split(';', 1)[0]
+    if (options.json !== undefined) headers['content-type'] = 'application/json'
+    const response = await fetch(origin + path, { method: options.method ?? 'GET', headers, body: options.json === undefined ? undefined : JSON.stringify(options.json) }), text = await response.text()
+    return { status: response.status, body: text ? JSON.parse(text) : undefined, cookie: response.headers.get('set-cookie') }
+  }
+}
+
+async function harnessCheck() {
+  let value = fixture()
+  const store = { async read() { return structuredClone(value) }, async update(mutator) { value = migrateState(await mutator(structuredClone(value))); return structuredClone(value) } }
+  const automation = createAutomationService({ store, workService: {}, connectionCatalog: [catalog()], clock: () => now })
+  assert.deepEqual(automation.eventSourceCapability(), retired)
+  const baseline = await store.read()
+  for (const attempt of [() => automation.createRule(actor, dailyBody()), () => automation.updateRule(actor, 'rule-http', { ...dailyBody(), expectedRevision: 1 }), () => automation.enableRule(actor, 'rule-draft', { expectedRevision: 1 }), () => automation.resumeRule(actor, 'rule-paused', { expectedRevision: 2 }), () => automation.acceptManualOccurrence(actor, 'rule-http', { expectedRevision: 1, clientRequestId: 'pure-retired' }), () => automation.acceptDailyOccurrence({ ruleId: 'rule-http', scheduledDate }), () => automation.acceptGearJobEvent({ sourceId, workOrderId: 'WO-EVENT', sourceRevision, digest: 'f'.repeat(64) })]) { await assert.rejects(attempt, { code: 'CAPABILITY_RETIRED' }); assert.deepEqual(await store.read(), baseline) }
+  for (const id of ['member-peer', 'member-admin']) { await assert.rejects(automation.getRule({ id }, 'rule-http'), { code: 'NOT_FOUND' }); await assert.rejects(automation.listOccurrences({ id }, 'rule-http'), { code: 'NOT_FOUND' }) }
+  await assert.rejects(automation.pauseRule(actor, 'rule-http', { expectedRevision: 9 }), { code: 'REVISION_CONFLICT' })
+  assert.equal((await automation.pauseRule(actor, 'rule-http', { expectedRevision: 1 })).revision, 2)
+  assert.equal((await automation.revokeRule(actor, 'rule-http', { expectedRevision: 2 })).status, 'revoked')
+  assert.deepEqual(facts(await store.read()), facts(baseline))
+  const workService = createWorkService({ store, connectionCatalog: [catalog()] })
+  const channel = createChannelService({ store, workService, clock: () => now, connectionCatalog: [catalog()] })
+  await assert.rejects(channel.retryDelivery({ deliveryId: 'delivery-unknown' }), { code: 'INVALID_STATE' })
+  const beforeRetry = counts(await store.read())
+  await channel.retryDelivery({ deliveryId: 'delivery-failed' }); await channel.validateSendClaim({ deliveryId: 'delivery-failed' })
+  await channel.recordDeliveryOutcome({ deliveryId: 'delivery-failed', status: 'delivered', providerMessageId: 'pure-controlled-ack' })
+  assert.deepEqual(counts(await store.read()), beforeRetry)
+  assert.equal((await store.read()).deliveries.find(item => item.id === 'delivery-unknown').status, 'unknown')
+  const injectedRunner = controlledRunner(), stopService = createWorkService({ store, runner: injectedRunner, connectionCatalog: [catalog()] })
+  try {
+    const created = await stopService.createWork(actor, { employeeId: 'employee-owner', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 120, quantity: 2 }, clientRequestId: 'pure-cycle-stop' })
+    assert.equal(created.ok, true)
+    await waitFor(async () => (await stopService.getWork(actor, created.value.id)).value.status === 'running')
+    await stopService.cancel(actor, created.value.id)
+    await waitFor(async () => (await stopService.getWork(actor, created.value.id)).value.status === 'cancelled')
+    assert.equal(injectedRunner.calls, 1)
+    assert.deepEqual((await store.read()).works.filter(item => item.id !== created.value.id), baseline.works)
+  } finally { await stopService.close() }
+  await checkUi(fixture())
+  console.log('P4 retained harness checks passed: current schema closed history graph, retired admissions/no new facts, owner-only history, pause/revoke CAS, legal cycle stop/saved notification retry, unknown no retry and actual Web helpers; HTTP/browser/native/real-model/upstream not run')
+}
+async function checkUi(fixtureState) {
+  const index = await readFile(new URL('../web/index.html', import.meta.url), 'utf8'), script = index.match(/<script>([\s\S]*?)<\/script>/)[1]
+  new Script(script)
+  const elements = new Map(), element = id => { if (!elements.has(id)) elements.set(id, { innerHTML: '' }); return elements.get(id) }
+  const automation = createAutomationService({ store: { async read() { return fixtureState }, async update() { assert.fail('UI history rendering must not mutate its fixture') } }, clock: () => now })
+  const state = { bootstrap: fixtureState, channels: { deliveries: fixtureState.deliveries }, channelApps: fixtureState.channelApps.map(item => ({ ...item, runtimeStatus: 'ready' })), automations: await automation.listRules(actor), automationOccurrences: fixtureState.automationOccurrences, automationDetail: null }
+  const box = createContext({ state, document: { getElementById: element, querySelectorAll: () => [] }, bindWorkLinks() {}, bindDeliveryActions() {}, openAutomation() {} })
+  const between = (start, end) => { const a = script.indexOf(start), b = script.indexOf(end, a + start.length); assert.ok(a >= 0 && b > a); return script.slice(a, b) }
+  runInContext(between('    const titles=', '    async function api(') + between('    function automationView(', '    async function openAutomation(') + between('    function deliveryCard(', '    function conversationReplyControls('), box)
+  for (const rule of state.automations) {
+    state.automationDetail = { rule, occurrences: fixtureState.automationOccurrences.filter(item => item.ruleId === rule.id) }
+    runInContext('renderAutomations()', box)
+    const html = element('automation-detail').innerHTML
+    assert.doesNotMatch(html, /data-rule-action="(?:enable|resume)"|data-check-now|automation-edit/)
+    assert.equal(/data-rule-action="pause"/.test(html), rule.status === 'active')
+    assert.equal(/data-rule-action="revoke"/.test(html), rule.status !== 'revoked')
+    if (rule.id === 'rule-event') { assert.ok(html.includes(sourceRevision)); for (const label of ['事件：', '接收：', '通知：']) assert.ok(html.includes(label)) }
+  }
+  box.delivery = fixtureState.deliveries.find(item => item.id === 'delivery-unknown')
+  assert.match(runInContext('deliveryCard(delivery)', box), /不会盲目重发/)
+  assert.doesNotMatch(runInContext('deliveryCard(delivery)', box), /data-retry-delivery/)
+  box.delivery = fixtureState.deliveries.find(item => item.id === 'delivery-failed')
+  assert.match(runInContext('deliveryCard(delivery)', box), /data-retry-delivery="delivery-failed"/)
+  state.channelApps[0].runtimeStatus = 'unavailable'
+  assert.match(runInContext('deliveryCard(delivery)', box), /data-retry-delivery="delivery-failed" disabled/)
+  assert.doesNotMatch(index, /id="(?:new-automation|automation-form)"/)
+}
+
+async function browserJourney({ origin, temp, request, owner, activeWorkId, setTransportAvailable }) {
+  const port = await freePort(), profile = join(temp, 'chrome'); await mkdir(profile, { recursive: true })
+  const browser = spawn('/usr/bin/google-chrome', ['--headless=new', '--no-sandbox', '--disable-gpu', '--disable-background-networking', '--disable-default-apps', '--disable-extensions', '--disable-component-update', '--disable-sync', '--no-first-run', `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--window-size=1440,900', `--app=${origin}`], { stdio: 'ignore' })
+  let socket
+  try {
+    const target = await browserTarget(port, origin); socket = new WebSocket(target.webSocketDebuggerUrl)
+    const pending = new Map(); let sequence = 0, consoleErrors = 0, pageErrors = 0, networkErrors = 0, loadEvents = 0, confirmNext = false, confirmations = 0, wheelEvents = 0
+    await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }) })
+    const send = (method, params = {}) => new Promise((resolve, reject) => { const id = ++sequence; pending.set(id, { resolve, reject }); socket.send(JSON.stringify({ id, method, params })) })
+    socket.addEventListener('message', event => {
+      const value = JSON.parse(event.data)
+      if (value.method === 'Runtime.consoleAPICalled' && value.params.type === 'error') consoleErrors += 1
+      if (value.method === 'Runtime.exceptionThrown') pageErrors += 1
+      if (value.method === 'Network.loadingFailed' && !value.params.canceled) networkErrors += 1
+      if (value.method === 'Page.loadEventFired') loadEvents += 1
+      if (value.method === 'Page.javascriptDialogOpening') { const accept = confirmNext; confirmNext = false; if (accept) confirmations += 1; void send('Page.handleJavaScriptDialog', { accept }).catch(() => { pageErrors += 1 }) }
+      if (!value.id) return
+      const entry = pending.get(value.id); if (!entry) return; pending.delete(value.id); value.error ? entry.reject(new Error(value.error.message)) : entry.resolve(value.result)
+    })
+    const evaluate = async expression => { const value = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }); if (value.exceptionDetails) throw new Error(value.exceptionDetails.text); return value.result.value }
+    const wait = expression => waitFor(() => evaluate(expression))
+    const rect = selector => evaluate(`(()=>{const node=[...document.querySelectorAll(${JSON.stringify(selector)})].find(node=>node.getClientRects().length&&getComputedStyle(node).visibility!=='hidden');if(!node)return null;const r=node.getBoundingClientRect(),nav=document.querySelector('.mobile-nav'),n=nav?.getBoundingClientRect(),bar=document.querySelector('.topbar')?.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom,disabled:node.disabled,minimum:node.closest('.sidebar,.mobile-nav,.topbar')?0:Math.max(0,bar?.bottom||0),limit:node.closest('.mobile-nav')?innerHeight:n?.height?n.top:innerHeight,viewportWidth:innerWidth}})()`)
+    const click = async selector => {
+      let geometry
+      for (let attempt = 0; attempt < 30; attempt++) {
+        geometry = await rect(selector); assert.ok(geometry, 'visible DOM target missing: ' + selector)
+        if (geometry.width > 0 && geometry.height > 0 && geometry.x >= 0 && geometry.right <= geometry.viewportWidth && geometry.y >= geometry.minimum && geometry.bottom < geometry.limit) break
+        const point = await evaluate(`(()=>{const r=document.querySelector('.content').getBoundingClientRect();return {x:Math.max(1,Math.min(innerWidth-1,r.x+r.width/2)),y:Math.max(1,Math.min(innerHeight-100,r.y+Math.min(r.height/2,300)))}})()`)
+        await send('Input.dispatchMouseEvent', { type: 'mouseWheel', ...point, deltaX: 0, deltaY: geometry.y < geometry.minimum ? -500 : 500 }); wheelEvents += 1
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      assert.ok(geometry?.width && geometry.y >= geometry.minimum && geometry.bottom < geometry.limit && geometry.x >= 0 && geometry.right <= geometry.viewportWidth, 'mouse cannot reach: ' + selector)
+      assert.equal(Boolean(geometry.disabled), false, 'disabled target: ' + selector)
+      const point = { x: geometry.x + geometry.width / 2, y: geometry.y + geometry.height / 2 }
+      assert.equal(await evaluate(`(()=>{const n=document.elementFromPoint(${point.x},${point.y});return Boolean(n?.closest(${JSON.stringify(selector)}))})()`), true, 'target is covered: ' + selector)
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...point }); await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 }); await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })
+      return geometry
+    }
+    const nav = async view => { await click('[data-view="' + view + '"]'); await wait(`document.querySelector('#view-${view}').classList.contains('active')`) }
+    const openRule = async id => { await click('[data-open-automation="' + id + '"]'); await wait(`document.querySelector('#automation-detail h3')?.textContent===${JSON.stringify('WO-' + id.slice(5).toUpperCase())}`) }
+    const reload = async () => { const previous = loadEvents; await send('Page.reload', { ignoreCache: true }); await waitFor(() => loadEvents > previous); await wait(`!document.querySelector('#app').classList.contains('hidden')`) }
+    await send('Page.enable'); await send('Runtime.enable'); await send('Network.enable'); await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false })
+    await wait(`Boolean(document.querySelector('#login-name'))`)
+    await click('#login-name'); await send('Input.insertText', { text: 'owner' }); await click('#login-password'); await send('Input.insertText', { text: 'owner password' }); await click('#login-button')
+    await wait(`!document.querySelector('#app').classList.contains('hidden')`); await nav('works')
+    const noRetiredCreation = await evaluate(`!document.querySelector('#new-automation,#automation-form,[data-rule-action="enable"],[data-rule-action="resume"],[data-check-now]')`); assert.equal(noRetiredCreation, true)
+    await openRule('rule-event')
+    const eventHistory = await evaluate(`document.querySelector('.automation-history').innerText`)
+    assert.ok(eventHistory.includes(sourceRevision)); assert.match(eventHistory, /事件：/); assert.match(eventHistory, /接收：/); assert.match(eventHistory, /通知：/)
+    await click('[data-open-work="work-event"]'); await wait(`document.querySelector('#work-retired-note')&&!document.querySelector('#work-retired-note').classList.contains('hidden')`)
+    assert.equal(await evaluate(`Boolean(document.querySelector('#refresh-work,#continue-form,#follow-form'))`), false)
+    const historicalWork = await evaluate(`document.querySelector('#work-detail').innerText`); assert.match(historicalWork, /p5-http/); assert.match(historicalWork, /external-test/); assert.match(historicalWork, /synthetic/)
+    await nav('works'); await openRule('rule-conflict')
+    const changed = await request('/api/automations/rule-conflict/pause', { method: 'POST', session: owner, json: { expectedRevision: 1 } }); assert.equal(changed.status, 200)
+    await click('#automation-detail [data-rule-action="pause"]'); await wait(`document.querySelector('#automation-message').classList.contains('error')`)
+    assert.match(await evaluate(`document.querySelector('#automation-message').innerText`), /版本|变化|刷新/)
+    await reload(); await nav('works'); await openRule('rule-conflict')
+    assert.match(await evaluate(`document.querySelector('#automation-detail-card').innerText`), /已暂停/)
+    await openRule('rule-event'); const desktopPause = await click('#automation-detail [data-rule-action="pause"]')
+    await wait(`document.querySelector('#automation-detail-card .record-title .pill')?.textContent==='已暂停'&&document.querySelector('#automation-message').classList.contains('success')`)
+    assert.equal((await request('/api/automations/rule-event', { session: owner })).body.rule.status, 'paused')
+    const desktopOverflow = await evaluate(`document.documentElement.scrollWidth>innerWidth`); assert.equal(desktopOverflow, false)
+    await nav('channels'); await wait(`Boolean(document.querySelector('[data-delivery="delivery-unknown"]'))`)
+    assert.equal(await evaluate(`Boolean(document.querySelector('[data-delivery="delivery-unknown"] [data-retry-delivery]'))`), false)
+    setTransportAvailable(false); await reload(); await nav('channels'); await wait(`Boolean(document.querySelector('[data-retry-delivery="delivery-failed"]')?.disabled)`)
+    setTransportAvailable(true); await reload(); await nav('channels'); await wait(`document.querySelector('[data-retry-delivery="delivery-failed"]')?.disabled===false`)
+    await click('[data-retry-delivery="delivery-failed"]'); await wait(`!document.querySelector('[data-delivery="delivery-failed"]')`)
+    assert.equal((await request('/api/channels', { session: owner })).body.deliveries.find(item => item.id === 'delivery-failed').status, 'delivered')
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true })
+    await nav('works'); await openRule('rule-mobile'); const mobilePause = await click('#automation-detail [data-rule-action="pause"]')
+    await wait(`document.querySelector('#automation-detail-card .record-title .pill')?.textContent==='已暂停'&&document.querySelector('#automation-message').classList.contains('success')`)
+    await waitFor(async () => (await request('/api/automations/rule-mobile', { session: owner })).body.rule.status === 'paused')
+    confirmNext = true; const mobileRevoke = await click('#automation-detail [data-rule-action="revoke"]')
+    await waitFor(async () => (await request('/api/automations/rule-mobile', { session: owner })).body.rule.status === 'revoked')
+    await wait(`document.querySelector('#automation-detail-card .record-title .pill')?.textContent==='已撤销'`)
+    assert.equal(confirmations, 1)
+    await click('[data-open-work="' + activeWorkId + '"]'); await wait(`document.querySelector('#cancel-work')?.disabled===false`)
+    const mobileStop = await click('#cancel-work')
+    await waitFor(async () => (await request('/api/works/' + activeWorkId, { session: owner })).body.status === 'cancelled')
+    await wait(`document.querySelector('#cancel-work')?.disabled===true`)
+    const mobileOverflow = await evaluate(`document.documentElement.scrollWidth>innerWidth`); assert.equal(mobileOverflow, false)
+    assert.ok(wheelEvents > 0, 'retained journey must actually use the mouse wheel')
+    assert.deepEqual({ consoleErrors, pageErrors, networkErrors }, { consoleErrors: 0, pageErrors: 0, networkErrors: 0 })
+    return { desktopOverflow, mobileOverflow, noRetiredCreation, eventHistory, desktopPause, mobilePause, mobileRevoke, mobileStop, wheelEvents, consoleErrors, pageErrors, networkErrors }
+  } finally {
+    socket?.close()
+    if (browser.exitCode === null) { browser.kill('SIGKILL'); await new Promise(resolve => browser.once('exit', resolve)) }
+  }
+}
+async function browserTarget(port, origin) { for (let i = 0; i < 100; i++) { try { const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(), target = targets.find(item => item.type === 'page' && item.url.startsWith(origin)); if (target) return target } catch {} await new Promise(resolve => setTimeout(resolve, 25)) }; throw new Error('Chrome CDP startup timed out') }
+async function waitFor(predicate) { for (let i = 0; i < 500; i++) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 25)) }; throw new Error('retained check condition timed out') }
 async function freePort() { const probe = createNodeServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve)); const port = probe.address().port; await new Promise(resolve => probe.close(resolve)); return port }

@@ -6,8 +6,9 @@ import { getCapability, parseCapabilityToolResult } from '../capabilities.mjs'
 import { KIVO_TPM_RESULT_KIND } from '../domain/tpm.mjs'
 import { connectionSnapshot } from '../execution-grant.mjs'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
+import { normalizeWeixinApiBaseUrl } from '../../vendor/dsh-im/weixin/weixin-api.mjs'
 
-export const STATE_VERSION = 9
+export const STATE_VERSION = 10
 export const KNOWLEDGE_LIMITS = Object.freeze({
   maxMaterials: 100,
   maxBodyBytes: 32 * 1024,
@@ -57,6 +58,7 @@ const EMPTY_STATE = {
   conversations: [],
   works: [],
   reservations: {},
+  defaultChannelEmployeeId: null,
 }
 
 const DEFAULT_FS_OPS = { mkdir, open, readFile, rename, unlink }
@@ -90,6 +92,7 @@ export function createFileStore(filePath, fsOps = {}) {
         const next = migrateState(await mutator(current))
         assertActionFactsImmutable(immutableBaseline, next)
         assertConversationFactsImmutable(immutableBaseline, next)
+        assertChannelFactsImmutable(immutableBaseline, next)
         await io.mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
         const fileName = filePath.split('/').pop()
         const tempPath = join(dirname(filePath), `.${fileName}.${process.pid}.tmp`)
@@ -122,13 +125,14 @@ export function migrateState(value) {
   if (value.version !== undefined && !Number.isInteger(value.version)) throw new Error('产品状态版本无效')
   const version = value.version ?? 3
   if (version > STATE_VERSION) throw new Error(`不支持未来产品状态版本：${version}`)
-  if (version === STATE_VERSION) return normalizeV9(value)
-  if (version === 8) return migrateV8ToV9(normalizeV8(value))
-  if (version === 7) return migrateV8ToV9(migrateV7ToV8(normalizeV7(value)))
-  if (version === 6) return migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(value)))
-  if (version === 5) return migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(migrateV5(value))))
-  if (version === 4) return migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(value)))))
-  if (version === 3) return migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(migrateV3(value))))))
+  if (version === STATE_VERSION) return normalizeV10(value)
+  if (version === 9) return migrateV9ToV10(value)
+  if (version === 8) return migrateV9ToV10(migrateV8ToV9(normalizeV8(value)))
+  if (version === 7) return migrateV9ToV10(migrateV8ToV9(migrateV7ToV8(normalizeV7(value))))
+  if (version === 6) return migrateV9ToV10(migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(value))))
+  if (version === 5) return migrateV9ToV10(migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(migrateV5(value)))))
+  if (version === 4) return migrateV9ToV10(migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(value))))))
+  if (version === 3) return migrateV9ToV10(migrateV8ToV9(migrateV7ToV8(migrateV6ToV7(migrateV5(migrateV4(migrateV3(value)))))))
   throw new Error(`不支持产品状态版本：${version}`)
 }
 
@@ -197,6 +201,23 @@ function migrateV7ToV8(value) {
 
 function migrateV8ToV9(value) {
   return normalizeV9({ ...value, version: 9, conversations: value.conversations ?? [] })
+}
+
+function migrateV9ToV10(value) {
+  const targets = new Map()
+  const automationRules = requiredArray(value, 'automationRules').map(rule => {
+    const endpoints = value.channelConversations.filter(item => item.id === rule.notificationConversationId && item.type === 'private' && item.memberId === rule.ownerMemberId)
+    const identity = endpoints.length === 1 && value.channelIdentities.find(item => item.id === endpoints[0].identityId && item.memberId === rule.ownerMemberId && item.channelAppId === endpoints[0].channelAppId)
+    targets.set(rule.id, identity?.id ?? null)
+    return identity || rule.notificationConversationId === null ? rule : { ...rule, notificationConversationId: null }
+  })
+  const common = normalizeV9({ ...value, automationRules })
+  return normalizeV10({ ...common, version: 10, defaultChannelEmployeeId: null,
+    channelApps: common.channelApps.map(item => item.provider === 'weixin' && item.id !== 'channel-app-weixin'
+      ? { ...item, enabled: false, status: 'disabled', revision: item.revision + (item.enabled ? 1 : 0) } : item),
+    channelIdentities: common.channelIdentities.map(item => ({ ...item, defaultEmployeeId: null, activeConversationId: null })),
+    automationRules: common.automationRules.map(({ notificationConversationId: _legacy, ...rule }) => ({ ...rule, notificationIdentityId: targets.get(rule.id) })),
+  })
 }
 
 function migrateEmployee(employee) {
@@ -445,7 +466,7 @@ function normalizeV5(value) {
   return { ...common, version: 5, knowledgeMaterials }
 }
 
-function normalizeV6(value) {
+function normalizeV6(value, { channels = false } = {}) {
   const {
     channelApps: _channelApps,
     channelIdentities: _channelIdentities,
@@ -456,19 +477,22 @@ function normalizeV6(value) {
     ...legacy
   } = value
   const common = normalizeV5({ ...legacy, version: 5 })
-  const channelApps = requiredArray(value, 'channelApps').map(normalizeChannelApp)
-  const channelIdentities = requiredArray(value, 'channelIdentities').map(normalizeChannelIdentity)
-  const channelConversations = requiredArray(value, 'channelConversations').map(normalizeChannelConversation)
-  const channelMessages = requiredArray(value, 'channelMessages').map(normalizeChannelMessage)
-  const deliveries = requiredArray(value, 'deliveries').map(normalizeDelivery)
-  const linkCodes = requiredArray(value, 'linkCodes').map(normalizeLinkCode)
+  const channelApps = requiredArray(value, 'channelApps').map(item => normalizeChannelApp(item, channels))
+  const channelIdentities = requiredArray(value, 'channelIdentities').map(item => normalizeChannelIdentity(item, channels))
+  const channelConversations = requiredArray(value, 'channelConversations').map(item => normalizeChannelConversation(item, channels))
+  const channelMessages = requiredArray(value, 'channelMessages').map(item => normalizeChannelMessage(item, channels))
+  const deliveries = requiredArray(value, 'deliveries').map(item => normalizeDelivery(item, channels))
+  const linkCodes = requiredArray(value, 'linkCodes').map(item => normalizeLinkCode(item, channels))
   for (const [items, label] of [[channelApps, '渠道应用'], [channelIdentities, '渠道身份'], [channelConversations, '渠道会话'], [channelMessages, '渠道消息'], [deliveries, '渠道投递'], [linkCodes, '关联码']]) uniqueIds(items, label)
 
-  uniqueDomain(channelApps, item => [item.provider, item.providerTenantId, item.providerAppId], '渠道应用官方 identity')
-  uniqueDomain(channelIdentities, item => [item.channelAppId, item.providerUserId], '渠道身份官方 identity')
-  uniqueDomain(channelConversations, item => [item.channelAppId, item.providerConversationId], '渠道会话官方 identity')
-  uniqueDomain(channelMessages.filter(item => item.providerEventId), item => [item.channelAppId, item.providerEventId], '渠道 event')
-  uniqueDomain(channelMessages.filter(item => item.providerMessageId), item => [item.channelAppId, item.providerMessageId], '渠道 message')
+  uniqueDomain(channelApps.filter(item => !channels || item.provider !== 'weixin' || item.id === 'channel-app-weixin'), item => [item.provider, item.providerTenantId, item.providerAppId], '渠道应用官方 identity')
+  const currentIdentity = item => !channels || ['pending', 'active'].includes(item.status)
+  uniqueDomain(channelIdentities.filter(currentIdentity), item => [item.channelAppId, item.weixin?.botId ?? '', item.providerUserId], '渠道身份官方 identity')
+  if (channels) uniqueDomain(channelIdentities.filter(item => currentIdentity(item) && item.weixin), item => [item.channelAppId, item.weixin.botId], '微信 bot identity')
+  const accountByIdentity = new Map(channelIdentities.map(item => [item.id, item.weixin?.botId ?? '']))
+  uniqueDomain(channelConversations.filter(currentIdentity), item => [item.channelAppId, accountByIdentity.get(item.identityId) ?? '', item.providerConversationId], '渠道会话官方 identity')
+  uniqueDomain(channelMessages.filter(item => item.providerEventId), item => [item.channelAppId, item.providerAccountId ?? '', item.providerEventId], '渠道 event')
+  uniqueDomain(channelMessages.filter(item => item.providerMessageId), item => [item.channelAppId, item.providerAccountId ?? '', item.providerMessageId], '渠道 message')
   uniqueDomain(deliveries, item => [item.channelAppId, item.requestId], '渠道投递 request')
   uniqueDomain(deliveries.filter(item => item.providerMessageId), item => [item.channelAppId, item.providerMessageId], '渠道投递 message')
   uniqueDomain(linkCodes, item => [item.digest], '关联码摘要')
@@ -485,6 +509,7 @@ function normalizeV6(value) {
 
   for (const identity of channelIdentities) {
     if (!appById.has(identity.channelAppId) || !memberById.has(identity.memberId)) throw new Error(`渠道身份 ${identity.id} 引用不存在`)
+    if (channels && identity.weixin && appById.get(identity.channelAppId).provider !== 'weixin') throw new Error('微信身份必须属于微信应用')
   }
   for (const conversation of channelConversations) {
     const app = appById.get(conversation.channelAppId), identity = identityById.get(conversation.identityId)
@@ -497,6 +522,7 @@ function normalizeV6(value) {
     const conversation = message.conversationId && conversationById.get(message.conversationId)
     const identity = message.senderIdentityId && identityById.get(message.senderIdentityId)
     if ((message.conversationId && (!conversation || conversation.channelAppId !== app.id)) || (message.senderIdentityId && (!identity || identity.channelAppId !== app.id))) throw new Error(`渠道消息 ${message.id} 身份或会话引用无效`)
+    if (channels && message.providerAccountId !== undefined && (app.provider !== 'weixin' || identity && identity.weixin?.botId !== message.providerAccountId)) throw new Error(`渠道消息 ${message.id} 微信账号引用无效`)
     if (message.workId) {
       const work = workById.get(message.workId)
       if (!work || (identity && work.ownerMemberId !== identity.memberId)) throw new Error(`渠道消息 ${message.id} 工作引用无效`)
@@ -505,7 +531,17 @@ function normalizeV6(value) {
       ? channelConversations.find(item => item.channelAppId === app.id && item.identityId === identity?.id && item.type === 'private')
       : conversation
     if (message.authorizationRevisions && (!identity || !authorizationConversation || message.authorizationRevisions.app > app.revision || message.authorizationRevisions.identity > identity.revision || message.authorizationRevisions.conversation > authorizationConversation.revision)) throw new Error(`渠道消息 ${message.id} 授权 revision 引用无效`)
-    if (message.status === 'accepted') {
+    if (channels && message.action) {
+      const memberConversation = value.conversations.find(item => item.id === message.memberConversationId)
+      if (!memberConversation || !identity || !conversation || message.direction !== 'inbound'
+        || memberConversation.ownerMemberId !== identity.memberId || memberConversation.channelIdentityId !== identity.id || memberConversation.source !== app.provider
+        || message.providerUserId !== identity.providerUserId || message.providerConversationId !== conversation.providerConversationId
+        || (conversation.type === 'private' && conversation.identityId !== identity.id)) throw new Error(`渠道消息 ${message.id} 对话引用不闭合`)
+      if (message.turnId) {
+        const turn = memberConversation.turns.find(item => item.id === message.turnId)
+        if (!turn || turn.clientRequestId !== message.clientRequestId || turn.userText !== message.text) throw new Error(`渠道消息 ${message.id} turn 引用不闭合`)
+      }
+    } else if (message.status === 'accepted') {
       const work = workById.get(message.workId)
       if (message.direction !== 'inbound' || !conversation || !identity || (conversation.type === 'private' && (conversation.identityId !== identity.id || conversation.memberId !== identity.memberId)) || work?.ownerMemberId !== identity.memberId
         || message.providerUserId !== identity.providerUserId || message.providerConversationId !== conversation.providerConversationId) throw new Error(`渠道消息 ${message.id} accepted 引用不闭合`)
@@ -529,13 +565,17 @@ function normalizeV6(value) {
   for (const delivery of deliveries) {
     const app = appById.get(delivery.channelAppId), work = delivery.workId && workById.get(delivery.workId)
     const identity = identityById.get(delivery.targetIdentityId), conversation = conversationById.get(delivery.targetConversationId)
-    const fixed = ['group.accepted', 'help.unsupported', 'help.unavailable'].includes(delivery.contentKey)
-    if (!app || (!fixed && !work) || !identity || !conversation || identity.channelAppId !== app.id || conversation.channelAppId !== app.id
+    const fixed = ['group.accepted', 'help.unsupported', 'help.unavailable', ...(channels ? ['help.confirmation', 'help.busy', 'help.interrupted', 'help.reply-invalid', 'conversation.started', 'conversation.default-changed'] : [])].includes(delivery.contentKey)
+    const source = channels && delivery.sourceRef && value.conversations.find(item => item.id === delivery.sourceRef.conversationId)
+    const turn = source && source.turns.find(item => item.id === delivery.sourceRef.turnId)
+    if (!app || (!fixed && !work && !source) || !identity || !conversation || identity.channelAppId !== app.id || conversation.channelAppId !== app.id
       || (work && identity.memberId !== work.ownerMemberId) || (conversation.type === 'private' && (conversation.memberId !== identity.memberId || conversation.identityId !== identity.id))) throw new Error(`渠道投递 ${delivery.id} 引用不闭合`)
+    if (delivery.sourceRef && (!source || source.ownerMemberId !== identity.memberId || source.channelIdentityId !== identity.id || source.source !== app.provider || turn?.status !== 'completed')) throw new Error(`渠道投递 ${delivery.id} 回复引用不闭合`)
     if (delivery.resultId && !work.results.some(item => item.id === delivery.resultId)) throw new Error(`渠道投递 ${delivery.id} 结果引用不存在`)
     if (delivery.channelMessageId) {
       const message = messageById.get(delivery.channelMessageId)
-      if (!message || message.channelAppId !== app.id || (message.workId && message.workId !== work.id)) throw new Error(`渠道投递 ${delivery.id} 消息引用无效`)
+      if (!message || message.channelAppId !== app.id || (message.workId && message.workId !== work?.id)
+        || (source && (message.memberConversationId !== source.id || message.clientRequestId !== turn.clientRequestId || message.turnId && message.turnId !== turn.id))) throw new Error(`渠道投递 ${delivery.id} 消息引用无效`)
     }
   }
   for (const link of linkCodes) {
@@ -543,7 +583,10 @@ function normalizeV6(value) {
     if (link.matchedIdentityId || link.matchedConversationId) {
       const identity = identityById.get(link.matchedIdentityId), conversation = conversationById.get(link.matchedConversationId)
       if (!identity || !conversation || identity.channelAppId !== link.channelAppId || conversation.channelAppId !== link.channelAppId || identity.memberId !== link.memberId || conversation.memberId !== link.memberId || conversation.identityId !== identity.id) throw new Error(`关联码 ${link.id} 匹配引用不闭合`)
+      if (link.kind === 'weixin-qr' && (appById.get(link.channelAppId)?.provider !== 'weixin' || identity.verificationMethod !== 'weixin-qr' || conversation.verificationMethod !== 'weixin-qr'
+        || ['tokenRef', 'cursorRef', 'contextRef'].some(key => link[key] !== identity.weixin?.[key]))) throw new Error(`微信关联码 ${link.id} 身份秘密引用不闭合`)
     }
+    if (link.kind === 'weixin-qr' && link.channelAppId !== 'channel-app-weixin') throw new Error('微信扫码必须使用内置应用')
   }
   for (const link of linkCodes.filter(item => item.status === 'active')) {
     if (linkCodes.some(item => item !== link && item.status === 'active' && item.memberId === link.memberId && item.channelAppId === link.channelAppId)) throw new Error('每名成员与渠道应用只能有一个活动关联码')
@@ -552,10 +595,10 @@ function normalizeV6(value) {
   return { ...common, version: 6, channelApps, channelIdentities, channelConversations, channelMessages, deliveries, linkCodes }
 }
 
-function normalizeV7(value) {
+function normalizeV7(value, options = {}) {
   const { automationRules: _automationRules, automationOccurrences: _automationOccurrences, ...legacy } = value
-  const common = normalizeV6({ ...legacy, version: 6 })
-  const automationRules = requiredArray(value, 'automationRules').map(normalizeAutomationRule)
+  const common = normalizeV6({ ...legacy, version: 6 }, options)
+  const automationRules = requiredArray(value, 'automationRules').map(item => normalizeAutomationRule(item, options.channels))
   const automationOccurrences = requiredArray(value, 'automationOccurrences').map(normalizeAutomationOccurrence)
   uniqueIds(automationRules, '自动规则')
   uniqueIds(automationOccurrences, '自动发生')
@@ -577,7 +620,10 @@ function normalizeV7(value) {
     const skill = skillById.get(rule.skillId)
     const connection = connectionById.get(rule.connectionId)
     if (!owner || !employee || !skill || !connection) throw new Error(`自动规则 ${rule.id} 绑定引用不闭合`)
-    if (rule.notificationConversationId !== null) {
+    if (options.channels && rule.notificationIdentityId !== null) {
+      const identity = identityById.get(rule.notificationIdentityId)
+      if (!identity || identity.memberId !== owner.id || !appById.has(identity.channelAppId)) throw new Error(`自动规则 ${rule.id} 通知身份引用不闭合`)
+    } else if (!options.channels && rule.notificationConversationId !== null) {
       const conversation = conversationById.get(rule.notificationConversationId)
       const identity = conversation && identityById.get(conversation.identityId)
       const app = conversation && appById.get(conversation.channelAppId)
@@ -624,8 +670,8 @@ function normalizeV7(value) {
   return { ...common, version: 7, automationRules, automationOccurrences }
 }
 
-function normalizeV8(value) {
-  const common = normalizeV7({ ...value, version: 7 })
+function normalizeV8(value, options = {}) {
+  const common = normalizeV7({ ...value, version: 7 }, options)
   const works = common.works.map(work => {
     const correlationResults = work.results.filter(result => result.kind === CORRELATION_RESULT_KIND)
     if (work.capabilityId === CORRELATION_CAPABILITY_ID) {
@@ -656,9 +702,9 @@ function normalizeV8(value) {
   return { ...common, version: 8, works }
 }
 
-function normalizeV9(value) {
-  const common = normalizeV8({ ...value, version: 8 })
-  const conversations = requiredArray(value, 'conversations').map(normalizeConversation)
+function normalizeV9(value, options = {}) {
+  const common = normalizeV8({ ...value, version: 8 }, options)
+  const conversations = requiredArray(value, 'conversations').map(item => normalizeConversation(item, options.channels))
   uniqueIds(conversations, '对话')
   const sessions = conversations.flatMap(conversation => conversation.sessions.map(session => session.id))
   if (new Set(sessions).size !== sessions.length) throw new Error('原生 Session 不得跨对话复用')
@@ -673,12 +719,48 @@ function normalizeV9(value) {
   return { ...common, version: 9, conversations, works }
 }
 
-function normalizeConversation(value) {
+function normalizeV10(value) {
+  const common = normalizeV9(value, { channels: true })
+  const defaultChannelEmployeeId = nullableId(value.defaultChannelEmployeeId, '全局渠道默认员工')
+  if (defaultChannelEmployeeId && !common.employees.some(item => item.id === defaultChannelEmployeeId)) throw new Error('全局渠道默认员工不存在')
+  for (const conversation of common.conversations) {
+    if (!common.members.some(item => item.id === conversation.ownerMemberId)) throw new Error('对话成员不存在')
+    for (const turn of conversation.turns) {
+      for (const ref of turn.workDependencyRefs ?? []) {
+        const work = common.works.find(item => item.id === ref.workId)
+        if (!work || work.ownerMemberId !== conversation.ownerMemberId || work.employeeId !== conversation.employeeId || work.conversationId !== conversation.id
+          || !work.results.some(item => item.id === ref.resultId)) throw new Error('回复工作事实依赖归属不闭合')
+        const capability = getCapability(work.capabilityId), connection = common.connections.find(item => item.id === work.connectionId)
+        if (capability?.requiresConnection ? !connection || ref.connectionRevision === null || ref.connectionRevision > connection.revision : ref.connectionRevision !== null) throw new Error('回复工作依赖连接 revision 不闭合')
+      }
+      for (const ref of turn.knowledgeDependencyRefs ?? []) {
+        const material = common.knowledgeMaterials.find(item => item.id === ref.knowledgeId)
+        if (!material || ref.revision > material.revision || material.status === 'active' && ref.revision === material.revision
+          && !segmentKnowledgeBody(material.body).some(item => item.segmentId === ref.segmentId)) throw new Error('回复知识依赖引用不闭合')
+      }
+    }
+    if (conversation.source === 'web') continue
+    const identity = common.channelIdentities.find(item => item.id === conversation.channelIdentityId)
+    const app = identity && common.channelApps.find(item => item.id === identity.channelAppId)
+    if (!identity || identity.memberId !== conversation.ownerMemberId || app?.provider !== conversation.source) throw new Error('渠道对话归属或来源不闭合')
+  }
+  for (const identity of common.channelIdentities) {
+    if (identity.defaultEmployeeId && !common.employees.some(item => item.id === identity.defaultEmployeeId)) throw new Error('渠道身份默认员工不存在')
+    if (identity.activeConversationId) {
+      const conversation = common.conversations.find(item => item.id === identity.activeConversationId)
+      if (['unlinked', 'rebind-required'].includes(identity.status) || !conversation || conversation.ownerMemberId !== identity.memberId || conversation.channelIdentityId !== identity.id) throw new Error('渠道身份活动对话归属不闭合')
+    }
+  }
+  return { ...common, version: 10, defaultChannelEmployeeId }
+}
+
+function normalizeConversation(value, channels = false) {
   if (!record(value)) throw new Error('对话状态无效')
   exactKeys(value, ['id', 'ownerMemberId', 'employeeId', 'employeeName', 'title', 'source', 'channelIdentityId', 'createdAt', 'updatedAt', 'archivedAt', 'sessions', 'turns'], '对话')
   const id = requiredText(value.id, '对话 ID 无效')
   for (const key of ['ownerMemberId', 'employeeId', 'employeeName', 'title']) requiredText(value[key], `对话 ${id} ${key} 无效`)
-  if (value.title.length > 200 || value.source !== 'web' || value.channelIdentityId !== null) throw new Error(`对话 ${id} 来源或标题无效`)
+  if (value.title.length > 200 || !(channels ? ['web', 'feishu', 'weixin'] : ['web']).includes(value.source)
+    || (value.source === 'web' ? value.channelIdentityId !== null : !text(value.channelIdentityId))) throw new Error(`对话 ${id} 来源或标题无效`)
   const createdAt = isoTimestamp(value.createdAt, `对话 ${id} createdAt`), updatedAt = isoTimestamp(value.updatedAt, `对话 ${id} updatedAt`)
   if (Date.parse(updatedAt) < Date.parse(createdAt)) throw new Error(`对话 ${id} 时间无效`)
   if (value.archivedAt !== null && Date.parse(isoTimestamp(value.archivedAt, `对话 ${id} archivedAt`)) < Date.parse(createdAt)) throw new Error(`对话 ${id} 归档时间无效`)
@@ -691,7 +773,7 @@ function normalizeConversation(value) {
     return session
   })
   uniqueIds(sessions, '对话 Session')
-  const turns = requiredArray(value, 'turns').map(turn => normalizeConversationTurn(turn, sessions))
+  const turns = requiredArray(value, 'turns').map(turn => normalizeConversationTurn(turn, sessions, channels))
   uniqueIds(turns, '对话回复')
   if (new Set(turns.map(turn => turn.clientRequestId)).size !== turns.length) throw new Error('对话请求标识重复')
   if (turns.filter(turn => ['accepted', 'running'].includes(turn.status)).length > 1) throw new Error('一个对话只能有一个活动回复')
@@ -702,10 +784,24 @@ function normalizeConversation(value) {
   return { ...value, sessions, turns }
 }
 
-function normalizeConversationTurn(value, sessions) {
+function normalizeConversationTurn(value, sessions, channels = false) {
   if (!record(value)) throw new Error('对话回复无效')
-  exactKeys(value, ['id', 'clientRequestId', 'userText', 'status', 'createdAt', 'startedAt', 'completedAt', 'error', 'definition', 'definitionFingerprint', 'sessionId', 'userMessageId', 'assistantMessageIds'], '对话回复')
+  exactKeys(value, ['id', 'clientRequestId', 'userText', 'status', 'createdAt', 'startedAt', 'completedAt', 'error', 'definition', 'definitionFingerprint', 'sessionId', 'userMessageId', 'assistantMessageIds', ...(channels ? ['workDependencyRefs', 'knowledgeDependencyRefs'] : [])], '对话回复')
   const id = requiredText(value.id, '回复 ID 无效')
+  if (channels) {
+    if (value.workDependencyRefs !== undefined) {
+      if (!Array.isArray(value.workDependencyRefs)) throw new Error('回复工作依赖无效')
+      for (const ref of value.workDependencyRefs) {
+        if (!record(ref)) throw new Error('回复工作依赖无效')
+        exactKeys(ref, ['workId', 'resultId', 'connectionRevision'], '回复工作依赖')
+        requiredText(ref.workId, '回复工作依赖 workId 无效')
+        requiredText(ref.resultId, '回复工作依赖 resultId 无效')
+        if (ref.connectionRevision !== null && (!Number.isSafeInteger(ref.connectionRevision) || ref.connectionRevision < 1)) throw new Error('回复工作依赖连接 revision 无效')
+      }
+      uniqueDomain(value.workDependencyRefs, ref => [ref.workId, ref.resultId, ref.connectionRevision], '回复工作依赖')
+    }
+    if (value.knowledgeDependencyRefs !== undefined) normalizeKnowledgeRefs(value.knowledgeDependencyRefs, '回复知识依赖')
+  }
   for (const [key, maximum] of [['clientRequestId', 200], ['userText', 16_000]]) {
     const text = requiredRawText(value[key], `回复 ${id} ${key} 无效`)
     if (text.length > maximum || !text.isWellFormed()) throw new Error(`回复 ${id} ${key} 无效`)
@@ -750,8 +846,58 @@ function assertConversationFactsImmutable(before, after) {
       if (turn.userMessageId && (next.sessionId !== turn.sessionId || next.userMessageId !== turn.userMessageId)) throw new Error('原生回复绑定不可改写')
       if (!['accepted', 'running'].includes(turn.status) && JSON.stringify(next) !== JSON.stringify(turn)) throw new Error('已结束回复不可改写')
       if (turn.status === 'running' && next.status === 'accepted') throw new Error('运行中回复不可回退')
+      if (!appendOnly(turn.workDependencyRefs ?? [], next.workDependencyRefs ?? []) || !appendOnly(turn.knowledgeDependencyRefs ?? [], next.knowledgeDependencyRefs ?? [])) throw new Error('回复事实依赖只能追加')
     }
   }
+}
+
+function assertChannelFactsImmutable(before, after) {
+  for (const identity of before.channelIdentities) {
+    const next = after.channelIdentities.find(item => item.id === identity.id)
+    if (!next || ['channelAppId', 'providerUserId', 'memberId', 'verificationMethod', 'createdAt'].some(key => identity[key] !== next[key])) throw new Error('渠道身份归属不可变更或删除')
+    if (['unlinked', 'rebind-required'].includes(identity.status) && !['unlinked', 'rebind-required'].includes(next.status)) throw new Error('已失效渠道身份不可重新激活')
+    if (identity.weixin && (!next.weixin || ['botId', 'baseUrl', 'tokenRef', 'cursorRef', 'contextRef'].some(key => identity.weixin[key] !== next.weixin[key]))) throw new Error('微信账号和秘密引用不可改写')
+  }
+  for (const endpoint of before.channelConversations) {
+    const next = after.channelConversations.find(item => item.id === endpoint.id)
+    if (!next || ['channelAppId', 'providerConversationId', 'identityId', 'memberId', 'type', 'createdAt'].some(key => endpoint[key] !== next[key])) throw new Error('渠道端点归属不可变更或删除')
+    if (['unlinked', 'rebind-required'].includes(endpoint.status) && !['unlinked', 'rebind-required'].includes(next.status)) throw new Error('已失效渠道端点不可重新激活')
+  }
+  for (const message of before.channelMessages) {
+    const next = after.channelMessages.find(item => item.id === message.id)
+    if (!next) throw new Error('渠道消息事实不可删除')
+    const immutable = ['channelAppId', 'providerAccountId', 'providerEventId', 'providerMessageId', 'replyToProviderMessageId', 'providerConversationId', 'providerUserId', 'conversationId', 'senderIdentityId', 'direction', 'text', 'conversationType', 'bodyDigest', 'rejectionCode', 'receivedAt', 'persistedAt']
+    if (immutable.some(key => !isDeepStrictEqual(message[key], next[key]))) throw new Error('渠道消息原始事实不可改写')
+    for (const key of ['action', 'command', 'memberConversationId', 'turnId', 'workId', 'clientRequestId', 'authorizationRevisions', 'reservedAt', 'noticeKey']) {
+      if (message[key] !== undefined && !isDeepStrictEqual(message[key], next[key])) throw new Error('渠道消息受理绑定不可改写')
+    }
+    if (['accepted', 'rejected', 'unhandled'].includes(message.status)) {
+      const { conflicts: _before, ...original } = message, { conflicts: _after, ...candidate } = next
+      if (!isDeepStrictEqual(original, candidate)) throw new Error('已处理渠道消息不可重新受理或改写')
+    }
+    if (!appendOnly(message.conflicts ?? [], next.conflicts ?? [])) throw new Error('渠道消息冲突事实只能追加')
+  }
+  for (const delivery of before.deliveries) {
+    const next = after.deliveries.find(item => item.id === delivery.id)
+    if (!next || ['channelAppId', 'requestId', 'workId', 'resultId', 'sourceRef', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'contentKey', 'createdAt'].some(key => !isDeepStrictEqual(delivery[key], next[key]))) throw new Error('渠道投递来源和接收方不可改写')
+    if (delivery.status === 'unknown' && !['unknown', 'delivered', 'failed'].includes(next.status)) throw new Error('未知投递效果不可重新发送')
+    if (['delivered', 'cancelled'].includes(delivery.status) && delivery.status !== next.status) throw new Error('已结束投递不可重新发送')
+    if (delivery.sendProgress) {
+      const a = delivery.sendProgress, b = next.sendProgress
+      if (!b || ['attemptId', 'totalParts', 'textDigest'].some(key => a[key] !== b[key]) || !appendOnly(a.acknowledgedParts, b.acknowledgedParts)) throw new Error('分段投递请求与已确认前缀不可改写')
+    } else if (next.sendProgress && (delivery.status !== 'sending' || delivery.attempts < 1)) throw new Error('分段投递只能从已授权发送开始')
+  }
+  for (const link of before.linkCodes) {
+    const next = after.linkCodes.find(item => item.id === link.id)
+    if (!next || ['channelAppId', 'memberId', 'digest', 'kind', 'loginRef', 'tokenRef', 'cursorRef', 'contextRef', 'createdAt', 'expiresAt'].some(key => !isDeepStrictEqual(link[key], next[key]))) throw new Error('渠道关联请求不可改写或删除')
+    if (['consumed', 'expired', 'cancelled'].includes(link.status) && next.status !== link.status) throw new Error('已结束关联请求不可重新激活')
+    if (next.failedAttempts < link.failedAttempts || link.qrcodeUrl !== undefined && next.qrcodeUrl !== link.qrcodeUrl) throw new Error('关联码失败次数或扫码地址不可回退或改写')
+    for (const key of ['matchedIdentityId', 'matchedConversationId', 'matchedAt', 'consumedAt']) if (link[key] !== undefined && next[key] !== link[key]) throw new Error('渠道关联匹配事实不可改写')
+  }
+}
+
+function appendOnly(before, after) {
+  return after.length >= before.length && before.every((item, index) => isDeepStrictEqual(item, after[index]))
 }
 
 function normalizeAction(action, work) {
@@ -862,16 +1008,16 @@ function assertMonotonicFact(current, next, additions, label) {
   if (JSON.stringify(currentBase) !== JSON.stringify(nextBase)) throw new Error(`${label} 不可改写`)
 }
 
-function normalizeAutomationRule(rule) {
+function normalizeAutomationRule(rule, channels = false) {
   if (!record(rule)) throw new Error('自动规则状态无效')
-  exactKeys(rule, ['id', 'ownerMemberId', 'revision', 'status', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationConversationId', 'effectiveFrom', 'eventAcceptAfter', 'createdAt', 'updatedAt', 'revokedAt'], '自动规则')
+  exactKeys(rule, ['id', 'ownerMemberId', 'revision', 'status', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', channels ? 'notificationIdentityId' : 'notificationConversationId', 'effectiveFrom', 'eventAcceptAfter', 'createdAt', 'updatedAt', 'revokedAt'], '自动规则')
   const id = requiredText(rule.id, '自动规则 ID 无效')
   for (const key of ['ownerMemberId', 'employeeId', 'skillId', 'connectionId', 'workOrderId']) requiredText(rule[key], `自动规则 ${id} ${key} 无效`)
   isoTimestamp(rule.createdAt, `自动规则 ${id} createdAt`)
   isoTimestamp(rule.updatedAt, `自动规则 ${id} updatedAt`)
   if (!Number.isSafeInteger(rule.revision) || rule.revision < 1 || !['draft', 'active', 'paused', 'revoked'].includes(rule.status)) throw new Error(`自动规则 ${id} revision 或状态无效`)
   if (!Number.isSafeInteger(rule.maxRuns) || rule.maxRuns < 1 || rule.maxRuns > 10) throw new Error(`自动规则 ${id} maxRuns 无效`)
-  if (rule.notificationConversationId !== null) requiredText(rule.notificationConversationId, `自动规则 ${id} notificationConversationId 无效`)
+  nullableId(rule[channels ? 'notificationIdentityId' : 'notificationConversationId'], `自动规则 ${id} 通知目标`)
   if (rule.effectiveFrom !== null) isoTimestamp(rule.effectiveFrom, `自动规则 ${id} effectiveFrom`)
   if (rule.eventAcceptAfter !== null) isoTimestamp(rule.eventAcceptAfter, `自动规则 ${id} eventAcceptAfter`)
   if (rule.revokedAt !== null) isoTimestamp(rule.revokedAt, `自动规则 ${id} revokedAt`)
@@ -940,69 +1086,139 @@ function isDateOnly(value) {
   return date.toISOString().slice(0, 10) === value
 }
 
-function normalizeChannelApp(app) {
+function normalizeChannelApp(app, channels = false) {
   if (!record(app)) throw new Error('渠道应用状态无效')
   exactKeys(app, ['id', 'provider', 'providerAppId', 'providerTenantId', 'credentialRef', 'enabled', 'allowedScopes', 'revision', 'status', 'createdAt', 'updatedAt'], '渠道应用')
   const id = requiredText(app.id, '渠道应用 ID 无效')
-  for (const key of ['provider', 'providerAppId', 'providerTenantId', 'credentialRef', 'createdAt', 'updatedAt']) requiredText(app[key], `渠道应用 ${id} ${key} 无效`)
+  if (channels && !['feishu', 'weixin'].includes(app.provider)) throw new Error('渠道应用 provider 无效')
+  for (const key of ['provider', 'providerAppId', 'providerTenantId', 'createdAt', 'updatedAt']) requiredText(app[key], `渠道应用 ${id} ${key} 无效`)
+  if (channels && app.provider === 'weixin') {
+    if (id === 'channel-app-weixin') {
+      if (app.providerAppId !== 'ilink' || app.providerTenantId !== 'personal' || app.credentialRef !== null) throw new Error('微信渠道必须使用唯一内置应用')
+    } else {
+      // Earlier manually configured applications remain as disabled history only.
+      if (app.enabled !== false || app.status !== 'disabled') throw new Error('旧微信应用不可重新启用')
+      requiredText(app.credentialRef, `渠道应用 ${id} credentialRef 无效`)
+    }
+  } else requiredText(app.credentialRef, `渠道应用 ${id} credentialRef 无效`)
   if (typeof app.enabled !== 'boolean' || !Number.isSafeInteger(app.revision) || app.revision < 1 || !['active', 'disabled', 'unavailable'].includes(app.status) || (app.enabled === false) !== (app.status === 'disabled')) throw new Error(`渠道应用 ${id} 状态无效`)
   const allowedScopes = uniqueTextArray(app.allowedScopes, `渠道应用 ${id} allowedScopes`)
   if (!allowedScopes.length) throw new Error(`渠道应用 ${id} 允许范围为空`)
   return { ...app, id, allowedScopes }
 }
 
-function normalizeChannelIdentity(identity) {
+function normalizeChannelIdentity(identity, channels = false) {
   if (!record(identity)) throw new Error('渠道身份状态无效')
-  exactKeys(identity, ['id', 'channelAppId', 'providerUserId', 'memberId', 'verificationMethod', 'status', 'revision', 'createdAt', 'updatedAt', 'unlinkedAt'], '渠道身份')
+  exactKeys(identity, ['id', 'channelAppId', 'providerUserId', 'memberId', 'verificationMethod', 'status', 'revision', 'createdAt', 'updatedAt', 'unlinkedAt', ...(channels ? ['defaultEmployeeId', 'activeConversationId', 'weixin'] : [])], '渠道身份')
   const id = requiredText(identity.id, '渠道身份 ID 无效')
   for (const key of ['channelAppId', 'providerUserId', 'memberId', 'createdAt', 'updatedAt']) requiredText(identity[key], `渠道身份 ${id} ${key} 无效`)
-  if (identity.verificationMethod !== 'link-code' || !['pending', 'active', 'unlinked'].includes(identity.status) || !Number.isSafeInteger(identity.revision) || identity.revision < 1) throw new Error(`渠道身份 ${id} 状态无效`)
+  if (!(channels ? ['link-code', 'weixin-qr'] : ['link-code']).includes(identity.verificationMethod)
+    || !(channels ? ['pending', 'active', 'unlinked', 'rebind-required'] : ['pending', 'active', 'unlinked']).includes(identity.status) || !Number.isSafeInteger(identity.revision) || identity.revision < 1) throw new Error(`渠道身份 ${id} 状态无效`)
   if (identity.status === 'unlinked') requiredText(identity.unlinkedAt, `渠道身份 ${id} unlinkedAt 无效`)
+  if (channels) {
+    nullableId(identity.defaultEmployeeId, `渠道身份 ${id} 默认员工`)
+    nullableId(identity.activeConversationId, `渠道身份 ${id} 活动对话`)
+    if ((identity.verificationMethod === 'weixin-qr') !== Boolean(identity.weixin)) throw new Error('微信身份验证方式与元信息不匹配')
+    if (identity.weixin) normalizeWeixinIdentity(identity.weixin)
+  }
   return identity
 }
 
-function normalizeChannelConversation(source) {
+function normalizeWeixinIdentity(value) {
+  if (!record(value)) throw new Error('微信身份元信息无效')
+  exactKeys(value, ['botId', 'baseUrl', 'tokenRef', 'cursorRef', 'contextRef', 'runtimeState', 'error'], '微信身份')
+  officialId(value.botId, '微信 bot ID')
+  let url
+  try { url = new URL(value.baseUrl) } catch { throw new Error('微信连接地址无效') }
+  if (url.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(url.hostname)) {
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash || url.href !== value.baseUrl) throw new Error('微信测试地址无效')
+  } else if (normalizeWeixinApiBaseUrl(value.baseUrl) !== value.baseUrl) throw new Error('微信连接地址未规范化')
+  const refs = ['tokenRef', 'cursorRef', 'contextRef'].map(key => secretRef(value[key], `微信身份 ${key}`))
+  if (new Set(refs).size !== refs.length) throw new Error('微信身份秘密引用不得复用')
+  if (!['pending', 'connecting', 'connected', 'reconnecting', 'unavailable', 'stopped'].includes(value.runtimeState)) throw new Error('微信运行状态无效')
+  if (value.error !== undefined) {
+    if (!record(value.error)) throw new Error('微信错误无效')
+    exactKeys(value.error, ['code'], '微信错误')
+    safeCode(value.error.code, '微信错误')
+  }
+}
+
+function normalizeChannelConversation(source, channels = false) {
   if (!record(source)) throw new Error('渠道会话状态无效')
   const { provider: _provider, ...conversation } = source
   exactKeys(conversation, ['id', 'channelAppId', 'providerConversationId', 'identityId', 'memberId', 'type', 'allowedScopes', 'verificationMethod', 'status', 'revision', 'defaultDispatch', 'createdAt', 'updatedAt', 'unlinkedAt'], '渠道会话')
   const id = requiredText(conversation.id, '渠道会话 ID 无效')
   for (const key of ['channelAppId', 'providerConversationId', 'createdAt', 'updatedAt']) requiredText(conversation[key], `渠道会话 ${id} ${key} 无效`)
   if (conversation.type === 'private') for (const key of ['identityId', 'memberId']) requiredText(conversation[key], `渠道会话 ${id} ${key} 无效`)
-  if (!['private', 'group'].includes(conversation.type) || !['link-code', 'bot-mention'].includes(conversation.verificationMethod)
-    || (conversation.type === 'private' && conversation.verificationMethod !== 'link-code')
-    || !['pending', 'active', 'unlinked'].includes(conversation.status) || !Number.isSafeInteger(conversation.revision) || conversation.revision < 1) throw new Error(`渠道会话 ${id} 状态无效`)
+  if (!['private', 'group'].includes(conversation.type) || !(channels ? ['link-code', 'bot-mention', 'weixin-qr'] : ['link-code', 'bot-mention']).includes(conversation.verificationMethod)
+    || (conversation.type === 'private' && !(channels ? ['link-code', 'weixin-qr'] : ['link-code']).includes(conversation.verificationMethod))
+    || !(channels ? ['pending', 'active', 'unlinked', 'rebind-required'] : ['pending', 'active', 'unlinked']).includes(conversation.status) || !Number.isSafeInteger(conversation.revision) || conversation.revision < 1) throw new Error(`渠道会话 ${id} 状态无效`)
   const allowedScopes = uniqueTextArray(conversation.allowedScopes, `渠道会话 ${id} allowedScopes`)
   if (!allowedScopes.length) throw new Error(`渠道会话 ${id} 允许范围为空`)
   if (conversation.status === 'unlinked') requiredText(conversation.unlinkedAt, `渠道会话 ${id} unlinkedAt 无效`)
   return { ...conversation, allowedScopes }
 }
 
-function normalizeChannelMessage(source) {
+function normalizeChannelMessage(source, channels = false) {
   if (!record(source)) throw new Error('渠道消息状态无效')
   const { provider: _provider, ...message } = source
-  exactKeys(message, ['id', 'channelAppId', 'providerEventId', 'providerMessageId', 'replyToProviderMessageId', 'providerConversationId', 'providerUserId', 'conversationId', 'senderIdentityId', 'direction', 'text', 'receivedAt', 'persistedAt', 'reservedAt', 'status', 'command', 'clientRequestId', 'authorizationRevisions', 'workId', 'error'], '渠道消息')
+  exactKeys(message, ['id', 'channelAppId', 'providerEventId', 'providerMessageId', 'replyToProviderMessageId', 'providerConversationId', 'providerUserId', 'conversationId', 'senderIdentityId', 'direction', 'text', 'receivedAt', 'persistedAt', 'reservedAt', 'status', 'command', 'clientRequestId', 'authorizationRevisions', 'workId', 'error', ...(channels ? ['providerAccountId', 'conversationType', 'bodyDigest', 'conflicts', 'action', 'memberConversationId', 'turnId', 'noticeKey', 'rejectionCode'] : [])], '渠道消息')
   const id = requiredText(message.id, '渠道消息 ID 无效')
-  for (const key of ['channelAppId', 'providerConversationId', 'providerUserId', 'receivedAt', 'persistedAt']) requiredText(message[key], `渠道消息 ${id} ${key} 无效`)
+  for (const key of ['channelAppId', 'receivedAt', 'persistedAt']) requiredText(message[key], `渠道消息 ${id} ${key} 无效`)
+  for (const key of ['providerConversationId', 'providerUserId']) {
+    if (!channels || message.status !== 'rejected' || message[key] !== undefined) officialId(message[key], `渠道消息 ${id} ${key}`)
+  }
   if (!text(message.providerEventId) && !text(message.providerMessageId)) throw new Error(`渠道消息 ${id} 缺少官方稳定 ID`)
   if (message.providerEventId !== undefined) requiredText(message.providerEventId, `渠道消息 ${id} event ID 无效`)
   if (message.providerMessageId !== undefined) requiredText(message.providerMessageId, `渠道消息 ${id} message ID 无效`)
   if (message.replyToProviderMessageId !== undefined) requiredText(message.replyToProviderMessageId, `渠道消息 ${id} reply message ID 无效`)
   if (message.conversationId !== undefined) requiredText(message.conversationId, `渠道消息 ${id} conversationId 无效`)
   if (message.senderIdentityId !== undefined) requiredText(message.senderIdentityId, `渠道消息 ${id} senderIdentityId 无效`)
-  if (message.text !== undefined) requiredRawText(message.text, `渠道消息 ${id} 文本无效`)
+  if (message.text !== undefined && (channels ? typeof message.text !== 'string' || message.text.length > 16_000 : !text(message.text))) throw new Error(`渠道消息 ${id} 文本无效`)
   if (!['inbound', 'outbound'].includes(message.direction) || !['received', 'reserved', 'unhandled', 'accepted', 'rejected'].includes(message.status)) throw new Error(`渠道消息 ${id} 状态无效`)
   if (message.command !== undefined) normalizeChannelCommand(message.command, id)
   if (message.clientRequestId !== undefined && (!text(message.clientRequestId) || message.clientRequestId.length > 340)) throw new Error(`渠道消息 ${id} clientRequestId 无效`)
   if (message.clientRequestId !== undefined) {
-    const kind = message.providerEventId ? 'event' : 'message', officialId = message.providerEventId ?? message.providerMessageId
-    const digest = createHash('sha256').update(`${message.channelAppId}\0${kind}\0${officialId}`).digest('hex')
-    if (message.clientRequestId !== `channel:${message.channelAppId}:${digest}`) throw new Error(`渠道消息 ${id} clientRequestId 不闭合`)
+    const kind = message.providerEventId ? 'event' : 'message', official = message.providerEventId ?? message.providerMessageId
+    const expected = message.action
+      ? `channel:${createHash('sha256').update(`${message.channelAppId}\0${id}`).digest('hex')}`
+      : `channel:${message.channelAppId}:${createHash('sha256').update(`${message.channelAppId}\0${kind}\0${official}`).digest('hex')}`
+    if (message.clientRequestId !== expected) throw new Error(`渠道消息 ${id} clientRequestId 不闭合`)
   }
   if (message.authorizationRevisions !== undefined) normalizeChannelAuthorizationRevisions(message.authorizationRevisions, `渠道消息 ${id}`)
   if (message.reservedAt !== undefined) requiredText(message.reservedAt, `渠道消息 ${id} reservedAt 无效`)
-  if (message.status === 'reserved' && (message.direction !== 'inbound' || !message.command || !message.clientRequestId || !message.authorizationRevisions || !message.reservedAt)) throw new Error(`渠道消息 ${id} reserved 状态不闭合`)
-  if (message.status === 'accepted') requiredText(message.workId, `渠道消息 ${id} workId 无效`)
+  if (message.status === 'reserved' && (message.direction !== 'inbound' || !(message.command || message.action === 'chat') || !message.clientRequestId || !message.authorizationRevisions || !message.reservedAt)) throw new Error(`渠道消息 ${id} reserved 状态不闭合`)
+  if (message.status === 'accepted' && !message.action) requiredText(message.workId, `渠道消息 ${id} workId 无效`)
   if (message.command?.workId !== undefined && message.workId !== message.command.workId) throw new Error(`渠道消息 ${id} command 工作引用不闭合`)
+  if (channels) {
+    for (const key of ['receivedAt', 'persistedAt', 'reservedAt']) if (message[key] !== undefined) isoTimestamp(message[key], `渠道消息 ${id} ${key}`)
+    if (message.providerAccountId !== undefined) officialId(message.providerAccountId, `渠道消息 ${id} account ID`)
+    if (message.conversationType !== undefined && !['private', 'group'].includes(message.conversationType)) throw new Error('渠道消息会话类型无效')
+    if (message.bodyDigest !== undefined) hexDigest(message.bodyDigest, '渠道消息正文摘要')
+    if (message.rejectionCode !== undefined) safeCode(message.rejectionCode, '渠道消息拒绝码')
+    if (message.noticeKey !== undefined && !['conversation.started', 'conversation.default-changed'].includes(message.noticeKey)) throw new Error('渠道消息通知类型无效')
+    if (message.action !== undefined) {
+      if (!['chat', 'new-conversation'].includes(message.action) || message.command || message.workId || !message.clientRequestId || !message.reservedAt || !message.authorizationRevisions) throw new Error('渠道会话受理状态不闭合')
+      requiredText(message.memberConversationId, '渠道对话引用无效')
+      if (message.action === 'new-conversation' && (message.status !== 'accepted' || message.turnId !== undefined || message.noticeKey !== 'conversation.started')) throw new Error('渠道新会话受理状态不闭合')
+      if (message.action === 'chat' && message.status === 'accepted') requiredText(message.turnId, '渠道回复引用无效')
+      if (message.action === 'chat' && !['reserved', 'accepted', 'rejected'].includes(message.status)) throw new Error('渠道聊天状态无效')
+    } else if (message.memberConversationId !== undefined || message.turnId !== undefined || message.noticeKey !== undefined) throw new Error('渠道消息缺少会话 action')
+    if (message.turnId !== undefined) requiredText(message.turnId, '渠道回复引用无效')
+    if (message.conflicts !== undefined) {
+      if (!Array.isArray(message.conflicts)) throw new Error('渠道 ID 冲突事实无效')
+      for (const conflict of message.conflicts) {
+        if (!record(conflict)) throw new Error('渠道 ID 冲突事实无效')
+        exactKeys(conflict, ['digest', 'providerEventId', 'providerMessageId', 'receivedAt', 'error'], '渠道 ID 冲突事实')
+        hexDigest(conflict.digest, '渠道 ID 冲突摘要')
+        for (const key of ['providerEventId', 'providerMessageId']) if (conflict[key] !== undefined) officialId(conflict[key], `渠道冲突 ${key}`)
+        isoTimestamp(conflict.receivedAt, '渠道冲突时间')
+        normalizeChannelError(conflict.error, '渠道冲突')
+        if (conflict.error.code !== 'OFFICIAL_ID_CONFLICT') throw new Error('渠道冲突错误码无效')
+      }
+      uniqueDomain(message.conflicts, item => [item.digest], '渠道 ID 冲突')
+    }
+  }
   if (message.error !== undefined) normalizeChannelError(message.error, `渠道消息 ${id}`)
   return message
 }
@@ -1026,21 +1242,28 @@ function normalizeChannelCommand(command, messageId) {
 function normalizeChannelAuthorizationRevisions(revisions, label) {
   if (!record(revisions)) throw new Error(`${label} 授权 revision 无效`)
   exactKeys(revisions, ['app', 'identity', 'conversation'], `${label} 授权 revision`)
-  for (const value of Object.values(revisions)) if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${label} 授权 revision 无效`)
+  for (const key of ['app', 'identity', 'conversation']) if (!Number.isSafeInteger(revisions[key]) || revisions[key] < 1) throw new Error(`${label} 授权 revision 无效`)
 }
 
-function normalizeDelivery(source) {
+function normalizeDelivery(source, channels = false) {
   if (!record(source)) throw new Error('渠道投递状态无效')
   const { provider: _provider, ...delivery } = source
   if (delivery.contentKey === undefined) delivery.contentKey = delivery.resultId ? 'result.gearjob' : 'work.accepted'
-  exactKeys(delivery, ['id', 'channelAppId', 'requestId', 'workId', 'resultId', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'contentKey', 'authorizationRevisions', 'status', 'attempts', 'providerMessageId', 'error', 'createdAt', 'updatedAt'], '渠道投递')
+  exactKeys(delivery, ['id', 'channelAppId', 'requestId', 'workId', 'resultId', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'contentKey', 'authorizationRevisions', 'status', 'attempts', 'providerMessageId', 'error', 'createdAt', 'updatedAt', ...(channels ? ['sourceRef', 'sendProgress'] : [])], '渠道投递')
   const id = requiredText(delivery.id, '渠道投递 ID 无效')
   for (const key of ['channelAppId', 'requestId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'contentKey', 'createdAt', 'updatedAt']) requiredText(delivery[key], `渠道投递 ${id} ${key} 无效`)
   if (delivery.workId !== undefined) requiredText(delivery.workId, `渠道投递 ${id} workId 无效`)
-  const fixed = ['group.accepted', 'help.unsupported', 'help.unavailable'].includes(delivery.contentKey)
-  if ((!fixed && !delivery.workId) || (delivery.contentKey === 'result.gearjob' && !delivery.resultId)
-      || !['work.accepted', 'result.gearjob', 'automation.completed', 'automation.failed', 'group.accepted', 'help.unsupported', 'help.unavailable'].includes(delivery.contentKey)
+  const fixedKeys = ['group.accepted', 'help.unsupported', 'help.unavailable', ...(channels ? ['help.confirmation', 'help.busy', 'help.interrupted', 'help.reply-invalid', 'conversation.started', 'conversation.default-changed'] : [])]
+  const fixed = fixedKeys.includes(delivery.contentKey), reply = channels && delivery.contentKey === 'conversation.reply'
+  if ((!fixed && !reply && !delivery.workId) || (delivery.contentKey === 'result.gearjob' && !delivery.resultId)
+      || !['work.accepted', 'result.gearjob', 'automation.completed', 'automation.failed', ...fixedKeys, ...(channels ? ['conversation.reply'] : [])].includes(delivery.contentKey)
       || (delivery.contentKey === 'automation.completed' && !delivery.resultId) || (delivery.contentKey === 'automation.failed' && delivery.resultId)) throw new Error(`渠道投递 ${id} 内容引用无效`)
+  if (channels && (reply || delivery.sourceRef !== undefined)) {
+    if (!reply || !record(delivery.sourceRef) || delivery.workId !== undefined || delivery.resultId !== undefined) throw new Error('渠道回复来源无效')
+    exactKeys(delivery.sourceRef, ['kind', 'conversationId', 'turnId'], '渠道回复来源')
+    if (delivery.sourceRef.kind !== 'conversation-turn') throw new Error('渠道回复来源类型无效')
+    for (const key of ['conversationId', 'turnId']) requiredText(delivery.sourceRef[key], `渠道回复 ${key} 无效`)
+  }
   if (delivery.resultId !== undefined) requiredText(delivery.resultId, `渠道投递 ${id} resultId 无效`)
   if (delivery.channelMessageId !== undefined) requiredText(delivery.channelMessageId, `渠道投递 ${id} channelMessageId 无效`)
   if (delivery.providerMessageId !== undefined) requiredText(delivery.providerMessageId, `渠道投递 ${id} providerMessageId 无效`)
@@ -1058,12 +1281,13 @@ function normalizeDelivery(source) {
   if (['failed', 'unknown'].includes(delivery.status) && (delivery.attempts < 1 || !hasAuthorization || !hasError)) throw new Error(`渠道投递 ${id} ${delivery.status} 状态不闭合`)
   if (delivery.status === 'blocked' && (!hasError || hasProviderMessage)) throw new Error(`渠道投递 ${id} blocked 状态不闭合`)
   if (delivery.status === 'cancelled' && hasProviderMessage) throw new Error(`渠道投递 ${id} cancelled 状态不闭合`)
+  if (channels && delivery.sendProgress !== undefined) normalizeSendProgress(delivery)
   return delivery
 }
 
-function normalizeLinkCode(link) {
+function normalizeLinkCode(link, channels = false) {
   if (!record(link)) throw new Error('关联码状态无效')
-  exactKeys(link, ['id', 'channelAppId', 'memberId', 'digest', 'status', 'failedAttempts', 'expiresAt', 'createdAt', 'updatedAt', 'matchedIdentityId', 'matchedConversationId', 'matchedAt', 'consumedAt'], '关联码')
+  exactKeys(link, ['id', 'channelAppId', 'memberId', 'digest', 'status', 'failedAttempts', 'expiresAt', 'createdAt', 'updatedAt', 'matchedIdentityId', 'matchedConversationId', 'matchedAt', 'consumedAt', ...(channels ? ['kind', 'loginRef', 'tokenRef', 'cursorRef', 'contextRef', 'qrcodeUrl', 'error'] : [])], '关联码')
   const id = requiredText(link.id, '关联码 ID 无效')
   for (const key of ['channelAppId', 'memberId', 'expiresAt', 'createdAt', 'updatedAt']) requiredText(link[key], `关联码 ${id} ${key} 无效`)
   if (typeof link.digest !== 'string' || !/^[a-f0-9]{64}$/.test(link.digest) || !['active', 'matched', 'consumed', 'expired', 'cancelled'].includes(link.status) || !Number.isSafeInteger(link.failedAttempts) || link.failedAttempts < 0 || link.failedAttempts > 5) throw new Error(`关联码 ${id} 状态无效`)
@@ -1073,13 +1297,52 @@ function normalizeLinkCode(link) {
     requiredText(link.matchedAt, `关联码 ${id} matchedAt 无效`)
   }
   if (link.status === 'consumed') requiredText(link.consumedAt, `关联码 ${id} consumedAt 无效`)
+  if (channels) {
+    const qrFields = ['loginRef', 'tokenRef', 'cursorRef', 'contextRef', 'qrcodeUrl']
+    if (link.kind !== undefined && link.kind !== 'weixin-qr') throw new Error('关联码 kind 无效')
+    if (!link.kind && qrFields.some(key => link[key] !== undefined)) throw new Error('普通关联码不得包含微信扫码字段')
+    if (link.kind === 'weixin-qr') {
+      const refs = qrFields.slice(0, 4).map(key => secretRef(link[key], `微信关联码 ${key}`))
+      if (new Set(refs).size !== refs.length) throw new Error('微信关联码秘密引用不得复用')
+      if (link.qrcodeUrl !== undefined) {
+        if (typeof link.qrcodeUrl !== 'string' || link.qrcodeUrl.length > 4096) throw new Error('微信扫码地址无效')
+        let url
+        try { url = new URL(link.qrcodeUrl) } catch { throw new Error('微信扫码地址无效') }
+        const base = new URL(url.href); base.search = ''; base.hash = ''
+        if (url.username || url.password) throw new Error('微信扫码地址无效')
+        if (!(base.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(base.hostname))) normalizeWeixinApiBaseUrl(base.href)
+      }
+    }
+    if (link.error !== undefined) normalizeChannelError(link.error, '渠道关联码')
+  }
   return link
+}
+
+function normalizeSendProgress(delivery) {
+  const value = delivery.sendProgress
+  if (!record(value)) throw new Error('投递分段进度无效')
+  exactKeys(value, ['attemptId', 'totalParts', 'textDigest', 'acknowledgedParts', 'partIndex'], '投递分段进度')
+  if (!uuid(value.attemptId) || delivery.attempts < 1 || delivery.status === 'pending') throw new Error('投递分段 attempt 无效')
+  boundedInteger(value.totalParts, 1, Number.MAX_SAFE_INTEGER, '投递总分段数无效')
+  hexDigest(value.textDigest, '投递内容摘要')
+  if (!Array.isArray(value.acknowledgedParts) || value.acknowledgedParts.length > value.totalParts) throw new Error('投递分段 ACK 无效')
+  value.acknowledgedParts.forEach((part, index) => {
+    if (!record(part)) throw new Error('投递分段 ACK 无效')
+    exactKeys(part, ['index', 'clientId'], '投递分段 ACK')
+    const clientId = `geneway-weixin-${createHash('sha256').update(`${value.attemptId}\0${index}`).digest('hex').slice(0, 32)}`
+    if (part.index !== index || part.clientId !== clientId) throw new Error('投递分段 ACK 必须是原请求的连续前缀')
+  })
+  if (value.partIndex !== undefined) {
+    boundedInteger(value.partIndex, 0, value.totalParts - 1, '投递当前分段无效')
+    if (value.partIndex !== value.acknowledgedParts.length) throw new Error('投递分段 claim 必须紧接 ACK 前缀')
+  }
+  if (delivery.status === 'delivered' && value.acknowledgedParts.length !== value.totalParts) throw new Error('已投递消息必须确认全部分段')
 }
 
 function normalizeChannelError(error, label) {
   if (!record(error)) throw new Error(`${label} error 无效`)
   exactKeys(error, ['code', 'message'], `${label} error`)
-  requiredText(error.code, `${label} error code 无效`)
+  safeCode(error.code, `${label} error code`)
   requiredText(error.message, `${label} error message 无效`)
 }
 
@@ -1650,6 +1913,24 @@ function requiredText(value, message) {
 
 function requiredRawText(value, message) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(message)
+  return value
+}
+
+function nullableId(value, label) { return value === null ? null : requiredText(value, `${label} 无效`) }
+function hexDigest(value, label) {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new Error(`${label} 无效`)
+  return value
+}
+function safeCode(value, label) {
+  if (typeof value !== 'string' || !/^[A-Z][A-Z0-9_]{0,79}$/.test(value)) throw new Error(`${label} 无效`)
+  return value
+}
+function secretRef(value, label) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new Error(`${label} 无效`)
+  return value
+}
+function officialId(value, label) {
+  if (typeof value !== 'string' || value !== value.trim() || !value || value.length > 512 || /[\u0000-\u001f\u007f]/u.test(value)) throw new Error(`${label} 无效`)
   return value
 }
 

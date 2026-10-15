@@ -123,7 +123,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         employees,
         connections: state.connections.filter(item => connectionIds.has(item.id)).map(item => publicConnection(item, connectionCatalog)),
         skills: state.skills.filter(item => skillIds.has(item.id)),
-        capabilities: listCapabilities().filter(item => state.skills.some(skill => skillIds.has(skill.id) && skill.enabled === true && skill.capabilityId === item.id)).map(publicCapability),
+        capabilities: listCapabilities().filter(item => member.role === 'admin' || state.skills.some(skill => skillIds.has(skill.id) && skill.enabled === true && skill.capabilityId === item.id)).map(publicCapability),
         works: state.works.filter(item => item.ownerMemberId === member.id).map(item => publicWork(state, member, item)),
       }
     },
@@ -1226,7 +1226,7 @@ function visibleConnection(connection, catalog) {
   if (value.lastTest?.ok === false) value.lastTest = { ...value.lastTest, ...safeError(value.lastTest) }
   try { assertTrustedConnection(catalog, connection); return value } catch { return { ...value, status: 'unavailable' } }
 }
-function publicCapability(capability) { return { id: capability.id, retired: capability.retired, skillId: capability.skillId, action: capability.action, requiredInputs: [...capability.requiredInputs], requiresConnection: capability.requiresConnection, resultKind: capability.resultKind } }
+function publicCapability(capability) { return { id: capability.id, retired: capability.retired, skillId: capability.skillId, action: capability.action, requiredInputs: [...capability.requiredInputs], requiresConnection: capability.requiresConnection, connectionKind: capability.connectionKind, resultKind: capability.resultKind } }
 
 export function isRetiredWork(state, work) {
   const rootId = work.rootWorkId ?? work.id

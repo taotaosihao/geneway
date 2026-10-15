@@ -20,7 +20,7 @@ console.log('P5 automation notification checks passed; fake SDK only; extra work
 
 async function deliveryLifecycle() {
   const memory = memoryStore(fixture())
-  const channel = createChannelService({ store: memory, clock: () => now, idFactory: ids })
+  const channel = createChannelService({ store: memory, clock: () => now, idFactory: ids, connectionCatalog: [catalog()], workService: createWorkService({ store: memory, clock: () => now, connectionCatalog: [catalog()] }) })
   const automation = createAutomationService({ store: memory, workService: {}, clock: () => now, idFactory: ids, connectionCatalog: [catalog()] })
   await addTerminal(memory, 'completed', 'a')
   const baseline = counts(await memory.read())
@@ -35,10 +35,20 @@ async function deliveryLifecycle() {
 
   await automation.pauseRule({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1 })
   assert.equal((await memory.read()).deliveries[0].status, 'blocked')
-  await automation.resumeRule({ id: 'member-owner' }, 'rule-a', { expectedRevision: 2 })
-  assert.equal((await channel.retryDelivery({ deliveryId: first.deliveries[0].id })).status, 'sending')
-  await channel.validateSendClaim({ deliveryId: first.deliveries[0].id })
-  await channel.recordDeliveryOutcome({ deliveryId: first.deliveries[0].id, status: 'failed', error: { code: 'FEISHU_230001' } })
+  const paused = await memory.read()
+  await assert.rejects(automation.resumeRule({ id: 'member-owner' }, 'rule-a', { expectedRevision: 2 }), hasCode('CAPABILITY_RETIRED'))
+  assert.deepEqual(await memory.read(), paused)
+  await assert.rejects(channel.retryDelivery({ deliveryId: first.deliveries[0].id }), hasCode('DELIVERY_FORBIDDEN'))
+
+  await addTerminal(memory, 'completed', 'active')
+  const active = (await channel.ensureAutomationDeliveries({ ownerCheck: () => true })).deliveries[0]
+  await channel.authorizeDelivery({ deliveryId: active.id })
+  await channel.validateSendClaim({ deliveryId: active.id })
+  await channel.recordDeliveryOutcome({ deliveryId: active.id, status: 'failed', error: { code: 'FEISHU_230001' } })
+  assert.equal((await channel.retryDelivery({ deliveryId: active.id })).status, 'sending')
+  await channel.validateSendClaim({ deliveryId: active.id })
+  await channel.recordDeliveryOutcome({ deliveryId: active.id, status: 'delivered', providerMessageId: 'om-active' })
+  assert.equal((await memory.read()).deliveries.find(item => item.id === active.id).status, 'delivered')
 
   await addTerminal(memory, 'failed', 'b')
   const failed = (await channel.ensureAutomationDeliveries({ ownerCheck: () => true })).deliveries[0]
@@ -61,7 +71,7 @@ async function deliveryLifecycle() {
   await addTerminal(memory, 'failed', 'binding')
   await memory.update(state => ({ ...state, connections: state.connections.map(item => item.id === 'connection-owner' ? { ...item, enabled: false } : item) }))
   assert.equal((await channel.ensureAutomationDeliveries({ ownerCheck: () => true })).deliveries[0].status, 'blocked')
-  assert.deepEqual(counts(await memory.read()), { works: 4, executions: 4 })
+  assert.deepEqual(counts(await memory.read()), { works: 5, executions: 5 })
 }
 
 async function runtimeOwnerGates() {
@@ -70,7 +80,7 @@ async function runtimeOwnerGates() {
   await mkdir(secretRoot, { mode: 0o700 })
   await writeFile(join(secretRoot, 'FEISHU_TEST'), JSON.stringify({ appId: 'cli_aaaaaaaaaaaaaaaa', appSecret: 'controlled_secret_123456' }), { mode: 0o600 })
   const memory = memoryStore(fixture())
-  const channel = createChannelService({ store: memory, clock: () => now, idFactory: ids })
+  const channel = createChannelService({ store: memory, clock: () => now, idFactory: ids, connectionCatalog: [catalog()], workService: createWorkService({ store: memory, clock: () => now, connectionCatalog: [catalog()] }) })
   const fake = fakeSdk()
   let owner = true
   let loseAfterAuthorize = false
@@ -115,23 +125,35 @@ async function runtimeOwnerGates() {
 }
 
 async function terminalCallback() {
-  const memory = memoryStore(fixture())
-  const channel = createChannelService({ store: memory, clock: () => now, idFactory: ids })
+  const notifications = memoryStore(fixture())
+  await addTerminal(notifications, 'completed', 'callback')
+  const channel = createChannelService({ store: notifications, clock: () => now, idFactory: ids, connectionCatalog: [catalog()], workService: createWorkService({ store: notifications, clock: () => now, connectionCatalog: [catalog()] }) })
+  const initial = fixture()
+  initial.skills.push({ id: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', enabled: true })
+  initial.employees[0].skillIds.push('skill-cycle-time-calculate')
+  const memory = memoryStore(migrateState(initial))
+  let callbacks = 0
   const workService = createWorkService({
-    store: memory, clock: () => now, connectionCatalog: [catalog()],
+    store: memory, clock: () => now,
     runner: { configured: true, async run() { return validModel() }, async cancel() {}, async close() {} },
-    onAutomationTerminal: options => channel.ensureAutomationDeliveries(options),
+    onAutomationTerminal: options => { callbacks += 1; return channel.ensureAutomationDeliveries(options) },
   })
-  const automation = createAutomationService({ store: memory, workService, clock: () => now, idFactory: ids, connectionCatalog: [catalog()] })
   try {
-    await memory.update(state => ({ ...state, automationRules: [...state.automationRules, ruleRecord('callback')] }))
-    const accepted = await automation.acceptDailyOccurrence({ ruleId: 'rule-callback', scheduledDate: '2026-09-21', ownerCheck: () => true })
-    await waitFor(async () => ['completed', 'failed'].includes((await memory.read()).works.find(item => item.id === accepted.workId)?.status))
-    await waitFor(async () => Boolean((await memory.read()).automationOccurrences[0].deliveryId))
+    await workService.ensureReady()
+    // The internal cycle has no rule; its callback processes a separate closed historical notification graph.
+    const input = { availableSeconds: 60, quantity: 1 }
+    await memory.update(state => ({ ...state, works: [{ id: 'callback-cycle', ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', input, requiredInputs: [], status: 'accepted', acceptedAt: now, results: [], actions: [], executions: [{ id: 'callback-cycle-exec', operation: 'automation', clientRequestId: 'callback-cycle', input, status: 'accepted', acceptedAt: now }] }] }))
+    await workService.dispatchAutomationWork('callback-cycle', 'callback-cycle-exec', now, { ownerCheck: () => true })
+    await waitFor(async () => (await memory.read()).works[0]?.status === 'completed')
+    await waitFor(async () => Boolean((await notifications.read()).automationOccurrences[0].deliveryId))
     const state = await memory.read()
-    assert.equal(state.deliveries.find(item => item.id === state.automationOccurrences[0].deliveryId)?.status, 'pending')
-    assert.equal(state.works.find(item => item.id === accepted.workId).status, 'completed')
+    const notified = await notifications.read()
+    assert.equal(notified.deliveries.find(item => item.id === notified.automationOccurrences[0].deliveryId)?.status, 'pending')
+    assert.equal(callbacks, 1)
+    assert.deepEqual(state.automationRules, [])
+    assert.deepEqual(state.automationOccurrences, [])
     assert.deepEqual(counts(state), { works: 1, executions: 1 })
+    assert.deepEqual(counts(notified), { works: 1, executions: 1 })
   } finally {
     await workService.close()
   }
@@ -161,7 +183,7 @@ function fixture() {
   })
 }
 
-function ruleRecord(suffix) { return { id: `rule-${suffix}`, ownerMemberId: 'member-owner', revision: 1, status: 'active', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'daily-time', time: '08:00', timeZone: 'Asia/Shanghai' }, maxRuns: 10, notificationConversationId: 'conversation-owner', effectiveFrom: now, eventAcceptAfter: null, createdAt: now, updatedAt: now, revokedAt: null } }
+function ruleRecord(suffix) { return { id: `rule-${suffix}`, ownerMemberId: 'member-owner', revision: 1, status: 'active', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'daily-time', time: '08:00', timeZone: 'Asia/Shanghai' }, maxRuns: 10, notificationIdentityId: 'identity-owner', effectiveFrom: now, eventAcceptAfter: null, createdAt: now, updatedAt: now, revokedAt: null } }
 function workRecord(suffix, status) {
   const completed = status === 'completed', resultId = `result-${suffix}`
   const source = { sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled', sourceRecordId: 'Work Order:WO-1', sourceRevision: 'r1' }
@@ -170,7 +192,7 @@ function workRecord(suffix, status) {
 }
 
 function catalog() { return { kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled' } }
-function validModel() { const source = { sourceSystem: 'GearJob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled', sourceRecordId: 'Work Order:WO-1', sourceRevision: 'r1' }; return { explanation: 'safe', dshSessionRef: 'session-callback', contextConfirmationRefs: [], result: { kind: 'gearjob.work-order.observation', payload: { workOrderId: 'WO-1', status: 'In Process', plannedQuantity: 10, completedQuantity: 4, unit: 'Nos', ...source }, source, toolName: 'geneway_gearjob_read_work_order', pluginId: 'geneway-gearjob-work-order', pluginVersion: '2' } } }
+function validModel() { return { explanation: 'safe', dshSessionRef: 'session-callback', contextConfirmationRefs: [], result: { kind: 'manufacturing.takt', payload: { availableSeconds: 60, quantity: 1, secondsPerUnit: 60, unit: 'seconds/unit' }, toolName: 'geneway_calculate_cycle_time', pluginId: 'geneway-cycle-time', pluginVersion: '2' } } }
 function memoryStore(initial) { let state = initial; return { async read() { return structuredClone(state) }, async update(mutator) { state = migrateState(await mutator(structuredClone(state))); return structuredClone(state) } } }
 function counts(state) { return { works: state.works.length, executions: state.works.reduce((sum, work) => sum + work.executions.length, 0) } }
 function deliveryFor(state, suffix) { return state.deliveries.find(item => item.workId === `work-${suffix}`) }

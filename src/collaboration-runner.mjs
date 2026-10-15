@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
-import { runProfile } from '@deepseek-ai/dsh/profile-boot'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { CYCLE_TIME_TOOL, getCapability, sanitizeFollowUpContext } from './capabilities.mjs'
 import { buildAgentPrompt, parseRunResult } from './dsh-runner.mjs'
 import { createObservation } from './domain/work-order.mjs'
@@ -11,7 +11,9 @@ import { connectionInputAllowed, connectionSnapshot } from './execution-grant.mj
 import { assertTrustedConnection } from './connection-catalog.mjs'
 import { KIVO_TPM_RESULT_KIND, KIVO_TPM_TOOLS } from './domain/tpm.mjs'
 import { isRetiredWork } from './work-service.mjs'
+import { conversationSessionDependencies, currentConversationDependencies } from './conversation-dependencies.mjs'
 import { assertDshHome, readModelCredential, readRuntimeConfig } from './runtime-config.mjs'
+import { bootDshHost } from './dsh-host.mjs'
 import { createCycleTimeTool } from '../plugins/cycle-time.mjs'
 import { createKivoTpmTools } from '../plugins/kivo-tpm.mjs'
 import { COLLABORATION_TOOLS, createCollaborationTools } from '../plugins/collaboration.mjs'
@@ -24,17 +26,21 @@ const ACTIVE = new Set(['accepted', 'running'])
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const USAGE_KEYS = ['inputTokens', 'outputTokens', 'totalTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens']
 const DEFAULT_AGENT = Object.freeze({ provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', maxTokens: 4096 })
+export const CONVERSATION_WORK_TOOLS = Object.freeze({
+  create: 'geneway_work_create', continue: 'geneway_work_continue', followUp: 'geneway_work_follow_up', status: 'geneway_work_status', stop: 'geneway_work_stop',
+})
 
 export function createCollaborationRunner({
   store,
   root: workspaceRoot = process.cwd(),
   dshHome = readRuntimeConfig(process.env, workspaceRoot).dshHome,
   patchPath = resolve(workspaceRoot, 'config', 'p3-runtime.patch.yml'),
-  runProfileImpl = runProfile,
+  runProfileImpl = bootDshHost,
   agentOptions = DEFAULT_AGENT,
   environment = {},
   secretRoot = readRuntimeConfig(process.env, workspaceRoot).secretRoot,
   connectionCatalog = [],
+  getWorkService,
   clock = () => new Date().toISOString(),
   onError = () => undefined,
   testHooks = {},
@@ -50,6 +56,8 @@ export function createCollaborationRunner({
   let knowledgeLifecycle = Promise.resolve()
   let knowledgeEnabled = true
   let closing = false
+  let closeTask
+  let nativeCloseTask
   const bindings = new WeakMap()
   const knowledgeSelections = new WeakMap()
   const summaryContexts = new WeakMap()
@@ -171,8 +179,16 @@ export function createCollaborationRunner({
       return operation
     },
 
-    async close() {
+    close() {
       closing = true
+      closeTask ??= closeRunner()
+      return closeTask
+    },
+  }
+
+  async function closeRunner() {
+    let failure
+    try {
       await Promise.all([...activeChats.values()].map(async entry => {
         entry.controller.abort(runtimeError('PROCESS_SHUTDOWN', '进程关闭时未完成'))
         entry.handle?.agent.cancel({ kind: 'user' })
@@ -193,18 +209,44 @@ export function createCollaborationRunner({
       knowledgeFiber = undefined
       await kivoFiber?.dispose()
       kivoFiber = undefined
-      if (runtime) await runtime.shutdown.shutdown(0)
+    } catch (error) { failure = error }
+    let started = runtime
+    if (!started && booting) {
+      try { started = await booting }
+      catch (error) {
+        if (error?.code === 'HOST_CLEANUP_FAILED') failure = failure ? new AggregateError([failure, error], '协作 Host 清理失败', { cause: failure }) : error
+      }
+    }
+    try {
+      if (started) await closeNative(started)
+      else await nativeCloseTask
+    } catch (error) { failure = failure ? new AggregateError([failure, error], '协作 Host 清理失败', { cause: failure }) : error }
+    finally {
       runtime = undefined
       booting = undefined
       modelCredential = undefined
-    },
+      knowledgeFiber = undefined
+      kivoFiber = undefined
+    }
+    if (failure) throw failure
+  }
+
+  function closeNative(started) {
+    nativeCloseTask ??= Promise.resolve().then(() => started.shutdown.shutdown(0))
+    return nativeCloseTask
+  }
+
+  function assertOpen() {
+    if (closing) throw runtimeError('PROCESS_SHUTDOWN', '进程正在关闭')
   }
 
   async function context() {
-    if (closing) throw runtimeError('PROCESS_SHUTDOWN', '进程正在关闭')
+    assertOpen()
     if (runtime) return runtime.ctx
     if (!booting) booting = boot()
-    runtime = await booting
+    const started = await booting
+    assertOpen()
+    runtime = started
     return runtime.ctx
   }
 
@@ -212,17 +254,36 @@ export function createCollaborationRunner({
     let result, failure
     try {
       await options.authorize()
+      const initial = typeof getWorkService === 'function' ? await store.read() : null
+      const conversation = initial?.conversations.find(item => item.id === options.conversationId)
+      const workTools = conversation?.channelIdentityId ? Object.values(CONVERSATION_WORK_TOOLS) : []
+      entry.toolCalls = new Map()
+      const assertChatAuthorized = async () => {
+        entry.controller.signal.throwIfAborted()
+        await options.authorize()
+        if (!conversation) return
+        const state = await store.read(), current = state.conversations.find(item => item.id === conversation.id)
+        const turn = current?.turns.find(item => item.id === options.turnId)
+        if (!turn || !currentConversationDependencies(state, current, conversationSessionDependencies(current, turn), connectionCatalog)) throw runtimeError('FORBIDDEN', '本对话使用的工作或知识授权已失效，请开启新会话')
+      }
+      await assertChatAuthorized()
       const ctx = await context(), signal = entry.controller.signal
       signal.throwIfAborted()
       const setup = (agentCtx, agent) => {
+        // This mask covers global tools; the five registrations below belong only to this agent.
         agentCtx.tools.restrict({ allow: [] })
-        agentCtx.tools.guard(() => 'This conversation does not allow tools')
+        agentCtx.tools.guard(execution => workTools.includes(execution.name) ? undefined : 'Tool is outside this conversation scope')
+        for (const tool of createConversationWorkTools(async request => {
+          if (request.invocation.agent !== agent || !workTools.includes(request.name)) throw runtimeError('FORBIDDEN', '工具与当前对话不匹配')
+          await assertChatAuthorized()
+          return invokeConversationWork(options, entry, request, assertChatAuthorized)
+        }, workTools)) agentCtx.tools.register(tool)
         agentCtx.systemPrompt.section({ name: 'geneway-conversation', order: 0, interpolate: false, complete: true,
-          text: buildAgentPrompt('你是该成员的 Geneway 对话助手。请根据本对话可见内容回答。', options.instructions),
+          text: buildAgentPrompt(`你是该成员的 Geneway 对话助手。请根据本对话可见内容回答。${workTools.length ? conversationWorkPrompt(initial, conversation, connectionCatalog) : ''}`, options.instructions),
         })
         agentCtx.on('agent/request', async ({ signal }, next) => {
           entry.controller.signal.throwIfAborted()
-          await untilAbort(Promise.resolve(options.authorize()), signal)
+          await untilAbort(assertChatAuthorized(), signal)
           return next()
         })
         agentCtx.on('agent/error', event => { entry.failure ??= event.error })
@@ -245,7 +306,7 @@ export function createCollaborationRunner({
       const message = createUserMessage({ content: [{ type: 'text', text: options.text }], source: { kind: 'user' } })
       await options.onSession({ sessionId: agent.id, userMessageId: message.id })
       signal.throwIfAborted()
-      await options.authorize()
+      await assertChatAuthorized()
       signal.throwIfAborted()
       const offset = agent.session.snapshotEvents().length
       agent.followup(message)
@@ -253,10 +314,11 @@ export function createCollaborationRunner({
       const events = agent.session.snapshotEvents().slice(offset)
       const reason = events.filter(event => event.type === 'turn/end').at(-1)?.data.reason
       const requestFailure = requestFailures.get(agent) ?? entry.failure
-      if (events.some(event => event.type === 'tool/call')) throw runtimeError('TOOL_CHAIN_INVALID', '对话不允许执行工具')
+      if (events.some(event => event.type === 'tool/call' && !workTools.includes(event.data?.name))) throw runtimeError('TOOL_CHAIN_INVALID', '对话调用了未获准工具')
       const assistantMessageIds = events.filter(event => event.type === 'assistant/message').map(event => event.data.message.id)
       if (reason?.kind === 'completed' && !assistantMessageIds.length) throw runtimeError('UPSTREAM_ERROR', '本次回复未能完成')
       await ctx.sessionPersistence.flush()
+      if (reason?.kind === 'completed') await assertChatAuthorized()
       result = { sessionId: agent.id, userMessageId: message.id,
         assistantMessageIds,
         stopReason: reason?.kind ?? 'error',
@@ -269,6 +331,78 @@ export function createCollaborationRunner({
     }
     if (failure) throw failure
     return result
+  }
+
+  async function invokeConversationWork(options, entry, { name, args, invocation }, authorize) {
+    if (typeof invocation.callId !== 'string' || !invocation.callId || invocation.signal?.aborted) throw runtimeError('FORBIDDEN', '工具缺少当前调用标识')
+    const requestId = `chat-${createHash('sha256').update(`${options.conversationId}\0${options.turnId}\0${name}\0${invocation.callId}`).digest('hex')}`
+    const previous = entry.toolCalls.get(requestId)
+    if (previous) {
+      if (!isDeepStrictEqual(previous.args, args)) throw runtimeError('INVALID_REQUEST', '同一工具请求的输入不可变更')
+      return previous.promise
+    }
+    const promise = dispatch()
+    entry.toolCalls.set(requestId, { args: structuredClone(args), promise })
+    return promise
+
+    async function dispatch() {
+      const state = await store.read(), conversation = state.conversations.find(item => item.id === options.conversationId)
+      const member = state.members.find(item => item.id === conversation?.ownerMemberId && item.enabled === true)
+      const employee = state.employees.find(item => item.id === conversation?.employeeId && item.enabled === true && member?.employeeIds.includes(item.id))
+      const turn = conversation?.turns.find(item => item.id === options.turnId && ACTIVE.has(item.status))
+      if (!conversation || !member || !employee || !turn || !conversation.channelIdentityId) throw runtimeError('FORBIDDEN', '当前对话或 Agent 未获准')
+      const service = getWorkService?.()
+      if (!service) throw runtimeError('MODEL_NOT_CONFIGURED', '工作服务当前不可用')
+      if (name === CONVERSATION_WORK_TOOLS.status && args.workId === undefined) {
+        return { ok: true, requiresSelection: true, candidates: state.works.filter(work => work.ownerMemberId === member.id && work.employeeId === employee.id && work.conversationId === conversation.id)
+          .map(work => ({ workId: work.id, goal: work.goal, status: work.status })), instruction: '请明确选择 workId；不会按最近工作自动执行。' }
+      }
+      let selected
+      if (name !== CONVERSATION_WORK_TOOLS.create) {
+        selected = state.works.find(work => work.id === args.workId && work.ownerMemberId === member.id && work.employeeId === employee.id && work.conversationId === conversation.id)
+        if (!selected) throw runtimeError('FORBIDDEN', '工作必须属于本人当前对话；其他对话请到 Web 继续')
+      }
+      await authorize()
+      invocation.signal?.throwIfAborted()
+      let result
+      if (name === CONVERSATION_WORK_TOOLS.create) {
+        result = await service.createWork(member, { employeeId: employee.id, conversationId: conversation.id, skillId: args.skillId, ...(args.connectionId === undefined ? {} : { connectionId: args.connectionId }), goal: args.goal, input: args.input ?? {}, clientRequestId: requestId })
+      } else if (name === CONVERSATION_WORK_TOOLS.continue) {
+        result = await service.continueWork(member, selected.id, { input: args.input ?? {}, clientRequestId: requestId })
+      } else if (name === CONVERSATION_WORK_TOOLS.followUp) {
+        result = await service.followUp(member, selected.id, args.text, { clientRequestId: requestId })
+      } else if (name === CONVERSATION_WORK_TOOLS.stop) result = await service.cancel(member, selected.id)
+      else if (name === CONVERSATION_WORK_TOOLS.status) result = await service.getWork(member, selected.id)
+      else throw runtimeError('FORBIDDEN', '对话工具未获准')
+      if (result?.ok !== true) return { ok: false, error: result?.error ?? { code: 'UPSTREAM_ERROR', message: '工作操作未完成，请到 Web 核对' } }
+      await authorize()
+      invocation.signal?.throwIfAborted()
+      let output
+      await store.update(current => {
+        entry.controller.signal.throwIfAborted()
+        const conversation = current.conversations.find(item => item.id === options.conversationId)
+        const turn = conversation?.turns.find(item => item.id === options.turnId && ACTIVE.has(item.status))
+        const work = current.works.find(item => item.id === result.value?.id && item.ownerMemberId === conversation?.ownerMemberId && item.employeeId === conversation.employeeId && item.conversationId === conversation.id)
+        if (!turn || !work) throw runtimeError('FORBIDDEN', '工作或当前回复归属已变化')
+        // Operations accept asynchronously. Read status explicitly later; never wait or poll here.
+        const visible = result.value.results ?? [], connection = current.connections.find(item => item.id === work.connectionId)
+        const workRefs = visible.map(item => ({ workId: work.id, resultId: item.id, connectionRevision: connection?.revision ?? null }))
+        const knowledgeRefs = stableKnowledgeRefs(visible.flatMap(item => item.knowledgeDependencyRefs ?? []))
+        const dependencies = { workDependencyRefs: workRefs, knowledgeDependencyRefs: knowledgeRefs }
+        if (visible.some(item => item.knowledgeUnavailable) || !currentConversationDependencies(current, conversation, dependencies, connectionCatalog)) throw runtimeError('FORBIDDEN', '工作或知识事实当前不可用，请到 Web 核对')
+        const next = { ...turn,
+          workDependencyRefs: [...(turn.workDependencyRefs ?? []), ...workRefs.filter(ref => !(turn.workDependencyRefs ?? []).some(item => isDeepStrictEqual(item, ref)))],
+          knowledgeDependencyRefs: [...(turn.knowledgeDependencyRefs ?? []), ...knowledgeRefs.filter(ref => !(turn.knowledgeDependencyRefs ?? []).some(item => knowledgeRefKey(item) === knowledgeRefKey(ref)))],
+        }
+        output = { ok: true, work: { workId: work.id, conversationId: conversation.id, goal: work.goal, status: work.status, input: work.input, requiredInputs: work.requiredInputs ?? [],
+          results: visible.map(item => ({ resultId: item.id, kind: item.kind, payload: item.payload, ...(item.source === undefined ? {} : { source: item.source }), createdAt: item.createdAt, explanation: item.explanation })),
+        }, ...(result.active ? { active: true, inputApplied: false } : {}), ...(result.accepted === undefined ? {} : { accepted: result.accepted }), deduplicated: result.deduplicated === true }
+        return { ...current, conversations: current.conversations.map(item => item.id === conversation.id ? { ...item, turns: item.turns.map(item => item.id === turn.id ? next : item) } : item) }
+      })
+      await authorize()
+      invocation.signal?.throwIfAborted()
+      return output
+    }
   }
 
   async function readChatHistory(sessionIds) {
@@ -305,9 +439,18 @@ export function createCollaborationRunner({
       ...(modelCredential ? { [config.model.credentialEnv]: modelCredential } : {}),
     }
     delete values.GENEWAY_DSH_GRANT_FILE
+    assertOpen()
     const started = await runProfileImpl({ environment: launchEnvironment(values), profile: 'sdk', patchFiles: [patchPath], args: [], resolutionMode: 'runtime' })
-    await install(started.ctx)
-    return started
+    try {
+      assertOpen()
+      await install(started.ctx)
+      assertOpen()
+      return started
+    } catch (error) {
+      try { await closeNative(started) }
+      catch (cleanupError) { throw new AggregateError([error, cleanupError], '协作 Host 启动及清理失败', { cause: error }) }
+      throw error
+    }
   }
 
   async function install(ctx) {
@@ -345,10 +488,13 @@ export function createCollaborationRunner({
     } }
     kivoFiber = ctx.plugin(kivoPlugin)
     await kivoFiber
+    assertOpen()
     await testHooks.onKivoMounted?.({ ctx, fiber: kivoFiber, plugin: kivoPlugin })
+    assertOpen()
     ctx.tools.register(createCycleTimeTool({ authorize: toolAuthorize }))
     for (const tool of createCollaborationTools({ invoke: invokeCollaboration })) ctx.tools.register(tool)
     if (knowledgeEnabled) await mountKnowledge(ctx)
+    assertOpen()
     ctx.tools.guard(execution => {
       if (![CYCLE_TIME_TOOL, ...Object.values(KIVO_TPM_TOOLS), ...Object.values(COLLABORATION_TOOLS), ...Object.values(KNOWLEDGE_TOOLS)].includes(execution.name)) return undefined
       const binding = execution.agent && bindings.get(execution.agent)
@@ -970,6 +1116,51 @@ function lastAssistantText(events) {
     if (text) return text
   }
   return undefined
+}
+function createConversationWorkTools(invoke, allowed) {
+  const input = { type: 'object', additionalProperties: false, properties: {
+    recordType: { type: 'string' }, reference: { type: 'string' },
+    filters: { type: 'object', additionalProperties: false, properties: {
+      page: { type: 'integer' }, pageSize: { type: 'integer' }, keyword: { type: 'string' }, deviceId: { type: 'string' },
+      archive: { type: 'string' }, status: { type: 'string' }, severity: { type: 'string' }, tab: { type: 'string' },
+    } }, availableSeconds: { type: 'number' }, quantity: { type: 'number' },
+  } }
+  const specs = [
+    [CONVERSATION_WORK_TOOLS.create, 'Create one work only when the owner explicitly requests a new business query. Use an explicitly selected authorized skill and connection; ask when ambiguous. Missing business inputs are allowed and produce waiting_input, not a guessed query.', {
+      skillId: { type: 'string', required: true }, connectionId: { type: 'string' }, goal: { type: 'string' }, input,
+    }],
+    [CONVERSATION_WORK_TOOLS.continue, 'Supply missing inputs or continue the exact work selected by the owner in this conversation. An active execution does not apply new inputs; ask the owner to resubmit after it ends.', { workId: { type: 'string', required: true }, input }],
+    [CONVERSATION_WORK_TOOLS.followUp, 'Ask a factual follow-up on the exact completed work selected by the owner. This does not refresh business data. Work completion is asynchronous; do not poll or wait in a loop.', { workId: { type: 'string', required: true }, text: { type: 'string', required: true } }],
+    [CONVERSATION_WORK_TOOLS.status, 'Read the current status and authorized persisted facts of an exact work in this conversation. Without workId, list candidates and ask the owner to choose; never choose the most recent work. Do not poll in a loop.', { workId: { type: 'string' } }],
+    [CONVERSATION_WORK_TOOLS.stop, 'Stop only the exact work explicitly selected by the owner. Does not stop this reply or another work.', { workId: { type: 'string', required: true } }],
+  ]
+  return specs.filter(([name]) => allowed.includes(name)).map(([name, description, parameters]) => defineTool({
+    name, description, parameters,
+    output: { schema: { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean', required: true } } }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+    async execute(args, invocation) {
+      try {
+        if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => !Object.hasOwn(parameters, key))) throw runtimeError('INVALID_REQUEST', '工具输入含未声明字段')
+        for (const [key, rule] of Object.entries(parameters)) if (rule.required && (typeof args[key] !== 'string' || !args[key].trim())) throw runtimeError('INVALID_REQUEST', '工具缺少明确的工作或技能')
+        return await invoke({ name, args, invocation })
+      } catch (error) {
+        const code = ['FORBIDDEN', 'INVALID_REQUEST', 'MODEL_NOT_CONFIGURED', 'CANCELLED', 'CAPABILITY_RETIRED'].includes(error?.code) ? error.code : 'UPSTREAM_ERROR'
+        return { ok: false, error: { code, message: '工作操作未完成，请核对当前会话的明确工作、技能、连接和输入；其他工作请到 Web 继续。' } }
+      }
+    },
+  }))
+}
+function conversationWorkPrompt(state, conversation, connectionCatalog) {
+  const employee = state.employees.find(item => item.id === conversation.employeeId)
+  const choices = state.skills.filter(skill => skill.enabled && employee?.skillIds.includes(skill.id) && getCapability(skill.capabilityId)?.retired === false).map(skill => {
+    const capability = getCapability(skill.capabilityId)
+    return { skillId: skill.id, capabilityId: capability.id, requiredInputs: capability.requiredInputs,
+      connections: capability.requiresConnection ? state.connections.filter(connection => {
+        if (!connection.enabled || connection.status !== 'ready' || connection.kind !== capability.connectionKind || !employee.connectionIds.includes(connection.id) || !connection.skillIds.includes(skill.id)) return false
+        try { assertTrustedConnection(connectionCatalog, connection); return true } catch { return false }
+      }).map(connection => ({ connectionId: connection.id, name: connection.name, sourceSystem: connection.sourceSystem, sourceInstance: connection.sourceInstance })) : [],
+    }
+  })
+  return `\n只有本人明确交办业务或引用工作时才使用工作工具，普通问答不创建工作。工具只操作本人当前对话和当前Agent；不要要求或提交owner、employee、原生Session、秘密或URL。技能或连接有多个候选时询问本人，不猜第一个或最近工作。缺必要信息使用waiting_input并提示补充。工作独立异步执行；不等待或循环查询。返回事实必须保留来源、时间和状态，不把受理说成完成。TPM维修/保养/点检/异常/维护计划/设备分别用recordType repair/maintenance/inspection/exception/plan/device；读取reference为文本，计划/设备用明确UUID；列表使用recordType和filters。当前候选：${JSON.stringify(choices)}`
 }
 function launchEnvironment(values) {
   return {

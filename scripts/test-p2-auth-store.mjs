@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { createAuthRuntime, initializeAuthFile, isSessionCurrent } from '../src/auth.mjs'
-import { createFileStore, migrateState } from '../src/store/file-store.mjs'
+import { createFileStore, migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
 
 const execFile = promisify(execFileCallback)
 const root = await mkdtemp(join(tmpdir(), 'geneway-p2-auth-'))
@@ -25,7 +25,7 @@ function checkMigration() {
   const original = v3Fixture()
   const migrated = migrateState(original)
   const channelKeys = ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']
-  assert.equal(migrated.version, 8)
+  assert.equal(migrated.version, STATE_VERSION)
   assert.deepEqual(migrated.knowledgeMaterials, [])
   for (const key of channelKeys) assert.deepEqual(migrated[key], [])
   assert.deepEqual(migrated.automationRules, [])
@@ -87,7 +87,7 @@ function checkMigration() {
     assert.throws(() => migrateState({ version: 3, [key]: {} }), new RegExp(key))
   }
   assert.throws(() => migrateState({ version: 3, reservations: [] }), /reservations/)
-  assert.throws(() => migrateState({ version: 9 }), /未来/)
+  assert.throws(() => migrateState({ version: STATE_VERSION + 1 }), /未来/)
   assert.throws(() => migrateState({ version: '6' }), /版本无效/)
   assert.throws(() => migrateState({ version: 2 }), /不支持产品状态版本/)
   assert.throws(() => migrateState({ ...original, employees: [{ ...original.employees[0], skillIds: {} }] }), /skillIds/)
@@ -141,7 +141,7 @@ async function checkMigrationFailureDoesNotWrite() {
 
   const damagedCurrent = migrateState(v3Fixture())
   damagedCurrent.knowledgeMaterials = {}
-  for (const [state, pattern] of [[{ ...v3Fixture(), works: {} }, /works/], [damagedCurrent, /knowledgeMaterials/], [{ version: 9 }, /未来/]]) {
+  for (const [state, pattern] of [[{ ...v3Fixture(), works: {} }, /works/], [damagedCurrent, /knowledgeMaterials/], [{ version: STATE_VERSION + 1 }, /未来/]]) {
     const statePath = join(root, `failure-${Math.random()}.json`)
     const raw = JSON.stringify(state)
     await writeFile(statePath, raw, { mode: 0o600 })
@@ -156,7 +156,7 @@ async function checkMigrationFailureDoesNotWrite() {
   const store = createFileStore(statePath)
   await store.update(state => state)
   const persisted = JSON.parse(await readFile(statePath, 'utf8'))
-  assert.equal(persisted.version, 8)
+  assert.equal(persisted.version, STATE_VERSION)
   assert.ok(persisted.works.every(work => Array.isArray(work.actions)))
   assert.deepEqual(persisted.knowledgeMaterials, [])
   for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.deepEqual(persisted[key], [])

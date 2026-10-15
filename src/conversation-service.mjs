@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { readRuntimeConfig } from './runtime-config.mjs'
+import { conversationSessionDependencies, currentConversationDependencies } from './conversation-dependencies.mjs'
 
 const ACTIVE = new Set(['accepted', 'running'])
 const MODEL = readRuntimeConfig({}).model
@@ -15,7 +17,7 @@ const ERRORS = Object.freeze({
   BACKUP_INTERRUPTED: '备份时回复未完成',
 })
 
-export function createConversationService({ store, runner, clock = () => new Date().toISOString(), onError = () => undefined } = {}) {
+export function createConversationService({ store, runner, connectionCatalog = [], clock = () => new Date().toISOString(), onError = () => undefined, onTurnTerminal = () => undefined } = {}) {
   if (!store || !runner) throw new Error('conversation store and runner are required')
   const active = new Map(), admissions = new Set()
   let recovery, closed = false
@@ -41,8 +43,8 @@ export function createConversationService({ store, runner, clock = () => new Dat
       const state = await store.read(), member = requireMember(state, actor)
       const owned = conversations(state).filter(item => item.ownerMemberId === member.id && (includeArchived || !item.archivedAt))
       const history = await loadHistory(owned)
-      requireMember(await store.read(), actor)
-      return owned.map(item => summary(state, member, item, history)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      const current = await store.read(), currentMember = requireMember(current, actor)
+      return owned.map(item => summary(current, currentMember, findOwned(current, actor, item.id), history, connectionCatalog)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     },
 
     async createConversation(actor, body = {}) {
@@ -54,23 +56,17 @@ export function createConversationService({ store, runner, clock = () => new Dat
       const id = `conversation-${randomUUID()}`, now = clock()
       const state = await store.update(state => {
         assertOpen()
-        const member = requireMember(state, actor), employee = state.employees.find(item => item.id === employeeId)
-        requireEmployee(state, member, employee)
-        return { ...state, conversations: [...conversations(state), {
-          id, ownerMemberId: member.id, employeeId, employeeName: employee.name, title,
-          source: 'web', channelIdentityId: null, createdAt: now, updatedAt: now, archivedAt: null,
-          sessions: [], turns: [],
-        }] }
+        return { ...state, conversations: [...conversations(state), newConversationRecord(state, actor, { id, employeeId, title }, now)] }
       })
-      return detail(state, requireMember(state, actor), findOwned(state, actor, id), new Map())
+      return detail(state, requireMember(state, actor), findOwned(state, actor, id), new Map(), connectionCatalog)
     },
 
     async getConversation(actor, id) {
       await service.ensureReady()
       const state = await store.read(), member = requireMember(state, actor), conversation = findOwned(state, member, id)
       const history = await loadHistory([conversation])
-      requireMember(await store.read(), actor)
-      return detail(state, member, conversation, history)
+      const current = await store.read(), currentMember = requireMember(current, actor)
+      return detail(current, currentMember, findOwned(current, actor, id), history, connectionCatalog)
     },
 
     async updateConversation(actor, id, body = {}) {
@@ -91,8 +87,9 @@ export function createConversationService({ store, runner, clock = () => new Dat
       return service.getConversation(actor, id)
     },
 
-    async sendTurn(actor, id, body = {}) {
-      const operation = acceptTurn(actor, id, body)
+    async sendTurn(actor, id, body = {}, { authorize } = {}) {
+      if (authorize !== undefined && typeof authorize !== 'function') throw error('INVALID_REQUEST', '渠道授权检查无效')
+      const operation = acceptTurn(actor, id, body, authorize)
       admissions.add(operation)
       try { return await operation } finally { admissions.delete(operation) }
     },
@@ -127,7 +124,7 @@ export function createConversationService({ store, runner, clock = () => new Dat
 
   function assertOpen() { if (closed) throw error('CONFLICT', '会话服务正在关闭') }
 
-  async function acceptTurn(actor, id, body) {
+  async function acceptTurn(actor, id, body, authorize) {
     await service.ensureReady()
     assertOpen()
     fields(body, ['text', 'clientRequestId'])
@@ -137,10 +134,11 @@ export function createConversationService({ store, runner, clock = () => new Dat
     const existing = repeatedTurn(conversation, clientRequestId, text)
     if (existing) {
       const history = await loadHistory([conversation])
-      requireMember(await store.read(), actor)
-      return { conversation: summary(initial, member, conversation, history), turn: turnProjection(existing, history), deduplicated: true }
+      const current = await store.read(), currentMember = requireMember(current, actor), owned = findOwned(current, actor, id)
+      return { conversation: summary(current, currentMember, owned, history, connectionCatalog), turn: turnProjection(existing, history, currentConversationDependencies(current, owned, existing, connectionCatalog)), deduplicated: true }
     }
-    requireWritable(initial, member, conversation)
+    requireWritable(initial, member, conversation, connectionCatalog)
+    await authorize?.()
     const history = await loadHistory([conversation])
     if (historyStatus(conversation, history) === 'unavailable' || historyStatus(conversation, history) === 'partial') throw error('HISTORY_UNAVAILABLE', ERRORS.HISTORY_UNAVAILABLE)
     const turnId = `turn-${randomUUID()}`, now = clock()
@@ -150,27 +148,30 @@ export function createConversationService({ store, runner, clock = () => new Dat
       const member = requireMember(state, actor), conversation = findOwned(state, member, id)
       const existing = repeatedTurn(conversation, clientRequestId, text)
       if (existing) { deduplicated = true; selected = existing; return state }
-      requireWritable(state, member, conversation)
+      requireWritable(state, member, conversation, connectionCatalog)
       if (currentTurn(conversation)) throw error('CONFLICT', '当前回复尚未结束')
       const employee = state.employees.find(item => item.id === conversation.employeeId)
       const definition = { employeeRevision: employee.revision ?? 1, instructions: employee.instructions ?? '', modelRouteId: employee.modelRouteId }
       const fingerprint = createHash('sha256').update(JSON.stringify(definition)).digest('hex')
       const last = conversation.sessions.at(-1), interrupted = conversation.turns.at(-1)?.status === 'interrupted'
+      const sessionId = !interrupted && last?.definitionFingerprint === fingerprint ? last.id : null
+      const dependencies = sessionId ? conversationSessionDependencies(conversation, { sessionId }) : {}
       selected = {
         id: turnId, clientRequestId, userText: text, status: 'accepted', createdAt: now, startedAt: null, completedAt: null, error: null,
-        definition, definitionFingerprint: fingerprint, sessionId: !interrupted && last?.definitionFingerprint === fingerprint ? last.id : null,
+        definition, definitionFingerprint: fingerprint, sessionId,
+        ...Object.fromEntries(Object.entries(dependencies).filter(([, refs]) => refs.length)),
         userMessageId: null, assistantMessageIds: [],
       }
       return replaceConversation(state, { ...conversation, employeeName: employee.name, updatedAt: now, turns: [...conversation.turns, selected] })
     })
     if (!deduplicated) {
-      const entry = { turnId, stopStatus: null, promise: undefined }
+      const entry = { turnId, stopStatus: null, promise: undefined, authorize }
       active.set(id, entry)
       entry.promise = Promise.resolve().then(() => execute(actor, id, selected, entry)).finally(() => { if (active.get(id) === entry) active.delete(id) })
       void entry.promise.catch(onError)
     }
     const updated = findOwned(state, actor, id)
-    return { conversation: summary(state, requireMember(state, actor), updated, history), turn: turnProjection(selected, history), deduplicated }
+    return { conversation: summary(state, requireMember(state, actor), updated, history, connectionCatalog), turn: turnProjection(selected, history, currentConversationDependencies(state, updated, selected, connectionCatalog)), deduplicated }
 
   }
 
@@ -194,7 +195,7 @@ export function createConversationService({ store, runner, clock = () => new Dat
     try {
       await store.update(state => {
         const member = requireMember(state, actor), conversation = findOwned(state, member, id)
-        requireWritable(state, member, conversation)
+        requireWritable(state, member, conversation, connectionCatalog)
         if (entry.stopStatus) return state
         return replaceTurn(state, id, selected.id, turn => ({ ...turn, status: 'running', startedAt: clock() }), clock())
       })
@@ -203,15 +204,16 @@ export function createConversationService({ store, runner, clock = () => new Dat
         authorize: async () => {
           if (entry.stopStatus) throw error('CANCELLED', ERRORS.CANCELLED)
           const state = await store.read(), member = requireMember(state, actor), conversation = findOwned(state, member, id)
-          requireWritable(state, member, conversation)
+          requireWritable(state, member, conversation, connectionCatalog)
           if (currentTurn(conversation)?.id !== selected.id) throw error('CANCELLED', ERRORS.CANCELLED)
+          await entry.authorize?.()
         },
         onSession: async ({ sessionId, userMessageId }) => {
           if (typeof sessionId !== 'string' || !sessionId || typeof userMessageId !== 'string' || !userMessageId) throw error('UPSTREAM_ERROR', ERRORS.UPSTREAM_ERROR)
           if (selected.sessionId && selected.sessionId !== sessionId) throw error('HISTORY_UNAVAILABLE', ERRORS.HISTORY_UNAVAILABLE)
           await store.update(state => {
             const member = requireMember(state, actor), conversation = findOwned(state, member, id)
-            requireWritable(state, member, conversation)
+            requireWritable(state, member, conversation, connectionCatalog)
             if (entry.stopStatus || currentTurn(conversation)?.id !== selected.id) throw error('CANCELLED', ERRORS.CANCELLED)
             if (conversations(state).some(item => item.id !== id && item.sessions.some(session => session.id === sessionId))
               || (!selected.sessionId && conversation.sessions.some(session => session.id === sessionId))) throw error('UPSTREAM_ERROR', ERRORS.UPSTREAM_ERROR)
@@ -223,11 +225,31 @@ export function createConversationService({ store, runner, clock = () => new Dat
       })
     } catch (error) { failure = error }
     const status = entry.stopStatus ?? (failure || outcome?.stopReason !== 'completed' ? (failure?.code === 'CANCELLED' || outcome?.stopReason === 'aborted' ? 'cancelled' : 'failed') : 'completed')
-    await store.update(state => replaceTurn(state, id, selected.id, turn => ({
-      ...turn, status, completedAt: clock(),
-      assistantMessageIds: outcome?.assistantMessageIds ?? turn.assistantMessageIds,
-      error: status === 'completed' ? null : publicError(status === 'cancelled' ? { code: 'CANCELLED' } : status === 'interrupted' ? { code: 'PROCESS_SHUTDOWN' } : failure ?? outcome?.error),
-    }), clock()))
+    await store.update(state => replaceTurn(state, id, selected.id, turn => {
+      const dependencies = {}
+      for (const key of ['workDependencyRefs', 'knowledgeDependencyRefs']) if (outcome?.[key]) {
+        const refs = [...(turn[key] ?? [])]
+        for (const ref of outcome[key]) if (!refs.some(previous => isDeepStrictEqual(previous, ref))) refs.push(structuredClone(ref))
+        dependencies[key] = refs
+      }
+      return { ...turn, ...dependencies, status, completedAt: clock(),
+        assistantMessageIds: outcome?.assistantMessageIds ?? turn.assistantMessageIds,
+        error: status === 'completed' ? null : publicError(status === 'cancelled' ? { code: 'CANCELLED' } : status === 'interrupted' ? { code: 'PROCESS_SHUTDOWN' } : failure ?? outcome?.error),
+      }
+    }, clock()))
+    await Promise.resolve().then(() => onTurnTerminal({ conversationId: id, turnId: selected.id })).catch(onError)
+  }
+}
+
+// Channel identity activation/rotation calls this inside its existing product transaction.
+export function newConversationRecord(state, actor, { id, employeeId, title = '新对话', source = 'web', channelIdentityId = null }, timestamp) {
+  const member = requireMember(state, actor), employee = state.employees.find(item => item.id === employeeId)
+  requireConversationEmployee(state, member, employee)
+  if (!['web', 'feishu', 'weixin'].includes(source) || typeof id !== 'string' || !id || conversations(state).some(item => item.id === id)) throw error('INVALID_REQUEST', '对话来源无效')
+  if (source === 'web' ? channelIdentityId !== null : !state.channelIdentities.some(identity => identity.id === channelIdentityId && identity.memberId === member.id
+    && state.channelApps.some(app => app.id === identity.channelAppId && app.provider === source))) throw error('INVALID_REQUEST', '对话渠道身份无效')
+  return { id, ownerMemberId: member.id, employeeId, employeeName: employee.name, title, source, channelIdentityId,
+    createdAt: timestamp, updatedAt: timestamp, archivedAt: null, sessions: [], turns: [],
   }
 }
 
@@ -243,14 +265,16 @@ function findOwned(state, actor, id) {
   if (!conversation) throw error('NOT_FOUND', '对话不存在')
   return conversation
 }
-function requireEmployee(state, member, employee) {
+export function requireConversationEmployee(state, member, employee) {
   if (!employee || employee.enabled !== true || !member.employeeIds.includes(employee.id)) throw error('FORBIDDEN', ERRORS.FORBIDDEN)
   const route = state.modelRoutes.find(item => item.id === employee.modelRouteId && item.enabled === true && item.provider === MODEL.provider && item.model === MODEL.model)
   if (!route) throw error('MODEL_NOT_CONFIGURED', ERRORS.MODEL_NOT_CONFIGURED)
 }
-function requireWritable(state, member, conversation) {
+function requireWritable(state, member, conversation, connectionCatalog) {
   if (conversation.archivedAt) throw error('CONFLICT', '对话已归档')
-  requireEmployee(state, member, state.employees.find(item => item.id === conversation.employeeId))
+  requireConversationEmployee(state, member, state.employees.find(item => item.id === conversation.employeeId))
+  const last = conversation.turns.at(-1)
+  if (last && !currentConversationDependencies(state, conversation, conversationSessionDependencies(conversation, last), connectionCatalog)) throw error('FORBIDDEN', '当前对话包含已失效的数据授权，请开启新会话')
 }
 function repeatedTurn(conversation, clientRequestId, text) {
   const existing = conversation.turns.find(item => item.clientRequestId === clientRequestId)
@@ -263,25 +287,27 @@ function replaceTurn(state, id, turnId, update, at) {
   if (!conversation) throw error('NOT_FOUND', '对话不存在')
   return replaceConversation(state, { ...conversation, updatedAt: at, turns: conversation.turns.map(turn => turn.id === turnId && ACTIVE.has(turn.status) ? update(turn) : turn) })
 }
-function readOnlyReason(state, member, conversation, history) {
+function readOnlyReason(state, member, conversation, history, connectionCatalog) {
   if (conversation.archivedAt) return 'CONVERSATION_ARCHIVED'
   const employee = state.employees.find(item => item.id === conversation.employeeId)
   if (!employee) return 'AGENT_UNAVAILABLE'
   if (!member.employeeIds.includes(employee.id)) return 'AGENT_ACCESS_REVOKED'
   if (!employee.enabled) return 'AGENT_DISABLED'
-  try { requireEmployee(state, member, employee) } catch { return 'AGENT_UNAVAILABLE' }
+  try { requireConversationEmployee(state, member, employee) } catch { return 'AGENT_UNAVAILABLE' }
+  const last = conversation.turns.at(-1)
+  if (last && !currentConversationDependencies(state, conversation, conversationSessionDependencies(conversation, last), connectionCatalog)) return 'CONTEXT_ACCESS_REVOKED'
   return ['partial', 'unavailable'].includes(historyStatus(conversation, history)) ? 'HISTORY_UNAVAILABLE' : null
 }
-function summary(state, member, conversation, history) {
+function summary(state, member, conversation, history, connectionCatalog) {
   return { id: conversation.id, title: conversation.title, employeeId: conversation.employeeId,
     employeeName: state.employees.find(item => item.id === conversation.employeeId)?.name ?? conversation.employeeName,
-    source: conversation.source, createdAt: conversation.createdAt, updatedAt: conversation.updatedAt, archivedAt: conversation.archivedAt,
-    readOnlyReason: readOnlyReason(state, member, conversation, history), activeTurnId: currentTurn(conversation)?.id ?? null,
+    source: conversation.source, channelIdentityId: conversation.channelIdentityId, createdAt: conversation.createdAt, updatedAt: conversation.updatedAt, archivedAt: conversation.archivedAt,
+    readOnlyReason: readOnlyReason(state, member, conversation, history, connectionCatalog), activeTurnId: currentTurn(conversation)?.id ?? null,
   }
 }
-function pickSummary(value) { return Object.fromEntries(['id', 'title', 'employeeId', 'employeeName', 'source', 'createdAt', 'updatedAt', 'archivedAt', 'readOnlyReason', 'activeTurnId'].map(key => [key, value[key]])) }
-function detail(state, member, conversation, history) {
-  return { ...summary(state, member, conversation, history), turns: conversation.turns.map(turn => turnProjection(turn, history)),
+function pickSummary(value) { return Object.fromEntries(['id', 'title', 'employeeId', 'employeeName', 'source', 'channelIdentityId', 'createdAt', 'updatedAt', 'archivedAt', 'readOnlyReason', 'activeTurnId'].map(key => [key, value[key]])) }
+function detail(state, member, conversation, history, connectionCatalog) {
+  return { ...summary(state, member, conversation, history, connectionCatalog), turns: conversation.turns.map(turn => turnProjection(turn, history, currentConversationDependencies(state, conversation, turn, connectionCatalog))),
     historyStatus: historyStatus(conversation, history), relatedWorks: state.works.filter(work => work.conversationId === conversation.id && work.ownerMemberId === member.id && !work.rootWorkId).map(work => ({ id: work.id, goal: work.goal, status: work.status, employeeId: work.employeeId })),
   }
 }
@@ -303,10 +329,11 @@ function nativeMessages(turn, history) {
   const text = messages.flatMap(message => message.content.filter(block => block.type === 'text' && typeof block.text === 'string').map(block => block.text)).join('\n')
   return { complete, assistantText: messages.length ? text : null }
 }
-function turnProjection(turn, history) {
+function turnProjection(turn, history, authorized = true) {
   const unavailable = turn.sessionId && history.get(turn.sessionId)?.status === 'unavailable'
-  return { id: turn.id, userText: unavailable ? null : turn.userText, assistantText: nativeMessages(turn, history).assistantText,
+  return { id: turn.id, userText: unavailable || !authorized ? null : turn.userText, assistantText: authorized ? nativeMessages(turn, history).assistantText : null,
     status: turn.status, createdAt: turn.createdAt, startedAt: turn.startedAt, completedAt: turn.completedAt, error: turn.error ? publicError(turn.error) : null,
+    ...(!authorized ? { contentUnavailableReason: 'CONTEXT_ACCESS_REVOKED' } : {}),
   }
 }
 function publicError(value) { const code = Object.hasOwn(ERRORS, value?.code) ? value.code : 'UPSTREAM_ERROR'; return { code, message: ERRORS[code] } }

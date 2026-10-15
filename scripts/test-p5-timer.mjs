@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createAutomationRuntime, createAutomationService } from '../src/automation-service.mjs'
+import { acquireAutomationOwner, createAutomationRuntime, createAutomationService } from '../src/automation-service.mjs'
 
 await dueAndRollbackChecks()
 await sameDueChecks()
 await missedWindowAndNoBackfillChecks()
 await refreshChecks()
 await ownerLockChecks()
+await ownerReleaseChecks()
 await ownerLossCancellationChecks()
 console.log('P5 timer checks passed; owner contention=closed; external effects=0')
 
@@ -111,6 +113,51 @@ async function ownerLockChecks() {
     assert.equal(secondReady, 1)
     await second.close()
   } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+async function ownerReleaseChecks() {
+  const root = await mkdtemp(join(tmpdir(), 'geneway-owner-release-')), holders = []
+  const spawnHolder = (command, args, options) => {
+    const holder = spawn(command, args, options)
+    holders.push(holder)
+    return holder
+  }
+  try {
+    const first = await acquireAutomationOwner(root, { spawnImpl: spawnHolder }), firstHolder = holders.at(-1)
+    let lost = false
+    void first.lost.then(() => { lost = true })
+    await assert.rejects(acquireAutomationOwner(root, { spawnImpl: spawnHolder }), { code: 'OWNER_ALREADY_RUNNING' })
+    assert.equal(holders.at(-1).exitCode, 73)
+    await first.release()
+    await first.release()
+    assert.equal(firstHolder.exitCode, 0, 'normal EOF must exit the holder successfully')
+    assert.equal(firstHolder.signalCode, null)
+    assert.equal(lost, false, 'normal release must not report owner loss')
+
+    const interrupted = await acquireAutomationOwner(root, { spawnImpl: spawnHolder }), interruptedHolder = holders.at(-1)
+    interruptedHolder.kill('SIGTERM')
+    assert.deepEqual(await interrupted.lost, { code: null, signal: 'SIGTERM' })
+    await interrupted.release()
+
+    const closed = await acquireAutomationOwner(root, { spawnImpl(command, _args, options) {
+      return spawnHolder(command, ['-c', '/usr/bin/flock --nonblock --conflict-exit-code 73 3 || exit $?; exec 0<&-; printf ready; /bin/sleep 0.2'], options)
+    } }), closedHolder = holders.at(-1)
+    assert.equal(closedHolder.exitCode, null, 'closed stdin must be tested before the holder exits')
+    await closed.release()
+    assert.equal(closedHolder.exitCode, 0, 'release must still wait for the real closed-pipe holder exit')
+    assert.equal(closedHolder.signalCode, null)
+
+    const reacquired = await acquireAutomationOwner(root, { spawnImpl: spawnHolder }), reacquiredHolder = holders.at(-1)
+    await reacquired.release()
+    assert.equal(reacquiredHolder.exitCode, 0)
+    for (const holder of holders) assert.throws(() => process.kill(holder.pid, 0), { code: 'ESRCH' })
+  } finally {
+    await Promise.all(holders.filter(holder => holder.exitCode === null && holder.signalCode === null).map(holder => new Promise(resolve => {
+      holder.once('exit', resolve)
+      holder.kill('SIGKILL')
+    })))
     await rm(root, { recursive: true, force: true })
   }
 }

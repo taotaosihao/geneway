@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { runProfile } from '@deepseek-ai/dsh/profile-boot'
 import { createCollaborationRunner } from '../src/collaboration-runner.mjs'
 import { readRuntimeConfig } from '../src/runtime-config.mjs'
 import { createFileStore } from '../src/store/file-store.mjs'
@@ -48,12 +47,10 @@ try {
     employees: [{ id: 'agent', name: 'Agent', enabled: true, modelRouteId: 'route', skillIds: ['skill-cycle-time-calculate'], connectionIds: [] }],
     skills: [{ id: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', enabled: true }],
   }))
-  const runProfileImpl = async options => {
-    const runtime = await runProfile({ ...options, patchFiles: [...options.patchFiles, patch] })
-    ctx = runtime.ctx
-    return runtime
-  }
-  runner = createCollaborationRunner({ store, root, dshHome: home, runProfileImpl })
+  const hostPatch = join(home, 'host.patch.yml')
+  await writeFile(hostPatch, `${await readFile(join(root, 'config/p3-runtime.patch.yml'), 'utf8')}\n${await readFile(patch, 'utf8')}`, { mode: 0o600 })
+  const runnerOptions = { store, root, dshHome: home, patchPath: hostPatch, testHooks: { onKivoMounted(value) { ctx = value.ctx } } }
+  runner = createCollaborationRunner(runnerOptions)
   await runner.enableKnowledge()
   const knowledge = runner.getKnowledgeService()
   const material = await knowledge.createMaterial(actor, { employeeIds: ['agent'], title: 'Synthetic maintenance', body: 'SYNTHETIC_KNOWLEDGE_OWNER', format: 'text', sourceLabel: 'local fixture', authorizationBasis: 'local synthetic probe' })
@@ -97,7 +94,7 @@ try {
   await writeFile(join(home, 'secrets', 'model.key'), explicitKey, { mode: 0o600 })
   process.env.GENEWAY_MODEL_CREDENTIAL_REF = 'model.key'
   positive = true
-  runner = createCollaborationRunner({ store, root, dshHome: home, runProfileImpl })
+  runner = createCollaborationRunner(runnerOptions)
   await runner.enableKnowledge()
   rootHandle = await ctx.agents.create({ sessionId: `credential-positive-${randomUUID()}`, meta: { cwd: root }, agentOptions: { provider: 'zenmux', model, maxTokens: 64 }, setup: agentCtx => { agentCtx.tools.restrict({ allow: [] }) } })
   rootHandle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Synthetic legal reference request' }], source: { kind: 'user' } }))

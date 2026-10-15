@@ -204,7 +204,11 @@ function seed(state, connections) {
   return { ...state, members: ['owner', 'admin'].map(id => ({ id, loginName: id, displayName: id, role: id === 'admin' ? 'admin' : 'member', enabled: true, authRef: id, sessionVersion: 1, employeeIds: ['lead', 'a', 'b'] })), modelRoutes: [{ id: 'model', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', enabled: true, credentialRef: 'ZENMUX_API_KEY' }], employees: ['lead', 'a', 'b'].map(id => ({ id, name: id, enabled: true, modelRouteId: 'model', revision: 1, skillIds: [read, list, 'cycle-time-calculate'].map(id => `skill-${id}`), connectionIds: connections.map(connection => connection.id) })), skills: [read, list, 'cycle-time-calculate'].map(id => ({ id: `skill-${id}`, capabilityId: id, enabled: true })), connections }
 }
 function target(connection) { return Object.fromEntries(['kind', 'targetIdentity', 'baseUrl', 'issuer', 'clientId', 'credentialRef', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode'].map(key => [key, connection[key]])) }
-function auditEnvironment() { return Object.fromEntries(['NODE_OPTIONS', 'GENEWAY_NETWORK_AUDIT_LOG', 'GENEWAY_NETWORK_SECRET_CANARY'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])) }
+function auditEnvironment() {
+  // The current audit owns the verified SDK spawn and propagates its explicit binding.
+  if (process.env.GENEWAY_NETWORK_AUDIT_ROLE === 'host') return {}
+  return Object.fromEntries(['NODE_OPTIONS', 'GENEWAY_NETWORK_AUDIT_LOG', 'GENEWAY_NETWORK_SECRET_CANARY'].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
+}
 function workBody(employeeId, capabilityId, input, clientRequestId) { return { employeeId, skillId: `skill-${capabilityId}`, connectionId: `instance-${employeeId}`, input, clientRequestId } }
 function tpmItem(id, employeeId, recordType, reference) { return { id, employeeId, skillId: `skill-${read}`, connectionId: `instance-${employeeId}`, goal: `SCENARIO:${id} 核对当前获准TPM事实`, input: { recordType, ...(reference ? { reference } : {}) } } }
 function cycleItem(id) { return { id, employeeId: 'b', skillId: 'skill-cycle-time-calculate', goal: id, input: { availableSeconds: 60, quantity: 2 } } }

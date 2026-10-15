@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
@@ -14,89 +14,62 @@ import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 import { createGearJobEventReceiver, GEARJOB_EVENT_PATH, readGearJobEventRuntimeConfig } from '../plugins/gearjob-events.mjs'
 
 const now = '2026-09-21T00:00:00.000Z'
-const catalog = [{ kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test' }]
+const catalog = [{ kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'test' }]
+const mode = process.argv[2]
+assert.ok(process.argv.length <= 3 && (mode === undefined || ['--pure-only', '--native-only'].includes(mode)), '仅支持互斥的 --pure-only 或 --native-only')
 
-await atomicAndAdmissionChecks()
-await manualAdmissionChecks()
-await eventAdmissionChecks()
-await eventReceiverReplayChecks()
-await concurrencyAndCapacityChecks()
-await ownerLossBeforeDispatchChecks()
-await ownerLossAfterRunnerStartChecks()
-await ownerLossBeforeResultCommitChecks()
-await liveEventCapabilityLossChecks()
-await requestGuardChecks()
-await actualProfileGuardChecks()
-await deadlineAndCancellationChecks()
-await closeTeardownChecks()
-await gearJobTimeoutChecks()
-await gearJobEventConfigChecks()
-await gearJobEventReceiverChecks()
-console.log('P5 execution checks passed; external effects=0; real GearJob/ZenMux=not called')
+if (mode !== '--native-only') {
+  await profileHomeChecks()
+  await atomicAndAdmissionChecks()
+  await manualAdmissionChecks()
+  await eventAdmissionChecks()
+  await eventReceiverReplayChecks()
+  await concurrencyAndCapacityChecks()
+  await ownerLossBeforeDispatchChecks()
+  await ownerLossAfterRunnerStartChecks()
+  await ownerLossBeforeResultCommitChecks()
+  await liveEventCapabilityLossChecks()
+  await requestGuardChecks()
+  await deadlineAndCancellationChecks()
+  await closeTeardownChecks()
+  await gearJobTimeoutChecks()
+  await gearJobEventConfigChecks()
+  await gearJobEventReceiverChecks()
+  console.log('P5 pure execution checks passed; injected runner/local FS/loopback only; native profile guard not included')
+}
+if (mode !== '--pure-only') {
+  await actualProfileGuardChecks()
+  console.log('P5 native profile guard checks passed')
+}
 
 async function manualAdmissionChecks() {
-  const harness = await admissionHarness({ maxRuns: 3, rules: ['rule-a'] })
+  const harness = await admissionHarness({ maxRuns: 1, rules: ['rule-a', 'rule-b', 'rule-c'] })
   try {
-    const input = { expectedRevision: 1, clientRequestId: 'manual-1' }
-    const first = await harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', input)
-    const replay = await harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', input)
-    assert.equal(first.accepted, true); assert.equal(replay.deduplicated, true); assert.equal(replay.workId, first.workId)
-    let state = await harness.store.read(), occurrence = state.automationOccurrences[0]
-    assert.equal(occurrence.scheduledDate, null); assert.equal(occurrence.occurrenceKey, 'rule-a:manual:manual-1')
-    const overlap = await harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'manual-2' })
-    assert.equal(overlap.reason, 'overlap')
-    await assert.rejects(harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 2, clientRequestId: 'manual-stale' }), error => error.code === 'REVISION_CONFLICT')
-    await assert.rejects(harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'bad:value' }), error => error.code === 'INVALID_REQUEST')
-    await harness.store.update(value => ({ ...value, works: value.works.map(work => ({ ...work, status: 'completed', executions: work.executions.map(execution => ({ ...execution, status: 'completed' })) })) }))
-    const daily = await harness.automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21' })
-    assert.equal(daily.accepted, true, 'manual identity must not consume the daily date identity')
-    state = await harness.store.read()
-    assert.equal(state.automationOccurrences.some(item => item.occurrenceKey === 'rule-a:2026-09-21'), true)
-    await harness.store.update(value => ({ ...value, automationRules: value.automationRules.map(rule => ({ ...rule, status: 'paused' })) }))
-    await assert.rejects(harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'manual-paused' }), error => error.code === 'INVALID_STATE')
+    const before = await harness.store.read()
+    for (const input of [
+      { expectedRevision: 1, clientRequestId: 'manual-1' },
+      { expectedRevision: 1, clientRequestId: 'manual-1' },
+      { expectedRevision: 2, clientRequestId: 'manual-stale' },
+      { expectedRevision: 1, clientRequestId: 'bad:value' },
+    ]) {
+      await assert.rejects(harness.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', input), error => error.code === 'CAPABILITY_RETIRED')
+      assert.deepEqual(await harness.store.read(), before)
+      assert.equal(harness.runs, 0)
+    }
   } finally { await harness.close() }
-
-  const budget = await admissionHarness({ maxRuns: 1, rules: ['rule-a'] })
-  try {
-    await budget.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'budget-1' })
-    await budget.store.update(value => ({ ...value, works: value.works.map(work => ({ ...work, status: 'completed', executions: work.executions.map(execution => ({ ...execution, status: 'completed' })) })) }))
-    const exhausted = await budget.automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'budget-2' })
-    assert.equal(exhausted.reason, 'budget')
-  } finally { await budget.close() }
-
-  const capacity = await admissionHarness({ rules: ['rule-a', 'rule-b', 'rule-c'] })
-  try {
-    const outcomes = await Promise.all(['rule-a', 'rule-b', 'rule-c'].map((ruleId, index) => capacity.automation.acceptManualOccurrence({ id: 'member-owner' }, ruleId, { expectedRevision: 1, clientRequestId: `capacity-${index}` })))
-    assert.equal(outcomes.filter(item => item.accepted).length, 2); assert.equal(outcomes.find(item => item.reason)?.reason, 'capacity')
-  } finally { await capacity.close() }
 }
 
 async function eventAdmissionChecks() {
   const harness = await admissionHarness({ maxRuns: 3, rules: ['rule-a'] })
   try {
-    await harness.store.update(state => ({ ...state, automationRules: state.automationRules.map(rule => rule.id === 'rule-a' ? { ...rule, trigger: { kind: 'gearjob-work-order-update', sourceId: 'gearjob:dev.localhost' }, effectiveFrom: null, eventAcceptAfter: '2026-09-21T00:00:00.000Z' } : rule) }))
+    await harness.store.update(state => ({ ...state, automationRules: state.automationRules.map(rule => ({ ...rule, trigger: { kind: 'gearjob-work-order-update', sourceId: 'gearjob:dev.localhost' }, effectiveFrom: null, eventAcceptAfter: now })) }))
+    const before = await harness.store.read()
     const input = { sourceId: 'gearjob:dev.localhost', workOrderId: 'WO-1', sourceRevision: '2026-09-21 08:01:02.123456', digest: 'a'.repeat(64) }
-    const first = await harness.automation.acceptGearJobEvent(input)
-    const replay = await harness.automation.acceptGearJobEvent(input)
-    assert.equal(first.accepted, 1)
-    assert.equal(replay.outcomes[0].deduplicated, true)
-    let state = await harness.store.read()
-    assert.equal(state.automationOccurrences[0].scheduledDate, null)
-    assert.deepEqual(state.automationOccurrences[0].event, { sourceId: input.sourceId, sourceRevision: input.sourceRevision, digest: input.digest })
-    assert.equal(Object.hasOwn(state.automationOccurrences[0].event, 'sourceTime'), false)
-    assert.match(state.automationOccurrences[0].occurrenceKey, /^rule-a:event:[a-f0-9]{64}$/)
-    assert.equal(state.works.length, 1)
-    await assert.rejects(harness.automation.acceptGearJobEvent({ ...input, digest: 'b'.repeat(64) }), error => error.code === 'CONFLICT')
-    await harness.store.update(value => ({ ...value, works: value.works.map(work => ({ ...work, status: 'completed', executions: work.executions.map(execution => ({ ...execution, status: 'completed' })) })) }))
-    const stale = await harness.automation.acceptGearJobEvent({ ...input, sourceRevision: '2026-09-20 07:59:59.000001', digest: 'c'.repeat(64) })
-    assert.equal(stale.accepted, 0)
-    assert.equal(stale.outcomes[0].reason, 'before-active-window')
-    assert.equal((await harness.store.read()).works.length, 1)
-    const unverifiable = await harness.automation.acceptGearJobEvent({ ...input, sourceRevision: '2026-09-31 08:02:02.000001', digest: 'd'.repeat(64) })
-    assert.equal(unverifiable.outcomes[0].reason, 'source-time-unverifiable')
-    await assert.rejects(harness.automation.acceptGearJobEvent({ ...input, sourceId: 'gearjob:other', sourceRevision: '2026-09-21 08:02:02.000001', digest: 'e'.repeat(64) }), error => error.code === 'SOURCE_NOT_CONFIGURED')
-    state = await harness.store.read()
-    assert.equal(state.automationOccurrences.length, 3)
+    for (const event of [input, input, { ...input, digest: 'b'.repeat(64) }, { ...input, sourceRevision: '2026-09-20 07:59:59.000001' }, { ...input, sourceRevision: '2026-09-31 08:02:02.000001' }, { ...input, sourceId: 'gearjob:other' }]) {
+      await assert.rejects(harness.automation.acceptGearJobEvent(event), error => error.code === 'CAPABILITY_RETIRED')
+      assert.deepEqual(await harness.store.read(), before)
+      assert.equal(harness.runs, 0)
+    }
   } finally { await harness.close() }
 }
 
@@ -144,10 +117,10 @@ async function eventReceiverReplayChecks() {
     await receiver.start()
     const body = JSON.stringify({ source: 'gearjob:dev.localhost', event: 'on_update', doctype: 'Work Order', name: 'WO-1', modified: '2026-09-21 08:00:00.000001' })
     const signature = createHmac('sha256', secret).update(body).digest('base64'), options = { method: 'POST', headers: { 'content-type': 'application/json', 'x-frappe-webhook-signature': signature }, body }
-    assert.equal((await fetch(`http://127.0.0.1:${port}${GEARJOB_EVENT_PATH}`, options)).status, 202)
-    assert.equal((await fetch(`http://127.0.0.1:${port}${GEARJOB_EVENT_PATH}`, options)).status, 200)
-    const state = await harness.store.read()
-    assert.equal(state.automationOccurrences.length, 1); assert.equal(state.works.length, 1)
+    const before = await harness.store.read()
+    assert.equal((await fetch(`http://127.0.0.1:${port}${GEARJOB_EVENT_PATH}`, options)).status, 503)
+    assert.equal((await fetch(`http://127.0.0.1:${port}${GEARJOB_EVENT_PATH}`, options)).status, 503)
+    assert.deepEqual(await harness.store.read(), before)
   } finally { await receiver.close(); await harness.close() }
 }
 
@@ -171,128 +144,71 @@ async function atomicAndAdmissionChecks() {
   const root = await mkdtemp(join(tmpdir(), 'geneway-p5-execution-'))
   try {
     const statePath = join(root, 'state.json')
-    const initial = fixture({ maxRuns: 3, rules: ['rule-a', 'rule-b', 'rule-c'] })
-    await writeFile(statePath, JSON.stringify(initial, null, 2) + '\n', { mode: 0o600 })
-    const store = createFileStore(statePath)
-    const calls = []
-    let sequence = 0
+    await writeFile(statePath, JSON.stringify(fixture({ maxRuns: 3, rules: ['rule-a', 'rule-b', 'rule-c'] }), null, 2) + '\n', { mode: 0o600 })
+    const store = createFileStore(statePath), before = await readFile(statePath, 'utf8'), calls = []
     const workService = {
       async ensureReady() { calls.push('ready') },
-      prepareAutomationWork(state, rule, options) {
-        calls.push('prepare')
-        const workId = options.workId, executionId = options.executionId
-        return { ok: true, workId, executionId, acceptedAt: options.acceptedAt, work: {
-          id: workId, ownerMemberId: rule.ownerMemberId, employeeId: rule.employeeId, skillId: rule.skillId,
-          capabilityId: 'gearjob-work-order-read', connectionId: rule.connectionId, goal: 'gearjob.work-order.read',
-          input: { workOrderId: rule.workOrderId }, requiredInputs: [], status: 'accepted', acceptedAt: options.acceptedAt,
-          results: [], actions: [], executions: [{ id: executionId, operation: 'automation', clientRequestId: options.occurrenceKey, input: { workOrderId: rule.workOrderId }, status: 'accepted', acceptedAt: options.acceptedAt }],
-        } }
-      },
-      async dispatchAutomationWork(workId, executionId) { calls.push(`dispatch:${workId}:${executionId}`) },
+      prepareAutomationWork() { calls.push('prepare'); throw new Error('retired admission must not prepare work') },
+      async dispatchAutomationWork() { calls.push('dispatch') },
     }
-    const serviceA = createAutomationService({ store, workService, clock: () => now, idFactory: () => `a-${++sequence}`, connectionCatalog: catalog })
-    const serviceB = createAutomationService({ store, workService, clock: () => now, idFactory: () => `b-${++sequence}`, connectionCatalog: catalog })
-    const [first, second] = await Promise.all([
-      serviceA.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21' }),
-      serviceB.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21' }),
-    ])
-    assert.equal([first, second].filter(value => value.accepted).length, 2, 'dedup result should retain accepted fact')
-    assert.equal((await store.read()).works.length, 1)
-    assert.equal((await store.read()).automationOccurrences.length, 1)
-    assert.equal(first.occurrence.workId, second.occurrence.workId)
-    assert.deepEqual(calls.slice(0, 2), ['ready', 'ready'])
-
-    const stateAfter = await store.read()
-    const ruleA = stateAfter.automationRules.find(rule => rule.id === 'rule-a')
-    await store.update(state => ({ ...state, works: state.works.map(work => ({ ...work, status: 'completed', executions: work.executions.map(execution => ({ ...execution, status: 'completed' })) })) }))
-    const admitted = await serviceA.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-22' })
-    assert.equal(admitted.accepted, true)
-    assert.equal((await store.read()).automationOccurrences.filter(item => item.ruleId === ruleA.id && item.workId).length, 2)
-
-    const overlap = await serviceA.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-23' })
-    assert.equal(overlap.reason, 'overlap')
-    const inactive = await store.update(state => ({ ...state, automationRules: state.automationRules.map(rule => rule.id === 'rule-c' ? { ...rule, status: 'paused' } : rule) }))
-    assert.ok(inactive)
-    const blocked = await serviceA.acceptDailyOccurrence({ ruleId: 'rule-c', scheduledDate: '2026-09-21' })
-    assert.equal(blocked.reason, 'rule-inactive')
-    assert.equal(blocked.occurrence.workId, null)
-
-    await store.update(state => ({ ...state,
-      automationRules: state.automationRules.map(rule => rule.id === 'rule-a' ? { ...rule, maxRuns: 2 } : rule),
-      works: state.works.map(work => ({ ...work, status: 'completed', executions: work.executions.map(execution => ({ ...execution, status: 'completed' })) })),
-    }))
-    const budget = await serviceA.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-24' })
-    assert.equal(budget.reason, 'budget')
-    assert.equal(budget.occurrence.workId, null)
-
-    const snapshot = await store.read()
-    assert.equal(snapshot.works.filter(work => work.id === first.workId).length, 1)
-    assert.equal(snapshot.works.find(work => work.id === first.workId).executions.length, 1)
-    assert.equal(snapshot.automationOccurrences.some(item => item.workId === first.workId), true)
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
+    const serviceA = createAutomationService({ store, workService, clock: () => now, connectionCatalog: catalog })
+    const serviceB = createAutomationService({ store, workService, clock: () => now, connectionCatalog: catalog })
+    const outcomes = await Promise.allSettled([serviceA, serviceB].map(service => service.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21' })))
+    assert.ok(outcomes.every(outcome => outcome.status === 'rejected' && outcome.reason.code === 'CAPABILITY_RETIRED'))
+    assert.equal(await readFile(statePath, 'utf8'), before)
+    assert.deepEqual(calls, [])
+    assert.equal((await store.read()).works.length, 0)
+    assert.equal((await store.read()).automationOccurrences.length, 0)
+  } finally { await rm(root, { recursive: true, force: true }) }
 }
 
 async function ownerLossBeforeDispatchChecks() {
-  let state = fixture({ rules: ['rule-a'] })
-  let dispatches = 0, checks = 0
+  let state = executionFixture(), runnerCalls = 0
   const store = { async read() { return structuredClone(state) }, async update(mutator) { state = migrateState(await mutator(structuredClone(state))); return structuredClone(state) } }
-  const workService = {
-    async ensureReady() {},
-    prepareAutomationWork(_state, rule, options) { return { ok: true, workId: options.workId, executionId: options.executionId, acceptedAt: options.acceptedAt, work: { id: options.workId, ownerMemberId: rule.ownerMemberId, employeeId: rule.employeeId, skillId: rule.skillId, capabilityId: 'gearjob-work-order-read', connectionId: rule.connectionId, input: { workOrderId: rule.workOrderId }, status: 'accepted', acceptedAt: options.acceptedAt, results: [], actions: [], executions: [{ id: options.executionId, operation: 'automation', status: 'accepted' }] } } },
-    async dispatchAutomationWork() { dispatches += 1 },
-  }
-  const automation = createAutomationService({ store, workService, clock: () => now, idFactory: () => 'owner-loss' })
-  await assert.rejects(automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'owner-before', ownerCheck: () => false }), error => error.code === 'OWNER_LOCK_LOST')
-  assert.equal(state.automationOccurrences.length, 0)
-  checks = 0
-  const manual = await automation.acceptManualOccurrence({ id: 'member-owner' }, 'rule-a', { expectedRevision: 1, clientRequestId: 'owner-after', ownerCheck: () => ++checks < 3 })
-  assert.equal(manual.dispatchError.code, 'OWNER_LOCK_LOST'); assert.equal(dispatches, 0); assert.equal(state.automationOccurrences[0].workId, manual.workId)
-  state = fixture({ rules: ['rule-a'] }); checks = 0
-  const result = await automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21', ownerCheck: () => ++checks < 3 })
-  assert.equal(result.dispatchError.code, 'OWNER_LOCK_LOST')
-  assert.equal(dispatches, 0)
-  assert.equal(state.automationOccurrences[0].workId, result.workId, 'atomic acceptance remains for next-owner recovery')
+  const denied = createWorkService({ store, runner: { configured: true, async run() { runnerCalls += 1; return validModel() } }, clock: () => now })
+  await denied.ensureReady()
+  state = migrateState({ ...state, works: [acceptedCycle('owner-before', 'owner-before-exec', now)] })
+  const before = structuredClone(state)
+  await assert.rejects(denied.dispatchAutomationWork('owner-before', 'owner-before-exec', now, { ownerCheck: () => false }), error => error.code === 'OWNER_LOCK_LOST')
+  assert.deepEqual(state, before)
+  assert.equal(runnerCalls, 0)
+  await denied.close()
 
-  let owned = true, runnerCalls = 0, markedRunning = false
-  state = fixture({ rules: ['rule-a'] })
+  let owned = true, markedRunning = false
+  state = executionFixture()
   const racingStore = {
     async read() { return structuredClone(state) },
     async update(mutator) {
       state = migrateState(await mutator(structuredClone(state)))
-      if (!markedRunning && state.works.some(work => work.executions.some(execution => execution.status === 'running'))) {
-        markedRunning = true
-        owned = false
-      }
+      if (!markedRunning && state.works.some(work => work.executions.some(execution => execution.status === 'running'))) { markedRunning = true; owned = false }
       return structuredClone(state)
     },
   }
-  const guardedWork = createWorkService({ store: racingStore, runner: { configured: true, async run() { runnerCalls += 1; return validModel() } }, clock: () => now, connectionCatalog: catalog })
-  const guardedAutomation = createAutomationService({ store: racingStore, workService: guardedWork, clock: () => now, idFactory: () => 'owner-race', connectionCatalog: catalog })
-  const raced = await guardedAutomation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21', ownerCheck: () => owned })
+  const guarded = createWorkService({ store: racingStore, runner: { configured: true, async run() { runnerCalls += 1; return validModel() } }, clock: () => now })
+  await guarded.ensureReady()
+  state = migrateState({ ...state, works: [acceptedCycle('owner-race', 'owner-race-exec', now)] })
+  await guarded.dispatchAutomationWork('owner-race', 'owner-race-exec', now, { ownerCheck: () => owned })
   await waitFor(() => markedRunning)
   await new Promise(resolve => setImmediate(resolve))
-  assert.equal(raced.accepted, true)
   assert.equal(runnerCalls, 0, 'owner loss after markRunning must stop before model I/O')
   assert.equal(state.works[0].status, 'running', 'next owner recovers the accepted work without former-owner writes')
-  await guardedWork.close()
+  await guarded.close()
 }
 
 async function ownerLossAfterRunnerStartChecks() {
-  let state = fixture({ rules: ['rule-a'] }), rejectRun, runnerCalls = 0, cancelCalls = 0
+  let state = executionFixture(), rejectRun, runnerCalls = 0, cancelCalls = 0
   const store = { async read() { return structuredClone(state) }, async update(mutator) { state = migrateState(await mutator(structuredClone(state))); return structuredClone(state) } }
   const runner = {
     configured: true,
     async run() { runnerCalls += 1; return new Promise((_resolve, reject) => { rejectRun = reject }) },
     async cancel() { cancelCalls += 1; rejectRun?.(Object.assign(new Error('owner lost'), { code: 'OWNER_LOCK_LOST' })); throw new Error('cancel cleanup failed') },
   }
-  const workService = createWorkService({ store, runner, clock: () => now, connectionCatalog: catalog })
-  const automation = createAutomationService({ store, workService, clock: () => now, idFactory: () => 'owner-running', connectionCatalog: catalog })
-  const accepted = await automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21', ownerCheck: () => true })
+  const workService = createWorkService({ store, runner, clock: () => now })
+  await workService.ensureReady()
+  state = migrateState({ ...state, works: [acceptedCycle('owner-running', 'owner-running-exec', now)] })
+  await workService.dispatchAutomationWork('owner-running', 'owner-running-exec', now, { ownerCheck: () => true })
   await waitFor(() => runnerCalls === 1)
   await workService.automationOwnerLost()
-  assert.equal(accepted.accepted, true)
   assert.equal(cancelCalls, 1, 'owner loss must cancel the active automation runner')
   assert.equal(state.works[0].status, 'running', 'former owner must not write a terminal result after lock loss')
   assert.equal(state.works[0].results.length, 0)
@@ -301,27 +217,24 @@ async function ownerLossAfterRunnerStartChecks() {
 
 async function liveEventCapabilityLossChecks() {
   const root = await mkdtemp(join(tmpdir(), 'geneway-p5-live-capability-'))
-  let state = fixture({ rules: [] }), loseOwner, runtime, receiver, ownerLosses = 0
+  let state = fixture({ rules: [] }), loseOwner, runtime, ownerLosses = 0
   const store = { async read() { return structuredClone(state) }, async update(mutator) { state = migrateState(await mutator(structuredClone(state))); return structuredClone(state) } }
+  const receiver = { listening: true, isListening() { return this.listening }, async close() { this.listening = false } }
   const workService = { async ensureReady() {}, async automationOwnerLost() { ownerLosses += 1 } }
-  const automation = createAutomationService({ store, workService, clock: () => now, connectionCatalog: catalog, eventSourceId: 'gearjob:dev.localhost', eventSourceReady: () => runtime?.ownsLock() === true && receiver?.isListening() === true })
-  runtime = createAutomationRuntime({ store, automationService: automation, workService, dataRoot: root, lockFactory: async () => ({ lost: new Promise(resolve => { loseOwner = resolve }), async release() {} }), onOwnerLost: async () => receiver.close() })
-  receiver = createGearJobEventReceiver({ secret: Buffer.from('live-secret'), sourceId: 'gearjob:dev.localhost', expectedSourceAddress: '127.0.0.1', host: '127.0.0.1', port: await freePort(), automationRuntime: runtime })
+  const automation = createAutomationService({ store, workService, clock: () => now, eventSourceId: 'gearjob:dev.localhost', eventSourceReady: () => runtime?.ownsLock() === true && receiver.isListening() })
+  runtime = createAutomationRuntime({ store, automationService: automation, workService, dataRoot: root, lockFactory: async () => ({ lost: new Promise(resolve => { loseOwner = resolve }), async release() {} }), onOwnerLost: () => receiver.close() })
   try {
-    await runtime.start(); await receiver.start()
-    assert.deepEqual(automation.eventSourceCapability(), { status: 'ready', sourceId: 'gearjob:dev.localhost' })
-    await receiver.close()
-    assert.equal(automation.eventSourceCapability().status, 'unavailable')
-    await assert.rejects(automation.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'gearjob-work-order-update', sourceId: 'gearjob:dev.localhost' } }), error => error.code === 'SOURCE_NOT_CONFIGURED')
-    await receiver.start()
+    await runtime.start()
+    assert.deepEqual(automation.eventSourceCapability(), { status: 'unavailable', code: 'CAPABILITY_RETIRED' })
+    await assert.rejects(automation.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'gearjob-work-order-update', sourceId: 'gearjob:dev.localhost' } }), error => error.code === 'CAPABILITY_RETIRED')
     loseOwner(new Error('lost'))
     await waitFor(() => !receiver.isListening() && !runtime.ownsLock() && ownerLosses === 1)
-    assert.equal(automation.eventSourceCapability().status, 'unavailable')
+    assert.deepEqual(automation.eventSourceCapability(), { status: 'unavailable', code: 'CAPABILITY_RETIRED' })
   } finally { await receiver.close(); await runtime.close(); await rm(root, { recursive: true, force: true }) }
 }
 
 async function ownerLossBeforeResultCommitChecks() {
-  let state = fixture({ rules: ['rule-a'] }), owned = true, cancelCalls = 0, releaseCommit, reachedCommit
+  let state = executionFixture(), owned = true, cancelCalls = 0, releaseCommit, reachedCommit
   const commitReached = new Promise(resolve => { reachedCommit = resolve })
   const commitGate = new Promise(resolve => { releaseCommit = resolve })
   const store = {
@@ -339,14 +252,14 @@ async function ownerLossBeforeResultCommitChecks() {
   }
   const runner = { configured: true, async run() { return validModel() }, async cancel() { cancelCalls += 1 } }
   const workService = createWorkService({ store, runner, clock: () => now, connectionCatalog: catalog })
-  const automation = createAutomationService({ store, workService, clock: () => now, idFactory: () => 'owner-result', connectionCatalog: catalog })
-  const accepted = await automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21', ownerCheck: () => owned })
+  await workService.ensureReady()
+  state = migrateState({ ...state, works: [acceptedCycle('owner-result', 'owner-result-exec', now)] })
+  await workService.dispatchAutomationWork('owner-result', 'owner-result-exec', now, { ownerCheck: () => owned })
   await commitReached
   owned = false
   const losing = workService.automationOwnerLost()
   releaseCommit()
   await losing
-  assert.equal(accepted.accepted, true)
   assert.equal(cancelCalls, 1, 'owner loss must cancel once after the runner returned')
   assert.equal(state.works[0].status, 'running')
   assert.equal(state.works[0].executions[0].status, 'running')
@@ -354,22 +267,25 @@ async function ownerLossBeforeResultCommitChecks() {
   await workService.close()
 }
 
-async function actualProfileGuardChecks() {
-  const dshHome = await mkdtemp(join(tmpdir(), 'geneway-p5-guard-profile-'))
+async function actualProfileGuardChecks({ Harness = DeepSeekHarness, createProvider = createServer } = {}) {
+  const temp = await mkdtemp(join(tmpdir(), 'geneway-p5-guard-profile-')), dshHome = join(temp, 'dsh')
+  const previousHome = process.env.DSH_HOME
   const root = new URL('..', import.meta.url).pathname
-  let providerCalls = 0
-  const provider = createServer((_request, response) => { providerCalls += 1; response.writeHead(500).end() })
-  await new Promise((resolve, reject) => provider.listen(0, '127.0.0.1', error => error ? reject(error) : resolve()))
-  const providerPort = provider.address().port
-  const networkPatch = join(dshHome, 'local-provider.patch.yml')
-  await writeFile(networkPatch, `- id: llm-pi-ai\n  config:\n    providers:\n      zenmux:\n        displayName: Local guard probe\n        api: openai-completions\n        apiKeyEnv: ZENMUX_API_KEY\n        baseURL: http://127.0.0.1:${providerPort}/v1\n        models:\n          - id: deepseek/deepseek-v4.1-flash\n            contextWindow: 200000\n            maxOutputTokens: 8192\n`, { mode: 0o600 })
-  const harness = new DeepSeekHarness({
-    profile: 'sdk', patches: [join(root, 'config/p1-runtime.patch.yml'), networkPatch], dshHome,
-    processCwd: root, cwd: root, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash',
-    env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: process.env.LANG, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED', ZENMUX_API_KEY: 'guard-must-stop-before-provider' },
-    initializeTimeoutMs: 15_000, requestTimeoutMs: 120_000,
-  })
+  let providerCalls = 0, provider, harness
   try {
+    await mkdir(dshHome, { mode: 0o700 })
+    process.env.DSH_HOME = dshHome
+    provider = createProvider((_request, response) => { providerCalls += 1; response.writeHead(500).end() })
+    await new Promise((resolve, reject) => provider.listen(0, '127.0.0.1', error => error ? reject(error) : resolve()))
+    const providerPort = provider.address().port
+    const networkPatch = join(temp, 'local-provider.patch.yml')
+    await writeFile(networkPatch, `- id: llm-pi-ai\n  config:\n    providers:\n      zenmux:\n        displayName: Local guard probe\n        api: openai-completions\n        apiKeyEnv: ZENMUX_API_KEY\n        baseURL: http://127.0.0.1:${providerPort}/v1\n        models:\n          - id: deepseek/deepseek-v4.1-flash\n            contextWindow: 200000\n            maxOutputTokens: 8192\n`, { mode: 0o600 })
+    harness = new Harness({
+      profile: 'sdk', patches: [join(root, 'config/p1-runtime.patch.yml'), networkPatch], dshHome,
+      processCwd: root, cwd: root, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash',
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: process.env.LANG, DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED', ZENMUX_API_KEY: 'guard-must-stop-before-provider' },
+      initializeTimeoutMs: 15_000, requestTimeoutMs: 120_000,
+    })
     const result = await harness.run('本请求必须在模型 I/O 前由缺失授权拒绝。')
     assert.equal(result.events.some(event => event.type === 'request/header'), false)
     const turnEnd = result.events.find(event => event.type === 'turn/end')
@@ -377,41 +293,72 @@ async function actualProfileGuardChecks() {
     assert.equal(turnEnd?.data?.reason?.error?.message, '执行授权已失效')
     assert.equal(providerCalls, 0)
   } finally {
-    await harness.close().catch(() => undefined)
-    await new Promise(resolve => provider.close(resolve))
-    await rm(dshHome, { recursive: true, force: true })
+    try {
+      if (harness) await harness.close().catch(() => undefined)
+      if (provider) await new Promise(resolve => provider.close(resolve))
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      await rm(temp, { recursive: true, force: true })
+    }
+  }
+}
+
+async function profileHomeChecks() {
+  const original = process.env.DSH_HOME
+  try {
+    for (const previous of [undefined, '/synthetic-parent-home']) for (const failAt of [undefined, 'constructor', 'run']) {
+      if (previous === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previous
+      let options, providerClosed = 0, harnessClosed = 0
+      const failure = new Error('synthetic harness failure')
+      const createProvider = () => ({ listen(_port, host, done) { assert.equal(host, '127.0.0.1'); done() }, address() { return { port: 32001 } }, close(done) { providerClosed += 1; done() } })
+      class Harness {
+        constructor(value) {
+          options = value
+          assert.equal(process.env.DSH_HOME, options.dshHome); assert.equal(options.env.DSH_HOME, options.dshHome)
+          assert.equal(options.patches.at(-1), join(options.dshHome, '..', 'local-provider.patch.yml'))
+          if (failAt === 'constructor') throw failure
+        }
+        async run() {
+          assert.equal((await stat(options.dshHome)).mode & 0o777, 0o700)
+          assert.equal((await stat(options.patches.at(-1))).mode & 0o777, 0o600)
+          if (failAt === 'run') throw failure
+          return { events: [{ type: 'turn/end', data: { reason: { kind: 'error', error: { message: '执行授权已失效' } } } }] }
+        }
+        async close() { harnessClosed += 1 }
+      }
+      if (failAt) await assert.rejects(actualProfileGuardChecks({ Harness, createProvider }), error => error === failure)
+      else await actualProfileGuardChecks({ Harness, createProvider })
+      assert.equal(process.env.DSH_HOME, previous)
+      assert.equal(providerClosed, 1); assert.equal(harnessClosed, failAt === 'constructor' ? 0 : 1)
+      await assert.rejects(stat(options.dshHome), { code: 'ENOENT' })
+      await assert.rejects(stat(options.patches.at(-1)), { code: 'ENOENT' })
+    }
+  } finally {
+    if (original === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = original
   }
 }
 
 async function concurrencyAndCapacityChecks() {
-  const budget = await admissionHarness({ maxRuns: 1, rules: ['rule-a'] })
-  try {
-    const outcomes = await Promise.all([
-      budget.automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21' }),
-      budget.automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-22' }),
-    ])
-    assert.equal(outcomes.filter(item => item.accepted && !item.deduplicated).length, 1)
-    assert.equal(outcomes.find(item => item.reason)?.reason, 'budget')
-    assert.equal(outcomes.find(item => item.reason)?.deduplicated, false)
-    assert.equal((await budget.store.read()).works.length, 1)
-  } finally { await budget.close() }
-
-  const capacity = await admissionHarness({ rules: ['rule-a', 'rule-b', 'rule-c'], includeManualWork: true })
-  try {
-    const outcomes = await Promise.all(['rule-a', 'rule-b', 'rule-c'].map(ruleId => capacity.automation.acceptDailyOccurrence({ ruleId, scheduledDate: '2026-09-21' })))
-    assert.equal(outcomes.filter(item => item.accepted).length, 2)
-    assert.equal(outcomes.find(item => item.reason)?.reason, 'capacity')
-    assert.equal(outcomes.find(item => item.reason)?.deduplicated, false)
-    assert.equal((await capacity.store.read()).works.filter(work => work.id !== 'manual-work').length, 2)
-  } finally { await capacity.close() }
-
+  for (const options of [{ maxRuns: 1, rules: ['rule-a'] }, { rules: ['rule-a', 'rule-b', 'rule-c'], includeManualWork: true }]) {
+    const harness = await admissionHarness(options)
+    try {
+      const before = await harness.store.read()
+      const outcomes = await Promise.allSettled(['2026-09-21', '2026-09-22'].map(scheduledDate => harness.automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate })))
+      assert.ok(outcomes.every(outcome => outcome.status === 'rejected' && outcome.reason.code === 'CAPABILITY_RETIRED'))
+      assert.deepEqual(await harness.store.read(), before)
+      assert.equal(harness.runs, 0)
+    } finally { await harness.close() }
+  }
   const revoked = await admissionHarness({ rules: ['rule-a'] })
   try {
     await revoked.store.update(state => ({ ...state, connections: state.connections.map(connection => ({ ...connection, enabled: false, status: 'disabled' })) }))
-    const blocked = await revoked.automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21' })
-    assert.equal(blocked.reason, 'auth-blocked')
-    assert.equal(blocked.deduplicated, false)
-    assert.equal((await revoked.store.read()).works.length, 0)
+    const before = await revoked.store.read()
+    await assert.rejects(revoked.automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21' }), error => error.code === 'CAPABILITY_RETIRED')
+    assert.deepEqual(await revoked.store.read(), before)
+    assert.equal(revoked.runs, 0)
   } finally { await revoked.close() }
 }
 
@@ -422,16 +369,15 @@ async function admissionHarness({ maxRuns = 3, rules, includeManualWork = false 
   if (includeManualWork) initial.works.push({ id: 'manual-work', ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', connectionId: 'connection-owner', input: { workOrderId: 'WO-1' }, status: 'running', results: [], actions: [], executions: [{ id: 'manual-exec', operation: 'create', status: 'running' }] })
   await writeFile(statePath, JSON.stringify(initial, null, 2) + '\n', { mode: 0o600 })
   const store = createFileStore(statePath)
-  let sequence = 0
-  const pending = new Map()
+  let runs = 0
   const runner = {
     configured: true,
-    async run({ executionId }) { return new Promise((resolve, reject) => pending.set(executionId, { resolve, reject })) },
-    async cancel(executionId) { pending.get(executionId)?.reject(Object.assign(new Error('cancelled'), { code: 'CANCELLED' })); pending.delete(executionId) },
+    async run() { runs += 1; throw new Error('retired admission must not call runner') },
+    async cancel() {},
   }
-  const workService = createWorkService({ store, runner, clock: () => now, connectionCatalog: catalog, idFactory: () => `work-service-${++sequence}` })
-  const automation = createAutomationService({ store, workService, clock: () => now, connectionCatalog: catalog, idFactory: () => `automation-${++sequence}`, eventSourceId: 'gearjob:dev.localhost' })
-  return { store, automation, close: async () => { await workService.close(); await rm(root, { recursive: true, force: true }) } }
+  const workService = createWorkService({ store, runner, clock: () => now, connectionCatalog: catalog })
+  const automation = createAutomationService({ store, workService, clock: () => now, connectionCatalog: catalog, eventSourceId: 'gearjob:dev.localhost' })
+  return { store, automation, get runs() { return runs }, close: async () => { await workService.close(); await rm(root, { recursive: true, force: true }) } }
 }
 
 async function requestGuardChecks() {
@@ -478,56 +424,59 @@ async function requestGuardChecks() {
 }
 
 async function deadlineAndCancellationChecks() {
-  const state = fixture({ maxRuns: 3, rules: ['rule-a'] })
-  let current = state
-  let clock = now
-  let resolveRun
-  let runCount = 0
+  let current = executionFixture(), clock = now, resolveRun, runCount = 0
   const store = { async read() { return structuredClone(current) }, async update(mutator) { current = migrateState(await mutator(structuredClone(current))); return structuredClone(current) } }
   const runner = { configured: true, async run() { runCount += 1; return new Promise(resolve => { resolveRun = resolve }) }, async cancel() {} }
-  const workService = createWorkService({ store, runner, clock: () => clock, connectionCatalog: catalog, idFactory: (() => { let i = 0; return () => `w-${++i}` })() })
-  const automation = createAutomationService({ store, workService, clock: () => clock, idFactory: (() => { let i = 0; return () => `a-${++i}` })(), connectionCatalog: catalog })
-  const accepted = await automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-21' })
-  assert.equal(accepted.accepted, true)
+  const workService = createWorkService({ store, runner, clock: () => clock })
+  await workService.ensureReady()
+  current = migrateState({ ...current, works: [acceptedCycle('before-deadline', 'before-deadline-exec', now)] })
+  await workService.dispatchAutomationWork('before-deadline', 'before-deadline-exec', now)
   await waitFor(() => runCount === 1)
   clock = '2026-09-21T00:01:59.999Z'
   resolveRun(validModel())
   await waitFor(() => current.works[0].status === 'completed')
   assert.equal(runCount, 1)
 
-  const expired = await automation.acceptDailyOccurrence({ ruleId: 'rule-a', scheduledDate: '2026-09-22' })
-  assert.equal(expired.accepted, true)
-  const expiredWork = current.works.find(work => work.id === expired.workId)
-  clock = new Date(new Date(expiredWork.acceptedAt).getTime() + 120_000).toISOString()
-  await waitFor(() => current.works.find(work => work.id === expired.workId)?.status === 'failed')
-  assert.equal(current.works.find(work => work.id === expired.workId).executions[0].error.code, 'UPSTREAM_TIMEOUT')
-  assert.equal(current.works.find(work => work.id === accepted.workId).status, 'completed')
+  const secondAcceptedAt = clock
+  current = migrateState({ ...current, works: [...current.works, acceptedCycle('expired', 'expired-exec', secondAcceptedAt)] })
+  await workService.dispatchAutomationWork('expired', 'expired-exec', secondAcceptedAt)
+  await waitFor(() => runCount === 2)
+  clock = new Date(new Date(secondAcceptedAt).getTime() + 120_000).toISOString()
+  resolveRun(validModel())
+  await waitFor(() => current.works.find(work => work.id === 'expired').status === 'failed')
+  assert.equal(current.works.find(work => work.id === 'expired').executions[0].error.code, 'UPSTREAM_TIMEOUT')
+  assert.equal(current.works[0].status, 'completed')
   await workService.close()
 
-  let deadlineState = fixture({ rules: ['rule-a', 'rule-b'] })
+  let deadlineState = executionFixture(), finishCancel, cancelStarted = false
   const acceptedAt = new Date(Date.now() - 119_900).toISOString()
-  let finishCancel
-  let cancelStarted = false
-  const runResolvers = new Map()
-  const cancelledExecutions = []
-  const deadlineStore = { async read() { return structuredClone(deadlineState) }, async update(mutator) { deadlineState = migrateState(await mutator(structuredClone(deadlineState))); return structuredClone(deadlineState) } }
+  const runResolvers = new Map(), cancelledExecutions = []
+  let writeBarrier = Promise.resolve()
+  // Concurrent work transitions need the same serialization as createFileStore.
+  const deadlineStore = {
+    async read() { await writeBarrier; return structuredClone(deadlineState) },
+    update(mutator) {
+      const operation = writeBarrier.then(async () => { deadlineState = migrateState(await mutator(structuredClone(deadlineState))); return structuredClone(deadlineState) })
+      writeBarrier = operation.catch(() => undefined)
+      return operation
+    },
+  }
   const deadlineRunner = {
     configured: true,
     async run({ executionId }) { return new Promise(resolve => runResolvers.set(executionId, resolve)) },
     async cancel(executionId) { cancelledExecutions.push(executionId); cancelStarted = true; return new Promise(resolve => { finishCancel = resolve }) },
   }
-  const deadlineWorkService = createWorkService({ store: deadlineStore, runner: deadlineRunner, clock: () => new Date().toISOString(), connectionCatalog: catalog })
+  const deadlineWorkService = createWorkService({ store: deadlineStore, runner: deadlineRunner, clock: () => new Date().toISOString() })
   await deadlineWorkService.ensureReady()
-  const prepared = deadlineWorkService.prepareAutomationWork(deadlineState, deadlineState.automationRules[0], { occurrenceKey: 'rule-a:2026-09-21', acceptedAt, workId: 'deadline-work', executionId: 'deadline-exec' })
   const peerAcceptedAt = new Date().toISOString()
-  const peer = deadlineWorkService.prepareAutomationWork(deadlineState, deadlineState.automationRules[1], { occurrenceKey: 'rule-b:2026-09-21', acceptedAt: peerAcceptedAt, workId: 'peer-work', executionId: 'peer-exec' })
-  deadlineState = migrateState({ ...deadlineState, works: [prepared.work, peer.work], automationOccurrences: [
-    { id: 'deadline-occurrence', occurrenceKey: 'rule-a:2026-09-21', ruleId: 'rule-a', ruleRevision: 1, scheduledDate: '2026-09-21', workId: prepared.workId, status: null, reason: null, deliveryId: null, createdAt: acceptedAt },
-    { id: 'peer-occurrence', occurrenceKey: 'rule-b:2026-09-21', ruleId: 'rule-b', ruleRevision: 1, scheduledDate: '2026-09-21', workId: peer.workId, status: null, reason: null, deliveryId: null, createdAt: peerAcceptedAt },
-  ] })
-  await deadlineWorkService.dispatchAutomationWork(prepared.workId, prepared.executionId, acceptedAt)
-  await deadlineWorkService.dispatchAutomationWork(peer.workId, peer.executionId, peerAcceptedAt)
-  await waitFor(() => runResolvers.has('peer-exec'))
+  deadlineState = migrateState({ ...deadlineState, works: [acceptedCycle('deadline-work', 'deadline-exec', acceptedAt), acceptedCycle('peer-work', 'peer-exec', peerAcceptedAt)] })
+  await deadlineWorkService.dispatchAutomationWork('deadline-work', 'deadline-exec', acceptedAt)
+  await deadlineWorkService.dispatchAutomationWork('peer-work', 'peer-exec', peerAcceptedAt)
+  await waitFor(() => {
+    const error = deadlineState.works.find(work => work.id === 'peer-work').executions[0].error
+    assert.equal(error, undefined, `peer dispatch failed: ${error?.code}`)
+    return runResolvers.has('peer-exec')
+  })
   await waitFor(() => cancelStarted)
   assert.equal(deadlineState.works[0].status, 'running', 'deadline must retain capacity until runner teardown')
   assert.deepEqual(cancelledExecutions, ['deadline-exec'])
@@ -562,22 +511,14 @@ async function gearJobTimeoutChecks() {
 }
 
 async function closeTeardownChecks() {
-  let state = fixture({ rules: ['rule-a'] })
-  let cancelCalls = 0
-  let rejectRun
+  let state = executionFixture(), cancelCalls = 0, rejectRun
   const store = { async read() { return structuredClone(state) }, async update(mutator) { state = migrateState(await mutator(structuredClone(state))); return structuredClone(state) } }
-  const runner = {
-    configured: true,
-    async run() { return new Promise((_resolve, reject) => { rejectRun = reject }) },
-    async cancel() { cancelCalls += 1; rejectRun?.(Object.assign(new Error('closed'), { code: 'CANCELLED' })) },
-    async close() {},
-  }
-  const service = createWorkService({ store, runner, clock: () => new Date().toISOString(), connectionCatalog: catalog })
+  const runner = { configured: true, async run() { return new Promise((_resolve, reject) => { rejectRun = reject }) }, async cancel() { cancelCalls += 1; rejectRun?.(Object.assign(new Error('closed'), { code: 'CANCELLED' })) }, async close() {} }
+  const service = createWorkService({ store, runner, clock: () => new Date().toISOString() })
   await service.ensureReady()
   const acceptedAt = new Date().toISOString()
-  const prepared = service.prepareAutomationWork(state, state.automationRules[0], { occurrenceKey: 'rule-a:2026-09-21', acceptedAt, workId: 'close-work', executionId: 'close-exec' })
-  state = migrateState({ ...state, works: [prepared.work], automationOccurrences: [{ id: 'close-occurrence', occurrenceKey: 'rule-a:2026-09-21', ruleId: 'rule-a', ruleRevision: 1, scheduledDate: '2026-09-21', workId: prepared.workId, status: null, reason: null, deliveryId: null, createdAt: acceptedAt }] })
-  await service.dispatchAutomationWork(prepared.workId, prepared.executionId, acceptedAt)
+  state = migrateState({ ...state, works: [acceptedCycle('close-work', 'close-exec', acceptedAt)] })
+  await service.dispatchAutomationWork('close-work', 'close-exec', acceptedAt)
   await waitFor(() => Boolean(rejectRun))
   await service.close()
   assert.equal(cancelCalls, 1)
@@ -590,7 +531,7 @@ function fixture({ maxRuns = 3, rules = ['rule-a'] } = {}) {
     members: [{ id: 'member-owner', loginName: 'owner', displayName: 'Owner', role: 'member', enabled: true, authRef: 'owner', sessionVersion: 1, employeeIds: ['employee-owner'] }],
     modelRoutes: [{ id: 'route-owner', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'ZENMUX_API_KEY', enabled: true }],
     employees: [{ id: 'employee-owner', enabled: true, modelRouteId: 'route-owner', skillIds: ['skill-gearjob-work-order-read'], connectionIds: ['connection-owner'] }],
-    connections: [{ id: 'connection-owner', kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test', enabled: true, status: 'ready', revision: 1, skillIds: ['skill-gearjob-work-order-read'], allowedObjectIds: ['WO-1'] }],
+    connections: [{ id: 'connection-owner', kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'test', enabled: true, status: 'ready', revision: 1, skillIds: ['skill-gearjob-work-order-read'], allowedObjectIds: ['WO-1'] }],
     skills: [{ id: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', enabled: true }], confirmations: [], knowledgeMaterials: [], channelApps: [], channelIdentities: [], channelConversations: [], channelMessages: [], deliveries: [], linkCodes: [], works: [], reservations: {},
     automationRules: rules.map((id, index) => ({ id, ownerMemberId: 'member-owner', revision: 1, status: 'active', employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'daily-time', time: '08:00', timeZone: 'Asia/Shanghai' }, maxRuns, notificationConversationId: null, effectiveFrom: now, eventAcceptAfter: null, createdAt: now, updatedAt: now, revokedAt: null })),
     automationOccurrences: [],
@@ -598,8 +539,21 @@ function fixture({ maxRuns = 3, rules = ['rule-a'] } = {}) {
   return migrateState(value)
 }
 
+// Internal accepted-work fixtures exercise dispatch/teardown; they do not create cycle automation rules.
+function executionFixture() {
+  const state = fixture({ rules: [] })
+  state.skills.push({ id: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', enabled: true })
+  state.employees[0].skillIds.push('skill-cycle-time-calculate')
+  return migrateState(state)
+}
+
+function acceptedCycle(id, executionId, acceptedAt) {
+  const input = { availableSeconds: 60, quantity: 1 }
+  return { id, ownerMemberId: 'member-owner', employeeId: 'employee-owner', skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', input, requiredInputs: [], status: 'accepted', acceptedAt, results: [], actions: [], executions: [{ id: executionId, operation: 'automation', clientRequestId: executionId, input, status: 'accepted', acceptedAt }] }
+}
+
 function validModel() {
-  return { result: { kind: 'gearjob.work-order.observation', payload: { workOrderId: 'WO-1', status: 'Draft', plannedQuantity: 10, completedQuantity: 1, unit: '件', sourceTime: now, sourceRecordId: 'Work Order:WO-1', sourceRevision: '1', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test' }, source: { sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test', sourceRecordId: 'Work Order:WO-1', sourceRevision: '1', sourceTime: now }, toolName: 'geneway_gearjob_read_work_order', pluginId: 'geneway-gearjob-work-order', pluginVersion: '2' }, explanation: 'ok', dshSessionRef: 'session-1' }
+  return { result: { kind: 'manufacturing.takt', payload: { availableSeconds: 60, quantity: 1, secondsPerUnit: 60, unit: 'seconds/unit' }, toolName: 'geneway_calculate_cycle_time', pluginId: 'geneway-cycle-time', pluginVersion: '2' }, explanation: 'ok', dshSessionRef: 'session-1', contextConfirmationRefs: [] }
 }
 
 async function waitFor(predicate) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { generateKeyPairSync, randomUUID, verify } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,7 +8,19 @@ import { createCollaborationRunner } from '../src/collaboration-runner.mjs'
 import { createFileStore, migrateState } from '../src/store/file-store.mjs'
 import { createKnowledgeService } from '../src/knowledge-service.mjs'
 import { createWorkService } from '../src/work-service.mjs'
+import { assertKivoTpmTools, KIVO_MCP_SCOPE } from '../plugins/kivo-tpm.mjs'
+import { KIVO_TPM_TOOLS, tpmSourcePath } from '../src/domain/tpm.mjs'
 
+const fixturePath = process.argv[2]
+assert.ok(fixturePath, '请显式传入脱敏 tpm-wire-tools.json；本测试不寻找或读取运行凭据')
+const fixture = JSON.parse(await readFile(fixturePath, 'utf8'))
+assert.equal(fixture.sourceCommit, 'c54d38af47c735b039a45bf40eb63b94bf30e337')
+const tools = fixture.tools.map(({ name, inputSchema, outputSchema }) => ({ name, inputSchema, outputSchema }))
+assert.equal(assertKivoTpmTools(tools).size, 11)
+const keys = generateKeyPairSync('rsa', { modulusLength: 2048 })
+const recordId = '00000000-0000-4000-8000-000000000002', deviceId = '00000000-0000-4000-8000-000000000001'
+const fixtureTime = '2026-10-15T14:00:00.000Z'
+assertHistoricalQuantityChecks()
 const temp = await mkdtemp(join(tmpdir(), 'geneway-p3-runtime-'))
 process.env.DSH_HOME = join(temp, 'dsh')
 const capture = await startCapture()
@@ -17,10 +29,10 @@ let runtimeFailure, runner, service, failure
 process.env.GENEWAY_P3_CAPTURE_BASE_URL = `${capture.address}/v1`
 try {
   const store = createFileStore(join(temp, 'state.json'))
-  const gearConnection = connection(capture.address)
-  await store.update(state => seed(state, gearConnection))
+  const tpmConnection = connection(capture.address)
+  await store.update(state => seed(state, tpmConnection))
   await mkdir(join(temp, 'secrets'), { recursive: true, mode: 0o700 })
-  await writeFile(join(temp, 'secrets', gearConnection.credentialRef), 'local-test-only', { mode: 0o600 })
+  await writeFile(join(temp, 'secrets', tpmConnection.credentialRef), keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
   const schemaSnapshots = []
   const runtimeHooks = { onKnowledgeSchemas: names => schemaSnapshots.push(names) }
   runner = createCollaborationRunner({
@@ -30,10 +42,11 @@ try {
     environment: { GENEWAY_P3_CAPTURE_BASE_URL: `${capture.address}/v1`, GENEWAY_P3_CAPTURE_KEY: 'local-only' },
     agentOptions: { provider: 'geneway-p3-capture', model: 'p3-runtime-test', maxTokens: 4096 },
     secretRoot: join(temp, 'secrets'),
+    connectionCatalog: [tpmConnection],
     onError: error => { runtimeFailure = error },
     testHooks: runtimeHooks,
   })
-  service = createWorkService({ store, collaborationRunner: runner, connectionCatalog: [gearConnection] })
+  service = createWorkService({ store, collaborationRunner: runner, connectionCatalog: [tpmConnection] })
   const actor = { id: 'member-owner' }
   const knowledgeIds = ['runtime', 'disposable', 'sibling']
   const knowledge = createKnowledgeService({ store, idFactory: () => knowledgeIds.shift() })
@@ -188,34 +201,38 @@ try {
   assert.deepEqual(capture.tools('root-summary'), ['geneway_collaboration_submit_summary'])
   assert.deepEqual(completed.results.at(-1).payload.resultRefs, childrenResultRefs(children))
 
-  const gearCompleted = await create(service, actor, 'gear-complete', [{
-    id: 'item-gear-complete', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id,
-    goal: '完成并持久化工单观察', input: { workOrderId: 'WO-CANCEL' },
+  const tpmCompleted = await create(service, actor, 'tpm-complete', [{
+    id: 'item-tpm-complete', employeeId: 'employee-a', skillId: 'skill-kivo-tpm-record-read', connectionId: tpmConnection.id,
+    goal: '完成并持久化维修观察', input: { recordType: 'repair', reference: 'R-1' },
   }])
-  await waitFor(service, actor, gearCompleted.value.id, work => work.status === 'completed')
-  const gearChild = (await store.read()).works.find(work => work.rootWorkId === gearCompleted.value.id)
-  const gearResult = gearChild.results.at(-1)
-  assert.equal(gearResult.kind, 'gearjob.work-order.observation')
-  assert.equal(gearResult.payload.observationId, gearResult.id)
-  assert.equal(gearResult.payload.queriedAt, gearResult.createdAt)
-  assert.equal(gearResult.payload.dshSessionRef, gearResult.dshSessionRef)
-  assert.deepEqual(gearResult.source, Object.fromEntries(['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'sourceRecordId', 'sourceRevision', 'sourceTime'].filter(key => gearResult.payload[key] !== undefined).map(key => [key, gearResult.payload[key]])))
+  await waitFor(service, actor, tpmCompleted.value.id, work => work.status === 'completed')
+  const tpmChild = (await store.read()).works.find(work => work.rootWorkId === tpmCompleted.value.id)
+  const tpmResult = tpmChild.results.at(-1)
+  assert.equal(tpmResult.kind, 'kivo.tpm.observation')
+  assert.equal(tpmResult.payload.queriedAt, tpmResult.createdAt)
+  assert.equal(tpmResult.payload.records[0].id, recordId)
+  assert.equal(tpmResult.payload.records[0].rawStatus, 'reported')
+  assert.equal(tpmResult.payload.linkedDevice.id, deviceId)
+  assert.deepEqual(tpmResult.source, tpmResult.payload.source)
+  assert.equal(tpmResult.dshSessionRef, tpmChild.executions[0].dshSessionRef)
+  assert.deepEqual(capture.tpmCalls.map(call => call.name), ['tpm.repair.get', 'devices.device.get'])
   assert.match(completed.results.at(-1).explanation, /后置事实汇总/)
   assert.equal(capture.maxActiveChildren <= 2, true)
   assertClosedGraphRejects(persisted, completed.id)
 
-  const clientQuantityItems = [
-    { id: 'item-client-gear', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取工单', input: { workOrderId: 'WO-CANCEL' } },
-    { id: 'item-client-cycle', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '不得接收客户端数量', input: { availableSeconds: 600 }, dependsOn: ['item-client-gear'] },
-  ]
-  const directQuantity = structuredClone(clientQuantityItems); directQuantity[1].quantity = 6
-  const inputQuantity = structuredClone(clientQuantityItems); inputQuantity[1].input.quantity = 6
-  assert.equal((await create(service, actor, 'client-direct-quantity', directQuantity)).error.status, 400)
-  assert.equal((await create(service, actor, 'client-input-quantity', inputQuantity)).error.status, 400)
+  // Both cycle inputs are explicit user conditions; TPM never supplies a derived quantity.
+  const clientItems = [item('item-client-a', 'employee-a', 600, 6), { ...item('item-client-b', 'employee-b', 600, 6), dependsOn: ['item-client-a'] }]
+  const invalidField = structuredClone(clientItems); invalidField[1].input.url = 'https://invalid.example'
+  const invalidQuantity = structuredClone(clientItems); invalidQuantity[1].input.quantity = '6'
+  const beforeInvalid = await store.read(), invalidRequests = capture.requests
+  for (const items of [invalidField, invalidQuantity]) assert.equal((await create(service, actor, `client-invalid-${items === invalidField ? 'field' : 'type'}`, items)).error.status, 400)
+  const afterInvalid = await store.read()
+  assert.deepEqual([afterInvalid.works.length, Object.keys(afterInvalid.reservations).length], [beforeInvalid.works.length, Object.keys(beforeInvalid.reservations).length])
+  assert.equal(capture.requests, invalidRequests)
 
   const waiting = await create(service, actor, 'waiting', [
-    { id: 'item-wait-a', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取当前工单事实', input: { workOrderId: 'WO-CANCEL' } },
-    { id: 'item-wait-b', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '等待可用时间', input: {}, dependsOn: ['item-wait-a'] },
+    item('item-wait-a', 'employee-a', 600, 6),
+    { id: 'item-wait-b', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '等待可用时间', input: { quantity: 6 }, dependsOn: ['item-wait-a'] },
   ])
   const waitingReadback = await waitFor(service, actor, waiting.value.id, work => work.status === 'waiting_input')
   assert.equal(waitingReadback.plan.items.find(entry => entry.id === 'item-wait-a').status, 'completed')
@@ -224,11 +241,12 @@ try {
   assert.equal(waitingChildren.find(work => work.planItemId === 'item-wait-a').results.length, 1)
   assert.equal(waitingChildren.find(work => work.planItemId === 'item-wait-b').executions.length, 0)
   assert.equal(waitingChildren.find(work => work.planItemId === 'item-wait-b').input.quantity, 6)
+  assert.equal(waitingChildren.find(work => work.planItemId === 'item-wait-b').inputProvenance, undefined)
   assert.deepEqual(waitingChildren.find(work => work.planItemId === 'item-wait-b').requiredInputs, ['availableSeconds'])
   const waitingEdited = await service.updateCollaborationPlan(actor, waiting.value.id, { expectedRevision: 1, items: [{ id: 'item-wait-b', goal: '更新后的等待目标', employeeId: 'employee-lead' }] })
   assert.equal(waitingEdited.value.plan.revision, 2)
   await assert.rejects(service.updateCollaborationPlan(actor, waiting.value.id, { expectedRevision: 1, items: [{ id: 'item-wait-b', goal: '过期草稿' }] }), error => error.code === 'BUSY')
-  assert.equal((await service.continueCollaboration(actor, waiting.value.id, { clientRequestId: 'waiting-client-quantity', inputs: { 'item-wait-b': { availableSeconds: 3600, quantity: 99 } } })).error.status, 400)
+  assert.equal((await service.continueCollaboration(actor, waiting.value.id, { clientRequestId: 'waiting-invalid-input', inputs: { 'item-wait-b': { availableSeconds: 3600, url: 'https://invalid.example' } } })).error.status, 400)
   const waitContinued = await service.continueCollaboration(actor, waiting.value.id, { clientRequestId: 'waiting-successor', inputs: { 'item-wait-b': { availableSeconds: 3600 } } })
   assert.equal(waitContinued.ok, true)
   const waitingDone = await waitFor(service, actor, waiting.value.id, work => work.status === 'completed')
@@ -236,47 +254,12 @@ try {
   assert.equal(waitingDone.collaboration.generation, 2)
   assert.equal(waitingChildrenDone.find(work => work.planItemId === 'item-wait-a').executions.length, 1)
   assert.equal(waitingChildrenDone.find(work => work.planItemId === 'item-wait-b').executions.length, 1)
-  const derivedResult = waitingChildrenDone.find(work => work.planItemId === 'item-wait-b').results.at(-1)
-  assert.equal(derivedResult.payload.quantity, 6)
-  assert.deepEqual(derivedResult.inputProvenance.quantity, { kind: 'gearjob.remaining-quantity', sourcePlanItemId: 'item-wait-a', sourceResultId: waitingChildrenDone.find(work => work.planItemId === 'item-wait-a').results.at(-1).id, plannedQuantity: 10, completedQuantity: 4 })
-  assertProvenanceRejects(await store.read(), waiting.value.id)
+  const cycleResult = waitingChildrenDone.find(work => work.planItemId === 'item-wait-b').results.at(-1)
+  assert.equal(cycleResult.payload.quantity, 6)
+  assert.equal(cycleResult.inputProvenance, undefined)
   const waitingReplay = await service.continueCollaboration(actor, waiting.value.id, { clientRequestId: 'waiting-successor', inputs: { 'item-wait-b': { availableSeconds: 99 } } })
   assert.equal(waitingReplay.deduplicated, true)
   assert.equal((await store.read()).works.find(work => work.planItemId === 'item-wait-b' && work.rootWorkId === waiting.value.id).executions.length, 1)
-
-  capture.setWorkOrder(12, 5)
-  const changedFacts = await create(service, actor, 'changed-facts', [
-    { id: 'item-changed-a', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取变化后的当前工单事实', input: { workOrderId: 'WO-CANCEL' } },
-    { id: 'item-changed-b', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '按变化后的事实计算', input: { availableSeconds: 3500 }, dependsOn: ['item-changed-a'] },
-  ])
-  await waitFor(service, actor, changedFacts.value.id, work => work.status === 'completed')
-  const changedChild = (await store.read()).works.find(work => work.rootWorkId === changedFacts.value.id && work.planItemId === 'item-changed-b')
-  assert.equal(changedChild.results.at(-1).payload.quantity, 7)
-  assert.deepEqual([changedChild.results.at(-1).inputProvenance.quantity.plannedQuantity, changedChild.results.at(-1).inputProvenance.quantity.completedQuantity], [12, 5])
-  capture.setWorkOrder(4, 4)
-  const noRemaining = await create(service, actor, 'no-remaining', [
-    { id: 'item-zero-a', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取无剩余工单', input: { workOrderId: 'WO-CANCEL' } },
-    { id: 'item-zero-b', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '等待正数剩余数量', input: { availableSeconds: 600 }, dependsOn: ['item-zero-a'] },
-  ])
-  await waitFor(service, actor, noRemaining.value.id, work => work.status === 'waiting_input')
-  const noRemainingChild = (await store.read()).works.find(work => work.rootWorkId === noRemaining.value.id && work.planItemId === 'item-zero-b')
-  assert.equal(noRemainingChild.input.quantity, undefined)
-  assert.deepEqual(noRemainingChild.requiredInputs, ['quantity'])
-  assert.equal(noRemainingChild.executions.length, 0)
-  assert.equal((await service.continueCollaboration(actor, noRemaining.value.id, { clientRequestId: 'zero-client-quantity', inputs: { 'item-zero-b': { quantity: 1 } } })).error.status, 400)
-
-  const ambiguous = await create(service, actor, 'ambiguous-source', [
-    { id: 'item-ambiguous-a', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取来源 A', input: { workOrderId: 'WO-CANCEL' } },
-    { id: 'item-ambiguous-b', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id, goal: '读取来源 B', input: { workOrderId: 'WO-CANCEL' } },
-    { id: 'item-ambiguous-cycle', employeeId: 'employee-b', skillId: 'skill-cycle-time-calculate', goal: '不得猜测来源', input: { availableSeconds: 600 }, dependsOn: ['item-ambiguous-a', 'item-ambiguous-b'] },
-  ])
-  await waitFor(service, actor, ambiguous.value.id, work => work.status === 'waiting_input')
-  const ambiguousState = await store.read(), ambiguousRoot = ambiguousState.works.find(work => work.id === ambiguous.value.id), ambiguousChild = ambiguousState.works.find(work => work.rootWorkId === ambiguous.value.id && work.planItemId === 'item-ambiguous-cycle')
-  const ambiguousSource = ambiguousState.works.find(work => work.id === ambiguousRoot.plan.items[0].childWorkId).results.at(-1)
-  ambiguousChild.input.quantity = 0.5
-  ambiguousChild.inputProvenance = { quantity: { kind: 'gearjob.remaining-quantity', sourcePlanItemId: 'item-ambiguous-a', sourceResultId: ambiguousSource.id, plannedQuantity: 4, completedQuantity: 3.5 } }
-  assert.throws(() => migrateState(ambiguousState), /唯一当前 GearJob 交接/)
-  capture.setWorkOrder(10, 4)
 
   await assert.rejects(service.updateCollaborationPlan(actor, completed.id, { expectedRevision: 1, items: [{ id: 'item-a', goal: '不可改已完成' }] }), error => error.code === 'BUSY')
   assert.equal((await service.continueCollaboration(actor, completed.id, { clientRequestId: 'normal-completed' })).error.status, 409)
@@ -325,8 +308,8 @@ try {
 
   capture.holdTool()
   const toolCancelling = await create(service, actor, 'tool-cancel', [{
-    id: 'item-tool-cancel', employeeId: 'employee-a', skillId: 'skill-gearjob-work-order-read', connectionId: gearConnection.id,
-    goal: '读取后取消', input: { workOrderId: 'WO-CANCEL' },
+    id: 'item-tool-cancel', employeeId: 'employee-a', skillId: 'skill-kivo-tpm-record-read', connectionId: tpmConnection.id,
+    goal: '读取后取消', input: { recordType: 'repair', reference: 'R-1' },
   }])
   const toolIndependent = await create(service, actor, 'tool-independent', [item('item-tool-independent', 'employee-b', 60, 2)])
   await capture.waitForTool()
@@ -399,7 +382,7 @@ try {
   let deferredWorkId
   const deferredService = createWorkService({
     store,
-    connectionCatalog: [gearConnection],
+    connectionCatalog: [tpmConnection],
     collaborationRunner: {
       run(id) { deferredWorkId = id; return Promise.resolve() },
       cancel: (...args) => runner.cancel(...args),
@@ -529,7 +512,7 @@ try {
 if (failure) throw failure
 console.log('P3 collaboration runtime checks passed')
 
-function seed(state, gearConnection) {
+function seed(state, tpmConnection) {
   const now = '2026-09-19T00:00:00.000Z'
   const employeeIds = ['employee-lead', 'employee-a', 'employee-b', 'employee-revoked', 'employee-incompatible']
   return {
@@ -541,19 +524,19 @@ function seed(state, gearConnection) {
     modelRoutes: [{ id: 'model-zenmux', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     skills: [
       { id: 'skill-cycle-time-calculate', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true },
-      { id: 'skill-gearjob-work-order-read', name: '工单读取', capabilityId: 'gearjob-work-order-read', enabled: true },
+      { id: 'skill-kivo-tpm-record-read', name: 'TPM 读取', capabilityId: 'kivo-tpm-record-read', enabled: true },
     ],
-    connections: [gearConnection],
+    connections: [tpmConnection],
     employees: employeeIds.map(id => ({
       id, name: id, enabled: id !== 'employee-revoked', modelRouteId: 'model-zenmux',
-      connectionIds: ['employee-a', 'employee-incompatible'].includes(id) ? [gearConnection.id] : [],
-      skillIds: id === 'employee-a' ? ['skill-cycle-time-calculate', 'skill-gearjob-work-order-read'] : id === 'employee-incompatible' ? ['skill-gearjob-work-order-read'] : ['skill-cycle-time-calculate'],
+      connectionIds: ['employee-lead', 'employee-a', 'employee-incompatible'].includes(id) ? [tpmConnection.id] : [],
+      skillIds: ['employee-lead', 'employee-a'].includes(id) ? ['skill-cycle-time-calculate', 'skill-kivo-tpm-record-read'] : id === 'employee-incompatible' ? ['skill-kivo-tpm-record-read'] : ['skill-cycle-time-calculate'],
     })),
   }
 }
 
-function connection(baseUrl) {
-  return { id: 'connection-gear', name: 'GearJob test', kind: 'gearjob-rest', targetIdentity: 'local-capture', baseUrl, credentialRef: 'gearjob.json', allowedObjectIds: ['WO-CANCEL'], sourceSystem: 'GearJob', sourceInstance: 'local-capture', sourceEnvironment: 'test', dataMode: 'synthetic', evidenceMode: 'controlled', enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'], revision: 1 }
+function connection(issuer) {
+  return { id: 'connection-tpm', name: 'Kivo TPM test', kind: 'kivo-mcp', targetIdentity: 'local-capture', baseUrl: `${issuer}/api/v1/mes/mcp`, issuer, clientId: '00000000-0000-4000-8000-000000000003', credentialRef: 'kivo.pem', allowedObjectIds: [], sourceSystem: 'Kivo', sourceInstance: 'local-capture', sourceEnvironment: 'test', dataMode: 'synthetic', evidenceMode: 'controlled-mcp', enabled: true, status: 'ready', skillIds: ['skill-kivo-tpm-record-read'], revision: 1 }
 }
 
 function item(id, employeeId, availableSeconds, quantity) {
@@ -579,6 +562,52 @@ function assertClosedGraphRejects(state, rootWorkId) {
     const foreignResult = value.works.find(work => work.id === childIds[1]).results[0].id
     current.handoffs.find(handoff => handoff.childWorkId === childIds[0]).resultRefs = [foreignResult]
   })
+}
+
+function assertHistoricalQuantityChecks() {
+  // These are existing facts, never new GearJob work or TPM quantity derivation.
+  for (const [planned, completed] of [[10, 4], [12, 5]]) {
+    const fixture = historicalQuantityState(planned, completed), state = migrateState(fixture)
+    assert.deepEqual(state.works, fixture.works)
+    const observation = state.works[1].results[0]
+    assert.equal(observation.kind, 'gearjob.work-order.observation')
+    assert.equal(observation.payload.observationId, observation.id)
+    assert.equal(observation.payload.queriedAt, observation.createdAt)
+    assert.equal(observation.payload.dshSessionRef, observation.dshSessionRef)
+    assert.deepEqual(observation.source, Object.fromEntries(['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'sourceRecordId', 'sourceRevision', 'sourceTime'].map(key => [key, observation.payload[key]])))
+    assert.equal(state.works.at(-1).results[0].payload.quantity, planned - completed)
+    assertProvenanceRejects(state, 'history-root')
+    const zero = structuredClone(fixture)
+    zero.works.at(-1).inputProvenance.quantity.completedQuantity = planned
+    assert.throws(() => migrateState(zero), /派生数量/)
+  }
+  assert.throws(() => migrateState(historicalQuantityState(10, 4, 2)), /唯一当前 GearJob 交接/)
+}
+
+function historicalQuantityState(planned, completed, sourceCount = 1) {
+  const at = '2026-09-19T00:00:00.000Z', quantity = planned - completed
+  const resultBase = { schemaVersion: 1, createdAt: at, dshSessionRef: 'history-session', contextConfirmationRefs: [], generation: 1, employeeId: 'history-agent' }
+  const workBase = { ownerMemberId: 'history-owner', employeeId: 'history-agent', conversationId: null, requiredInputs: [], status: 'completed', acceptedAt: at, actions: [] }
+  const sourceChildren = Array.from({ length: sourceCount }, (_, index) => {
+    const id = `history-source-${index}`, resultId = `history-observation-${index}`
+    const source = { sourceSystem: 'GearJob', sourceInstance: 'historical-fixture', sourceEnvironment: 'external-test', dataMode: 'synthetic', evidenceMode: 'controlled', sourceRecordId: 'Work Order:WO-HISTORY', sourceRevision: 'revision-1', sourceTime: at }
+    const result = { ...resultBase, id: resultId, kind: 'gearjob.work-order.observation', capabilityId: 'gearjob-work-order-read', skillId: 'skill-gearjob-work-order-read', input: { workOrderId: 'WO-HISTORY' },
+      payload: { ...source, observationId: resultId, workOrderId: 'WO-HISTORY', status: 'In Process', plannedQuantity: planned, completedQuantity: completed, completion: { ratio: completed / planned, overPlan: false }, queriedAt: at, dshSessionRef: resultBase.dshSessionRef },
+      source, toolName: 'geneway_gearjob_read_work_order', pluginId: 'geneway-gearjob-work-order', handoffRefs: [`handoff-${id}`] }
+    return { ...workBase, id, parentWorkId: 'history-root', rootWorkId: 'history-root', workType: 'collaboration-child', planItemId: id, collaborationGeneration: 1, skillId: result.skillId, capabilityId: result.capabilityId, connectionId: 'history-connection', input: result.input, results: [result], executions: [{ id: `execution-${id}`, status: 'completed', generation: 1, resultId }] }
+  })
+  const input = { availableSeconds: 3600, quantity }, inputProvenance = { quantity: { kind: 'gearjob.remaining-quantity', sourcePlanItemId: sourceChildren[0].id, sourceResultId: sourceChildren[0].results[0].id, plannedQuantity: planned, completedQuantity: completed } }
+  const cycle = { ...workBase, id: 'history-cycle', parentWorkId: 'history-root', rootWorkId: 'history-root', workType: 'collaboration-child', planItemId: 'history-cycle', collaborationGeneration: 1, skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', input, inputProvenance,
+    results: [{ ...resultBase, id: 'history-takt', kind: 'manufacturing.takt', capabilityId: 'cycle-time-calculate', skillId: 'skill-cycle-time-calculate', input, inputProvenance, payload: { ...input, secondsPerUnit: 3600 / quantity, unit: 'seconds/unit' }, toolName: 'geneway_calculate_cycle_time', pluginId: 'geneway-cycle-time', pluginVersion: '1', handoffRefs: ['handoff-history-cycle'] }],
+    executions: [{ id: 'execution-history-cycle', status: 'completed', generation: 1, resultId: 'history-takt' }] }
+  const children = [...sourceChildren, cycle], resultRefs = children.map(child => child.results[0].id), handoffRefs = children.map(child => `handoff-${child.id}`)
+  const root = { ...workBase, id: 'history-root', workType: 'collaboration', skillId: cycle.skillId, capabilityId: cycle.capabilityId, input: {},
+    collaboration: { generation: 1, cancelGeneration: 0, status: 'completed', requestLimit: 12, requestCount: 6, childLimit: 4, maxConcurrentChildren: 2, rootTimeoutMs: 360000, childTimeoutMs: 120000, outputMaxTokens: 4096, childWorkIds: children.map(child => child.id), summaryResultRefs: resultRefs, staleKnowledgeRefs: [], staleItemIds: [] },
+    plan: { revision: 1, items: children.map(child => ({ id: child.id, childWorkId: child.id, goal: '历史事实', employeeId: child.employeeId, status: 'completed', dependsOn: child === cycle ? sourceChildren.map(source => source.id) : [] })) },
+    handoffs: children.map(child => ({ id: `handoff-${child.id}`, childWorkId: child.id, fromEmployeeId: child.employeeId, toEmployeeId: 'history-agent', resultRefs: [child.results[0].id], knowledgeRefs: [], revision: 1, generation: 1, status: 'current', createdAt: at })),
+    results: [{ ...resultBase, id: 'history-summary', kind: 'assistant.collaboration-summary', capabilityId: cycle.capabilityId, skillId: cycle.skillId, input: {}, payload: { resultRefs }, handoffRefs }],
+    executions: [{ id: 'execution-history-root', generation: 1, status: 'completed', resultId: 'history-summary' }] }
+  return { version: 8, members: [{ id: 'history-owner', loginName: 'history', authRef: 'history', role: 'member', enabled: true, sessionVersion: 1, employeeIds: ['history-agent'] }], modelRoutes: [], employees: [{ id: 'history-agent' }], connections: [], skills: [], confirmations: [], knowledgeMaterials: [], channelApps: [], channelIdentities: [], channelConversations: [], channelMessages: [], deliveries: [], linkCodes: [], automationRules: [], automationOccurrences: [], works: [root, ...children], reservations: {} }
 }
 
 function assertProvenanceRejects(state, rootWorkId) {
@@ -613,16 +642,19 @@ async function startCapture() {
   let requests = 0, activeChildren = 0, maxActiveChildren = 0
   const holds = new Set(), pending = new Map(), seen = new Set(), counts = new Map(), sequences = new Map(), scenarioTools = new Map()
   let sequence = 0
-  let holdToolRequest = false, toolPending, toolAborted = false, plannedQuantity = 10, completedQuantity = 4
+  let holdToolRequest = false, toolPending, toolAborted = false
+  const tpmCalls = []
   const server = createServer(async (request, response) => {
-    if (request.method === 'GET' && request.url?.includes('/api/resource/Work%20Order/')) {
-      if (holdToolRequest) {
-        toolPending = response
-        response.on('close', () => { if (!response.writableEnded) toolAborted = true; toolPending = undefined })
-        return
-      }
-      response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ data: { name: 'WO-CANCEL', status: 'In Process', qty: plannedQuantity, produced_qty: completedQuantity } }))
+    if (request.url !== '/v1/chat/completions') {
+      try {
+        await serveKivo(request, response, connection(`http://127.0.0.1:${server.address().port}`), rpc => {
+          tpmCalls.push(rpc.params)
+          if (!holdToolRequest) return false
+          toolPending = response
+          response.on('close', () => { if (!response.writableEnded) toolAborted = true; toolPending = undefined })
+          return true
+        })
+      } catch (error) { runtimeFailure = error; response.writeHead(500); response.end('synthetic MCP fixture failed') }
       return
     }
     const body = await readJson(request)
@@ -634,7 +666,7 @@ async function startCapture() {
     if (scenario !== 'root-summary' && !hasToolResult) { activeChildren += 1; maxActiveChildren = Math.max(maxActiveChildren, activeChildren) }
     const visibleTools = (body.tools ?? []).map(entry => entry.function?.name ?? entry.name)
     scenarioTools.set(scenario, visibleTools)
-    const businessTool = visibleTools.find(name => ['geneway_calculate_cycle_time', 'geneway_gearjob_read_work_order'].includes(name))
+    const businessTool = visibleTools.find(name => ['geneway_calculate_cycle_time', KIVO_TPM_TOOLS.readRecord].includes(name))
     const summaryRefs = [...new Set(serialized.match(/result-[a-f0-9-]+/g) ?? [])]
     const knowledgeScenario = scenario.includes('knowledge') && visibleTools.includes('geneway_knowledge_search')
     const skipSearch = scenario.includes('negative-unsearched')
@@ -643,7 +675,6 @@ async function startCapture() {
         : knowledgeScenario && toolResultCount === 1 && skipSearch ? 'geneway_knowledge_submit_references'
         : knowledgeScenario && toolResultCount === 2 && !skipSearch ? 'geneway_knowledge_submit_references'
           : hasToolResult ? 'structured_output' : businessTool
-    const inputMatch = serialized.match(/\\?"availableSeconds\\?":(\d+),\\?"quantity\\?":(\d+)/)
     const complete = () => sendCompletion(response, body.model, tool, tool === 'structured_output'
       ? { status: 'done', explanation: knowledgeScenario ? `${scenario} KNOWLEDGE-CANARY knowledge-runtime employee-b collaboration-child 已完成` : `${scenario} 已完成` }
       : tool === 'geneway_collaboration_submit_summary' ? { resultRefs: summaryRefs }
@@ -653,8 +684,7 @@ async function startCapture() {
         revision: scenario === 'item-knowledge' ? 1 : scenario.includes('sibling') ? 1 : scenario.includes('bad-revision') ? 2 : (scenario.includes('shared') || scenario.includes('gate') || scenario.includes('negative') || scenario.includes('old-generation')) ? 3 : 2,
         segmentId: scenario.includes('bad-segment') ? 'p9-c9' : 'p1-c1',
       }] }
-      : tool === 'geneway_gearjob_read_work_order' ? { workOrderId: 'WO-CANCEL' }
-        : { availableSeconds: Number(inputMatch?.[1] ?? 3600), quantity: Number(inputMatch?.[2] ?? 6) },
+      : tool === KIVO_TPM_TOOLS.readRecord || tool === 'geneway_calculate_cycle_time' ? canonicalBusinessInput(body) : undefined,
     scenario === 'root-summary' && !tool ? `后置事实汇总已完成 ${summaryRefs.join(' ')} employee-lead item-knowledge collaboration-root` : undefined)
     seen.add(scenario)
     sequences.set(scenario, ++sequence)
@@ -684,7 +714,7 @@ async function startCapture() {
     scenarioCount: scenario => counts.get(scenario) ?? 0,
     sequence: scenario => sequences.get(scenario) ?? 0,
     tools: scenario => scenarioTools.get(scenario) ?? [],
-    setWorkOrder(planned, completed) { plannedQuantity = planned; completedQuantity = completed },
+    get tpmCalls() { return tpmCalls },
     holdTool() { holdToolRequest = true },
     async waitForTool() {
       const deadline = Date.now() + 5000
@@ -721,7 +751,52 @@ function sendCompletion(response, model, tool, args, content = '后置事实汇�
 }
 
 async function readJson(request) {
-  let raw = ''
-  for await (const chunk of request) raw += chunk
-  return JSON.parse(raw || '{}')
+  return JSON.parse(await readBody(request) || '{}')
+}
+
+async function readBody(request) { let raw = ''; for await (const chunk of request) raw += chunk; return raw }
+
+function canonicalBusinessInput(body) {
+  const text = body.messages.map(message => typeof message.content === 'string' ? message.content : (message.content ?? []).map(part => part.text ?? '').join('\n')).join('\n')
+  const marker = text.includes(' exactly once with ') ? ' exactly once with ' : '参数必须精确为 '
+  assert(text.includes(marker), 'canonical business input missing')
+  const start = text.indexOf('{', text.indexOf(marker) + marker.length)
+  let depth = 0, quoted = false, escaped = false
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index]
+    if (quoted) { if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === '"') quoted = false }
+    else if (char === '"') quoted = true
+    else if (char === '{') depth += 1
+    else if (char === '}' && --depth === 0) return JSON.parse(text.slice(start, index + 1))
+  }
+  assert.fail('canonical business input JSON missing')
+}
+
+async function serveKivo(request, response, target, onCall) {
+  const path = new URL(request.url, target.issuer).pathname
+  const send = (status, value, headers = {}) => { response.writeHead(status, { 'content-type': 'application/json', ...headers }); response.end(JSON.stringify(value)) }
+  if (path === '/.well-known/oauth-protected-resource/api/v1/mes/mcp') return send(200, { resource: target.baseUrl, authorization_servers: [target.issuer], scopes_supported: KIVO_MCP_SCOPE.split(' '), bearer_methods_supported: ['header'] })
+  if (path === '/.well-known/oauth-authorization-server') return send(200, { issuer: target.issuer, authorization_endpoint: `${target.issuer}/api/v1/oauth/authorize`, token_endpoint: `${target.issuer}/api/v1/oauth/token`, grant_types_supported: ['client_credentials'], response_types_supported: [], token_endpoint_auth_methods_supported: ['private_key_jwt'], token_endpoint_auth_signing_alg_values_supported: ['RS256'] })
+  if (path === '/api/v1/oauth/token') {
+    assert.equal(request.method, 'POST')
+    const form = new URLSearchParams(await readBody(request)), jwt = form.get('client_assertion').split('.'), claims = JSON.parse(Buffer.from(jwt[1], 'base64url'))
+    assert.equal(form.get('resource'), target.baseUrl); assert.equal(form.get('scope'), KIVO_MCP_SCOPE)
+    assert.equal(claims.sub, target.clientId); assert.equal(claims.aud, target.issuer)
+    assert(verify('RSA-SHA256', Buffer.from(`${jwt[0]}.${jwt[1]}`), keys.publicKey, Buffer.from(jwt[2], 'base64url')))
+    return send(200, { access_token: 'synthetic-kivo-token', token_type: 'Bearer', expires_in: 300, scope: KIVO_MCP_SCOPE })
+  }
+  assert.equal(path, '/api/v1/mes/mcp'); assert.equal(request.method, 'POST')
+  const rpc = await readJson(request)
+  if (request.headers.authorization !== 'Bearer synthetic-kivo-token') return send(401, { error: 'invalid_token' }, { 'www-authenticate': `Bearer resource_metadata="${target.issuer}/.well-known/oauth-protected-resource/api/v1/mes/mcp", error="invalid_token"` })
+  const reply = value => send(200, { jsonrpc: '2.0', id: rpc.id, result: { resultType: 'complete', ...value } })
+  if (rpc.method === 'server/discover') return reply({ supportedVersions: ['2026-07-28'], capabilities: { tools: {} }, ttlMs: 0, cacheScope: 'private' })
+  if (rpc.method === 'tools/list') return reply({ tools, ttlMs: 0, cacheScope: 'private' })
+  assert.equal(rpc.method, 'tools/call')
+  const expected = { 'tpm.repair.get': { orderNo: 'R-1' }, 'devices.device.get': { deviceId } }[rpc.params.name]
+  assert(expected, 'unexpected synthetic MCP tool'); assert.deepEqual(rpc.params.arguments, expected)
+  if (onCall?.(rpc)) return
+  const value = rpc.params.name === 'devices.device.get' ? { id: deviceId, code: 'D-1', name: '合成设备', lifecycleStatus: 'active', connectionStatus: 'unknown', operationStatus: 'unknown', summaryStatus: 'unknown', summaryReason: null, organizationUnitId: recordId, organizationName: 'synthetic' }
+    : { id: recordId, deviceId, orderNo: 'R-1', status: 'reported', reporterId: null, executorId: null, acceptedById: null, revision: 1, createdAt: fixtureTime, updatedAt: fixtureTime, reopenedFrom: null, detail: { reason: 'TPM-FACT-CANARY' } }
+  const result = { status: 'ok', source: { system: 'kivo', path: tpmSourcePath(rpc.params), queriedAt: fixtureTime, traceId: request.headers['x-trace-id'] }, value }
+  return reply({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result })
 }

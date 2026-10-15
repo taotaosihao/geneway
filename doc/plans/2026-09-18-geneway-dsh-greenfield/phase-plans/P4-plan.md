@@ -1,291 +1,286 @@
-# P4 多渠道与移动工作入口详细计划
+# P4 Agent、成员会话、Kivo TPM 与多渠道详细计划
 
-> **合同 v4.3 注记（2026-10-15）**：**本计划按合同 v4.3 重规划中，暂停新的实施任务。**下文“唯一有效计划 / ready frontier 可实施”的状态被本注记取代，直到 planner team 在本文件内完成原位重规划。已实现且仍适用的投递状态、发送前复核、关联码、群聊保守规则与飞书运行时保留；命令式渠道路由与“员工+技能”默认派发须改为渠道会话与默认 Agent；企业微信不再是必达项，微信改为 Geneway 内置并复用 dsh-im iLink 实现（合同 §5.4）。合同中的 DSH 升级任务编号为 P4-U0，与本计划已执行的 P4-T0 飞书真实接口探针不同。阶段末真人验收与“真实两个渠道主链”要求已由合同 §5.4 渠道模拟验收取代（本地 iLink 模拟服务器、飞书 SDK 事件注入，须经过实际渠道通道代码）。
+> 合同 v4.4 原位重规划，形成时间：2026-10-15T10:32:00Z。本文替换旧 P4 的当前执行正文；旧提交和报告仅作历史，不恢复 GearJob 主链、企业微信 deferred、真人渠道或公网手机入口等已被新决定取代的门。依据为合同全文、clarification-notes.md §10/11、P1–P6 计划顶部注记，以及用户本轮最新目标。
 
-> **合同 v4.4 注记（2026-10-15）**：业务系统由 GearJob 改为 Kivo TPM。新增切片 P4-K0：在 Kivo 建机器账号与 OAuth 授权，并在 `mes-api` 内按 MCP 2026-07-28 规范建 MCP 端点与 TPM 只读工具（Kivo 只保留一套 MCP：`agent-mcp` 演进为唯一实现库，制造方法快照工具迁到 `fms-api` 后下线 stdio，须在恢复 P6 前完成），Geneway 新建 Kivo 业务插件替换 GearJob，并重新验证 J1、J4、J6 的业务部分及 Kivo 路径上的 AC-06/07/09/10/11/12 与 J2；P4-U0 只回归与业务来源无关的部分；与 P4-S1、P4-U0 可并行，须纳入本计划的原位重规划（合同 §5.6、§9）。
+状态：**Team Astra 原位规划、独立过度设计和计划正确性复审均通过；U0、S1-A、K0-A及C2有限协议探针具备实施条件，其余按依赖展开。P4产品尚未验收。** 用户已授权全量本地实施与本地提交。FMS锁定工具与机器写策略的范围另见§8，未决仅阻塞相关写迁移及后续P6恢复。
 
-状态：**Team Astra 规划已收敛；通用 ready frontier 可实施；真实渠道分支仍有用户决策与外部账号门。P4 尚未完成。**
+## 1. 目标、当前事实与边界
 
-基线：`20c4ea879a7d12a6035a8b913c696a2bb54e8415`（P3 产品候选 `5bc9bafbdf12d0edd44247161c17d320d6003a33`）。
+本阶段交付：P4-S1 后台 Agent 与隔离的成员 Web 会话；P4-U0 DSH 最新版升级；P4-K0 Kivo TPM 只读主链；渠道会话、「我的渠道」、内置微信及既有飞书运行时的完整模拟验收。S1 单独先交付视频和离线说明，最终 P4 再在同一集成候选回归。P4 通过后才原位规划 P5-K1，再原位重规划 P6，最后规划 P7。每阶段继续采用两名独立 Astra planner、未参与规划的过度设计 reviewer和 Team Sol 实施，不提前实施下阶段。
 
-本计划是 P4 唯一有效计划。它不授权创建或使用真实渠道应用、向真实人员发送产品消息、暴露网络入口、部署或发布；这些动作分别核对下文权限门。
+覆盖 G1/G3/G4/G6/G9；J1/J4/J6 业务部分改为 Kivo，J2 及相关连续性回归，J7/J11/J12 的 Web/渠道路径；AC-02/05/14、AC-25 只读，Kivo 路径 AC-06/07/09/10/11/12，AC-16/17/23/24。DSH 升级同时回归受影响的来源无关能力。AC-25 写工具、两来源关联、维修单创建留在 P6；签名 webhook、对账补偿和回声识别留在 P5-K1。
 
-## 1. 阶段目标、覆盖与非目标
+### 1.1 已观察的基线
 
-P4 交付 G6、J7、J11 的渠道与移动部分，以及 AC-16、AC-17：Web、真实飞书和用户明确选择的真实微信通道进入同一套成员、工作和消息关联；两个真实渠道分别完成文字交办、反馈、补充、在 Web 继续同一 `workId`，并从 Web 向该工作的已验证渠道回复。重复、回声、乱序、失败、恢复和权限变化不能重复执行或越权发送，手机可完成关键操作。
+| 事实 | 证据与含义 |
+|---|---|
+| 主机、工作树与分支 | gewu-office 对应本机地址；`/home/gewu/.devspace/worktrees/geneway-f4222c66`，`rebuild/dsh-greenfield@4702ae20e7b0f26a1ccf3ed2186f370b0859f378`。SSH 只读身份检查曾因 host key verification 失败，未改信任设置；后续在已核对的本机路径操作。 |
+| 工作树 | 规划开始时仅用户未跟踪的 `ui-sketches*`；全部不改、不暂存、不清理。 |
+| DSH | 根清单三个直接 `@deepseek-ai/*` 仍为 `0.1.6-alpha.2`，不是已升级；飞书 SDK 已锁 `1.74.0`。升级目标以 U0 开始时 npm dsh latest 实际值为准。 |
+| 产品事实源 | `src/store/file-store.mjs` 已 v8，临时文件 sync→rename→父目录 sync；没有成员对话集合。旧 `channelConversations` 是平台收发地址而非成员对话。 |
+| Agent 与会话 | `work-service` 已有 employees 管理与成员 employeeIds 授权；缺独立指令/成员对话。`dsh-runner` 强制 work metadata 与一次预期业务工具，不能直接承担零 work 即时问答。 |
+| 授权 | `work-service.updateMember` 对 employeeIds 修改提升 sessionVersion；`action-service` 旧批准摘要依赖它。取消强制登出前须补永久作废待执行批准，避免移出再加回复活。 |
+| 渠道 | `channel-service` 仍按命令与 defaultDispatch 派发 GearJob；飞书已有持久收件、官方 EventDispatcher 注入、发送前 claim、failed/unknown，保留。自动通知仍指向 notificationConversationId。 |
+| 恢复 | `scripts/state-transfer.mjs` 只收集 works 的 Session，需扩展对话谱系；普通备份不含秘密。 |
+| 模型 | `runtime-config.mjs` 默认读 Claude settings，历史模型路由为 ZenMux。当前合法 Geneway secret ref、可用性未验证；不得扫描/搬运旧项目秘密。 |
+| Kivo | 只读 `git show/ls-tree` 核对 `/home/gewu/work/kivo` 的 `deploy/dongguan-airui@26182fccf35d915982ea844ec71db58970a99c04`。尚未 clone、安装或启动。共享 platform-api/platform-db 已存在；agent-mcp 现有 stdio/单 token 方法快照工具；MES 为 Nest/Fastify。 |
+| 历史验证 | P1/P2/P3/P5 与 P6-T1/T2/T3 证据只覆盖各自原候选和旧来源。保留代码可回归；不把历史 GearJob/Hive 证明换名为 Kivo。 |
 
-`W-Feishu` 与 `W-WeChat` 可以是两个独立工作；合同不要求自动合并两个渠道发起的工作，也不要求跨平台转发。每个工作必须在自己的渠道和 Web 间保持同一 `workId`。
+规划阶段未运行产品、探针或测试，未读取秘密值。后文拟建入口均不是已通过证据。
 
-首版渠道消息范围限定为：
+### 1.2 权限与非目标
 
-- 接收和发送纯文本；渠道中必须出现可读的业务反馈，不能只给链接；
-- 可发送经过认证的 Web 工作/结果链接，承载来源、复杂配置和详细结果；
-- 图片、文件、语音、视频、卡片中的任意外链均明确拒绝，不抓取、不自动入知识库、不触发业务；提示用户到 Web 导入 P3 已支持的 `.txt/.md`；
-- 渠道自由文字“补充/追问”只映射现有 `followUp`，不猜测 `continueWork` 的结构化字段；活动执行期间明确提示“已收到但本轮未应用，待本轮结束后重新提交”，不新增输入队列。
+- Geneway 只在当前树实施；Kivo 从本地源仓库独立 clone 到 `/home/gewu/.devspace/worktrees/kivo-geneway-mcp`，新分支 `codex/geneway-kivo-mcp`。不得访问/修改 `~/.codex/worktrees/bd52/kivo`，不得对共享源仓库 fetch/prune/改写 refs，不修改其他仓库。
+- 允许两个独立本机 MES 测试实例、synthetic 数据、开发测试 License、独立 JWT/通知秘密及 worker 身份；启动前证明 DB/Redis/端口隔离。实例和 Geneway 均只监听 loopback。
+- 产品渠道仅本地 iLink 模拟器与飞书官方 SDK 事件注入；不向真实成员发送产品消息，不扫描真实联系人/群。`lark-cli` 向用户发送验收材料是单独已授权工程交付。
+- 仅本地提交，禁止 push、PR、合入、部署、发布或网络暴露。管理员默认无成员会话/工作正文读取权。
+- 不建第二 AgentLoop、每成员 Host、消息总线、通用队列、DSL、权限中心或 MCP 实现；不增加 PLC、设备控制、配置或报警处置工具。即时聊天不强造 work。
+- 产品决策在团队讨论后由主代理落定；改变业务目标、写动作或授权范围必须询问用户，等待仅限依赖路径。用户负责阶段最终验收；内部技术通过与用户验收分别记录。
 
-P4 不实现通用消息总线、分布式队列、通用审批引擎、跨渠道自动合并、任意附件平台、远端消息撤回保证、已读保证、个人微信逆向协议、自写 AgentLoop、生产部署或发布认证。P4 切片本身不实现 P5 主动任务或 P6 业务写入；P5 的后续顺序按 §10 的用户更新决定执行。
+## 2. 真实规划参与及最小方案
 
-## 2. Team Astra 规划与裁决
+### 2.1 参与者和原始结果
 
-### 2.1 独立规划者
+- `/root/p4_product_planner`，`atlas-sdd-planner`，明确派发 `gpt-6-astra/high`：独立产品、会话、渠道、恢复与普通入口意见；已返回完整报告。
+- `/root/p4_engineering_planner`，相同模型/角色：独立源码、升级、授权、Kivo边界和验证意见；已返回完整报告。
+- 两人均收到同一合同/范围/限制，先独立阅读并报告，随后只讨论实质取舍。原始返回保留于本次协作消息，不复制正式报告包；工作流任务复用 `20260919-006-geneway-dsh-greenfield`。
+- `/root/p4_overdesign_v44`，atlas-sdd-reviewer，gpt-6-astra/medium：未参与规划/实现，独立静态有界消融通过，并复核最终三处增量；无新增复杂度阻断。
+- `/root/p4_plan_correctness_v44`，atlas-sdd-phase-reviewer，gpt-6-astra/medium：独立计划正确性/合同覆盖通过，无剩余问题；未代签复杂度或运行验收。主代理持原始返回确认两planner实际独立参与、先独立后讨论。
+- 两审查覆盖的内容候选blob为`cf93325bd9cbde1c3d2061085e3e46b712f2ecaa`；其后仅将本节/状态/消融表的待审文字更新为真实结论，没有先行实施。
+- 精确模型路由的工具接纳与有效只读结果已观察；未做计费级模型核实，不宣称已证明计费模型。
 
-- 工程/安全 planner：`/root/p4_astra_engineering_plan`，`gpt-6-astra` / high，只读；检查 P3 代码、v5 store、auth/cookie、work/knowledge/runtime、恢复、渠道可靠性与真实验收边界。
-- 产品/渠道 planner：`/root/p4_astra_product_plan`，`gpt-6-astra` / high，只读；检查合同、WorkBuddy 界面、J7、移动路径、身份关联、群聊、投递状态和失败恢复。
+两份首轮及后续实质讨论均支持：现有 employees 和 members 授权唯一事实源；一种成员对话；保留 work 独立 Session/取消；身份与平台地址独立；通知指向 identity；重新绑定新 identity；微信仅协议文件复用；唯一 agent-mcp 与共享机器授权；U0/S1 核心文件单写者。未选择另建 Agent Preset、权限副本、dsh-im Host 或第二 MCP。
 
-两者先独立返回，再交换并收敛以下实质问题：是否跨渠道合并同一 work、群聊最小安全输出、文本/链接范围、飞书长连接的证据边界、v6 与外发授权模型、微信未决时的 ready frontier。最终均返回 `CONSENSUS`，无阻止 ready frontier 的工程分歧。
+### 2.2 主代理产品裁决
 
-### 2.2 主代理裁决
+1. 后台沿用员工入口，显示 Agent 配置与开放成员。开放关系只改 members[].employeeIds；不另存 Agent allowedMemberIds。默认 Agent 为一个产品配置引用，成员未选择渠道 Agent 时仅在其当前获准且启用时采用；不可用要求明确选择，不静默换人。
+2. `conversations` 为唯一成员对话类型，Web/渠道仅来源不同；旧平台 `channelConversations` 保留名称和传输职责，避免无收益改名迁移。群地址不构成共享成员会话。
+3. 同一对话仅一个活动回复；忙碌明确本次未应用，不增输入队列。关联 work 可各自执行，取消范围不合并。
+4. 渠道轮换使旧对话成为历史；仍可由本人在 Web 查看和继续，不隐式停工作。已持久消息固定受理时 conversationId；新消息使用新指针。渠道不接入旧对话，引用旧对话工作引导 Web。本人从 Web 继续后仍可在当前身份/发送权限允许时显式回复原渠道，不重新激活旧对话。
+5. 新绑定必须新 identityId 与新对话；有效绑定唯一，历史 tombstone 保留。普通会话轮换不提升身份授权 revision，不撤销合法工作投递或主动通知。
+6. 私聊文本为当前渠道范围；非文本明确不支持，不抓 URL、不入知识。群 @ 输入只进入发送者本人渠道对话；群内固定引导，正文只发本人已验证私聊，不具备目标则留 Web。
+7. 先做 S1 实际纯聊与隔离；自然语言交办通过 DSH 窄产品工具访问 work service。多个工作候选要求选择，不按“最近工作”猜。新工具不接受模型指定 owner、秘密、任意 URL 或原生 Session ID。
+8. 手机适配用真实浏览器的 390×844 操作验收；不恢复已被用户替换的公网/真人渠道前置。未验证真实手机设备和平台账号则如实标未测，不因此把合法模拟渠道判为未完成。
 
-1. 渠道是同一产品工作空间的入口，不是第二套工作系统；复用现有 work service、DSH Session、结果和知识权限。
-2. 不要求飞书和微信自动合并成一件工作；分别验证完整闭环。
-3. 群聊允许已关联成员明确 `@` 机器人发起，但群内只回复不含标题、工单、结果、知识或成员私有信息的固定提示；私有正文只发该成员已验证且当前允许接收的私聊。私聊不可用时留在 Web 待处理，绝不回退为整群发送。
-4. 内部 `delivered` 只表示平台发送 API 已接受并返回真实消息标识；UI 写“已发送至会话”，没有更强回执时不写“对方已收到/已读”。
-5. 首选飞书官方 Node SDK `WSClient + EventDispatcher` 长连接，但只作为 T0 候选。必须用真实产品 app 验证事件、ACK、关闭/重连、发送回执和 SDK 版本后才能锁定；若失败，由双 Astra 复核 webhook 分支，不能静默换方案。
-6. v5 缺少身份、消息和投递事实，升 v6；不建独立通用许可表。发送依据直接记录在已验证渠道绑定或明确发送请求中，并在每次网络发送前调用同一授权检查。
-7. 微信未选定时只做渠道中立底座、Web/UI、恢复和已具备条件的飞书分支；不造占位微信适配器，不把待办链接当微信完成。两个真实渠道闭环前不得宣称 G6、AC-16/17 或 P4 PASS。
+### 2.3 独立有界消融与裁决
 
-### 2.3 独立过度设计审查与有界消融
-
-独立审查者：`/root/p4_overdesign_review`，`gpt-5.6-sol` / high，只读；未参与 P4 Astra 规划或 Team Sol 实现。首轮误把用户明确要求的 MP4/Lark 交付当成可删项，主代理依据当前用户目标纠正后，审查者重新完成收敛消融。
-
-| 争议复杂度 | 最小变体与证据 | 裁决 |
+| 当前方案 | 最小删减变体 | 比较依据与独立裁决 |
 |---|---|---|
-| 单一 v6 store 与六组渠道事实 | 合并 identity/conversation 或 message/delivery 会丢失群聊、解绑、入站防重、未知发送效果或一次性关联的独立生命周期；拆库/队列增加第二事实源 | 保留单 store 与六组有限事实 |
-| `reserved` 与七态 delivery | 删除 `reserved` 会使 work 已提交但 message 未落终态的崩溃间隙无法收敛；合并 `blocked/failed/unknown` 会允许越权或未知效果盲重试 | 全部保留 |
-| `authorizeDelivery` + `validateSendClaim` | 单次授权不能覆盖实际发送前发生的撤权；T1 测试已证明最终 claim 或同一服务内的即时失效转换共同阻断失效知识/app/identity | 保留；T3 验证真实 I/O 紧前调用 |
-| 手工 `bindMessageWork` | T2 `handleInbound` 已拥有唯一 message→work 映射并覆盖崩溃恢复，旧入口无生产调用 | 删除 |
-| `deliverLinkCode` callback | 只有测试实现；认证 Web 本就需要一次看到明文码，直接返回 code 而 state 只存 digest 更短 | 删除 callback，T5a 负责防日志/响应缓存 |
-| conversation/message/delivery 重复 provider | 历史 channelApp 被闭图强制保留且不可原地换 identity，provider 可由 channelAppId 派生 | 删除重复字段 |
-| `channelGraphSha256` | 完整 state entry 已有 bytes/SHA-256，restore 再运行 v6 全闭图 normalizer；局部图 hash 没有新增保证 | 删除 |
-| 验收材料 | 用户明确要求 MP4 + Lark；合同需要必要验证报告。offline HTML、完整帧目录、封面、独立 attestation 和 formal schema v2 只是重复包装 | 保留 MP4 + 一份去敏 verification report + 两类独立审查 + Lark 三项发送/回读；删除其余正式产物 |
+| 一种 conversation + 独立 work | 每句话建 work，或复用平台地址为对话 | 合同 §3.2 零 work 即时问答、群地址与私有归属、工作级取消；独立审查核对runner强制workId及channel-service群地址调用点，保留conversation。 |
+| 扩展既有授权与批准失效 | 新授权 epoch/权限表，或只删除 sessionVersion 变更 | 现有原子 store update 与 action 状态可失效批准；首选直接作废，不预建新权限层。 |
+| 一个 runner 内明确 chat 分支 | 新独立执行框架/通用 RPC | 原生 SDK 与现有产品服务桥可复用；仅内聚性确实恶化才分文件，不复制循环。 |
+| identity、平台端点、成员对话各自职责 | 合并其中任意两者 | 群/私聊地址、轮换、解绑、通知目标生命周期不同；保留最小必要关联。 |
+| 同库 MCP + 共享 platform 授权 | MES/FMS 两套实现或独立代理服务 | 合同唯一实现与现有共享包；删除重复实现。 |
+| dsh-im 协议文件 + 本地协议模拟器 | 整体 Host，或仅直接调 service 的测试 | 前者引入第二会话权威，后者绕过验收入口；保留实际通道及协议模拟。 |
+| 现有备份扩展 + 独立受限秘密包 | token 塞入 state，或每成员加密/KMS | 合同凭据备份和正文隔离不要求加密平台；选择前者的最小安全扩展。 |
+| 一份计划、一份验证记录、必要视频/离线说明 | A/C/D/E、receipt、attestation 链 | 合同 §2.6 与用户交付要求；删除重复过程包，不删视频/离线说明。 |
 
-消融后复杂度结论：**PASS**。不得因此删除真实双渠道、手机 HTTPS、群聊权限、撤权、防重、恢复、视频或 Lark 交付。
+独立审查逐项依据合同与实际调用点确认表中最小方案，结论通过。具体证据包括runner metadata、action decision.invalidatedAt/原子store、channel identity查合法私聊、agent-mcp既有HTTP runner、飞书EventDispatcher测试及state-transfer仅收works谱系；未运行代码或消融安全门。正确性复审要求补首次模型实际外发核查、新插件实际卸载/重挂、P6夹具口径，均已纳入§4/6.4/7.4并复核。
 
-### 2.4 飞书 T0 长连接碰撞复核
+## 3. S1：后台 Agent 与成员会话
 
-用户于 2026-09-20 授权 app `cli_aaae8b6cbdb89cc0` 用于飞书 T0，并明确本轮先跳过企业微信真实验证；微信义务因此保持 deferred，不从合同删除，也不允许 P4、G6、J7 或 AC-16 宣称完成。
+### 3.1 数据与管理
 
-受控 probe 先证明 `im.message.receive_v1` 长连接可进入 `ready`；本机明确停止后，开放平台仍持续返回 `online_instance_cnt=1`，而本机 event bus 为 `not_running` 且无相关进程。新的 consumer 被拒绝，不能取得完整入站、ACK、重投或唯一消费证据。
+扩展 employees 的职责、执行指令、模型引用、技能/工具/连接绑定、启用状态；使用现有配置 API 和管理 UI。Agent 侧开放成员编辑在同一次 store update 中修改成员授权，并用既有 expected-revision 风格拒绝并发覆盖，不建版本平台。
 
-依 §2.2 第 5 项启动两名新的独立 Astra：
+`conversations` 保存 id、ownerMemberId、employeeId、标题、来源、必要 channelIdentityId、归档/轮换时间以及 DSH Session 谱系/turn 引用。产品保存归属、幂等、渲染与恢复必需投影，不镜像完整模型历史。浏览器仅持产品 conversationId；服务端解析原生 Session。work 增可空 conversationId，旧 work 不按时间猜测拼入对话。
 
-- 工程视角：`/root/p4_feishu_t0_collision_engineering`；核对官方 cluster/transport 语义、连接归属与替代分支。
-- 产品/安全视角：`/root/p4_feishu_t0_collision_product`；核对产品身份、数据隔离、既有 Multica 影响与最小用户决定。
+成员可新建多个 Web 对话、重命名、归档并查看历史。新对话为空上下文；同一 Agent 下不同成员的 Session、确认信息与私有知识隔离。管理员配置能力不带正文访问；运维投影仅用量/耗时/错误/连接状态。成员主动分享指定结果使用既有或最小显式分享入口；不扩大到会话全文或管理员搜查。
 
-两者独立收敛为 **CONSENSUS**：不能让 Geneway 与未知远端实例并行复用该 app；同 app 多长连接是集群分发而非广播，会随机分流事件，破坏完整性、ACK、重投和跨系统防重证据。webhook 是 app 级 transport/订阅配置，不是与未知长连接安全共存的旁路，也不能解决产品身份和数据隔离。
+### 3.2 执行和权限
 
-最简安全裁决按顺序为：
+保留 work runner 对预期能力/工具的严格校验；另有明确 chat 模式支持真实零工具问答，不放松所有业务模式。模型循环、Session 创建/继续/历史、原生事件、取消与委派均用 DSH。
 
-1. 定位现有在线实例的 owner/host/service；如果它将永久退出且 app 明确移交 Geneway 独占，由 owner 优雅停止并确认不会自动拉起，等待连接数归零后重跑 T0；当前任务不得强停未知实例。
-2. 若现有实例必须继续、owner 不明或不能可靠移交，使用独立 Geneway 飞书企业自建 app；这是推荐路径。
-3. 不为复用 app 临时新增跨服务消息总线；除非既有 runtime 已有经过认证、持久化并保留全部官方稳定 ID 与 ACK 语义的转发能力。
-4. 只有独立 app 的长连接本身失败、app owner 明确批准切换且 HTTPS challenge/验签边界就绪时，才再次复核 webhook。
+每次新回复冻结该次 Agent 定义；名称/指令编辑影响以后回复，不能热改正在运行 prompt。停用、撤权、连接失效则在下一模型请求、工具 I/O、委派、批准及发送前立即阻断。干净 successor 仅注入当前获准事实，不复制已撤销整段上下文。
 
-用户把 secret 直接提供到会话后，后续不得复述或写入仓库/state/log/report；正式测试或迁移完成后应轮换，并只从仓库外 `credentialRef` 使用。
+撤销员工授权或停用 Agent 时，在同一次产品事务中永久作废受影响未派发批准；unknown/已有 attempt 保留核对，不重新执行。然后才取消 employeeIds 编辑造成的登录 sessionVersion 提升；账号停用、角色变化与显式退出仍保留登录失效语义。验证移出→加回、停用→启用不会复活旧批准。
 
-### 2.5 Hermes 成熟实现复核与自主验收裁决
+对话停止只取消本次回复；工作停止只取消本 work 及已有明确归属子工作。一个会话中 W1 停止不能影响 W2。恢复活动回复为 interrupted；已完成且原生历史缺失显示历史不可用，不改写成未完成。
 
-用户明确不再承担逐项 canary 发送，要求团队自行完成剩余测试，只在阶段候选冻结后参与一次最终验收；并建议优先复用成熟飞书方案，例如本机 Hermes。
+### 3.3 S1 普通入口验收
 
-两名只读分析者分别检查 Geneway 接入面与本机 Hermes 0.16.0 实际运行源码，收敛为：**继续使用已锁定并真实验证的飞书官方 Node SDK；复用 Hermes 已验证的局部设计规则，不直接调用或整体复制 Hermes runtime/adapter。**
+admin 在后台创建两个 Agent，将其中一个只开放 A；A 实际登录后看到可用 Agent，B 不能通过 UI/API使用它。A/B 使用公共 Agent 各发不同 canary，并各新建第二对话验证干净上下文；实际模型给出回复。修改指令后新执行生效，进行中执行不偷换定义。A 未重登即可看到授权改变，撤权后新派发失败。admin/B 用已知 conversation/work/Session标识、历史/搜索/导出入口均不能取得 A 正文。A 在同一对话关联 W1/W2，停 W1 不停 W2；重启仍能查看对话谱系。桌面及 390×844 实际完成创建、消息、历史和停止。
 
-关键证据与裁决：
+S1 在同候选真实操作后录制独立 MP4，离线 HTML 带内联截图与相对视频链接，通过 lark-cli 发用户并回读；即使还未实现渠道，也注明“渠道为模拟验收；本视频覆盖 S1 Web”。不等待微信/Kivo 全部完成才发第一段。
 
-1. 官方 Node SDK 会 `await EventDispatcher.invoke()` 后再写 ACK；Geneway handler 可以先 `await channelService.handleInbound()`，把 durable inbox/去重置于 handler 返回之前。
-2. Hermes Python adapter 把 coroutine 提交到另一个 loop 后立即返回，Python SDK 随即 ACK；其独立 JSON 去重又发生在业务持久化前，不满足本合同的 durable-before-handler-return 边界。
-3. Hermes 没有稳定的外部 adapter HTTP/IPC API；直接复用会引入 Python gateway、session/agent、独立去重文件、第二套权限/配置与第二事实源。
-4. Hermes 对发送异常最多自动重试三次且每次生成新 UUID，不能复用于 `unknown` 不盲重发的 Geneway delivery 状态机。
-5. 借鉴且重新实现为极薄 Node glue 的规则只有：app-scoped `open_id` 身份、bot `open_id` 精确 self-echo/群 @ gate、per-app 实时 availability、停用后关闭并禁止重连、每 attempt 固定 UUID、成功 message ID 回读；群结果仍只发已验证私聊。
-6. 本机 Hermes gateway 使用另一个 app，继续保持独立运行，不停止、不接入 Geneway，也不读取/复制其 secret 或含临时 WS ticket 的历史日志。
+## 4. U0：DSH 升级和有限探针
 
-后续实现与确定性测试不再要求用户逐项发消息：使用去标识真实形状 fixture、官方 `EventDispatcher.invoke()`、真实 channel store 和 fake official client 验证 durable-before-resolve、重复/冲突、发送前撤权、成功/failed/unknown、配置轮换和关闭重连。已经取得的真实私聊入站/出站/SDK fast/slow/lifecycle 作为 T0 bootstrap 证据；真实 DM 与群 @mention 正反例只在 P4 最终候选阶段请用户一次验收，bot 消息不得冒充真人路径。
+U0 开始前备份当前产品 store 和 DSH home，记录基线/校验值/恢复入口，秘密不进入普通报告。解析 npm `@deepseek-ai/dsh` latest 当时值，验证所需同版本包/peer 均存在，精确锁定所有 @deepseek-ai/*；不分别取配套包各自 latest，不用 alpha 替代。
 
-## 3. 当前事实、已验证依赖与未知
+比对安装产物实际默认插件/工具与当前禁用清单；未知新增可用能力先判失败并裁决，不能只看配置文件。明确禁止模型文件/shell/任意网络等未授权能力。验证旧原生 Session 可读取或准确显示恢复不完整，新建/继续/干净 successor/取消/原生委派正常。保留 SDK profile patch 仅在仍有必要时更新，不为旧 patch 留无用适配。
 
-### 3.1 已观察事实
+S1/U0 的 runner、清单/lock、runtime-config、原生插件/桥及 state-transfer 由同一核心 writer 串行集成。若旧版本探针可支持 S1，可先交 S1；若不能，数据/API准备可继续，真实聊天依赖 U0。无论顺序如何，最终 S1 需在升级候选复验。
 
-- `src/store/file-store.mjs` 的 v5 单 JSON store 是产品唯一事实源，串行 update + 原子 rename；P3 已支持 work、execution、result、knowledge、handoff、backup/restore。
-- `src/work-service.mjs` 保持 owner-only 工作权限；P4 必须通过渠道身份可靠映射到产品 member，不得用昵称或请求体 memberId 当权威。
-- `src/server.mjs` 当前是 loopback HTTP，Cookie 为 `HttpOnly; SameSite=Strict`，没有 `Secure`；桌面本地验收成立，但不构成真实手机/渠道内 Web 安全入口。
-- P3 已用 ZenMux 的 `deepseek/deepseek-v4-pro` 完成 root/child/recheck 真实调用。ZenMux 官方模型目录当前列出该精确 model id；P4 不更换 provider/model，不从 `~/.claude/setting.json` 复制或输出 API key。
-- P3 `lark-cli` 仅证明工程验收资料能够送达既有飞书会话；它不是 P4 产品 app、产品身份映射或产品消息适配器。
-- T0 真实探针证明需要官方 SDK 后，仓库已精确锁定 `@larksuiteoapi/node-sdk@1.74.0`；不为 adapter factory、队列、webhook 或 Hermes runtime 引入额外依赖。
-- 用户提供的飞书 app `cli_aaae8b6cbdb89cc0` 机器人已激活，名称为 `IoT Deploy - Multica`；本机 credential 仅进入 `lark-cli` 加密存储。历史碰撞曾表现为本机停止后仍有一个未知在线实例；用户随后授权清理 Multica 绑定，精确 installation 被正式 API 标记为 revoked，远端连接数约 20 秒后从 1 降为 0，唯一事件 owner 冲突已经解除。
-- Geneway 已独占完成真实私聊入站、幂等出站/回读、关闭重连和官方 SDK fast/slow probe。fast 通过；slow 的 4 秒 handler 在 20 秒内未观察到重投，因此重投语义保持 `not-observed`，不能当作丢失补偿保证。
+首个真实模型调用前，由U0核心owner核查新版本实际外发：模型输入、随请求附带的Session日志、遥测/反馈及其接收方，确认只有获准路由和必要数据、无秘密；检查安装产物和受控捕获，不能只据禁用清单推断。无法关闭或核实未知外发时先停真实模型调用。
 
-### 3.2 外部事实与待验证假设
+本任务只回归来源无关的身份、授权、Session、委派、取消、恢复、节拍工具、知识撤销、定时路径以及已提交 P6 来源无关测试。J1/J4/J6业务改 Kivo验证；不启动旧 GearJob来凑升级通过。
 
-- 飞书官方 Node SDK 的真实 `WSClient`/`EventDispatcher` 已证明 ready、真实入站、真实发送回执、幂等出站、关闭后连接归零及重新连接。SDK 实现会等待 async handler 完成后再写 ACK；但 4 秒 handler 在本次 20 秒窗口内没有观测到重投，不能把平台重投当可靠补偿。仍待产品 adapter 和阶段末一次真人验收证明 durable inbox、私聊/群完整路径、发送前撤权、失败/unknown 和实际业务回读。
-- 飞书长连接只解决产品 app 的事件通道，不解决手机打开 Web。真实手机/飞书内 Web 仍需要用户可达、可信 HTTPS origin 与相应网络暴露授权。安全拓扑固定为：Geneway 继续只监听 loopback，由明确获准的 TLS 终止器反向代理；服务只配置一个 canonical HTTPS origin，HTTPS 模式的 session Cookie 强制 `Secure; HttpOnly; SameSite=Strict`。只信任来自明确代理来源的转发上下文，不接受客户端任意 `Forwarded`/`X-Forwarded-*` 决定 origin 或身份；明文外网监听、origin 不匹配或代理来源不可信均拒绝。具体域名、TLS 终止器和网络暴露仍由用户授权。
-- 微信具体形态、正式接口、账号资质、回调要求和消息限制未知。个人微信、企业微信内部应用/客户联系、微信客服等不可互换。
+模型仅从明确 Geneway 服务端秘密引用读取，移除默认扫描其他产品 settings。当前无合法可用引用时只阻塞真实模型验收，不能复制旧项目 secret、伪造真实调用或默换提供方。
 
-### 3.3 必须由用户决定或提供的外部门
+## 5. K0：Kivo 唯一 MCP 与 TPM 主链
 
-1. 微信真实入口形态，以及可用账号/API/负责人；用户已决定本轮企业微信真实验证 deferred，该义务不删除；
-2. 飞书真实测试用户、测试私聊与测试群的最终验收范围；app 唯一事件 owner 与私聊测试对象已经具备，群聊正反例留到阶段末一次真人验收；
-3. 所选微信的真实测试对象与允许收发范围；
-4. 两渠道允许外发的数据范围；默认只允许当前 work 的获准结构化事实与保守提示，不允许任意知识正文或模型 explanation；
-5. 若要求群内直接显示业务详情，必须另行明确群接收范围和数据共享规则；默认保持 owner-only；
-6. 真实手机所需 HTTPS origin 的网络暴露或部署动作。
+### 5.1 独立工作目录与部署单元
 
-以上缺口只阻塞依赖它的分支；不依赖的 ready frontier 继续实施。
+计划通过后 `git clone --no-hardlinks --no-checkout` 本地源到指定独立目录，再基于已复核 SHA 建 `codex/geneway-kivo-mcp`；源库只读，不 fetch。重读 clone 内 AGENTS/Control。Kivo 要求受控意图先于实现，先单独本地提交相关 Control、ai/project-map、docs/agent-mcp-method-snapshot 的授权调整，再做实现；不顺便改无关业务。
 
-## 4. 产品对象、v6 数据与唯一职责
+实例 A/B 使用各自 MES数据库、Redis、端口、JWT_SECRET、通知主密钥、worker身份、synthetic组织/设备/账号和记录。配置在服务端受限位置；若使用 Compose 则独立 project，端口选用前检查占用。开发测试 License 含 mes.tpm；P6 的 mes.monitor 不提前冒充已测。两个实例放相同单号、不同事实，证明连接隔离。启动前记录实际 DB/Redis身份的去敏证明，禁止使用现场数据。
 
-### 4.1 最小新增事实
+### 5.2 唯一职责
 
-v6 在现有 state 增加五组有限事实；字段名可按实现局部调整，但职责不能拆成第二事实源：
+| 位置 | 职责 |
+|---|---|
+| `packages/agent-mcp` | 唯一 MCP 2026-07-28 协议、固定工具/schema登记、OAuth资源校验接口、内部主体注入接口、HTTP路由调用；不引 DB/私有业务服务。 |
+| `packages/platform-contracts` | 必要机器主体、管理 DTO、权限与资源契约。 |
+| `packages/platform-db` 及既有迁移 | 独立机器账号、公钥/轮换/停用、组织/角色范围、断言 jti 防重放；复用事务与审计。 |
+| `packages/platform-api` | MES/FMS 共用唯一机器账号加载器、管理与 OAuth 实现、内部机器主体上下文。 |
+| MES/FMS API 挂载 | 薄挂载同库；MES TPM 标 `@ProductModule('mes.tpm')`；FMS 接原方法快照。实际业务通过产品 HTTP 路由。 |
+| Geneway `plugins/kivo-tpm.mjs` 及窄客户端/规范化 | MCP客户端、固定白名单、TPM规范化及DSH工具，复用当前授权与连接，不将远端MCP直接给模型。 |
 
-- `channelApps[]`：provider、稳定 app/tenant identity、`credentialRef`、enabled、允许的事件/发送范围、revision 和状态；只保存引用，不保存 secret。由管理员配置/启停，是 T0、adapter lifecycle、发送前授权和恢复的唯一装配事实。
-- `channelIdentities[]`：channelAppId、provider、外部稳定用户 ID、memberId、验证方式/依据、状态、revision、时间；不保存昵称作为身份依据。身份域是 `channelAppId + 官方用户 ID`，不同 app/tenant 永不合并。
-- `channelConversations[]`：channelAppId、provider、稳定 conversation ID、类型（private/group）、绑定 memberId、允许接收范围、验证依据、状态、revision，以及本人在 Web 明确选择的单一默认派发绑定 `employeeId + skillId + capabilityId + optional connectionId`；群成员 ID 本身不自动建立私聊投递关系。
-- `channelMessages[]`：channelAppId、provider、稳定 message/event ID、conversation、sender identity、方向、受支持文本、收到/持久化时间、workId、处理状态和错误；这是 inbox 与去重事实，不复制业务结果。
-- `deliveries[]`：channelAppId、workId、result/message refs、provider、target conversation/identity、内容范围、授权依据 revision、状态、attempts、平台 message ID、错误与时间。
+授权服务器实现和权威机器账号只一套；每个部署明确 issuer/token endpoint，MES/FMS 资源分别校验 audience，不各自新建账号系统。基于真实安装的 Nest/Fastify 路由注入证明内部主体可传递，候选为进程内 AsyncLocalStorage 或等价不可伪造机制；外部 header 不能创建主体。JwtAuthGuard/PermissionGuard照常检查模块、权限和组织范围；直接 OAuth 调业务路由、人类 JWT 调 MCP、伪内部 header 均拒绝。不能安全挂载则暂停重规划，禁止独立进程转发令牌或直接调service。
 
-`pending → sending → delivered|failed|unknown|blocked|cancelled` 是投递状态，不是业务 work 状态。发送失败、取消或重试只改变 delivery，不重跑 work、不刷新 GearJob、不重新执行协作。
+### 5.3 协议与账号
 
-超时且不能排除平台已接受时进入 `unknown`，不自动改 `failed`、不盲目重发；仅由平台回查/幂等证据或明确人工处理恢复。恢复时遗留 `sending` 转为 `unknown`，历史 `delivered` 不重发，未处理入站不在恢复过程中暗中启动业务。
+开工时核实并精确锁 `@modelcontextprotocol/server` / `client` 2.x latest；同时锁 ext-auth 仓库的实际提交与授权扩展文本。仅启用 2026-07-28、server/discover、单一POST、MCP-Protocol-Version/Mcp-Method/Mcp-Name；拒绝 initialize/旧握手，验证 Origin。SDK 文档支持 pinned version与server legacy reject，但必须以安装产物探针证明，不把文档当运行通过。
 
-### 4.2 服务与适配器职责
+OAuth只实现client_credentials + private_key_jwt；issuer、token认证算法元数据、RFC9728资源元数据、RFC8707 resource audience、短时token。校验JWT断言sub/aud/exp/iat/算法/签名/jti，拒重放，License受限不签发。每个MCP请求复核账号和密钥当前状态；401带WWW-Authenticate/资源元数据，scope不足返回insufficient_scope。不做授权码/PKCE/动态注册/refresh token/共享口令。
 
-- `src/channel-service.mjs`：唯一维护 app 引用、身份关联、持久 inbox、message/work 映射、默认派发绑定、delivery 状态、去重和 `authorizeDelivery`；调用现有 work service，不执行模型循环。
-- `src/channel-runtime.mjs`（仅当真实 lifecycle 需要）：装配启停、重连和 adapter 回调；如果 server 内几行即可完成则不建此文件。
-- `plugins/feishu.mjs`：只做官方平台事件/发送传输和必要格式转换，不拥有 work、身份授权或 retry policy。
-- `plugins/<selected-wechat>.mjs`：仅在用户选定形态及真实接口后建立一个实现，不预建多个占位插件。
-- `src/server.mjs` / `web/index.html`：提供本人 Web 关联、投递状态与显式重试/取消；Host/plugin 安装仍不是普通成员能力。
+机器账号独立于人类和runtime_worker_instance；管理API可创建/停用/轮换公钥，按现有管理权限保护。Geneway每连接对应一个实例/机器账号；P4只授合同五项TPM/设备读取权限，不给管理员或维修派工/验收/豁免权限。Kivo只存公钥，Geneway秘密存储保存私钥；token/私钥不入模型/浏览器/日志。P6写断言/事务复核另按后续计划实现，P4不提前开放写。
 
-渠道 app 凭据内容只位于仓库外既有 `GENEWAY_SECRET_ROOT`，`credentialRef` 继续使用现有安全文件解析边界；state、backup、API 和 UI 均不得包含 secret。管理员才可创建、修改、测试或启停 `channelApps`；普通成员只能在 enabled app 下关联本人身份、选择自己当前获准的员工/Skill/连接作为默认派发绑定。app revision 或启用状态变化立即参与入站和发送前授权，adapter 不读取另一份竞争配置。
+### 5.4 TPM工具、结果和历史
 
-不建通用 adapter interface/factory。两个插件若出现真实重复，再提取最小共用函数。
+固定有限目录：维修/保养/点检及异常的列表和按单号/明确ID详情、保养计划列表/详情、设备详情。实际工具名和输入输出schema由现有DTO与真实API输出确定，探针后冻结；列表仅有固定过滤、分页上限，不提供任意path/query。无组织范围明确scope_empty，与正常零结果区分且不透露范围外对象。
 
-### 4.3 受理、去重与发送顺序
+Geneway固定工具名+输入/输出schema指纹allowlist；未知/新增/漂移工具不暴露并使连接测试明确失败，不信readOnlyHint。写工具不进入模型清单。工具实际I/O前重新核对成员、Agent、技能、连接、对象范围；传x-trace-id。
 
-入站顺序：验证平台签名/连接来源 → 解析稳定 provider IDs → 在一个 store update 内持久化或命中现有 `channelMessages` → 关联当前有效身份/会话 → 创建 work 或 follow-up reservation → 返回平台回调。若 SDK 在持久化前已经自动 ACK，T0 必须如实记录并重规划可靠受理，不得声称“先持久化再 ACK”。
+结果保留单号、类型、原始及规范状态、设备、负责人、计划/到期/开始/完成、来源时间和查询时间。程序负责规范化与逾期判断；无基线不判断，未知状态/时区不猜。latest查询形成新观察，不覆盖旧结果。
 
-去重、身份、会话、平台 message ID 和投递查找键统一使用 `channelAppId + 官方稳定 ID`；不按 provider 单独建域，也不按文本、时间或“最新消息”去重。app 更换或停用不会让新 app 接管旧 app 的身份/消息；恢复保留原 channelAppId 域，只有原 app revision 当前有效时才允许新收发。回声、乱序或平台重投命中同一消息事实，不再创建 work/execution。工作 reservation 与 message/work 映射共同区分“已收件未受理”和“已受理未回执”。
+K0退出GearJob的新产品装配、创建和事件/Comment执行路径，保留旧typed结果、来源/时间、Session、动作事实只读及必要测试。不能把GearJob历史用TPM映射重算。J6调整为A读设备TPM工单/计划，B检索获准维护标准核对缺项，负责人引用汇总；复用动态委派、计划调整、等待/取消，不把产量/节拍硬套TPM。
 
-首版不做自然语言意图路由。只有以下确定性文字格式进入 work service，其余文字回复简短帮助且不创建/继续/停止工作：
+### 5.5 FMS收尾
 
-- 新建：`交办 工单 <workOrderId>`。使用该私聊在 Web 已确认的默认派发绑定，构造现有 `createWork` 的 `employeeId/skillId/capabilityId/connectionId/workOrderId`；首版默认绑定必须是 `gearjob-work-order-read`，否则入口不可用。
-- 补充/追问：直接回复 Geneway 针对某工作发出的消息并写 `补充 <text>`，或发送 `补充 <workRef> <text>`。reply-to message ID / workRef 必须精确映射到当前成员拥有的一个 work。仅当没有活动 execution 且已有至少一个业务结果时，原样将 `<text>` 调用现有 `followUp`；这会在同一 work 创建 `follow-up` execution/result，不刷新 GearJob、不改结构化 input。活动 execution 时只回复“本轮未应用，请结束后重交”，不调用 service；`waiting_input` 且无业务结果时引导 Web 使用结构化补充；completed 或 failed/interrupted/cancelled 但已有业务结果时可按现有 `followUp` 当前授权执行。无映射、多个候选或其他状态均拒绝，绝不使用“最近工作”。首版渠道不把自由文字映射成 `continueWork`，也不提供通用参数 DSL。
-- 停止：在上述精确 reply/workRef 上发送 `停止` 或 `停止 <workRef>`，复用现有 work-service cancel；只停止本人该工作，不取消 delivery、不影响其他 work。
-- `状态 <workRef>` 只读取本人投影，不触发执行。附件、URL 和其他命令不执行。
+原 `manufacturing.method_snapshot.get/lock` 迁到 fms-api 的同一库，保持HTTP边界、原权限、dry-run、确认凭证不转发、trace、错误与幂等语义。迁移完成才下线stdio/CLI旧入口、单KIVO_TOKEN及别名，更新文档/测试。该收尾不阻塞TPM只读验收，但在恢复P6前必须完成。lock真实写授权存在§8所列待裁决点，不能把只读探针当收尾PASS，也不能悄悄长期保留双实现。
 
-provider event/message ID 经长度有界的 SHA-256 映射为现有 `clientRequestId = channel:<channelAppId>:<digest>`；同一入站在 create/follow-up/cancel 中稳定一致。每次真正调用 work service 前重新验证 member enabled、channel app/binding revision、employee、Skill、capability、connection 和 allowed object；Web 曾选择或消息已持久化都不替代当前授权。渠道不得直接调用 runner 或自行组装 execution。
+## 6. 渠道会话、我的渠道、微信与恢复
 
-每次首次发送、显式重试及恢复后处理，均在实际网络 I/O 前重新检查：当前 member、渠道身份、应用/会话绑定、work owner、目标接收范围、结果和知识依赖有效性、该内容的外发依据 revision。生成时允许、当前 owner 可见、历史曾发送都不等于本次允许。失权转 `blocked` 并给出原因/恢复动作，不发送。
+### 6.1 产品服务和UI
 
-### 4.4 身份关联
+保留channelApps、identities、平台端点、inbox/messages、deliveries、关联码；增加identity的activeConversationId/default employee引用。平台端点只保存收发地址/允许范围；活动指针由channel-service唯一维护。会话/工作正文由owner服务投影，admin不因维护app取得正文。
 
-成员在已登录 Web 生成一次性关联码；本人从待关联渠道的私聊发送该码；Web 显示 provider、已验证外部稳定 ID 的脱敏值、会话与过期时间，并要求最终确认。码使用 Node `crypto.randomBytes(32)` 的 256-bit 随机值，base64url 展示，TTL 10 分钟；每成员 × channelApp 至多一个活动码，新码原子作废旧码，最多 5 次失败尝试。state 只保存 SHA-256 摘要、成员/app、到期时间和失败计数；私聊匹配、Web 确认或到期均在同一 store update 内原子消费/失效。错误统一为“关联码无效或已过期”，不得暴露可枚举差异。码本身不授予工作或知识权限，不进入日志/视频/备份明文；猜测、重放、错 provider、群聊提交和过期均拒绝。
+「我的渠道」为飞书/微信两张卡：未连接、待确认、已连接、暂不可用、已解绑；脱敏身份、默认Agent、打开本人会话、新会话、解绑。飞书沿用一次性关联码+Web最终确认；微信二维码→服务端登录→本人Web确认脱敏owner→激活身份/会话。确认前首条消息持久标未受理，提示确认后重发，不静默补跑；取消/过期后晚到登录结果不能激活。
 
-解绑增加 revision 并立即阻止新入站映射和未发送 delivery；历史事实留作审计，不自动删除远端消息。重新关联不接管旧身份的历史工作。
+自然文字由当前Agent会话处理，窄产品工具调用既有work服务创建/补充/继续/状态/停止。缺必要信息形成明确待补充；精确work引用与当前owner/会话授权不满足则询问或引导Web。Web可继续同work并投递获准回复；不能仅发链接。渠道不能列Session、绑定旧Session、切换他人对话。
 
-## 5. 群聊、附件、权限和恢复
+P5规则通知改存notificationIdentityId，发送时解析当前合法私聊端点；会话轮换不影响通知。旧规则有可靠唯一映射才迁移，否则明确待选择，不猜。历史delivery保留实际目标与引用；对话回复/工作结果采用封闭来源引用，不复制整份业务结果。
 
-- 群聊只接受当前已关联成员的明确 `@`；陌生人、其他成员、旧回复引用和猜测 work ID 均不能读取、继续、停止或获得 owner 私有结果。
-- 群内固定响应不含工作标题、工单、结果、知识、连接和成员私有信息。群输入不授权后续派生内容共享给群。
-- 私聊目标必须由本人明确关联且当前在允许发送范围内；没有私聊绑定时只在 Web 标为待处理。
-- 发送结构化业务事实复用现有 result/source refs；只有确需发送 explanation 或知识派生文本时才验证完整 knowledge dependency 与外发范围。
-- 渠道插件停用或未安装时 Web、权限维护、解绑、delivery 历史和现有 work 继续可用；该 provider 的新收发明确不可用。
-- backup/restore 保存 v6 映射和状态但不保存 app secret、token、一次性码或 session secret；恢复默认不开启外部收发、不重放、不重发，待管理员重新提供凭据并明确启用。
+### 6.2 iLink协议复用
 
-## 6. 正式 Product Design 门与界面行为
+按文件引入 `@xmanrui/dsh-im` MIT 的iLink协议/扫码/轮询/分段/重连，记录精确版本、来源文件、许可和改动；不运行Host，不带其工作区/AgentPreset/会话映射或/session等命令。入口建议 `plugins/weixin.mjs`，协议文件就近vendor，只有实际重复才抽公共函数。
 
-实施用户可见界面前，在 `workflow/artifacts/20260919-006-geneway-dsh-greenfield/product-design-p4/` 形成 A/C/D/E。两 Astra 共识可批准已委托的中间产品决策；上文六项外部账号/共享/网络决定不能由设计文档越权代选。
+实际通道在测试配置可指向本地iLink模拟器；生产配置拒绝该测试覆盖。模拟器实现扫码、长轮询、发送、重投/乱序、非主人、非文本、上下文过期、拒发与未知响应，不直接调用产品service。
 
-关键场景至少包含：
+owner稳定ID在确认时固定，只受理该owner私聊；同一bot同一时刻一个轮询实例，复用现有进程锁/必要的账号锁，跨data root也不能重复消费。停用/解绑/失效关闭轮询且不自动重连。
 
-1. Web 生成关联码 → 渠道私聊验证 → Web 确认；失效/错人/解绑可见；
-2. 飞书与选定微信各自创建工作、接收业务反馈、补充、在 Web 继续同一 work，再从 Web 回复原绑定渠道；
-3. 业务完成但投递 `failed/unknown/blocked` 时，工作结果与消息状态并列展示，显式处理不重跑业务；
-4. 生成后撤销知识共享或解绑接收者，再重试时被当前授权门阻止；
-5. 群聊保守提示与本人私聊投递，私聊不可用时安全降级到 Web；
-6. 390×844 以及真实手机/渠道内浏览器，从认证深链打开工作、补充、查看来源、回复、停止当前本人工作与处理失败；停止复用既有 work cancel，而非取消 delivery。P4 没有需要批准的业务写动作，“必要批准”本阶段不适用，留到 P6。
+一批消息全部完成durable inbox或持久拒绝结果后才保存游标，store失败不推进；稳定平台ID去重，毒消息不永久堵后续。bot_token及发送上下文令牌仅在服务端秘密存储，state只存引用；游标同样只保存稳定秘密引用；顺序为inbox持久化后原子更新秘密存储游标，中间崩溃仅导致旧游标重投并由inbox去重，不新增逐轮秘密文件或引用切换。传输状态不能成为第二套业务事实。
 
-UI 延续 WorkBuddy 层级，不另建“渠道运维平台”。工作详情在“需要关注”附近显示渠道来源、发送目标脱敏值、业务状态与投递状态；`unknown` 明示“发送结果待核对，请勿重复发送”；`blocked` 显示当前原因和恢复动作；成功只写“已发送至［会话］”。管理员配置 app/凭据引用与普通成员身份关联分离。
+分段只有全部确认才delivered；保留已确认分段进展，中途未知即unknown，不盲重发整条/已确认部分。上下文失效或拒发如实failed/待核对，不用心跳绕规则。
 
-## 7. Team Sol 实施切片、依赖和门禁
+### 6.3 飞书与外发
 
-| 切片 | 输出与唯一写入边界 | 进入条件 | 必过门禁 |
-|---|---|---|---|
-| P4-T0 真实接口探针 | 飞书官方 SDK 有界 probe；选定微信后建立对应 probe；probe owner | 对应真实 app/账号/权限已授权 | 稳定 IDs、ACK、重投、发送 message ID、关闭/重连、群/私聊能力；失败只停该 adapter 并回 Astra |
-| P4-T1 v6 与 channel service | store migration、`channel-service.mjs`、纯状态测试；store/security owner | 计划与 v6 语义已批准 | v5→v6、未来版拒绝、app 唯一装配、所有外部 ID 以 channelAppId 分域、app 更换/停用/恢复隔离、256-bit/10 分钟/5 次/摘要关联码、去重、delivery 状态、发送前复权 |
-| P4-T2 工作接入 | channel service 调用现有 work service；integration owner | T1 | 明确命令语法、默认派发当前授权、provider ID→clientRequestId、创建/`followUp` 补充/状态/停止、active/waiting/completed/failed 分支、歧义拒绝、重复不执行；投递重试不重跑业务 |
-| P4-T3 飞书 adapter | `plugins/feishu.mjs` 与最小 lifecycle；单一 adapter owner | 飞书 T0 通过 | 真实私聊、群聊保守路径、回声/乱序/重投、明确停用 |
-| P4-T4 微信 adapter | 仅一个选定插件；单一 adapter owner | 用户选择与微信 T0 通过 | 真实私聊/适用会话、完整 J7；不以模拟代替 |
-| P4-T5a 本地 HTTP/UI/移动 | server、`web/index.html`；单一 API/UI owner | A/C/D/E 可执行，T1/T2 | app 管理与本人关联/默认派发、状态、显式重试/取消 delivery、停止 work、服务端权限、桌面/390px；保持 loopback |
-| P4-T5b 真实手机 HTTPS | canonical origin、Secure Cookie、可信 TLS proxy boundary 与渠道内浏览器；同一 API/UI owner | 用户批准域名/TLS/网络暴露 | 应用仍 loopback；只信任明确代理来源；明文外网/伪造 forwarded header/origin mismatch 拒绝；真实手机完成全路径 |
-| P4-T6 恢复与组合门 | state-transfer、P4 tests/package scripts；integration owner | T1–T5 已集成 | secrets 不入备份、恢复不收发/不重放、插件缺失 Web 可用、P1–P3 回归 |
-| P4-T7 实际验收与交付 | `scripts/accept-p4.mjs`、同候选 MP4 与一份去敏 verification report；acceptance owner | 全旅程通过并冻结候选 | 两真实渠道、Web/手机、权限变化、重复/失败/恢复全部同一候选；独立正确性和复杂度审查零阻断；Lark 说明/视频/report 回读后才可关闭 |
+保留现有官方SDK1.74.0及WSClient/EventDispatcher生命周期、app-scoped身份、echo/群@校验、固定attempt UUID、发送前claim。模拟连接/client从官方EventDispatcher.invoke进入实际plugin，持久受理后返回，捕获真实通道出站调用。
 
-T1、设计发现和不依赖外部账号的受控测试可以并行；store schema、work integration、`web/index.html` 各保持单一 writer。未经 T0 不锁定具体 SDK 行为；微信未决时 T4 为空缺而不是假实现。
+每次首次发送/重试/恢复处理紧邻I/O复核成员、Agent、app、identity、work/会话owner、接收范围、共享知识有效性与revision。撤权blocked且零网络发送；failed可显式重试且不重跑模型业务；unknown不盲重发。群内只有固定提示，无合法私聊留Web。delivered只显示“已发送至会话”，不声称已读。
 
-## 8. 验收数据、J7/AC-16/17 旅程
+### 6.4 备份恢复与可选能力
 
-### 8.1 测试对象
+扩展现有state-transfer收集conversation/work/子工作所有Session谱系及身份/活动指针/扫码终态/游标/发送进展。普通state和manifest不含秘密；按准确引用制作独立受限秘密备份（目录0700/文件0600），不得进Git/模型/浏览器/视频/普通报告，不建每成员加密或KMS。
 
-- 真实 GearJob 测试源继续使用明确标记 `external-test / synthetic` 的对象，优先复用并在验收时回读 `WO-26-00096`；若状态不适用，通过正常 GearJob/Frappe 数据层创建新的非生产模拟工单并记录来源，不硬编码旧数量。
-- 人类账号至少 admin、owner member、peer member；产品渠道身份分别绑定 owner，另准备未关联用户与无权群成员。
-- 两渠道各使用唯一 message canary、重复 event ID 和乱序序列；知识使用当前有效与发送前已撤销的不同 canary。
-- 所有真实消息只发到用户明确批准的测试私聊/群；不扫描旧项目或联系人寻找目标。
+恢复默认关闭外部收发；活动执行interrupted，sending→unknown，delivered不重发，未处理inbox不暗中执行业务。恢复旧秘密不复活已解绑身份；不能确认当前owner/凭据有效性则要求重绑。历史缺失明确不完整。
 
-### 8.2 完整旅程
+未安装/停用渠道时Web、权限维护、解绑、历史仍可用；停知识能力后普通聊天/TPM仍能运行，撤销维护仍可阻止旧知识读取/注入/外发。只测实际有意义的最小装配，不穷举组合。K0-C及C2 owner还须在同一Host/同版本上实际卸载新增Kivo/微信插件，验证请求资源、轮询和注册已清理；再挂载验证没有重复工具/消费者且Web与历史维护仍可用。既有合成lifecycle probe不能代证这两种实际插件（AC-09）。
 
-1. admin 通过凭据引用启用真实飞书；owner 在 Web 生成一次性码并从真实飞书私聊完成关联。错码、群聊码、重放和 peer 冒用均拒绝。
-2. owner 在 Web 为该私聊选择当前获准的 GearJob 员工/Skill/连接，再从飞书发送 `交办 工单 <id>`；系统持久入站并只创建一次 `W-Feishu`，provider message ID 映射为稳定 clientRequestId；真实读取 GearJob，渠道收到可读业务反馈与认证 Web 链接。缺少/失效默认绑定、歧义和其他文本不创建 work；相同 event 重投、回声和乱序不新增 work/execution。
-3. owner 在飞书回复该工作的机器人消息发送 `补充 请解释完成量来源`；若当前 execution 活动，明确告知本轮未应用且不创建 execution；结束后原样重交，系统调用现有 `followUp`，在同一 work 创建 follow-up execution/result，不刷新 GearJob。另测 waiting_input 无业务结果时引导 Web、completed 与 failed/interrupted/cancelled 且有业务结果时按当前授权执行、歧义 workRef 拒绝。Web 打开同一 `workId`，补充/查看来源后回复飞书，平台返回真实 message ID。
-4. 对用户选定微信形态重复关联、交办、反馈、补充、Web 继续与 Web 回信，形成独立 `W-WeChat`；不复用飞书身份推导微信身份。
-5. 在两个渠道分别验证不支持附件的明确反馈，不抓取 URL、不执行、不入知识。
-6. 群中 owner 明确 `@` 发起，群内只见固定无敏感提示，私有正文发已验证 owner 私聊；陌生人、peer、旧引用和猜 work ID 均得不到私有内容。移除私聊绑定后不回退群发，Web 显示待处理。
-7. 结果生成后但发送前，撤销相关知识共享或解绑/失权接收者；首次发送/重试转 `blocked` 且零平台发送。恢复权限后显式重试只发 delivery，不重跑业务。
-8. 制造一次明确 `failed` 与一次效果不明 `unknown`；failed 可显式重试，unknown 不盲重发。业务结果保持完成，UI 不把消息失败写成业务失败。
-9. 正常重启与 backup/restore 到隔离根：work/message/delivery/identity revision 回读一致，`sending→unknown`，无入站自动处理、无历史重发；未配置渠道 secrets 时 Web 与维护能力仍可用。
-10. 真实手机及渠道内浏览器从认证 HTTPS 深链打开指定工作，完成补充、来源查看、回复、停止当前本人工作并回读停止范围/最终状态与失败处理；验证停止不影响独立工作且不同于取消 delivery。390×844 回归无横向溢出、焦点和错误提示可用。本阶段没有业务写动作，必要批准不适用。
+## 7. Team Sol执行责任、探针与验证
 
-### 8.3 确定性与真实证据矩阵
+### 7.1 任务依赖和写入所有权
 
-- AC-16：飞书与明确选定微信的真实稳定 IDs、真实收发 message IDs、各自 workId、精确 `followUp` 补充、Web readback 和后续回信；mock 只用于异常补充，不替代主链。
-- AC-17：同 provider event 去重、乱序、回声、群聊正反例、发送前撤权、failed/unknown、恢复无重放、可信 HTTPS 和真实手机停止工作。
-- J11：两个产品成员的渠道身份/工作/知识服务端正反例；管理员配置 app 与普通成员关联/默认派发权限分离；真实手机完成补充、来源、回复和停止。
-- 回归：P1 真实读取与来源、P2 waiting/continue/cancel/confirmation/多连接、P3 collaboration/knowledge/revoke/backup 均通过。
+| 任务 | 输出/文件与owner职责 | 就绪条件/集成 |
+|---|---|---|
+| P4-U0 | 根清单/lock、runtime-config、runner/原生桥、升级probe与受影响测试；Geneway核心owner | 计划复审通过；备份先行。与S1共享文件串行。 |
+| P4-S1-A | store、work/action服务、Agent配置API、授权/批准测试；核心owner | 计划复审通过；先批准失效再取消强制登出。 |
+| P4-S1-B | conversation-service、runner chat、server API、state-transfer、会话测试；核心owner；Web由UI owner | A和原生Session探针；server同一时段仅一个owner。 |
+| P4-S1-C | 实际浏览器/模型验收、单独视频离线说明及回读；验收owner | S1可运行候选；不等渠道/Kivo。 |
+| P4-K0-A | 独立clone、Control文档提交、隔离实例准备；Kivo owner | 计划复审通过；不动源库/受保护树。 |
+| P4-K0-B | shared机器/OAuth、唯一agent-mcp、MES挂载/guards、只读工具与测试；Kivo owner | A；SDK/路由注入有限探针后展开。 |
+| P4-K0-C | Kivo插件、TPM规范化、capability/连接/授权接线、TPM协作；Geneway集成owner | 建议U0后；Kivo工具/资源契约冻结；共享文件移交后写。 |
+| P4-K0-D | 两实例J1/J4/J6及Kivo回归、真实浏览器来源；验收owner | B/C及升级候选。 |
+| P4-K0-E | FMS同库迁移、旧入口下线、文档测试；Kivo owner | B；§8写范围裁决后才完成lock路径。 |
+| P4-C1 | channel-service/store/automation-service/API与身份迁移；核心owner | S1会话契约稳定。 |
+| P4-C2 | 微信协议vendor/plugin与本地iLink模拟器；微信owner | 计划复审通过可先协议探针；接线依赖C1。 |
+| P4-C3 | 飞书会话接入/SDK注入测试；通道owner | C1；保留已有transport。 |
+| P4-C4 | 我的渠道/对话Web/移动交互；UI owner | API契约稳定；web/index.html唯一writer。 |
+| P4-V | 同候选聚合、独立正确性/复杂度/设计核验、视频离线说明、验证记录和Lark回读 | S1/U0/K0只读/C1–C4完成；不能以局部通过代P4。 |
 
-拟建命令不是当前证据：
+owner在实际派发时记具体agent；同文件不并发写。初始可执行边界仅核心U0/S1、独立Kivo、微信协议；UI等接口稳定后接入。实施采用用户指定Team Sol，路由预检后明确模型/权限/owned files；交接先确认前writer静止。reviewer不实现被审改动。
+
+### 7.2 有限探针及失败分支
+
+| 探针 | 成功证据 | 失败处置 |
+|---|---|---|
+| DSH包/能力 | 同版本实际安装、默认有效工具列表、旧历史/新Session/取消/委派 | 缺配套包或未知能力停止升级集成；窄patch后重测，不降级伪报。 |
+| S1原生对话 | 真模型零work问答、新建空上下文、继续/重启读取、两个工作独立取消 | 旧版不足则S1运行依赖U0；新版仍不足重规划，不造循环。 |
+| 模型秘密 | 明确合法server ref可载入并完成受控真实调用，无秘密入Session | 缺引用只停真实模型验收，向用户说明所需配置；不扫描搬运。 |
+| MCP/OAuth | discover/精确版本/头/metadata/privateJWT全链、旧握手拒绝 | 同库窄配置适配可做；需换协议/人类token/代理则重规划。 |
+| 内部主体 | 一个TPM GET经真实guards/模块/组织成功，外部伪主体与错误token拒绝 | 不能安全注入则停K0，不直调service。 |
+| TPM DTO | 真实返回与严格输出一致，未知/时间/无范围可区分 | 缺字段标unknown；必要窄API修正限本接入，不补造。 |
+| iLink | vendor实际通道连模拟协议，确认/owner/收发/游标/拒发 | 协议局部适配；需Host/第二会话权威/先游标则重规划。 |
+| FMS迁移 | 同库下read/dryrun/确认/幂等与既有权限行为可验证 | 写授权未决不执行lock；未完成收尾不能恢复P6。 |
+
+### 7.3 普通旅程与负例
+
+至少admin、A/B、两个Agent、Kivo A/B同单号不同记录。顺序：
+
+1. S1管理、真实聊天、多会话与管理员/成员隔离，见§3.3。
+2. J1经实际Web→DSH→Geneway插件→MCP→Kivo路由读TPM及设备，来源/时间/状态与API回读一致；追问不偷刷新，查最新形成新观察；缺单号待补充，继续同work。J2保留等待/停止/重复继续和确认信息有效性。
+3. J4两个独立实例相同单号，成员/Agent不同连接，交错执行/轮换凭据/停连接不串；不以同库两个组织代替。
+4. J6真实TPM与获准维护知识动态委派/交接/计划调整/汇总，引用可回读；撤知识与停子工作后不泄漏、不误停独立work。
+5. A/B各自飞书和微信经实际通道完成绑定、自然交办、正文反馈、精确补充，Web找到同work继续和回信；飞书官方SDK注入，微信本地协议服务器，模型/业务仍真实路由与synthetic数据。
+6. 两渠道「新会话」和Web切默认Agent：新上下文干净、旧对话仅Web本人可进、A/B及飞书/微信不串；通知identity不随轮换失效；解绑后新identity，旧消息/旧delivery不复活。
+7. 重投/乱序/冲突event、echo、非主人、非文本、确认前首条/取消扫码晚到、群@/陌生人/错reply、上下文过期/拒发/unknown；所有入口有持久结果，失败不重跑业务。
+8. 生成后发送前撤成员/Agent/知识/identity权限，首次发送和重试零平台调用；恢复权限不复活旧批准；分段未知不重复已确认部分。
+9. 正常重启与隔离根backup/restore：对话谱系/身份/游标/工作结果一致，无自动业务/重发，已解绑不复活；渠道缺失Web仍可用，旧GearJob历史不改义。
+10. 桌面和390×844实际登录、聊天、交办、补充、来源、停止、绑定确认/解绑；无横溢/遮挡，键盘与错误提示可用。P4无维修写批准，留P6。
+
+### 7.4 检查和实际记录
+
+优先复用现有聚合：`pnpm test:p5` 已覆盖前序p4/p3/p2链，按实际脚本确认后不重复整套；聚焦检查按影响面运行。保留以下已提交P6确定性测试，检查来源无关授权/持久语义及旧typed历史；其中action/correlation仍含GearJob/Hive受控夹具，按保留代码必要调整，不启动旧来源、不计为Kivo真实证据：
 
 ```text
-pnpm test:p4
-pnpm probe:p4-feishu
-pnpm probe:p4-wechat
-pnpm accept:p4
+node scripts/test-p6-state-store.mjs
+node scripts/test-p6-action.mjs
+TZ=Asia/Shanghai node scripts/test-p6-correlation.mjs
 ```
 
-保留回归：
+拟建并由相应任务落地：`scripts/test-p4-session.mjs`、`test-p4-kivo.mjs`、`test-p4-weixin.mjs`；`accept-p4-session.mjs`、`accept-p4-kivo.mjs`、`accept-p4.mjs`。名字可合并至已存在入口，不为每AC建脚本；当前不能记为已存在或通过。
 
-```text
-pnpm test:unit
-pnpm test:service
-pnpm test:controlled
-pnpm test:p2
-pnpm test:p3
-GENEWAY_P1_PROBE_MODEL=true pnpm probe:p1-runtime
-git diff --check
-```
+Kivo在clone内读取package scripts后运行受影响包/API typecheck、目标单测/PG HTTP集成、`node scripts/check-boundaries.mjs`，必要OpenAPI/迁移检查；提交前Control lint按真实base。具体命令与退出码在唯一验证记录中落地，不预填不存在的filter脚本。
 
-## 9. 视频、验证报告与 Lark 工程交付
+唯一验证记录用工作流外Git目录中一份 `p4-v44-verification.md`，逐步记候选/命令/退出码/失败/跳过/来源范围/实际入口/readback/审查引用；无需另建正式回执链。新逻辑用能发现缺陷的小测试，安全与恢复检查不能删除。命令失败先判代码、环境或未具备外部条件，不把重试次数当结束标准。
 
-P4 有可验收界面，必须在功能、真实渠道、回归和 Design Review 全通过后冻结一个产品候选，再用同一候选录制正常速度 MP4。视频至少展示：两个真实渠道关联与各自 J7、Web 同 work、群聊边界、重复不重跑、发送前撤权、failed/unknown、390px 与真实手机补充/来源/回复/停止、恢复无重发。不得用静态动画、mock 消息或剪掉失败替代真实主链。
+## 8. 未决事项、风险与停止点
 
-一份去敏 verification report 保存 candidate、MP4 SHA-256、真实 provider/app 脱敏标识、外部 message/event ID 脱敏值、work/execution/result/delivery refs、权限正反例、回归、浏览器、恢复、秘密扫描、独立正确性审查和独立过度设计审查结论。材料不得包含 app secret、access token、Cookie、关联码、grant 或 Session secret。
+**FMS写策略冲突待用户裁决：**迁移要求保留method_snapshot.lock的原写行为，而合同同时只准机器账号创建维修单、MCP不接人类token。只给Geneway账号不授FMS权限不足以回答“平台是否允许机器锁定快照”。两名planner均核对为真实冲突：FMS控制器要求manufacturing.method_snapshot.execute，lock服务写status/lockedBy/updatedBy且写上下文硬编码human，现有JWT仅加载人类session。已向用户提出允许专属FMS机器账号锁定或调整为人工FMS锁定的单项选择；未获明确结论前不得扩充机器写allowlist，也不得删掉锁定行为冒充迁移完成。仅K0-E真实lock路径受阻，S1/U0/K0只读继续。
 
-独立正确性 reviewer 完整查看视频、report、hash 和秘密扫描；独立过度设计 reviewer 确认最终候选没有重新引入已否定复杂度。随后使用新的 P4 幂等 key 通过 `lark-cli` 发送说明、视频和 verification report，并回读类型、消息 ID 与 `deleted=false`。视频制作临时帧可在确认 MP4 后删除，不作为正式交付物。该发送仍是工程验收材料交付，不等于 P4 产品飞书渠道本身。
+其余主要风险：DSH新API与历史、内部主体穿过真实guards、iLink先持久后游标、撤权后旧上下文/批准、身份恢复复活。各由§7.2探针与负例处理；变化超出已列分支则两Astra原位重规划受影响段，未知依赖不拖停无关就绪任务。
 
-## 10. 风险、恢复、停止和完成判定
+无合法模型秘密/开发License/独立实例时，不宣称真实旅程通过；不靠现场数据或他人库补齐。需要新业务写、外网、真实产品消息、push/合入/部署时先询问用户。秘密泄漏、越权正文、撤权后派发或恢复重放为当前交付阻断，修复后重新冻结受影响候选。
 
-- SDK 无法证明持久化/ACK/重投边界：停止该 adapter，保留 inbox 设计，由双 Astra 复核 webhook 或官方替代；不削弱可靠性声明。
-- 微信选型或账号不可得：继续 ready frontier，但 T4、微信 J7、AC-16/17、G6 和 P4 PASS 保持未完成。用户于 2026-09-20 后续明确批准 P5 并允许在这些 P4 缺口 deferred 时先实施 P5；该决定只取代“不提前进入 P5 实施”的顺序限制，不改写 P4 完成条件。
-- 手机 HTTPS 入口无授权：只实施保持 loopback 的 T5a；不得直接对外监听或信任任意 forwarded header，本地 390px 只能作为支持证据，T5b 与真实手机门保持未过。
-- 外部发送效果未知：保留 `unknown`，不盲发；需要真实平台回查或人工决定。
-- 身份/群/外发范围发生产品语义变化，或需要通用队列/新存储/跨进程 worker：暂停受影响工作，由两名 Astra 原位复核本计划。
-- 任何 credential、关联码或私有正文进入日志、视频、备份或错误响应：停止验收，修复并重新冻结候选。
+## 9. 交付、本地提交与关闭条件
 
-P4 只有在两个真实渠道主链、Web/真实手机、权限/群聊/重复/失败/恢复、P1–P3 回归、Design Review、MP4/verification report、独立正确性与过度设计审查和 Lark 回读全部通过后，才能标记 PASS。局部代码完成、一个渠道可用、受控 webhook、HTTP 200 或材料发送成功均不构成阶段完成。
+S1与最终P4各交一套同候选真实操作MP4和离线HTML说明（内联截图、相对视频链接、操作步骤/可见结果/失败恢复），明确“渠道为模拟验收”、Kivo synthetic/本地非生产，以及实际模型路由。不得以动画/直调service/静态截图替代交互。HTML不含debug、placeholder或秘密。
+
+独立正确性/设计核验查看实际浏览器、持久readback与视频；独立复杂度审查确认无重复系统或过程包。用已授权lark-cli发送说明、视频与必要验证材料，回读消息类型/ID/deleted状态；工程交付成功不等于产品渠道验收成功。
+
+每个独立可理解、已验证的逻辑结果做适度本地Conventional Commit，检查 staged diff 与 `git diff --cached --check`；只含任务路径/hunk。Kivo受控意图提交先于实现。ui-sketches*永不stage。记录两个仓库commit分别状态，不push/合入。
+
+P4技术完成须S1/U0/K0只读及渠道全旅程、来源无关与Kivo回归、权限/恢复、真实浏览器、独立审查、两次视频/离线说明/Lark回读齐全。用户最终阶段验收另列，不代签。FMS收尾允许晚于TPM只读验证，但必须在恢复P6前完成。局部通过、HTTP200、历史GearJob结果或材料已发送均不等于P4完成。
+
+下一顺序保持P4→P5-K1（Astra原位计划）→P6 Kivo（Astra原位计划，先确认唯一MCP收尾）→P7（Astra计划）。本计划不替代后三阶段详细规划。

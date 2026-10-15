@@ -396,7 +396,7 @@ function seed(state, connectionValue) {
       { id: 'member-owner', loginName: 'owner', displayName: '生产协调员', role: 'member', enabled: true, authRef: 'member-owner', sessionVersion: 1, employeeIds, createdAt: now, updatedAt: now },
       { id: 'member-peer', loginName: 'peer', displayName: '协作成员', role: 'member', enabled: true, authRef: 'member-peer', sessionVersion: 1, employeeIds: ['employee-b'], createdAt: now, updatedAt: now },
     ],
-    modelRoutes: [{ id: 'model-zenmux', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', displayName: 'ZenMux DeepSeek', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
+    modelRoutes: [{ id: 'model-zenmux', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux DeepSeek', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     skills: [{ id: 'skill-cycle-time-calculate', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true }, { id: 'skill-gearjob-work-order-read', name: '工单读取', capabilityId: 'gearjob-work-order-read', enabled: true }],
     connections: [connectionValue],
     employees: [

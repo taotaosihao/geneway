@@ -3,7 +3,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { resolveCredentialFile } from './execution-grant.mjs'
 
 const ZENMUX_PROVIDER = 'zenmux'
-const ZENMUX_MODEL = 'deepseek/deepseek-v4-pro'
+const ZENMUX_MODEL = 'deepseek/deepseek-v4.1-flash'
 const ZENMUX_BASE_URL = 'https://zenmux.ai/api/v1'
 
 export function readRuntimeConfig(env = process.env, root = process.cwd()) {

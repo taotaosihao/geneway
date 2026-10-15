@@ -362,10 +362,10 @@ async function actualProfileGuardChecks() {
   await new Promise((resolve, reject) => provider.listen(0, '127.0.0.1', error => error ? reject(error) : resolve()))
   const providerPort = provider.address().port
   const networkPatch = join(dshHome, 'local-provider.patch.yml')
-  await writeFile(networkPatch, `- id: llm-pi-ai\n  config:\n    providers:\n      zenmux:\n        displayName: Local guard probe\n        api: openai-completions\n        apiKeyEnv: ZENMUX_API_KEY\n        baseURL: http://127.0.0.1:${providerPort}/v1\n        models:\n          - id: deepseek/deepseek-v4-pro\n            contextWindow: 200000\n            maxOutputTokens: 8192\n`, { mode: 0o600 })
+  await writeFile(networkPatch, `- id: llm-pi-ai\n  config:\n    providers:\n      zenmux:\n        displayName: Local guard probe\n        api: openai-completions\n        apiKeyEnv: ZENMUX_API_KEY\n        baseURL: http://127.0.0.1:${providerPort}/v1\n        models:\n          - id: deepseek/deepseek-v4.1-flash\n            contextWindow: 200000\n            maxOutputTokens: 8192\n`, { mode: 0o600 })
   const harness = new DeepSeekHarness({
     profile: 'sdk', patches: [join(root, 'config/p1-runtime.patch.yml'), networkPatch], dshHome,
-    processCwd: root, cwd: root, provider: 'zenmux', model: 'deepseek/deepseek-v4-pro',
+    processCwd: root, cwd: root, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash',
     env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: process.env.LANG, DSH_TELEMETRY_MODE: 'DISABLED', ZENMUX_API_KEY: 'guard-must-stop-before-provider' },
     initializeTimeoutMs: 15_000, requestTimeoutMs: 120_000,
   })
@@ -588,7 +588,7 @@ function fixture({ maxRuns = 3, rules = ['rule-a'] } = {}) {
   const value = {
     version: 7,
     members: [{ id: 'member-owner', loginName: 'owner', displayName: 'Owner', role: 'member', enabled: true, authRef: 'owner', sessionVersion: 1, employeeIds: ['employee-owner'] }],
-    modelRoutes: [{ id: 'route-owner', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', credentialRef: 'ZENMUX_API_KEY', enabled: true }],
+    modelRoutes: [{ id: 'route-owner', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'ZENMUX_API_KEY', enabled: true }],
     employees: [{ id: 'employee-owner', enabled: true, modelRouteId: 'route-owner', skillIds: ['skill-gearjob-work-order-read'], connectionIds: ['connection-owner'] }],
     connections: [{ id: 'connection-owner', kind: 'gearjob-rest', targetIdentity: 'gearjob-test', baseUrl: 'https://gearjob.test', hostHeader: 'gearjob.test', credentialRef: 'GEARJOB_TEST', sourceSystem: 'gearjob', sourceInstance: 'test', sourceEnvironment: 'synthetic', dataMode: 'live', evidenceMode: 'test', enabled: true, status: 'ready', revision: 1, skillIds: ['skill-gearjob-work-order-read'], allowedObjectIds: ['WO-1'] }],
     skills: [{ id: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', enabled: true }], confirmations: [], knowledgeMaterials: [], channelApps: [], channelIdentities: [], channelConversations: [], channelMessages: [], deliveries: [], linkCodes: [], works: [], reservations: {},

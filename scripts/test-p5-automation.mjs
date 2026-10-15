@@ -106,6 +106,10 @@ async function ruleChecks() {
   assert.equal(enabled.status, 'active')
   assert.equal(enabled.revision, 2)
   assert.equal(enabled.effectiveFrom, state.clock)
+  const currentRoutes = structuredClone(state.current.modelRoutes)
+  state.current.modelRoutes.find(route => route.id === 'route-owner').model = 'deepseek/deepseek-v4-pro'
+  await assert.rejects(service.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: daily('08:00') }), error => error.code === 'FORBIDDEN')
+  state.current.modelRoutes = currentRoutes
   await assert.rejects(service.getRule({ id: 'member-peer' }, created.id), error => error.code === 'NOT_FOUND')
   await assert.rejects(service.getRule({ id: 'member-admin' }, created.id), error => error.code === 'NOT_FOUND')
   const channels = Object.fromEntries(['channelApps', 'channelIdentities', 'channelConversations'].map(key => [key, structuredClone(state.current[key])]))
@@ -316,7 +320,7 @@ function fixture() {
 }
 
 function member(id, employeeIds) { return { id, loginName: id, displayName: id, role: id === 'member-admin' ? 'admin' : 'member', enabled: true, authRef: id, sessionVersion: 1, employeeIds } }
-function route(id) { return { id, provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', credentialRef: 'ZENMUX_API_KEY', enabled: true } }
+function route(id) { return { id, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'ZENMUX_API_KEY', enabled: true } }
 function employee(id, modelRouteId, connectionId) { return { id, enabled: true, modelRouteId, skillIds: [id === 'employee-owner' ? 'skill-gearjob-work-order-read' : id === 'employee-owner-2' ? 'skill-owner-2' : 'skill-peer'], connectionIds: [connectionId] } }
 function skill(value = {}) { return { id: 'skill-gearjob-work-order-read', capabilityId: 'gearjob-work-order-read', enabled: true, ...value } }
 function connection(id, workOrderId) { const target = id === 'connection-owner-2' ? catalog[1] : catalog[0]; return { id, kind: target.kind, targetIdentity: target.targetIdentity, baseUrl: target.baseUrl, hostHeader: target.hostHeader, credentialRef: target.credentialRef, sourceSystem: target.sourceSystem, sourceInstance: target.sourceInstance, sourceEnvironment: target.sourceEnvironment, dataMode: target.dataMode, evidenceMode: target.evidenceMode, enabled: true, status: 'ready', revision: 1, skillIds: [id === 'connection-owner' ? 'skill-gearjob-work-order-read' : id === 'connection-owner-2' ? 'skill-owner-2' : 'skill-peer'], allowedObjectIds: [workOrderId] } }

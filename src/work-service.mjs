@@ -22,7 +22,7 @@ const TERMINAL_EXECUTION = new Set(['completed', 'failed', 'cancelled', 'interru
 const CONTINUABLE_WORK = new Set(['waiting_input', 'failed', 'interrupted', 'cancelled'])
 const CONFIG_KINDS = new Set(['employees', 'connections', 'skills', 'modelRoutes'])
 const ZENMUX_PROVIDER = 'zenmux'
-const ZENMUX_MODEL = 'deepseek/deepseek-v4-pro'
+const ZENMUX_MODEL = 'deepseek/deepseek-v4.1-flash'
 const SAFE_ERROR_MESSAGES = Object.freeze({
   SOURCE_NOT_CONFIGURED: '连接凭据不可用或连接未配置',
   UPSTREAM_TIMEOUT: '来源读取超时',
@@ -1067,7 +1067,7 @@ function modelRoute(body, current) {
   const id = current?.id ?? clean(body.id), provider = body.provider ?? current?.provider, model = body.model ?? current?.model
   const displayName = clean(body.displayName ?? current?.displayName), enabled = body.enabled ?? current?.enabled ?? true
   const credentialRef = clean(body.credentialRef ?? current?.credentialRef ?? 'ZENMUX_API_KEY')
-  if (!id || provider !== ZENMUX_PROVIDER || model !== ZENMUX_MODEL || !displayName || typeof enabled !== 'boolean' || credentialRef !== 'ZENMUX_API_KEY') throw serviceError('INVALID_REQUEST', '模型路由必须使用固定 ZenMux DeepSeek V4 Pro 配置')
+  if (!id || provider !== ZENMUX_PROVIDER || model !== ZENMUX_MODEL || !displayName || typeof enabled !== 'boolean' || credentialRef !== 'ZENMUX_API_KEY') throw serviceError('INVALID_REQUEST', '模型路由必须使用固定 ZenMux DeepSeek V4.1 Flash 配置')
   return { id, provider, model, displayName, enabled, credentialRef }
 }
 function skillConfig(body, current) {

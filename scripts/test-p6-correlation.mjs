@@ -254,7 +254,7 @@ async function runnerChecks() {
   const dshHome = join(root, 'dsh-home'), harnesses = []
   const runner = createDshRunner({
     root: process.cwd(),
-    config: { model: { configured: true, provider: 'zenmux', model: 'deepseek/deepseek-v4-pro' }, source: { configured: true }, dshHome, stateFile: join(root, 'state.json'), dataRoot: root, secretRoot },
+    config: { model: { configured: true, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash' }, source: { configured: true }, dshHome, stateFile: join(root, 'state.json'), dataRoot: root, secretRoot },
     harnessFactory() {
       const index = harnesses.length
       const harness = { closed: 0, async run() { return { events, finalResponse: '关联完成', sessionId: `session-${index + 1}` } }, async close() { this.closed += 1 } }
@@ -328,7 +328,7 @@ function fixtureState() {
   return {
     version: STATE_VERSION,
     members: [{ id: 'member-a', loginName: 'member', displayName: 'Member', role: 'member', enabled: true, authRef: 'member-a', sessionVersion: 1, employeeIds: ['employee-a'], createdAt: queriedAt, updatedAt: queriedAt }],
-    modelRoutes: [{ id: 'route-a', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
+    modelRoutes: [{ id: 'route-a', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     employees: [{ id: 'employee-a', name: 'Employee', description: '', enabled: true, modelRouteId: 'route-a', connectionIds: ['connection-gear', 'connection-hive'], skillIds: ['skill-manufacturing-work-order-device-correlate', 'skill-gearjob-work-order-read'] }],
     connections: [gearConnection(), hiveConnection()],
     skills: [{ id: 'skill-manufacturing-work-order-device-correlate', name: '关联', capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY, enabled: true }, { id: 'skill-gearjob-work-order-read', name: '工单', capabilityId: 'gearjob-work-order-read', enabled: true }],

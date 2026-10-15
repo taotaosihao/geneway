@@ -15,7 +15,7 @@ try {
   await store.update(state => ({
     ...state,
     members: [member('admin', 'admin'), member('alice'), member('bob')],
-    modelRoutes: [{ id: 'route', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', credentialRef: 'ZENMUX_API_KEY', enabled: true }],
+    modelRoutes: [{ id: 'route', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'ZENMUX_API_KEY', enabled: true }],
   }))
   const created = await service.createConfig(admin, 'employees', {
     id: 'assistant', name: '助手', instructions: '依据事实回答。', modelRouteId: 'route', memberIds: ['alice'],

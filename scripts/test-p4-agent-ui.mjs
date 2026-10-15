@@ -18,7 +18,7 @@ try {
     const now = '2026-10-15T00:00:00.000Z'
     return { ...state,
       members: ['admin', 'a', 'b'].map(id => ({ id, loginName: id, displayName: id, role: id === 'admin' ? 'admin' : 'member', enabled: true, authRef: id, employeeIds: [], sessionVersion: 1, createdAt: now, updatedAt: now })),
-      modelRoutes: [{ id: 'model', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', displayName: '测试模型', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
+      modelRoutes: [{ id: 'model', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: '测试模型', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
       skills: [{ id: 'skill-cycle-time-calculate', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true }],
     }
   })

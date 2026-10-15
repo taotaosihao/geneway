@@ -7,6 +7,7 @@ import { readGearJobWorkOrder } from '../plugins/gearjob-work-order.mjs'
 import { readConnectionCatalog } from '../src/connection-catalog.mjs'
 import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
+import { readRuntimeConfig } from '../src/runtime-config.mjs'
 
 const root = await mkdtemp(join(tmpdir(), 'geneway-p2-service-'))
 const stateFile = join(root, 'state.json')
@@ -68,6 +69,12 @@ try {
   const alice = { id: 'member-alice' }
   const bob = { id: 'member-bob' }
   const admin = { id: 'member-admin' }
+  const runtimeModel = readRuntimeConfig({}).model
+  const configuredRoute = await service.updateConfig(admin, 'modelRoutes', 'model-zenmux', { provider: runtimeModel.provider, model: runtimeModel.model, displayName: 'ZenMux · DeepSeek V4.1 Flash' })
+  assert.equal(configuredRoute.model, 'deepseek/deepseek-v4.1-flash')
+  await assert.rejects(service.createConfig(admin, 'modelRoutes', { ...configuredRoute, id: 'legacy-model', model: 'deepseek/deepseek-v4-pro' }), error => error.code === 'INVALID_REQUEST')
+  await assert.rejects(service.updateConfig(admin, 'modelRoutes', configuredRoute.id, { model: 'deepseek/deepseek-v4-pro' }), error => error.code === 'INVALID_REQUEST')
+  assert.equal((await store.read()).modelRoutes.find(route => route.id === configuredRoute.id).model, runtimeModel.model)
 
   const waiting = await service.createWork(alice, { employeeId: 'employee-a', skillId: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', input: { availableSeconds: 3600 }, clientRequestId: 'waiting' })
   assert.equal(waiting.ok, true)
@@ -86,6 +93,7 @@ try {
   assert.equal(completedCycle.results[0].payload.secondsPerUnit, 60)
   assert.equal(completedCycle.executions[0].resultId, completedCycle.results[0].id)
   assert.equal(completedCycle.observations.length, 0)
+  assert.equal(calls[0].sessionMetadata.modelRouteId, configuredRoute.id)
   const callsAfterContinue = calls.length
   const continuedReplay = await service.continueWork(alice, waiting.value.id, { input: { quantity: 999 }, clientRequestId: 'continue' })
   assert.equal(continuedReplay.deduplicated, true)
@@ -163,7 +171,7 @@ try {
 
   await assert.rejects(service.listMembers(alice), error => error.code === 'FORBIDDEN')
   await assert.rejects(service.listConfig(alice, 'employees'), error => error.code === 'FORBIDDEN')
-  assert.equal((await service.listConfig(admin, 'modelRoutes'))[0].model, 'deepseek/deepseek-v4-pro')
+  assert.equal((await service.listConfig(admin, 'modelRoutes'))[0].model, 'deepseek/deepseek-v4.1-flash')
   const renamed = await service.updateConfig(admin, 'employees', 'employee-admin', { description: '管理员配置员工', expectedRevision: (await service.listConfig(admin, 'employees')).find(employee => employee.id === 'employee-admin').revision })
   assert.equal(renamed.description, '管理员配置员工')
   const configuredAgent = await service.updateConfig(admin, 'employees', 'employee-a', { instructions: '本次执行保留原指令。', expectedRevision: (await service.listConfig(admin, 'employees')).find(employee => employee.id === 'employee-a').revision })
@@ -327,7 +335,7 @@ function seedState(state) {
   return {
     ...state,
     members: [member('member-admin', 'admin', ['employee-admin']), member('member-alice', 'member', ['employee-a']), member('member-bob', 'member', ['employee-b'])],
-    modelRoutes: [{ id: 'model-zenmux', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
+    modelRoutes: [{ id: 'model-zenmux', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     skills: [
       { id: 'skill-gearjob-work-order-read', name: '工单查询', capabilityId: 'gearjob-work-order-read', enabled: true },
       { id: 'skill-cycle-time-calculate', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true },

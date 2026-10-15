@@ -72,7 +72,7 @@ try {
   await login(evaluate, waitFor, 'admin', adminPassword, 'admin')
 
   const configured = await evaluate(`(async()=>{
-    const route=await api('/api/admin/model-routes',{method:'POST',body:{id:'model-zenmux',provider:'zenmux',model:'deepseek/deepseek-v4-pro',displayName:'ZenMux · DeepSeek V4 Pro',enabled:true,credentialRef:'ZENMUX_API_KEY'}})
+    const route=await api('/api/admin/model-routes',{method:'POST',body:{id:'model-zenmux',provider:'zenmux',model:'deepseek/deepseek-v4.1-flash',displayName:'ZenMux · DeepSeek V4.1 Flash',enabled:true,credentialRef:'ZENMUX_API_KEY'}})
     const skill=await api('/api/admin/skills',{method:'POST',body:{id:'skill-gearjob-work-order-read',name:'GearJob 工单只读',capabilityId:'gearjob-work-order-read',enabled:true}})
     const connection=await api('/api/admin/connections',{method:'POST',body:{id:'connection-a',name:'GearJob 外部测试 A',kind:'gearjob-rest',targetIdentity:'gearjob-dev-a',baseUrl:${JSON.stringify(gearJobUrl)},hostHeader:${JSON.stringify(gearJobHost)},credentialRef:'gearjob-a.json',allowedObjectIds:[${JSON.stringify(workOrderId)}],sourceSystem:'GearJob',sourceInstance:'dev.localhost',sourceEnvironment:'external-test',dataMode:'synthetic',evidenceMode:'real-frappe-rest',enabled:true,skillIds:[skill.id]}})
     const employee=await api('/api/admin/employees',{method:'POST',body:{id:'employee-a',name:'工单助理 A',description:'读取 GearJob 外部测试 A',enabled:true,modelRouteId:route.id,connectionIds:[connection.id],skillIds:[skill.id]}})

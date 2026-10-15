@@ -121,7 +121,7 @@ function seed(state) {
   const member = (id, loginName, role, employeeIds) => ({ id, loginName, displayName: loginName, role, enabled: true, authRef: id, sessionVersion: 1, employeeIds, createdAt: now, updatedAt: now })
   return { ...state,
     members: [member('member-admin', 'admin', 'admin', []), member('member-owner', 'owner', 'member', ['employee-owner']), member('member-peer', 'peer', 'member', [])],
-    modelRoutes: [{ id: 'model-1', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
+    modelRoutes: [{ id: 'model-1', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     employees: [{ id: 'employee-owner', name: '工单核对员', description: '核对工单', enabled: true, modelRouteId: 'model-1', connectionIds: ['connection-owner'], skillIds: ['skill-gearjob-work-order-read'] }],
     connections: [{ id: 'connection-owner', name: 'GearJob 外部测试', ...catalog(), allowedObjectIds: ['WO-HTTP', 'WO-BROWSER', 'WO-EVENT', 'WO-FAILED', 'WO-UNKNOWN', 'WO-ACTIVE'], enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'], revision: 1 }],
     skills: [{ id: 'skill-gearjob-work-order-read', name: '工单查询', capabilityId: 'gearjob-work-order-read', enabled: true }],

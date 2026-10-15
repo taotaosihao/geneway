@@ -132,7 +132,7 @@ async function configureProduct(browser, config, adminPassword, ownerPassword) {
   await waitFor(`Boolean(document.querySelector('#login-name'))`)
   await login(evaluate, waitFor, 'admin', adminPassword)
   const configured = await evaluate(`(async()=>{
-    const route=await api('/api/admin/model-routes',{method:'POST',body:{id:'model-zenmux',provider:'zenmux',model:'deepseek/deepseek-v4-pro',displayName:'ZenMux DeepSeek V4 Pro',enabled:true,credentialRef:'ZENMUX_API_KEY'}})
+    const route=await api('/api/admin/model-routes',{method:'POST',body:{id:'model-zenmux',provider:'zenmux',model:'deepseek/deepseek-v4.1-flash',displayName:'ZenMux DeepSeek V4.1 Flash',enabled:true,credentialRef:'ZENMUX_API_KEY'}})
     const skill=await api('/api/admin/skills',{method:'POST',body:{id:'skill-gearjob-work-order-read',name:'GearJob 工单只读',capabilityId:'gearjob-work-order-read',enabled:true}})
     const connection=await api('/api/admin/connections',{method:'POST',body:{id:'connection-p5',name:'GearJob 外部测试',kind:'gearjob-rest',targetIdentity:'gearjob-p5',baseUrl:${JSON.stringify(config.gearJobUrl)},hostHeader:${JSON.stringify(config.gearJobHost)},credentialRef:'gearjob.json',allowedObjectIds:[${JSON.stringify(config.workOrderId)}],sourceSystem:'GearJob',sourceInstance:'dev.localhost',sourceEnvironment:'external-test',dataMode:'synthetic',evidenceMode:'real-frappe-rest',enabled:true,skillIds:[skill.id]}})
     const employee=await api('/api/admin/employees',{method:'POST',body:{id:'employee-p5',name:'工单核对员',description:'真实定时核对测试工单',enabled:true,modelRouteId:route.id,connectionIds:[connection.id],skillIds:[skill.id]}})
@@ -294,7 +294,7 @@ async function readback(statePath, dshPath, journey, config) {
   assert.equal(result.source.sourceRecordId, `Work Order:${config.workOrderId}`); assert.equal(result.source.sourceSystem, 'GearJob'); assert.equal(result.source.sourceEnvironment, 'external-test'); assert.equal(result.source.dataMode, 'synthetic'); assert.equal(result.source.evidenceMode, 'real-frappe-rest')
   assert.equal(result.payload.plannedQuantity, 10); assert.equal(result.payload.completedQuantity, 4); assert.equal(result.payload.unit, 'Nos'); assert.ok(result.dshSessionRef); assert.ok(Number.isInteger(execution.dshEventCount) && execution.dshEventCount > 0)
   assert.equal(connection.sourceSystem, 'GearJob'); assert.equal(connection.sourceEnvironment, 'external-test'); assert.equal(connection.dataMode, 'synthetic'); assert.equal(connection.evidenceMode, 'real-frappe-rest')
-  assert.equal(route.provider, config.runtime.model.provider); assert.equal(route.model, config.runtime.model.model); assert.equal(route.provider, 'zenmux'); assert.equal(route.model, 'deepseek/deepseek-v4-pro')
+  assert.equal(route.provider, config.runtime.model.provider); assert.equal(route.model, config.runtime.model.model); assert.equal(route.provider, 'zenmux'); assert.equal(route.model, 'deepseek/deepseek-v4.1-flash')
   assert.match(delivery.providerMessageId, /^om_/)
   const dsh = await dshEvidence(dshPath, result.dshSessionRef); assert.ok(dsh.sessionCount >= 1 && dsh.eventCount >= execution.dshEventCount)
   assert.ok(Math.abs(Date.parse(localDateTimeIso(occurrence.scheduledDate, rule.trigger.time)) - Date.parse(journey.targetIso)) <= 60_000)
@@ -581,7 +581,7 @@ async function validateFormal(input) {
   const runtimeEnv = { ...process.env, GENEWAY_GEARJOB_BASE_URL: input.gearJobUrl ?? process.env.GENEWAY_GEARJOB_BASE_URL, GENEWAY_GEARJOB_CREDENTIAL_FILE: gearJobCredential, GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: input.workOrderId, GENEWAY_GEARJOB_HOST_HEADER: input.gearJobHost ?? process.env.GENEWAY_GEARJOB_HOST_HEADER, GENEWAY_GEARJOB_TARGET_IDENTITY: input.gearJobTargetIdentity ?? process.env.GENEWAY_GEARJOB_TARGET_IDENTITY }
   const runtime = readRuntimeConfig(runtimeEnv, root); await validateRuntimeConfig(runtime)
   if (!runtime.source.configured) throw new Error(`GearJob runtime config is not configured: ${runtime.source.error ?? 'unknown'}`)
-  if (runtime.model.provider !== 'zenmux' || runtime.model.model !== 'deepseek/deepseek-v4-pro' || !runtime.model.configured) throw new Error('runtime settings must configure ZenMux DeepSeek V4 Pro through actual settings env')
+  if (runtime.model.provider !== 'zenmux' || runtime.model.model !== 'deepseek/deepseek-v4.1-flash' || !runtime.model.configured) throw new Error('runtime settings must configure ZenMux DeepSeek V4.1 Flash through actual settings env')
   if (process.env.GENEWAY_GEARJOB_BASE_URL && process.env.GENEWAY_GEARJOB_BASE_URL !== runtime.source.baseUrl) throw new Error('conflicting GearJob base URL sources')
   if (process.env.GENEWAY_GEARJOB_CREDENTIAL_FILE && resolve(process.env.GENEWAY_GEARJOB_CREDENTIAL_FILE) !== resolve(gearJobCredential)) throw new Error('conflicting GearJob credential sources')
   const gearRaw = await readFile(gearJobCredential, 'utf8'), settings = readSettings(process.env), settingsToken = settings?.env?.ANTHROPIC_AUTH_TOKEN

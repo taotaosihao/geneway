@@ -86,7 +86,7 @@
         apiKeyEnv: ZENMUX_API_KEY
         baseURL: https://zenmux.ai/api/v1
         models:
-          - id: deepseek/deepseek-v4-pro
+          - id: deepseek/deepseek-v4.1-flash
             contextWindow: 200000
             maxOutputTokens: 8192
 - id: tools

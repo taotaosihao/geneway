@@ -20,7 +20,7 @@ const { createUserMessage } = await import(pathToFileURL(requireFromDsh.resolve(
 const ACTIVE = new Set(['accepted', 'running'])
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const USAGE_KEYS = ['inputTokens', 'outputTokens', 'totalTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens']
-const DEFAULT_AGENT = Object.freeze({ provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', maxTokens: 4096 })
+const DEFAULT_AGENT = Object.freeze({ provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', maxTokens: 4096 })
 
 export function createCollaborationRunner({
   store,
@@ -430,7 +430,7 @@ export function createCollaborationRunner({
       const employee = state.employees.find(candidate => candidate.id === binding.employeeId && candidate.enabled === true)
       const skill = state.skills.find(candidate => candidate.id === work?.skillId && candidate.enabled === true)
       const route = state.modelRoutes.find(candidate => candidate.id === employee?.modelRouteId && candidate.enabled === true)
-      if (!rootWork || !member || !member.employeeIds.includes(employee?.id) || !employee?.skillIds?.includes(skill?.id) || !route || route.provider !== 'zenmux' || route.model !== 'deepseek/deepseek-v4-pro' || route.credentialRef !== 'ZENMUX_API_KEY') throw runtimeError('FORBIDDEN', '当前成员、员工或模型路由授权已撤销')
+      if (!rootWork || !member || !member.employeeIds.includes(employee?.id) || !employee?.skillIds?.includes(skill?.id) || !route || route.provider !== 'zenmux' || route.model !== 'deepseek/deepseek-v4.1-flash' || route.credentialRef !== 'ZENMUX_API_KEY') throw runtimeError('FORBIDDEN', '当前成员、员工或模型路由授权已撤销')
       if (rootWork.collaboration.generation !== binding.generation || rootWork.collaboration.cancelGeneration !== binding.cancelGeneration || rootWork.collaboration.status !== 'running') throw runtimeError('CANCELLED', '协作 generation 已关闭')
       if (!execution || execution.generation !== binding.generation || execution.cancelGeneration !== binding.cancelGeneration || !ACTIVE.has(execution.status)) throw runtimeError('CANCELLED', '当前执行已关闭')
       let connection = null

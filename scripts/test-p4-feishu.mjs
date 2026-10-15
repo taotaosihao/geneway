@@ -416,7 +416,7 @@ function seed(state) {
       { id: 'member-admin', loginName: 'admin', displayName: 'admin', role: 'admin', enabled: true, authRef: 'admin', sessionVersion: 1, employeeIds: [], createdAt: now, updatedAt: now },
       { id: 'member-owner', loginName: 'owner', displayName: 'owner', role: 'member', enabled: true, authRef: 'owner', sessionVersion: 1, employeeIds: ['employee-owner'], createdAt: now, updatedAt: now },
     ],
-    modelRoutes: [{ id: 'model-1', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
+    modelRoutes: [{ id: 'model-1', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: 'ZenMux', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     employees: [{ id: 'employee-owner', name: '员工', enabled: true, modelRouteId: 'model-1', connectionIds: ['connection-owner'], skillIds: ['skill-gearjob-work-order-read'] }],
     connections: [{ id: 'connection-owner', name: 'GearJob', ...catalog(), allowedObjectIds: ['WO-RECOVER', 'WO-1', 'WO-2', 'WO-3'], enabled: true, status: 'ready', skillIds: ['skill-gearjob-work-order-read'], revision: 1 }],
     skills: [{ id: 'skill-gearjob-work-order-read', name: '工单查询', capabilityId: 'gearjob-work-order-read', enabled: true }],

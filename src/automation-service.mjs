@@ -8,7 +8,7 @@ import { validateCapabilityInput } from './capabilities.mjs'
 
 const CAPABILITY_ID = 'gearjob-work-order-read'
 const MODEL_PROVIDER = 'zenmux'
-const MODEL_ID = 'deepseek/deepseek-v4-pro'
+const MODEL_ID = 'deepseek/deepseek-v4.1-flash'
 const MODEL_CREDENTIAL = 'ZENMUX_API_KEY'
 const ZONE_OFFSET_MS = 8 * 60 * 60 * 1000
 

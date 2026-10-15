@@ -631,7 +631,7 @@ async function bootIsolatedRuntime(captureServer) {
 async function probeRealModel(harness, enabled) {
   if (!enabled) return { ran: false, reason: 'set GENEWAY_P3_PROBE_MODEL=true for the zero-business-data ZenMux spawn check' }
   if (!process.env.ZENMUX_API_KEY) throw new Error('GENEWAY_P3_PROBE_MODEL=true but the configured ZenMux credential is unavailable')
-  const realRoute = { provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', maxTokens: 256 }
+  const realRoute = { provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', maxTokens: 256 }
   const rootWork = await createRoot(harness, 'real-zenmux', [
     { childWorkId: 'real-child', executionId: 'real-exec', employeeId: 'employee-a', connectionId: 'local-none', objectId: 'probe-only', allowedTools: [TOOL_A] },
   ], 12, { agentOptions: realRoute })
@@ -669,7 +669,7 @@ async function probeRealModel(harness, enabled) {
     return {
       ran: true,
       provider: 'zenmux',
-      model: 'deepseek/deepseek-v4-pro',
+      model: 'deepseek/deepseek-v4.1-flash',
       rootRequests: rootRequests.length,
       childRequests: childRequests.length,
       parentCanaryExcludedFromChild: true,

@@ -399,7 +399,7 @@ function fixtureState() {
       { id: 'member-admin', loginName: 'admin', displayName: '管理员', role: 'admin', enabled: true, authRef: 'member-admin', sessionVersion: 3, employeeIds: ['employee-a', 'employee-b'] },
       { id: 'member-user', loginName: 'user', displayName: '成员', role: 'member', enabled: true, authRef: 'member-user', sessionVersion: 2, employeeIds: ['employee-b'] },
     ],
-    modelRoutes: [{ id: 'route-deepseek', provider: 'ZenMux', model: 'deepseek/deepseek-v4-pro', secretRef: 'zenmux-main' }],
+    modelRoutes: [{ id: 'route-deepseek', provider: 'ZenMux', model: 'deepseek/deepseek-v4.1-flash', secretRef: 'zenmux-main' }],
     employees: [
       { id: 'employee-a', enabled: true, modelRouteId: 'route-deepseek', skillIds: ['skill-gearjob-work-order-read'], connectionIds: ['connection-a'] },
       { id: 'employee-b', enabled: true, modelRouteId: 'route-deepseek', skillIds: ['skill-cycle-time-calculate'], connectionIds: ['connection-b'] },

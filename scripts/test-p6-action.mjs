@@ -500,7 +500,7 @@ function fixtureState() {
       { id: 'member-owner', role: 'member', enabled: true, sessionVersion: 1, employeeIds: ['employee-1'] },
       { id: 'member-admin', role: 'admin', enabled: true, sessionVersion: 1, employeeIds: ['employee-1'] },
     ],
-    modelRoutes: [{ id: 'route-1', provider: 'zenmux', model: 'deepseek/deepseek-v4-pro', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
+    modelRoutes: [{ id: 'route-1', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     employees: [{ id: 'employee-1', enabled: true, modelRouteId: 'route-1', connectionIds: ['connection-gear', 'connection-hive'], skillIds: ['skill-manufacturing-work-order-device-correlate'] }],
     connections: [gearConnection(), hiveConnection()],
     skills: [{ id: 'skill-manufacturing-work-order-device-correlate', enabled: true, capabilityId: WORK_ORDER_DEVICE_CORRELATION_CAPABILITY }],

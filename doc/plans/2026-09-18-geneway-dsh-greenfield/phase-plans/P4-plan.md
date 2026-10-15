@@ -2,7 +2,7 @@
 
 > 合同 v4.4 原位重规划，形成时间：2026-10-15T10:32:00Z。本文替换旧 P4 的当前执行正文；旧提交和报告仅作历史，不恢复 GearJob 主链、企业微信 deferred、真人渠道或公网手机入口等已被新决定取代的门。依据为合同全文、clarification-notes.md §10/11、P1–P6 计划顶部注记，以及用户本轮最新目标。
 
-状态：**Team Astra 原位规划、独立过度设计和计划正确性复审均通过；U0、S1-A、K0-A及C2有限协议探针具备实施条件，其余按依赖展开。P4产品尚未验收。** 用户已授权全量本地实施与本地提交。FMS锁定工具与机器写策略的范围另见§8，未决仅阻塞相关写迁移及后续P6恢复。
+状态：**Team Astra 原位规划、独立过度设计和计划正确性复审均通过；U0、S1-A、K0-A及C2有限协议探针具备实施条件，其余按依赖展开。P4产品尚未验收。** 用户已授权全量本地实施与本地提交。DSH版本规则与FMS专属机器锁定例外已获用户确认，见§8；K0-E按原计划内的窄化设计复核后实施，其余就绪任务继续。
 
 ## 1. 目标、当前事实与边界
 
@@ -105,7 +105,7 @@ S1 在同候选真实操作后录制独立 MP4，离线 HTML 带内联截图与�
 
 ## 4. U0：DSH 升级和有限探针
 
-U0 开始前备份当前产品 store 和 DSH home，记录基线/校验值/恢复入口，秘密不进入普通报告。解析 npm `@deepseek-ai/dsh` latest 当时值，验证所需同版本包/peer 均存在，精确锁定所有 @deepseek-ai/*；不分别取配套包各自 latest，不用 alpha 替代。
+U0 开始前备份当前产品 store 和 DSH home，记录基线/校验值/恢复入口，秘密不进入普通报告。解析 npm `@deepseek-ai/dsh` latest 当时值，验证同发行DSH包/peer均存在并精确同版，独立发版的Cordis/Schemastery等按上游相容约束锁入lockfile（本次group精确1.0.4），不忽略peer mismatch；不分别取配套包各自 latest，不用 alpha 替代。
 
 比对安装产物实际默认插件/工具与当前禁用清单；未知新增可用能力先判失败并裁决，不能只看配置文件。明确禁止模型文件/shell/任意网络等未授权能力。验证旧原生 Session 可读取或准确显示恢复不完整，新建/继续/干净 successor/取消/原生委派正常。保留 SDK profile patch 仅在仍有必要时更新，不为旧 patch 留无用适配。
 
@@ -144,7 +144,7 @@ S1/U0 的 runner、清单/lock、runtime-config、原生插件/桥及 state-tran
 
 OAuth只实现client_credentials + private_key_jwt；issuer、token认证算法元数据、RFC9728资源元数据、RFC8707 resource audience、短时token。校验JWT断言sub/aud/exp/iat/算法/签名/jti，拒重放，License受限不签发。每个MCP请求复核账号和密钥当前状态；401带WWW-Authenticate/资源元数据，scope不足返回insufficient_scope。不做授权码/PKCE/动态注册/refresh token/共享口令。
 
-机器账号独立于人类和runtime_worker_instance；管理API可创建/停用/轮换公钥，按现有管理权限保护。Geneway每连接对应一个实例/机器账号；P4只授合同五项TPM/设备读取权限，不给管理员或维修派工/验收/豁免权限。Kivo只存公钥，Geneway秘密存储保存私钥；token/私钥不入模型/浏览器/日志。P6写断言/事务复核另按后续计划实现，P4不提前开放写。
+机器账号独立于人类和runtime_worker_instance；管理API可创建/停用/轮换公钥，按现有管理权限保护。Geneway每连接对应一个实例/机器账号；P4只授合同五项TPM/设备读取权限，不给管理员或维修派工/验收/豁免权限。Kivo只存公钥，Geneway秘密存储保存私钥；token/私钥不入模型/浏览器/日志。Geneway TPM 的维修单写断言/事务复核另按P6计划实现，P4不提前开放该写动作；专属FMS账号仅按§5.5的用户已准迁移例外执行原快照锁定。
 
 ### 5.4 TPM工具、结果和历史
 
@@ -158,7 +158,7 @@ K0退出GearJob的新产品装配、创建和事件/Comment执行路径，保留
 
 ### 5.5 FMS收尾
 
-原 `manufacturing.method_snapshot.get/lock` 迁到 fms-api 的同一库，保持HTTP边界、原权限、dry-run、确认凭证不转发、trace、错误与幂等语义。迁移完成才下线stdio/CLI旧入口、单KIVO_TOKEN及别名，更新文档/测试。该收尾不阻塞TPM只读验收，但在恢复P6前必须完成。lock真实写授权存在§8所列待裁决点，不能把只读探针当收尾PASS，也不能悄悄长期保留双实现。
+原 `manufacturing.method_snapshot.get/lock` 迁到 fms-api 的同一库，保持HTTP边界、原权限、dry-run、确认凭证不转发、trace、错误与幂等语义。迁移完成才下线stdio/CLI旧入口、单KIVO_TOKEN及别名，更新文档/测试。该收尾不阻塞TPM只读验收，但在恢复P6前必须完成。用户已准专属FMS机器账号锁定，Geneway TPM账号无该权限，写工具不进模型；原权限/dry-run/人工确认/幂等/机器审计必须保留。共享机器写断言与事务复权的窄化设计在本节由两Astra独立补齐、独立过度设计审查后实施。不能把只读探针当收尾PASS，也不能悄悄长期保留双实现。
 
 ## 6. 渠道会话、我的渠道、微信与恢复
 
@@ -212,7 +212,7 @@ owner稳定ID在确认时固定，只受理该owner私聊；同一bot同一时�
 | P4-K0-B | shared机器/OAuth、唯一agent-mcp、MES挂载/guards、只读工具与测试；Kivo owner | A；SDK/路由注入有限探针后展开。 |
 | P4-K0-C | Kivo插件、TPM规范化、capability/连接/授权接线、TPM协作；Geneway集成owner | 建议U0后；Kivo工具/资源契约冻结；共享文件移交后写。 |
 | P4-K0-D | 两实例J1/J4/J6及Kivo回归、真实浏览器来源；验收owner | B/C及升级候选。 |
-| P4-K0-E | FMS同库迁移、旧入口下线、文档测试；Kivo owner | B；§8写范围裁决后才完成lock路径。 |
+| P4-K0-E | FMS同库迁移、旧入口下线、文档测试；Kivo owner | B；用户已准专属FMS例外，§5.5窄化设计复审后实施lock路径。 |
 | P4-C1 | channel-service/store/automation-service/API与身份迁移；核心owner | S1会话契约稳定。 |
 | P4-C2 | 微信协议vendor/plugin与本地iLink模拟器；微信owner | 计划复审通过可先协议探针；接线依赖C1。 |
 | P4-C3 | 飞书会话接入/SDK注入测试；通道owner | C1；保留已有transport。 |
@@ -232,7 +232,7 @@ owner在实际派发时记具体agent；同文件不并发写。初始可执行�
 | 内部主体 | 一个TPM GET经真实guards/模块/组织成功，外部伪主体与错误token拒绝 | 不能安全注入则停K0，不直调service。 |
 | TPM DTO | 真实返回与严格输出一致，未知/时间/无范围可区分 | 缺字段标unknown；必要窄API修正限本接入，不补造。 |
 | iLink | vendor实际通道连模拟协议，确认/owner/收发/游标/拒发 | 协议局部适配；需Host/第二会话权威/先游标则重规划。 |
-| FMS迁移 | 同库下read/dryrun/确认/幂等与既有权限行为可验证 | 写授权未决不执行lock；未完成收尾不能恢复P6。 |
+| FMS迁移 | 同库下read/dryrun/确认/幂等与既有权限行为可验证 | 仅专属FMS账号按已准边界执行lock；未完成收尾不能恢复P6。 |
 
 ### 7.3 普通旅程与负例
 
@@ -267,7 +267,11 @@ Kivo在clone内读取package scripts后运行受影响包/API typecheck、目标
 
 ## 8. 未决事项、风险与停止点
 
-**FMS写策略冲突待用户裁决：**迁移要求保留method_snapshot.lock的原写行为，而合同同时只准机器账号创建维修单、MCP不接人类token。只给Geneway账号不授FMS权限不足以回答“平台是否允许机器锁定快照”。两名planner均核对为真实冲突：FMS控制器要求manufacturing.method_snapshot.execute，lock服务写status/lockedBy/updatedBy且写上下文硬编码human，现有JWT仅加载人类session。已向用户提出允许专属FMS机器账号锁定或调整为人工FMS锁定的单项选择；未获明确结论前不得扩充机器写allowlist，也不得删掉锁定行为冒充迁移完成。仅K0-E真实lock路径受阻，S1/U0/K0只读继续。
+**U0版本规则已由用户确认：**本轮npm latest为0.2.0-rc.2；用户确认DSH主包及同发行dsh-*依赖/peers精确同版，独立Cordis/Schemastery等按官方相容范围锁入lockfile，group精确1.0.4且不忽略peer mismatch。原字面all@同版冲突解除。模型凭据已获准从用户指定Paseo配置定点提取到Geneway服务端秘密引用。先闭合已发现home隔离遗漏及相关复审，再恢复原生SDK/Session/委派/外发验证；旧失败仍保留，未执行部分不得标PASS。
+
+**K0 SDK 2.3.1 窄适配决定（2026-10-15 11:21 UTC）：**实际纯 client_credentials 授权服务器元数据被官方客户端 `OAuthMetadataSchema` 拒绝，原因是其无条件要求 `authorization_endpoint`。两名原独立 Astra planner 分别核对安装源码和本计划 §7.2：采用同一 issuer 下真实 `/api/v1/oauth/authorize` 拒绝端点属于已列同库窄适配，不增加授权方式。GET 端点仅返回 HTTP 400 JSON：缺失、空或重复 `response_type` 为 `invalid_request`，有效但不支持的类型为 `unsupported_response_type`；POST 可直接 405，无需增加 body 解析；不使用人类身份、不产生跳转、Cookie、会话、code 或 token。元数据仍只声明 `client_credentials`，`response_types_supported=[]`。不修改 SDK schema、不假造端点、不绕过发现。实施方须用官方 `PrivateKeyJwtProvider` 证明发现/取令牌/MCP成功且未请求该拒绝端点，并验证任意 `redirect_uri`、人类 token 与异常参数均拒绝且无 `Location`。若后续需宣称或启用交互授权能力则停止返回决策。此记录为现有探针分支内的兼容选择，不代表实际验收已通过。
+
+**FMS写策略已由用户裁决：**允许专属FMS机器账号保留原制造方法快照锁定能力，沿用原权限、dry-run、人工确认、幂等和机器审计，仅在本地synthetic FMS实例验证；Geneway TPM账号不授该FMS权限，写工具不进入模型。此例外只用于既有工具迁移，不扩Geneway写动作。K0-E在§5.5按已确认边界补齐共享写入断言/事务复权的必要设计并复审，再实施；恢复P6前仍必须完成唯一MCP迁移收尾。
 
 其余主要风险：DSH新API与历史、内部主体穿过真实guards、iLink先持久后游标、撤权后旧上下文/批准、身份恢复复活。各由§7.2探针与负例处理；变化超出已列分支则两Astra原位重规划受影响段，未知依赖不拖停无关就绪任务。
 

@@ -1,6 +1,6 @@
 # P7 全量集成与可运维交付详细计划
 
-形成时间：2026-10-16 16:10 UTC（2026-10-17 Asia/Shanghai）。状态：**两名 Astra 独立规划与交换均达成共识；独立过度设计与正式计划审查已通过，准入 T0 的就绪分支。至计划门通过时，尚未运行 P7 探针、安装、测试、产品或外部调用。**
+计划首次落盘：2026-10-16 16:14:01 UTC（2026-10-17 Asia/Shanghai），此前标称 16:10 为起草时间，不能作为实施顺序证据。状态：**双 Astra 规划、交换及两项独审通过；计划提交 `38a804e` 先于 T0。T0 原生检查及真实 GLM 工具调用通过；净安装构建策略已窄修并通过一次预验。T1/T3/T4 源码与局部检查独审通过并分别本地提交，T2 渠道协作与回执接线独审通过并本地提交；T5 验收脚本已独审并提交，所选20个回归入口实际通过。原生容量经采样范围及退出竞态修复后完整实测通过，原失败保留；Host 容量在§6.1最小修复后以原门完整通过，20身份空闲CPU为0.8403核、读取p95为337.5ms，原失败保留；两空目录冻结锁安装、原生探针及正式供应/登录/正常停止实际通过；旧应用、新版读取与空目录旧版回退完整演练通过，原始全量业务状态不存在的限制保留。最终同候选两路由、组合旅程及运维验收尚未完成。J10三轮在环境、共用select及继承库outbox前提处失败，旧证据保留；§8.1记录实施前的双Astra局部重规划，已通过独立过度设计审查及通知消费域口径复核；新准备包尚待实施。**
 
 依据：合同 v4.4 全文、clarification-notes.md §10/11、P1–P6 计划顶部有效决定及实际验证记录。用户在 P6 完整材料交付后明确“开始p7”，进入门已解除；P7 技术交付后仍由用户最终验收。本文是唯一 P7 计划，不是正式发布认证，不另建执行许可、receipt 或验收平台。
 
@@ -124,9 +124,17 @@ Geneway 未声明 Control；Kivo 的 `agent-controlled-actions`、`control/agent
 - 执行先受控延迟验证原子4上限、第5个BUSY、取消与预算，再以真实获准路由验证至少W1/W2并行。受控吞吐不能称供应商吞吐。连续多批普通工作完成后量自有SDK进程数与RSS，判定空闲驻留是否有可重复稳定上界；同时检查历史继续、取消与正常关闭。
 - 本地读与受理p95≤1秒；事件durable ACK p95≤1秒且每次成功ACK<10秒。模型耗时单独记录。所选负载下自有Geneway/DSH/SDK及微信锁辅助进程树峰值RSS≤4GiB、稳定空闲CPU≤1核；外部Kivo/Hive、模拟器、浏览器另报，不混入或漏计自有child。
 - 在目标数据量停机备份与恢复到可登录只读状态分别≤10分钟。RPO为最后完整停机快照，外部重新授权/微信重绑不冒称已包括在现场RTO。
-- 如果T0证明Harness随完成工作线性驻留或导致资源失败，采取固定小idle上限、仅关闭最旧无活动Harness，保留原生历史及successor，并测关闭与同Session新请求竞争，禁止淘汰active；上限先取4个idle（与顶层容量相同），若原生合法行为不相容则局部重规划，不无限按测量调参，不造TTL服务、池或队列。若已满足且有界，删除该改造。
+- T0 已实测普通工作完成2/4/8次时，idle SDK子进程为2/4/8、进程树RSS为432204/749332/1398164 KiB，线性驻留条件成立。因此实施固定4个idle上限，仅关闭最旧无活动Harness，保留原生历史及successor，并测关闭与同Session新请求竞争，禁止淘汰active；若原生合法行为不相容则局部重规划，不无限按测量调参，不造TTL服务、池或队列。shared Host八会话无SDK子进程，不扩大回收到该路径。此为受控loopback原生样本，不是完整容量PASS。
 
 记录主机、精确二进制、输入规模、样本数、原始延迟、进程树/CPU/FD及清理事实。目标失败先定位，不能事后改数字掩盖失败；需要架构或目标改变时局部双规划。
+
+### 6.1 Host 空轮询容量阻断的局部修复决定（2026-10-16 20:15 UTC）
+
+Hostfinal05 的 20 身份三秒空闲窗口实际为 1.119986 核，超过原 1 核门；采样器与 Host 分进程，不能归为采样成本。每次成功空轮询都将相同 connected 状态交给 setWeixinRuntime，原实现会反复持久化整库。CPU 归因比例尚未量化，修复收益必须按原负载和窗口重新实测；原失败保留。
+
+在现有 T5 容量阻断范围内，root、Sol 只读分析及独立 Astra 最小方案复核选择仅优化 setWeixinRuntime：每次仍实际读取并校验当前 identity/bot/app/status；只有无状态、归一错误及派生变更义务时免写。需要变更时仍在原 update 事务内重新校验并使用当前状态，不提交预读快照。保持 unavailable/stopped 保留规则、失效凭据的 rebind/revision/端点/投递/关联码联动及存储失败传播；不改变插件每轮回调、入站/发送复权，不增加缓存或修改 store API。相同状态不刷新 updatedAt，实际状态或错误变化仍刷新；现有契约未将该字段定义为心跳时间。实施限渠道服务及相关回归，实施后独立审查。
+
+必须以原缺陷的重复报告写入计数或同条件检查建立前后证据，覆盖同值复权、读后撤权与写事务复权、错误变化/清除、同值 invalid 联动及 read/persist 失败。1 秒轮询、3 秒空闲窗口、1 核、4 GiB、durable ACK 与读取延迟门均不变。若此局部修复不足，依据新实测再处理，不能改阈值或反复采样择优。
 
 ## 7. 安装、配置、完整恢复与版本维护
 
@@ -174,6 +182,38 @@ Kivo支持组合记录两仓commit、SDK2.3.1、协议2026-07-28和ext-auth `fb3
 
 Kivo默认只读；只有当前接入真实阻断才派唯一Kivo writer，保留Control/HTTP边界和独立审查。实现沿用户指定Team Sol路由，不以默认saving模型替代。独立审查者不实现其被审对象。服务、数据库、有限Hive采样窗口由明确owner控制，旧进程先核实退出再换候选；不把耗时或固定轮数当完成依据。
 
+### 8.1 T5 真实准备链局部重规划（2026-10-16 21:12 UTC）
+
+本节在新的准备包实施前形成；工程与产品两名独立 Astra planner 均完成只读规划，root 汇总并交换。工程与产品planner交换结论均为CONSENSUS；独立过度设计审查及其通知消费域文字复核均为PASS，复核候选SHA为`d35517dcc7a699277fc5290ba83ce2f2e5523f2e30fa3f4989caf358c7366fd3`。该复核先于新包实施；root在本计划提交后可仅授予准备包SOURCE GO，新资源启动仍等待冻结包独审和实际运行条件。原三轮完整J10失败及operator `unknown` 原样保留。三处失败没有证据指向同一产品缺陷；共同风险是验收脚本对真实环境、DOM和正式fixture生产者的前提未由实际入口核实。现已完成Chrome/HOME与disabled select实测修复；candidate11的final03真实完成2模型路由、2连接与3员工配置/保存，相关源码、launcher及环境不变时复用该实际证据，不为新计划重复跑相同诊断。
+
+已实测的当前阻断是operator把继承库所有pending都要求为本轮source-repair trace。A有旧P6 pending和本轮创建两规则产生的evaluate；B也有旧pending。删去断言不安全：既有worker只按事件类型循环领取，retained baseline允许所有历史ID；仅透传底层trace前缀也无法覆盖无来源trace的delivery。选择**新独立数据库与资源，复用普通真实worker**；不为此次验收扩Kivo公共claim接口，不清理、消费、删除或重放旧pending，不修改旧运行包/回执。新建库不复制旧业务；新资源不停止或复用旧PG/Redis容器。
+
+固定producer及新J10 run为 `geneway-p7-20261017-02`；新输出 `/tmp/geneway-p7-kivo-runtime-02`，新准备包为任务产物目录 `p7-kivo-runtime-fresh/`。沿现有identities函数派生suffix `407a7f46decc`：库 `geneway_p6_{a|b}_407a7f46decc`，角色 `kivo_p6_{a|b}_407a7f46decc_{owner|app|worker}`，容器/网络/volume前缀 `geneway-p6-407a7f46decc-{a|b}`，保留旧helper命名不混称旧实例。新运行包必须完整绑定实际目录与全部消费文件，不能让context、fixture、observer或workerChild暗中返回旧目录/旧run/旧数据库。
+
+| 实例 | API（loopback） | 新PG / Redis（loopback） | 新子网 / gateway |
+|---|---|---|---|
+| A | 34581 | 55681 / 56681 | 10.253.74.0/29 / 10.253.74.1 |
+| B | 34582 | 55682 / 56682 | 10.253.74.8/29 / 10.253.74.9 |
+
+root于本节形成前只读核42个Docker网络与45条route：上述网段无重叠，6端口无监听，新派生container/network/volume名字未占用，/tmp可用473GiB。最初候选10.253.73网段因已有/28重叠而弃用；第一次审计因Docker空IPAM配置为null失败，未执行写入。启动前仍由既有preflight再核。使用已固定PG/Redis镜像、不pull、不开放公网、不改旧资源；旧两库业务/outbox/delivery/attempt的逻辑行指纹在新资源动作前后只读比较，不能仅比较数量。
+
+唯一准备包writer只窄适配既有schema、bootstrap、API、fixture、worker及operator链：新资源配置、fresh schema来源（不伪造inherited handoff）、首次License申请/激活、新run派生的真实connection/sourceInstance、完整候选与秘密引用。沿冻结迁移、最小角色/权限收口和正式业务API；Kivo产品源码只读，不新增环境管理器或另一套worker。root维护唯一计划/验证记录，先独审冻结准备包，再给真实运行GO；Geneway主验收入口默认不改，确有消费形状阻断才由其原owner窄修并独审。
+
+先完成新schema与API启动，再启动已独审的同设备有限Hive window02，避免慢准备耗尽新鲜度。设备始终为新P7 UUID `2e31def5-08f8-4975-b7b0-2815003db549`，不是样本序号61。原窗口自然exit0、末sample62/transport804；续窗绑定其实际completed回执与末样本SHA，确认原owner/docker/容器Python均退出，仅追加61个30秒间隔样本、最大1860秒，不重建设备、不改旧时间、不自动延长或未知重试。fixture用实际新样本通过正式Hive mapping；查询/预览/批准前的120秒门不变，过期即停。
+
+本节所有“3条pending”“无backlog”及release前后的待处理/执行集合，均限定现有worker的固定三类通知消费域：`mes.notification.business-event.v1`、`mes.notification.deliver.v1`、`mes.notification.evaluate.v1`。其它正式producer产生的本轮outbox（例如`mes.tpm.repair.changed.v1`）按真实归属单独记录并保持未消费，不删除、不加入initial ID泛白名单、不扩大worker eventTypes；不能把全表pending数量当成上述门。
+
+完整J10前必须完成正式producer支持的小检查：
+
+- 两实例通过真实API创建本轮组织、设备、来源维修、机器账号、端点和两条business_event规则。逐ID/trace/actor/aggregate/payload/幂等键确认恰3条pending evaluate：维修revision0的subject intent，以及各自创建trace下的两条规则revision1 intent；没有business-event、delivery或其他未归属待处理项。不是只断言数量3或eventType相同。
+- 仅A使用现有正式owned非superuser worker消费这3条，完整claim/lease/heartbeat/执行记录与正常停止；实际执行集合恰3ID且processed。源维修保持reported/revision0，设备/规则/端点及业务事实不变；新增occurrence、delivery、attempt与webhook HTTP请求均0。允许变化仅为A三条setup outbox正常状态迁移及对应worker instance/execution生命周期记录。B只读核3条并保持pending，逐status、claimGeneration、锁及retry字段证明未领取，不为对称性启动B worker；后续B只读旅程不能启动worker。旧两库指纹保持。
+- 以上零通知预期来自真实evaluator的business_event规则直接返回、subject仅查询repair_*规则的现有语义，仍须实际验证。结果不符即保留并分析，不清理新增行、不扩白名单。
+- 初始化完成回执与正式J10分开。`switch-endpoints`保留端点URL、签名、revision和scope/targets检查，A必须无backlog，B必须仍为已绑定3条setup pending。每次正式release前允许pending集合仅为当前真实business event及精确evaluate sibling；完成后execution集合只能是这两条和由同event/occurrence、当前规则及端点生成的delivery。已处理setup记录不能因列在initial中获得再次消费许可。
+
+上述小检查、源码独审与新候选冻结通过后才重新运行完整十步J10，两真实模型、本人拒绝/批准、真实创建回读、同渠道反馈、重启及空目录恢复均保持原义。旅程中不修改候选；新输出/journal不覆盖旧unknown。出现旧库变化、未知pending、初始化通知/外发、身份混用、worker未退出、freshness失败或候选改变即停止依赖动作。容量/安装等已完成证据仍按实际消费变化评估，不冒称新候选已重跑。
+
+方案参照[PostgreSQL CREATE DATABASE](https://www.postgresql.org/docs/current/sql-createdatabase.html)的独立新库边界，以及[AWS transactional outbox说明](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)中事务内持久事件与消费者重放/幂等职责；这些资料不替代本地生产者与真实worker证据，也不授权清理旧outbox。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |
@@ -193,7 +233,7 @@ Kivo默认只读；只有当前接入真实阻断才派唯一Kivo writer，保�
 
 Kivo目标包类型/Vitest、实际HTTP/PG与边界检查只按变更选择。原634边界诊断保留；新候选不得新增当前范围问题。先前PASS可引用但须记录适用理由；权限、路由、持久化、执行或方法变化则重新验证相关结论。最终J10及新运维义务用同一交付候选，不混拼局部成功。
 
-AC-22核原始团队结果/时间与commit/报告；P1原Sol及P2用户更新后Astra重规划按当时有效决定描述，不伪写从第一天全是Astra。找不到的时序只能cannot_verify，不能补文件抹平；仅阻止全合同完成声明，不阻止安全的其余工作。
+AC-22已独立核对真实双planner结果与实施顺序；P1原Sol及P2用户更新后Astra重规划按当时有效决定描述，不伪写从第一天全是Astra。现行P4 v4.4、P5-K1、P6 Kivo与P7规划门先于实施。旧P6 T0则存在历史流程限制：2026-09-21 07:43:23 UTC已尝试启动隔离Hive、随后运行synthetic来源和映射准备，而唯一计划至08:00:13/08:01:30才更新状态和授权边界。因此该段“计划先于实施”不能写为PASS，不能事后补签。写动作是否由当时用户委托覆盖、窄实施者首次改代码时间仍不可独立确认，不扩成未经证实的越权结论。原始时序与独立核查引用保留于p7-verification.md；历史限制由用户在最终合同结论中处置，不阻止当前安全的其余工作。
 
 ## 10. 交付、失败分支与最终门
 

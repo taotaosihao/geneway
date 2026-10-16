@@ -178,12 +178,14 @@ function operatorChannel(input, binding, signal) {
 
 export function validateP7Observer(candidate, input, options, fixtures) {
   const runtime = candidate.p6Runtime, config = input.value
+  const mainRunId = options['run-id']
+  assert(typeof mainRunId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(mainRunId), 'valid observer main run id required')
   assert.equal(input.sha256, options['observer-config-sha']); noSecrets(config)
   assert(runtime && isAbsolute(runtime.root) && !within(root, runtime.root))
   assert.deepEqual(runtime.files?.map(file => file.path).sort(), ['operator.mjs', 'repair-create-observer.mjs', 'selfcheck-operator.mjs'].sort())
   for (const file of runtime.files) assert(/^[a-f0-9]{64}$/.test(file.sha256) && !file.path.includes('/') && !file.path.includes('..'))
-  assert.deepEqual(config, { schemaVersion: 1, runId: options['run-id'], producerRunId: fixtures[0].runId, candidate: options.candidateSha256,
-    candidatePath: options.candidate, baseCandidate: fixtures[0].candidate, setupOutput: dirname(options['fixture-a']), controlDirectory: join(dirname(options['fixture-a']), 'private/create-observer'),
+  assert.deepEqual(config, { schemaVersion: 1, runId: mainRunId, producerRunId: fixtures[0].runId, candidate: options.candidateSha256,
+    candidatePath: options.candidate, baseCandidate: fixtures[0].candidate, setupOutput: dirname(options['fixture-a']), controlDirectory: join(dirname(options['fixture-a']), 'private', 'create-observer-' + mainRunId),
     guardSha256: options['guard-sha256'], instances: fixtures.map(fixture => ({ instance: fixture.instance, resource: fixture.connection.baseUrl, clientId: fixture.connection.clientId, deviceId: fixture.facts.deviceId })) })
   return runtime
 }
@@ -584,7 +586,7 @@ async function acceptance(options) {
       await page.click('#tab-employees')
       const employeeSpecs = [
         { id: 'p7-agent-a', name: 'P7 协作负责人', instructions: '按计划交办，不猜业务单号；仅使用当前获准工具事实；维修创建只能由本人Web批准。', route: 'p7-deepseek', connection: fixtures[0].connection.id, skills: ['skill-' + correlation, 'skill-' + read], members: ['a'] },
-        { id: 'p7-reviewer', name: 'P7 知识复核员工', instructions: '检索获准维护知识，核对来源和不确定性，交接给负责人；不创建业务对象。', route: 'p7-glm', connection: fixtures[0].connection.id, skills: ['skill-' + read], members: ['a'] },
+        { id: 'p7-reviewer', name: 'P7 知识复核员工', instructions: '检索获准维护知识，核对来源和不确定性，交接给负责人；不创建业务对象。', route: 'p7-glm', connection: fixtures[0].connection.id, skills: ['skill-' + correlation, 'skill-' + read], members: ['a'] },
         { id: 'p7-agent-b', name: 'P7 B隔离员工', instructions: '只读取B实例当前获准事实。', route: 'p7-glm', connection: fixtures[1].connection.id, skills: ['skill-' + correlation, 'skill-' + read], members: ['b'] },
       ]
       for (const spec of employeeSpecs) {
@@ -595,7 +597,11 @@ async function acceptance(options) {
         for (const id of spec.skills) await page.check(form + ' [name="skillIds"][value="' + id + '"]', true)
         for (const id of spec.members) await page.check(form + ' [name="memberIds"][value="' + id + '"]', true)
         await page.click(form + ' button.primary')
-        await poll(async () => (await api('admin', '/api/admin/employees')).find(item => item.id === spec.id && item.modelRouteId === spec.route && item.memberIds?.includes(spec.members[0])), 'admin Web employee and open scope ' + spec.id)
+        const savedEmployee = await poll(async () => (await api('admin', '/api/admin/employees')).find(item => item.id === spec.id), 'admin Web employee and open scope ' + spec.id)
+        assert.deepEqual([...savedEmployee.skillIds].sort(), [...spec.skills].sort())
+        assert.deepEqual(savedEmployee.connectionIds, [spec.connection])
+        assert.deepEqual([...savedEmployee.memberIds].sort(), [...spec.members].sort())
+        assert.equal(savedEmployee.modelRouteId, spec.route); assert.equal(savedEmployee.enabled, true)
         await page.wait('Boolean(document.querySelector(' + js('form[data-kind="employee"][data-id="' + spec.id + '"]') + '))')
       }
       const configured = await Promise.all(['members', 'employees', 'connections', 'skills', 'model-routes'].map(kind => api('admin', '/api/admin/' + kind)))
@@ -984,6 +990,62 @@ async function harnessCheck() {
   for (const key of ['observer-config', 'observer-config-sha', 'fixture-a', 'fixture-b', 'candidate', 'run-id']) {
     const missing = [...runtimeArgs], index = missing.indexOf('--' + key); missing.splice(index, 2); assert.throws(() => argumentsFor(missing), 'missing ' + key)
   }
+  const harness = await readFile(script, 'utf8')
+  {
+    const [{ getCapability, parseCapabilityToolResult, sanitizeFollowUpContext }, { connectionInputAllowed, connectionSnapshot }, { assertTrustedConnection }, { createKnowledgeService, currentKnowledgeReference }, { connection, correlationFixture, now }] = await Promise.all([
+      import('../src/capabilities.mjs'), import('../src/execution-grant.mjs'), import('../src/connection-catalog.mjs'), import('../src/knowledge-service.mjs'), import('./fixtures/kivo-device-correlation.mjs'),
+    ])
+    const binding = { ...connection, skillIds: ['skill-' + correlation, 'skill-' + read] }
+    const specStart = harness.indexOf('      const employeeSpecs = ['), specEnd = harness.indexOf('\n      for (const spec of employeeSpecs)', specStart)
+    assert(specStart >= 0 && specEnd > specStart)
+    const specs = new Function('fixtures', 'correlation', 'read', harness.slice(specStart, specEnd) + '\nreturn employeeSpecs')([{ connection: binding }, { connection: { id: 'synthetic-b' } }], correlation, read)
+    const recipient = specs.find(item => item.id === 'p7-reviewer')
+    assert.equal(recipient.route, 'p7-glm'); assert.deepEqual(recipient.members, ['a']); assert.equal(recipient.connection, binding.id)
+    const capability = getCapability(correlation), payload = correlationFixture({ binding })
+    const result = { ...parseCapabilityToolResult(capability.id, { ok: true, observation: payload }, payload.input), id: 'result', capabilityId: capability.id }
+    const child = { id: 'child', ownerMemberId: 'a', rootWorkId: 'root', employeeId: 'p7-agent-a', skillId: capability.skillId, capabilityId: capability.id, connectionId: binding.id, status: 'completed', input: payload.input, results: [result] }
+    let state = { members: [{ id: 'a', enabled: true, employeeIds: ['p7-agent-a', recipient.id] }],
+      employees: specs.map(item => ({ id: item.id, enabled: true, skillIds: [...item.skills], connectionIds: [item.connection], modelRouteId: item.route })),
+      skills: [correlation, read].map(id => ({ id: getCapability(id).skillId, capabilityId: id, enabled: true })), connections: [binding], knowledgeMaterials: [], works: [child] }
+    const knowledge = createKnowledgeService({ store: { async read() { return structuredClone(state) }, async update(mutate) { state = mutate(structuredClone(state)) } }, clock: () => now, idFactory: () => 'p7-handoff' })
+    const material = await knowledge.createMaterial({ id: 'a' }, { employeeIds: ['p7-agent-a', recipient.id], title: '合成维护知识', body: '仅核对当前关联事实。', sourceLabel: 'pure fixture', authorizationBasis: '合成权限检查' })
+    const ref = await knowledge.resolveReference({ id: 'a' }, { employeeId: recipient.id, knowledgeId: material.id, revision: material.revision, segmentId: 'p1-c1' })
+    const knowledgeRef = { knowledgeId: ref.knowledgeId, revision: ref.revision, segmentId: ref.segmentId }
+    const rootWork = { id: 'root', ownerMemberId: 'a', employeeId: child.employeeId, plan: { items: [{ id: 'correlate', childWorkId: child.id, status: 'completed' }, { id: 'review', dependsOn: ['correlate'] }] },
+      handoffs: [{ id: 'handoff', childWorkId: child.id, status: 'current', resultRefs: [result.id], knowledgeRefs: [knowledgeRef] }] }
+    const source = await readFile(join(root, 'src/collaboration-runner.mjs'), 'utf8')
+    const start = source.indexOf('  function handoffProjection('), end = source.indexOf('\n  async function validateRequestContext(', start)
+    const runtimeError = source.split('\n').find(line => line.startsWith('function runtimeError('))
+    assert(start >= 0 && end > start && runtimeError)
+    const project = new Function('getCapability', 'connectionInputAllowed', 'assertTrustedConnection', 'connectionCatalog', 'connectionSnapshot', 'currentKnowledgeReference', 'sanitizeFollowUpContext', runtimeError + '\n' + source.slice(start, end) + '\nreturn dependencyProjection')(
+      getCapability, connectionInputAllowed, assertTrustedConnection, [binding], connectionSnapshot, currentKnowledgeReference, sanitizeFollowUpContext)
+    const item = rootWork.plan.items.find(item => item.id === 'review')
+    const original = structuredClone(state)
+    original.employees.find(item => item.id === recipient.id).skillIds = ['skill-' + read]
+    assert.throws(() => project(original, rootWork, item, recipient.id), { code: 'FORBIDDEN', message: '交接事实连接授权已撤销' })
+    const dependencies = project(state, rootWork, item, recipient.id)
+    assert.equal(dependencies.length, 1); assert.equal(dependencies[0].resultId, result.id)
+    assert.equal(dependencies[0].fact.kind, 'kivo.tpm.device-correlation'); assert.deepEqual(dependencies[0].knowledgeRefs, [knowledgeRef])
+    assert.deepEqual(dependencies[0].connection, connectionSnapshot(binding))
+    for (const field of ['skillIds', 'connectionIds']) {
+      const revoked = structuredClone(state), employee = revoked.employees.find(item => item.id === recipient.id)
+      employee[field] = employee[field].filter(id => id !== (field === 'skillIds' ? capability.skillId : binding.id))
+      assert.throws(() => project(revoked, rootWork, item, recipient.id), { code: 'FORBIDDEN', message: '交接事实连接授权已撤销' }, 'revoked recipient ' + field)
+    }
+  }
+  {
+    const options = { ...argumentsFor(runtimeArgs), candidateSha256: 'd'.repeat(64) }
+    const fixtures = ['a', 'b'].map((instance, index) => ({ instance, runId: 'p7-producer', candidate: 'e'.repeat(64), connection: { baseUrl: `http://127.0.0.1:${34581 + index}/api/v1/mes/mcp`, clientId: String(index) }, facts: { deviceId: 'device-' + instance } }))
+    const candidate = { p6Runtime: { root: '/synthetic/runtime', files: ['operator.mjs', 'repair-create-observer.mjs', 'selfcheck-operator.mjs'].map(path => ({ path, sha256: 'f'.repeat(64) })) } }
+    const config = { schemaVersion: 1, runId: options['run-id'], producerRunId: fixtures[0].runId, candidate: options.candidateSha256, candidatePath: options.candidate,
+      baseCandidate: fixtures[0].candidate, setupOutput: dirname(options['fixture-a']), controlDirectory: join(dirname(options['fixture-a']), 'private', 'create-observer-' + options['run-id']),
+      guardSha256: options['guard-sha256'], instances: fixtures.map(fixture => ({ instance: fixture.instance, resource: fixture.connection.baseUrl, clientId: fixture.connection.clientId, deviceId: fixture.facts.deviceId })) }
+    const input = value => ({ value, sha256: options['observer-config-sha'] })
+    assert.equal(validateP7Observer(candidate, input(config), options, fixtures), candidate.p6Runtime)
+    for (const controlDirectory of [join(config.setupOutput, 'private/create-observer'), join(config.setupOutput, 'private/create-observer-other'), '/other/private/create-observer-' + options['run-id']]) assert.throws(() => validateP7Observer(candidate, input({ ...config, controlDirectory }), options, fixtures))
+    assert.throws(() => validateP7Observer(candidate, input({ ...config, runId: 'other-main' }), options, fixtures))
+    for (const runId of ['', '../escape', '/absolute', 'a'.repeat(129)]) assert.throws(() => validateP7Observer(candidate, input({ ...config, runId, controlDirectory: join(config.setupOutput, 'private', 'create-observer-' + runId) }), { ...options, 'run-id': runId }, fixtures))
+  }
   assert.equal(stepsRequired.length, 10); assert.equal(new Set(stepsRequired).size, 10)
   const safe = model => ({ kind: 'fetch', host: 'zenmux.ai', model, role: 'sdk', permitted: true, maxTokens: 4096, maxTokensValid: true, maxTokensField: 'max_tokens', toolNames: ['geneway_kivo_tpm_correlate_device'] })
   assert.equal(validateP7ModelAudit(models.map(safe)).requests, 2)
@@ -994,5 +1056,5 @@ async function harnessCheck() {
   assert.throws(() => validateP7Polls({ ...polls, maxActivePolls: () => 2 }, ['a'], { minFullCycles: 3 }))
   assert.throws(() => validateP7Polls({ ...polls, calls: polls.calls.slice(1) }, ['a'], { minFullCycles: 3 }))
   for (const value of [{ accessToken: 'synthetic' }, { note: 'Bearer synthetic' }, { privateKey: 'not-a-key' }]) assert.throws(() => noSecrets(value))
-  console.log('P7 J10 harness checks passed (argument guard, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model calls=0)')
+  console.log('P7 J10 harness checks passed (argument guard, actual handoff permissions and revocation, main-run observer directory, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model calls=0)')
 }

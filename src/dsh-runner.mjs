@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { modelAgentOptions } from './model-route.mjs'
+import { nativeRequestCount, nativeUsage } from './execution-runtime.mjs'
 import { existsSync } from 'node:fs'
 import { chmod, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -45,18 +47,24 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       let record = requestedSessionId ? sessions.get(requestedSessionId) : undefined
       const runState = { harness: record?.harness, sessionId: requestedSessionId, closed: false, cancelled: false }
       active.set(executionId, runState)
-      if (record && !isDeepStrictEqual(record.metadata, metadata)) {
-        await record.harness.close().catch(() => undefined)
-        await removeHarness(record.harness)
-        record = undefined
-        runState.harness = undefined
-      }
+      let observedEvents = []
       let harness = record?.harness
-      const sameSession = Boolean(harness && requestedSessionId)
-      const successorFrom = !sameSession ? requestedSessionId : undefined
+      let sameSession = Boolean(harness && requestedSessionId)
+      let successorFrom = !sameSession ? requestedSessionId : undefined
       let grantFiles = harness ? grants.get(harness) : undefined
 
       try {
+        if (record && !isDeepStrictEqual(record.metadata, metadata)) {
+          try { await harness.close(); runState.closed = true; await removeHarness(harness) }
+          catch (error) { runState.closeFailed = true; throw Object.assign(error, { closeFailed: true }) }
+          record = undefined
+          harness = undefined
+          grantFiles = undefined
+          runState.harness = undefined
+          runState.closed = false
+          sameSession = false
+          successorFrom = requestedSessionId
+        }
         const modelCredential = config.model.provider === 'zenmux' || config.model.credentialRef ? await readModelCredential(config) : undefined
         if (harness && modelCredential !== modelCredentials.get(harness)) throw runnerError('MODEL_NOT_CONFIGURED', '模型路由不可用')
         if (!harness) {
@@ -73,8 +81,7 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
             dshHome: config.dshHome,
             processCwd: root,
             cwd: root,
-            provider: config.model.provider,
-            model: config.model.model,
+            ...(metadata.modelSnapshot ? modelAgentOptions(metadata.modelSnapshot) : { provider: config.model.provider, model: config.model.model, maxTokens: 4096 }),
             env: childEnvironment(config, grantFiles.tool, grantFiles.request, modelCredential),
             initializeTimeoutMs: 15_000,
             requestTimeoutMs: 120_000,
@@ -90,12 +97,16 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
         await writeGrant(grantFiles.tool, toolGrant)
         if (runState.cancelled) throw cancelledError()
         const prompt = buildAgentPrompt(isFollowUp ? followUpPrompt(options) : buildCapabilityPrompt(capabilityId, input, previousFact(options), options.confirmations), metadata.agentInstructions)
-        const result = await harness.run(prompt, sameSession ? { sessionId: requestedSessionId } : undefined)
+        const result = await harness.run(prompt, { ...(sameSession ? { sessionId: requestedSessionId } : {}), onNotification(notification) { if (notification.method === 'session.event') observedEvents.push(notification.params.event) } })
+        observedEvents = result.events ?? observedEvents
+        const budgetFailure = observedEvents.some(event => event.type === 'turn/end' && event.data?.reason?.error?.message?.includes('本次模型请求预算已耗尽'))
+        if (budgetFailure) throw runnerError('BUDGET_EXHAUSTED', '本次模型请求预算已耗尽')
         if (runState.cancelled) throw cancelledError()
         if (requestAuthorizationFailed(result)) throw runnerError('FORBIDDEN', '执行授权已失效')
         const parsed = parseRunResult(result, { operation, capabilityId, input })
         const actualSessionId = text(result?.sessionId)
         if (!actualSessionId) throw runnerError('TOOL_CHAIN_INVALID', 'DSH 未返回有效 Session ID')
+        sessions.delete(actualSessionId)
         sessions.set(actualSessionId, { harness, metadata })
         if (requestedSessionId && requestedSessionId !== actualSessionId) sessions.delete(requestedSessionId)
         return {
@@ -106,17 +117,29 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
           contextConfirmationRefs: metadata.confirmationRefs,
           continuity: sameSession ? 'same-session' : successorFrom ? 'successor' : 'new',
           eventCount: result.events?.length ?? 0,
+          runtime: { requestCount: nativeRequestCount(observedEvents), usage: nativeUsage(observedEvents) },
         }
       } catch (error) {
-        if (harness && !runState.closed) {
-          runState.closed = true
-          await harness.close().catch(() => undefined)
-          await removeHarness(harness)
+        let failure = runState.cancelled && error?.code !== 'CANCELLED' && !error?.closeFailed ? cancelledError() : error
+        if (harness && !runState.closed && !runState.closeFailed) {
+          try { await harness.close(); runState.closed = true; await removeHarness(harness) }
+          catch (closeError) {
+            runState.closeFailed = true
+            failure = Object.assign(new AggregateError([error, closeError], '执行资源尚未确认关闭'), { code: 'UPSTREAM_ERROR', closeFailed: true })
+          }
         }
-        throw runState.cancelled && error?.code !== 'CANCELLED' ? cancelledError() : error
+        failure.runtime = { requestCount: nativeRequestCount(observedEvents), usage: nativeUsage(observedEvents) }
+        throw failure
       } finally {
         if (grantFiles) await removeGrantFiles(grantFiles)
-        active.delete(executionId)
+        if (!runState.closeFailed) active.delete(executionId)
+        const busy = new Set([...active.values()].map(item => item.harness))
+        const idle = [...new Set([...sessions.values()].map(item => item.harness))].filter(item => !busy.has(item))
+        for (const retired of idle.slice(0, Math.max(0, idle.length - 4))) {
+          await removeHarness(retired)
+          try { await retired.close() }
+          catch (error) { active.set(executionId, { harness: retired, closeFailed: true }); throw Object.assign(error, { closeFailed: true }) }
+        }
       }
     },
 
@@ -127,16 +150,21 @@ export function createDshRunner({ root = process.cwd(), config = readRuntimeConf
       if (!activeRun.harness) return true
       const grantFiles = grants.get(activeRun.harness)
       if (grantFiles) await removeGrantFiles(grantFiles)
-      activeRun.closed = true
-      await activeRun.harness.close().catch(() => undefined)
+      try { await activeRun.harness.close(); activeRun.closed = true }
+      catch (error) { activeRun.closeFailed = true; throw Object.assign(error, { closeFailed: true }) }
       await removeHarness(activeRun.harness)
       return true
     },
 
     async close() {
       const harnesses = [...new Set([...sessions.values()].map(item => item.harness).concat([...active.values()].map(item => item.harness).filter(Boolean)))]
-      await Promise.all(harnesses.map(harness => harness.close().catch(() => undefined)))
-      await Promise.all(harnesses.map(removeHarness))
+      const results = await Promise.allSettled(harnesses.map(harness => harness.close()))
+      for (let index = 0; index < harnesses.length; index += 1) if (results[index].status === 'fulfilled') {
+        await removeHarness(harnesses[index])
+        for (const [id, record] of active) if (record.harness === harnesses[index]) active.delete(id)
+      }
+      const failures = results.filter(result => result.status === 'rejected').map(result => result.reason)
+      if (failures.length) throw new AggregateError(failures, '执行资源尚未确认关闭')
       active.clear()
       sessions.clear()
     },
@@ -208,6 +236,7 @@ function sessionMetadata(value, { capability, options }) {
   const metadata = value
   if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) throw runnerError('INVALID_REQUEST', 'Session metadata 无效')
   const result = {}
+  if (options.modelSnapshot ?? metadata.modelSnapshot) result.modelSnapshot = options.modelSnapshot ?? metadata.modelSnapshot
   result.agentInstructions = text(options.agentInstructions) ?? ''
   for (const key of ['ownerMemberId', 'workId', 'employeeId', 'skillId', 'capabilityId', 'modelRouteId', 'confirmationFingerprint']) {
     result[key] = text(metadata[key])
@@ -251,6 +280,7 @@ function executionGrant({ executionId, operation, capability, input, metadata, s
     capabilityId: capability.id,
     workId: metadata.workId,
     modelRouteId: metadata.modelRouteId,
+    ...(metadata.modelSnapshot ? { modelSnapshot: metadata.modelSnapshot } : {}),
     operation,
     expectedTool: capability.toolName,
     input,
@@ -273,6 +303,7 @@ function deniedGrant(capability, operation, metadata, options, config) {
     capabilityId: capability.id,
     workId: metadata.workId,
     modelRouteId: metadata.modelRouteId,
+    ...(metadata.modelSnapshot ? { modelSnapshot: metadata.modelSnapshot } : {}),
     operation,
     expectedTool: '__no_tool_allowed__',
     input: ['gearjob-work-order-read', WORK_ORDER_DEVICE_CORRELATION_CAPABILITY].includes(capability.id) ? { workOrderId: 'NO-TOOL' } : { availableSeconds: 0, quantity: 1 },
@@ -307,7 +338,7 @@ function previousFact(options) {
 function requestAuthorizationFailed(result) {
   return (result?.events ?? []).some(event => event.type === 'turn/end'
     && event.data?.reason?.kind === 'error'
-    && event.data.reason.error?.message === '执行授权已失效')
+    && event.data.reason.error?.message?.includes('执行授权已失效'))
 }
 
 function childEnvironment(config, grantFile, requestGrantFile, modelCredential) {

@@ -17,7 +17,7 @@ import { createWorkService } from '../src/work-service.mjs'
 const execFile = promisify(execFileCallback), root = process.cwd(), temp = await mkdtemp(join(tmpdir(), 'geneway-conversation-runtime-'))
 const dshHome = join(temp, 'dsh'), secretRoot = join(temp, 'secrets'), stateFile = join(temp, 'state.json')
 const saved = Object.fromEntries(['HOME', 'DSH_HOME', 'GENEWAY_DSH_HOME', 'GENEWAY_SECRET_ROOT', 'GENEWAY_MODEL_CREDENTIAL_REF'].map(key => [key, process.env[key]]))
-const modelKey = 'synthetic-conversation-model-key', model = readRuntimeConfig({}).model.model
+const modelKey = 'synthetic-conversation-model-key', model = readRuntimeConfig({}).model.model, secondModel = 'z-ai/glm-5.3-flash'
 const actor = { id: 'member-a' }, peer = { id: 'member-b' }, admin = { id: 'admin' }
 const store = createFileStore(stateFile), capture = await startCapture()
 let chat, work, collaborationRunner, sdkRunner, hosts = 0, harnesses = 0, failure, report
@@ -31,14 +31,14 @@ try {
   await mkdir(secretRoot, { mode: 0o700 })
   await writeFile(join(secretRoot, 'model.key'), modelKey, { mode: 0o600 })
   const patch = join(temp, 'capture.patch.yml')
-  const providerPatch = `- id: llm-pi-ai\n  config:\n    providers:\n      zenmux:\n        displayName: Local conversation capture\n        api: openai-completions\n        apiKeyEnv: ZENMUX_API_KEY\n        baseURL: ${capture.address}/v1\n        models:\n          - id: ${model}\n            contextWindow: 200000\n            maxOutputTokens: 4096\n`
+  const providerPatch = `- id: llm-pi-ai\n  config:\n    providers:\n      zenmux:\n        displayName: Local conversation capture\n        api: openai-completions\n        apiKeyEnv: ZENMUX_API_KEY\n        baseURL: ${capture.address}/v1\n        compat:\n          supportsUsageInStreaming: true\n          supportsFinishReason: true\n          maxTokensField: max_tokens\n        retryPolicy:\n          mode: normal\n          maxRetries: 8\n          backoff:\n            initialDelayMs: 5\n            maxDelayMs: 10\n            jitterRatio: 0\n        models:\n          - id: ${model}\n            contextWindow: 200000\n            maxTokens: 4096\n          - id: ${secondModel}\n            contextWindow: 1000000\n            maxTokens: 4096\n`
   await writeFile(patch, `- id: sdk-app-startup\n  disabled: true\n- id: sdk-jsonrpc-server\n  disabled: true\n${providerPatch}`, { mode: 0o600 })
   await writeFile(join(temp, 'sdk-capture.patch.yml'), providerPatch, { mode: 0o600 })
   await writeFile(join(temp, 'host.patch.yml'), `${await readFile(join(root, 'config/p3-runtime.patch.yml'), 'utf8')}\n${await readFile(patch, 'utf8')}`, { mode: 0o600 })
   await store.update(state => ({ ...state,
     members: [member(actor.id, ['public', 'private']), member(peer.id, ['public']), { ...member(admin.id, ['public']), role: 'admin' }],
-    employees: ['public', 'private'].map(id => ({ id, name: id, enabled: true, modelRouteId: 'route', revision: 1, instructions: 'INSTRUCTION_V1', skillIds: ['skill-cycle-time-calculate'], connectionIds: [] })),
-    modelRoutes: [{ id: 'route', provider: 'zenmux', model, credentialRef: 'ZENMUX_API_KEY', enabled: true }],
+    employees: ['public', 'private'].map(id => ({ id, name: id, enabled: true, modelRouteId: id === 'private' ? 'route-glm' : 'route', revision: 1, instructions: 'INSTRUCTION_V1', skillIds: ['skill-cycle-time-calculate'], connectionIds: [] })),
+    modelRoutes: [{ id: 'route', provider: 'zenmux', model, credentialRef: 'ZENMUX_API_KEY', enabled: true }, { id: 'route-glm', provider: 'zenmux', model: secondModel, credentialRef: 'ZENMUX_API_KEY', enabled: true, parameters: { maxOutputTokens: 64 } }],
     skills: [{ id: 'skill-cycle-time-calculate', capabilityId: 'cycle-time-calculate', enabled: true }],
   }))
   createServices()
@@ -50,6 +50,7 @@ try {
   const a2 = await chat.createConversation(actor, { employeeId: 'public' })
   assert.equal(a.historyStatus, 'empty')
   assert.equal(hosts, 0, 'empty conversations must not boot a native Host')
+  await modelAndBudgetChecks()
   await turn(a.id, 'CANARY_MEMBER_A', 'a-one')
   const firstSession = (await store.read()).conversations.find(item => item.id === a.id).sessions[0].id
   await turn(b.id, 'CANARY_MEMBER_B', 'b-one', peer)
@@ -161,8 +162,8 @@ try {
   assert.equal(unavailable.turns.find(item => item.id === later.turn.id).status, 'completed')
   await assert.rejects(chat.sendTurn(actor, a.id, { text: 'no silent fresh', clientRequestId: 'missing-history' }), { code: 'HISTORY_UNAVAILABLE' })
   await rename(join(temp, 'hidden-sessions'), join(dshHome, 'sessions'))
-  assert.equal(capture.requests.every(request => request.model === model && !request.credentialLeak && !request.sessionLog), true)
-  report = { ok: true, mode: 'native-controlled-loopback', actualProvider: 'local capture', requestedModel: model, nativeHosts: hosts, nativeSdkHarnesses: harnesses, modelRequests: capture.requests.length,
+  assert.equal(capture.requests.every(request => [model, secondModel].includes(request.model) && !request.credentialLeak && !request.sessionLog), true)
+  report = { ok: true, mode: 'native-controlled-loopback', actualProvider: 'local capture', requestedModel: model, requestedModels: [...new Set(capture.requests.map(request => request.model))], routingAndBudget: capture.routingAndBudget ?? null, nativeHosts: hosts, nativeSdkHarnesses: harnesses, modelRequests: capture.requests.length,
     emptyConversation: true, ownerAndSessionIsolation: true, frozenInstructions: true, cleanSuccessor: true, nativeRestartHistory: true, interruptedNotReplayed: true, exactTurnCancellation: true, workCancellationIndependent: true, relatedWorks: 2, conversationBackup: true, completedWithMissingHistory: true, chatBusinessTools: [], credentialCanaryLeaks: 0, sessionLogAttachments: 0 }
   }
 } catch (error) { failure = error }
@@ -174,6 +175,49 @@ finally {
 }
 if (failure) throw failure
 console.log(JSON.stringify(report, null, 2))
+
+async function modelAndBudgetChecks() {
+  const glm = await chat.createConversation(actor, { employeeId: 'private' })
+  await turn(glm.id, 'GLM_CHAT_FIRST_CANARY', 'glm-first')
+  assert.equal(capture.requests.at(-1).model, secondModel)
+  assert.equal(capture.requests.at(-1).maxTokens, 64)
+  const created = await work.createWork(actor, { employeeId: 'private', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 120, quantity: 2 }, clientRequestId: 'glm-work' })
+  assert.equal(created.ok, true)
+  const completed = await waitWork(created.value.id, 'completed')
+  assert.equal(completed.executions.at(-1).runtime.model, secondModel)
+  assert.equal(completed.executions.at(-1).runtime.requestCount, 2)
+  assert.equal(capture.requests.at(-1).maxTokens, 64)
+  await store.update(state => ({ ...state, modelRoutes: state.modelRoutes.map(route => route.id === 'route-glm' ? { ...route, parameters: { maxOutputTokens: 128 } } : route) }))
+  await turn(glm.id, 'GLM_CHAT_AFTER_CAP_CHANGE', 'glm-after-cap')
+  assert.equal(capture.requests.at(-1).maxTokens, 128)
+  assert.equal(capture.requests.at(-1).serialized.includes('GLM_CHAT_FIRST_CANARY'), false)
+  assert.equal((await store.read()).conversations.find(item => item.id === glm.id).sessions.length, 2)
+  const mixed = await work.createCollaboration(actor, { employeeId: 'public', skillId: 'skill-cycle-time-calculate', goal: '跨模型节拍核对', clientRequestId: 'mixed-model', items: [{ id: 'item-mixed-model', employeeId: 'private', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 180, quantity: 3 } }] })
+  assert.equal(mixed.ok, true)
+  await waitWork(mixed.value.id, 'completed')
+  const child = (await store.read()).works.find(item => item.rootWorkId === mixed.value.id)
+  assert.equal(child.executions.at(-1).runtime.model, secondModel)
+  assert.equal((await store.read()).works.find(item => item.id === mixed.value.id).executions.at(-1).runtime.model, model)
+  const beforeWork = capture.requests.length
+  const limitedWork = await work.createWork(actor, { employeeId: 'public', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 777, quantity: 2 }, clientRequestId: 'budget-work' })
+  let failedWork
+  await waitFor(async () => { failedWork = (await store.read()).works.find(item => item.id === limitedWork.value.id); return failedWork.status === 'failed' })
+  assert.equal(capture.requests.length - beforeWork, 4)
+  assert.equal(failedWork.executions.at(-1).error.code, 'BUDGET_EXHAUSTED')
+  assert.equal(failedWork.executions.at(-1).runtime.requestCount, 4)
+  assert(Object.values(failedWork.executions.at(-1).runtime.usage).every(value => value === null))
+  const beforeChat = capture.requests.length
+  const budgetChat = await chat.createConversation(actor, { employeeId: 'public' })
+  const admitted = await chat.sendTurn(actor, budgetChat.id, { text: 'BUDGET_CHAT_CANARY', clientRequestId: 'budget-chat' })
+  let failedTurn
+  await waitFor(async () => { failedTurn = (await store.read()).conversations.find(item => item.id === budgetChat.id).turns.find(item => item.id === admitted.turn.id); return failedTurn.status === 'failed' })
+  assert.equal(capture.requests.length - beforeChat, 6)
+  assert.equal(failedTurn.error.code, 'BUDGET_EXHAUSTED')
+  assert.equal(failedTurn.runtime.requestCount, 6)
+  assert.equal(failedTurn.runtime.terminationReason, 'BUDGET_EXHAUSTED')
+  assert(capture.requests.every(request => request.maxTokens <= 4096))
+  capture.routingAndBudget = { twoApprovedRoutes: true, sdkAndChatGlm: true, mixedCollaboration: true, capChangeCleanSuccessor: true, ordinaryWireRequestsAtBudget: 4, chatWireRequestsAtBudget: 6, budgetFailureUsageUnknown: true, requestCapsExplicit: true }
+}
 
 function createServices() {
   const config = readRuntimeConfig({ ...process.env, GENEWAY_STATE: stateFile }, root)
@@ -292,8 +336,8 @@ async function channelWorkChecks() {
   const [lateHistory] = await collaborationRunner.readChatHistory([late.sessionId])
   const latePublic = (await chat.getConversation(actor, id)).turns.find(item => item.id === late.id)
   const rejectedToolTurn = assertRejectedToolTurn({ turn: late, history: lateHistory, publicTurn: latePublic, toolName: tools.status, workId: first.id }, evidence => console.log(JSON.stringify({ kind: 'rejected-tool-turn-evidence', ...evidence })))
-  assert(capture.requests.every(item => item.model === model && !item.credentialLeak && !item.sessionLog))
-  report = { ok: true, mode: 'native-controlled-loopback-channel-work', actualProvider: 'local capture', requestedModel: model, nativeHosts: hosts, nativeSdkHarnesses: harnesses, modelRequests: capture.requests.length,
+  assert(capture.requests.every(item => [model, secondModel].includes(item.model) && !item.credentialLeak && !item.sessionLog))
+  report = { ok: true, mode: 'native-controlled-loopback-channel-work', actualProvider: 'local capture', requestedModel: model, requestedModels: [...new Set(capture.requests.map(request => request.model))], routingAndBudget: capture.routingAndBudget ?? null, nativeHosts: hosts, nativeSdkHarnesses: harnesses, modelRequests: capture.requests.length,
     fixedProductTools: Object.values(tools), webTools: [], plainChatWorks: 0, partialInputWithoutExecution: true, continuationSameWork: true, replayWithoutRequest: true, ownerInjectionRejected: true, sameConversationOnly: true,
     factsCommittedBeforeModel: true, nativeIdsExcludedFromToolOutput: true, factualFollowUpWithoutRefresh: true, explicitSelection: true, independentWorkStop: true, lateRevocationBlocksContinuation: true, failedTurnPersisted: true, rejectedToolTurn, credentialCanaryLeaks: 0, sessionLogAttachments: 0,
   }
@@ -371,20 +415,27 @@ async function startCapture() {
   const server = createServer(async (request, response) => {
     let raw = ''; for await (const chunk of request) raw += chunk
     const body = JSON.parse(raw), serialized = JSON.stringify(body), tools = (body.tools ?? []).map(tool => tool.function?.name ?? tool.name)
+    const cycleSchema = (body.tools ?? []).find(tool => (tool.function?.name ?? tool.name) === 'geneway_calculate_cycle_time')?.function?.parameters
+    if (cycleSchema) { assert.equal(cycleSchema.properties.availableSeconds.type, 'number'); assert.equal(cycleSchema.properties.quantity.type, 'number'); assert.deepEqual([...cycleSchema.required].sort(), ['availableSeconds', 'quantity']) }
     const text = body.messages.filter(message => message.role === 'user').map(message => typeof message.content === 'string' ? message.content : message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')).join('\n')
     const last = body.messages.filter(message => message.role === 'user').at(-1), lastText = typeof last?.content === 'string' ? last.content : last?.content?.filter(block => block.type === 'text').map(block => block.text).join('\n') ?? ''
-    const cycle = tools.includes('geneway_calculate_cycle_time') && !body.messages.some(message => message.role === 'tool')
+    const cycle = tools.includes('geneway_calculate_cycle_time') && !body.messages.some(message => message.role === 'tool') && text.includes('参数必须精确为 ')
     const lastUserIndex = body.messages.findLastIndex(message => message.role === 'user')
     const hasToolResult = body.messages.slice(lastUserIndex + 1).some(message => message.role === 'tool')
     const channelWork = lastText.startsWith('CHANNEL_WORK:') && !hasToolResult ? JSON.parse(lastText.slice('CHANNEL_WORK:'.length)) : null
     const input = cycle ? JSON.parse(text.match(/参数必须精确为 (\{[^}\n]*\})/)?.[1] ?? '{}') : undefined
     const label = lastText.startsWith('HOLD:') ? lastText : cycle && [64, 66].includes(input.availableSeconds) ? `WORK:${input.availableSeconds}` : null
-    requests.push({ model: body.model, serialized, tools, chat: tools.length === 0, hasToolResult, credentialLeak: raw.includes(modelKey), sessionLog: Object.hasOwn(body, 'dsh_session_log') })
+    requests.push({ model: body.model, maxTokens: body.max_tokens ?? body.max_completion_tokens, serialized, tools, chat: tools.length === 0, hasToolResult, credentialLeak: raw.includes(modelKey), sessionLog: Object.hasOwn(body, 'dsh_session_log') })
+    if (lastText.includes('BUDGET_CHAT_CANARY') || input?.availableSeconds === 777) { response.writeHead(503, { 'content-type': 'application/json' }); response.end(JSON.stringify({ error: { message: 'controlled budget retry', type: 'server_error' } })); return }
+    const scenario = /SCENARIO:([a-z0-9-]+)/i.exec(lastText)?.[1]
+    const summaryRefs = [...new Set(serialized.match(/result-[a-f0-9-]+/g) ?? [])]
+    const collaborationCall = scenario === 'root-summary' ? hasToolResult ? null : { name: 'geneway_collaboration_submit_summary', args: { resultRefs: summaryRefs } }
+      : scenario ? hasToolResult ? { name: 'structured_output', args: { status: 'done', explanation: '受控跨模型协作结果' } } : { name: 'geneway_calculate_cycle_time', args: JSON.parse(lastText.match(/ exactly once with (\{[^}\n]*\})/)?.[1] ?? '{}') } : null
     const send = () => {
       if (response.destroyed) return
       const id = `capture-${randomUUID()}`, chunk = (delta, finish_reason) => response.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', model: body.model, choices: [{ index: 0, delta, finish_reason }] })}\n\n`)
       response.writeHead(200, { 'content-type': 'text/event-stream' })
-      const call = channelWork ?? (cycle ? { name: 'geneway_calculate_cycle_time', args: input } : null)
+      const call = collaborationCall ?? channelWork ?? (cycle ? { name: 'geneway_calculate_cycle_time', args: input } : null)
       chunk(call ? { role: 'assistant', tool_calls: [{ index: 0, id: `tool-${randomUUID()}`, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.args) } }] } : { role: 'assistant', content: `LOCAL_REPLY:${lastText}` }, null)
       chunk({}, call ? 'tool_calls' : 'stop')
       response.end('data: [DONE]\n\n')

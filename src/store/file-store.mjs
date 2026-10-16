@@ -1,3 +1,5 @@
+import { validateModelSnapshot } from '../model-route.mjs'
+import { validateExecutionRuntime } from '../execution-runtime.mjs'
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -129,6 +131,7 @@ export function createFileStore(filePath, fsOps = {}) {
         const immutableBaseline = structuredClone(current)
         const next = migrateState(await mutator(current))
         assertActionFactsImmutable(immutableBaseline, next)
+        assertExecutionFactsImmutable(immutableBaseline, next)
         assertConversationFactsImmutable(immutableBaseline, next)
         assertChannelFactsImmutable(immutableBaseline, next)
         assertAutomationFactsImmutable(immutableBaseline, next)
@@ -435,6 +438,12 @@ function normalizeV4(value, { allowKnowledgeDependencyRefs = false } = {}) {
     const resultIds = new Set(results.map(result => result.id))
     const executions = requiredArray(work, 'executions').map(execution => {
       if (!record(execution)) throw new Error('执行状态无效')
+      if (execution.modelSnapshot !== undefined) validateModelSnapshot(execution.modelSnapshot)
+      if (execution.runtime !== undefined) {
+        validateExecutionRuntime(execution.runtime)
+        if (execution.modelSnapshot && ['modelRouteId', 'provider', 'model', 'parameters'].some(key => !isDeepStrictEqual(execution.runtime[key], execution.modelSnapshot[key]))) throw new Error('执行运行反馈与冻结模型不匹配')
+      }
+      if (execution.closePending !== undefined && typeof execution.closePending !== 'boolean') throw new Error('执行关闭状态无效')
       requiredText(execution.id, `工作 ${workId} 的执行 ID 无效`)
       const observationRef = text(execution.resultObservationId)
       const followUpRef = text(execution.resultFollowUpId)
@@ -1023,8 +1032,9 @@ function normalizeConversation(value, channels = false) {
 
 function normalizeConversationTurn(value, sessions, channels = false) {
   if (!record(value)) throw new Error('对话回复无效')
-  exactKeys(value, ['id', 'clientRequestId', 'userText', 'status', 'createdAt', 'startedAt', 'completedAt', 'error', 'definition', 'definitionFingerprint', 'sessionId', 'userMessageId', 'assistantMessageIds', ...(channels ? ['workDependencyRefs', 'knowledgeDependencyRefs'] : [])], '对话回复')
+  exactKeys(value, ['id', 'clientRequestId', 'userText', 'status', 'createdAt', 'startedAt', 'completedAt', 'error', 'definition', 'definitionFingerprint', 'sessionId', 'userMessageId', 'assistantMessageIds', 'runtime', ...(channels ? ['workDependencyRefs', 'knowledgeDependencyRefs'] : [])], '对话回复')
   const id = requiredText(value.id, '回复 ID 无效')
+  if (value.runtime !== undefined) validateExecutionRuntime(value.runtime)
   if (channels) {
     if (value.workDependencyRefs !== undefined) {
       if (!Array.isArray(value.workDependencyRefs)) throw new Error('回复工作依赖无效')
@@ -1046,10 +1056,14 @@ function normalizeConversationTurn(value, sessions, channels = false) {
   if (!['accepted', 'running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(value.status)) throw new Error('回复状态无效')
   const definition = value.definition
   if (!record(definition)) throw new Error('回复冻结定义无效')
-  exactKeys(definition, ['employeeRevision', 'instructions', 'modelRouteId'], '回复冻结定义')
+  exactKeys(definition, ['employeeRevision', 'instructions', 'modelRouteId', 'modelSnapshot'], '回复冻结定义')
   if (!Number.isSafeInteger(definition.employeeRevision) || definition.employeeRevision < 1 || typeof definition.instructions !== 'string' || definition.instructions.length > 16_000) throw new Error('回复冻结定义无效')
   requiredText(definition.modelRouteId, '回复模型引用无效')
-  const normalizedDefinition = { employeeRevision: definition.employeeRevision, instructions: definition.instructions, modelRouteId: definition.modelRouteId }
+  if (definition.modelSnapshot !== undefined) {
+    validateModelSnapshot(definition.modelSnapshot)
+    if (definition.modelSnapshot.modelRouteId !== definition.modelRouteId || value.runtime && ['modelRouteId', 'provider', 'model', 'parameters'].some(key => !isDeepStrictEqual(value.runtime[key], definition.modelSnapshot[key]))) throw new Error('回复模型快照不匹配')
+  }
+  const normalizedDefinition = { employeeRevision: definition.employeeRevision, instructions: definition.instructions, modelRouteId: definition.modelRouteId, ...(definition.modelSnapshot ? { modelSnapshot: definition.modelSnapshot } : {}) }
   const fingerprint = createHash('sha256').update(JSON.stringify(normalizedDefinition)).digest('hex')
   if (value.definitionFingerprint !== fingerprint) throw new Error('回复定义指纹不匹配')
   const sessionId = value.sessionId === null ? null : requiredText(value.sessionId, '回复 Session 引用无效')
@@ -1065,10 +1079,18 @@ function normalizeConversationTurn(value, sessions, channels = false) {
   if (value.error !== null) {
     if (!record(value.error)) throw new Error('回复错误无效')
     exactKeys(value.error, ['code', 'message'], '回复错误')
-    if (!['FORBIDDEN', 'MODEL_NOT_CONFIGURED', 'HISTORY_UNAVAILABLE', 'UPSTREAM_ERROR', 'UPSTREAM_TIMEOUT', 'CANCELLED', 'PROCESS_RESTARTED', 'PROCESS_SHUTDOWN', 'BACKUP_INTERRUPTED'].includes(value.error.code)) throw new Error('回复错误代码无效')
+    if (!['FORBIDDEN', 'MODEL_NOT_CONFIGURED', 'HISTORY_UNAVAILABLE', 'UPSTREAM_ERROR', 'UPSTREAM_TIMEOUT', 'CANCELLED', 'PROCESS_RESTARTED', 'PROCESS_SHUTDOWN', 'BACKUP_INTERRUPTED', 'BUDGET_EXHAUSTED'].includes(value.error.code)) throw new Error('回复错误代码无效')
     requiredText(value.error.message, '回复错误消息无效')
   }
   return { ...value, definition: normalizedDefinition, sessionId, userMessageId, assistantMessageIds }
+}
+
+function assertExecutionFactsImmutable(before, after) {
+  for (const work of before.works) for (const execution of work.executions) {
+    if (!execution.modelSnapshot) continue
+    const next = after.works.find(item => item.id === work.id)?.executions.find(item => item.id === execution.id)
+    if (!isDeepStrictEqual(execution.modelSnapshot, next?.modelSnapshot)) throw new Error('执行冻结模型不可改写')
+  }
 }
 
 function assertConversationFactsImmutable(before, after) {

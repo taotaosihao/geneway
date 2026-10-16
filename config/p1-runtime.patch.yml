@@ -106,7 +106,10 @@
         models:
           - id: deepseek/deepseek-v4.1-flash
             contextWindow: 200000
-            maxOutputTokens: 8192
+            maxTokens: 8192
+          - id: z-ai/glm-5.3-flash
+            contextWindow: 1000000
+            maxTokens: 4096
 - id: tools
   config:
     mode: native

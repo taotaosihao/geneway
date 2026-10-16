@@ -110,7 +110,7 @@
           - id: p3-runtime-test
             name: P3 runtime test
             contextWindow: 8192
-            maxOutputTokens: 4096
+            maxTokens: 4096
       zenmux:
         displayName: ZenMux
         api: openai-completions
@@ -119,7 +119,10 @@
         models:
           - id: deepseek/deepseek-v4.1-flash
             contextWindow: 200000
-            maxOutputTokens: 4096
+            maxTokens: 4096
+          - id: z-ai/glm-5.3-flash
+            contextWindow: 1000000
+            maxTokens: 4096
 - id: tools
   config:
     mode: native

@@ -15,7 +15,7 @@
     "probe:p3-delegation": "node scripts/probe-p3-delegation.mjs",
     "probe:p4-feishu": "node scripts/probe-p4-feishu.mjs",
     "probe:p5-trigger": "node scripts/probe-p5-trigger.mjs",
-    "test:unit": "node scripts/test-domain.mjs",
+    "test:unit": "node scripts/test-domain.mjs && node scripts/test-execution-runtime.mjs && node scripts/test-member-provisioning.mjs",
     "test:service": "node scripts/test-service.mjs && node scripts/test-shutdown.mjs",
     "test:controlled": "node scripts/test-controlled.mjs",
     "test:p2": "node scripts/test-p2-auth-store.mjs && node scripts/test-p2-runtime.mjs && node scripts/test-cycle-time.mjs && node scripts/test-p2-state-transfer.mjs && node scripts/probe-p2-lifecycle.mjs && node scripts/test-p2-session.mjs && node scripts/test-p2-plugin-combo.mjs",

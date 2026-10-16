@@ -1,3 +1,5 @@
+import { employeeModelRoute, modelAgentOptions, assertModelRoute } from './model-route.mjs'
+import { nativeUsage, nativeRequestCount, finishExecutionRuntime } from './execution-runtime.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
@@ -60,6 +62,7 @@ export function createCollaborationRunner({
   let closeTask
   let nativeCloseTask
   const bindings = new WeakMap()
+  const modelSnapshots = new WeakMap()
   const knowledgeSelections = new WeakMap()
   const summaryContexts = new WeakMap()
   const summarySubmissions = new WeakMap()
@@ -83,7 +86,9 @@ export function createCollaborationRunner({
       if (activeChats.has(options.conversationId)) throw runtimeError('BUSY', '当前对话回复尚未结束')
       const entry = { turnId: options.turnId, controller: new AbortController(), handle: undefined, promise: undefined, failure: undefined }
       activeChats.set(options.conversationId, entry)
-      entry.promise = executeChatTurn(options, entry).finally(() => { if (activeChats.get(options.conversationId) === entry) activeChats.delete(options.conversationId) })
+      const timeout = setTimeout(() => entry.controller.abort(runtimeError('UPSTREAM_TIMEOUT', '本次回复超时')), 120_000)
+      timeout.unref()
+      entry.promise = executeChatTurn(options, entry).finally(() => { clearTimeout(timeout); if (!entry.closeFailed && activeChats.get(options.conversationId) === entry) activeChats.delete(options.conversationId) })
       return entry.promise
     },
 
@@ -93,6 +98,7 @@ export function createCollaborationRunner({
       entry.controller.abort(runtimeError('CANCELLED', '本次回复已停止'))
       entry.handle?.agent.cancel({ kind: 'user' })
       await entry.promise.catch(() => undefined)
+      if (entry.closeFailed) throw Object.assign(runtimeError('UPSTREAM_ERROR', '执行资源尚未确认关闭'), { closeFailed: true })
       return true
     },
 
@@ -120,6 +126,7 @@ export function createCollaborationRunner({
         .catch(async error => { await failRoot(rootWorkId, rootWork.collaboration.generation, error); onError(error); throw error })
         .finally(async () => {
           await disposeEntry(entry)
+          await store.update(state => ({ ...state, works: state.works.map(work => work.id === rootWorkId || work.rootWorkId === rootWorkId ? { ...work, executions: work.executions.map(execution => execution.generation === entry.generation ? { ...execution, closePending: false } : execution) } : work) }))
           activeRoots.delete(rootWorkId)
           testHooks.afterRootDispose?.({ rootWorkId, active: activeRoots.has(rootWorkId) })
         })
@@ -138,7 +145,7 @@ export function createCollaborationRunner({
         const works = state.works.map(work => {
           if (work.id !== rootWorkId && work.rootWorkId !== rootWorkId) return work
           const executions = work.executions.map(execution => execution.generation === oldGeneration && ACTIVE.has(execution.status)
-            ? { ...execution, status: 'cancelled', completedAt: now, error: { code: 'CANCELLED', message: '本次执行已停止' } }
+            ? { ...execution, status: 'cancelled', completedAt: now, runtime: finishExecutionRuntime(execution.runtime, { completedAt: now, terminationReason: 'CANCELLED' }), error: { code: 'CANCELLED', message: '本次执行已停止' } }
             : execution)
           if (work.id !== rootWorkId) return { ...work, status: ['accepted', 'running', 'waiting_input'].includes(work.status) ? 'cancelled' : work.status, executions }
           return {
@@ -221,6 +228,8 @@ export function createCollaborationRunner({
     try {
       if (started) await closeNative(started)
       else await nativeCloseTask
+      activeChats.clear()
+      activeRoots.clear()
     } catch (error) { failure = failure ? new AggregateError([failure, error], '协作 Host 清理失败', { cause: failure }) : error }
     finally {
       runtime = undefined
@@ -252,7 +261,7 @@ export function createCollaborationRunner({
   }
 
   async function executeChatTurn(options, entry) {
-    let result, failure
+    let result, failure, eventOffset, nativeEvents = []
     try {
       await options.authorize()
       const initial = typeof getWorkService === 'function' ? await store.read() : null
@@ -270,7 +279,10 @@ export function createCollaborationRunner({
       await assertChatAuthorized()
       const ctx = await context(), signal = entry.controller.signal
       signal.throwIfAborted()
+      const selectedOptions = options.modelSnapshot ? nativeOptions(options.modelSnapshot) : agentOptions
       const setup = (agentCtx, agent) => {
+        if (options.modelSnapshot) modelSnapshots.set(agent, options.modelSnapshot)
+        let requests = 0
         // This mask covers global tools; the five registrations below belong only to this agent.
         agentCtx.tools.restrict({ allow: [] })
         agentCtx.tools.guard(execution => workTools.includes(execution.name) ? undefined : 'Tool is outside this conversation scope')
@@ -285,12 +297,15 @@ export function createCollaborationRunner({
         agentCtx.on('agent/request', async ({ signal }, next) => {
           entry.controller.signal.throwIfAborted()
           await untilAbort(assertChatAuthorized(), signal)
+          if (requests >= 6) throw runtimeError('BUDGET_EXHAUSTED', '本次回复模型请求预算已耗尽')
+          await options.onRequest?.()
+          requests += 1
           return next()
         })
         agentCtx.on('agent/error', event => { entry.failure ??= event.error })
       }
       if (options.sessionId) {
-        try { entry.handle = await ctx.agents.resume({ resumeSessionId: options.sessionId, agentOptions, setup, signal }) }
+        try { entry.handle = await ctx.agents.resume({ resumeSessionId: options.sessionId, agentOptions: selectedOptions, setup, signal }) }
         catch (error) {
           if (signal.aborted) throw signal.reason
           throw runtimeError('HISTORY_UNAVAILABLE', '历史记录暂时不可用')
@@ -299,7 +314,7 @@ export function createCollaborationRunner({
         entry.handle.agent.cancel({ kind: 'user' })
         await entry.handle.agent.whenIdle()
       } else {
-        entry.handle = await ctx.agents.create({ sessionId: `conversation-${randomUUID()}`, meta: { cwd: workspaceRoot }, agentOptions, setup, signal })
+        entry.handle = await ctx.agents.create({ sessionId: `conversation-${randomUUID()}`, meta: { cwd: workspaceRoot }, agentOptions: selectedOptions, setup, signal })
       }
       signal.throwIfAborted()
       const agent = entry.handle.agent
@@ -310,9 +325,11 @@ export function createCollaborationRunner({
       await assertChatAuthorized()
       signal.throwIfAborted()
       const offset = agent.session.snapshotEvents().length
+      eventOffset = offset
       agent.followup(message)
       await agent.whenIdle()
       const events = agent.session.snapshotEvents().slice(offset)
+      nativeEvents = events
       const reason = events.filter(event => event.type === 'turn/end').at(-1)?.data.reason
       const requestFailure = requestFailures.get(agent) ?? entry.failure
       if (events.some(event => event.type === 'tool/call' && !workTools.includes(event.data?.name))) throw runtimeError('TOOL_CHAIN_INVALID', '对话调用了未获准工具')
@@ -328,10 +345,15 @@ export function createCollaborationRunner({
     } catch (error) { failure = error }
     finally {
       try { await entry.handle?.dispose() }
-      catch (error) { failure = failure ? new AggregateError([failure, error], '对话执行和清理失败', { cause: failure }) : error }
+      catch (error) {
+        entry.closeFailed = true
+        failure = Object.assign(new AggregateError(failure ? [failure, error] : [error], '对话执行资源尚未确认关闭'), { code: 'UPSTREAM_ERROR', closeFailed: true })
+      }
     }
-    if (failure) throw failure
-    return result
+    if (eventOffset !== undefined && entry.handle) nativeEvents = entry.handle.agent.session.snapshotEvents().slice(eventOffset)
+    const metrics = { requestCount: nativeRequestCount(nativeEvents), usage: nativeUsage(nativeEvents) }
+    if (failure) { failure.runtime = metrics; throw failure }
+    return { ...result, runtime: metrics }
   }
 
   async function invokeConversationWork(options, entry, { name, args, invocation }, authorize) {
@@ -459,7 +481,9 @@ export function createCollaborationRunner({
       try {
         await authorizeModelRequest()
         const proposed = await next()
-        if (proposed.provider !== agentOptions.provider || proposed.model !== agentOptions.model) throw runtimeError('MODEL_NOT_CONFIGURED', '模型路由不可用')
+        const snapshot = modelSnapshots.get(agent) ?? bindings.get(agent)?.modelSnapshot
+        const expected = snapshot ? nativeOptions(snapshot) : agentOptions
+        if (proposed.provider !== expected.provider || proposed.model !== expected.model || proposed.maxTokens !== expected.maxTokens) throw runtimeError('MODEL_NOT_CONFIGURED', '模型路由不可用')
         return proposed
       } catch (error) { requestFailures.set(agent, error); throw error }
     })
@@ -505,10 +529,11 @@ export function createCollaborationRunner({
     })
   }
 
+  function nativeOptions(snapshot) { return localCapture(agentOptions, environment) ? agentOptions : modelAgentOptions(snapshot) }
+
   async function authorizeModelRequest() {
     if (localCapture(agentOptions, environment)) return
     const config = readRuntimeConfig(process.env, workspaceRoot)
-    if (agentOptions.provider !== config.model.provider || agentOptions.model !== config.model.model) throw runtimeError('MODEL_NOT_CONFIGURED', '模型路由不可用')
     const current = await readModelCredential(config)
     if (!modelCredential || current !== modelCredential) throw runtimeError('MODEL_NOT_CONFIGURED', '模型路由不可用')
   }
@@ -533,10 +558,12 @@ export function createCollaborationRunner({
     const rootInstructions = rootState.employees.find(employee => employee.id === rootSnapshot.employeeId)?.instructions ?? ''
     const rootExecution = rootSnapshot.executions.find(execution => execution.generation === generation && ACTIVE.has(execution.status))
     if (!rootExecution) throw runtimeError('BUSY', '协作根执行不可运行')
-    const rootHandle = await ctx.agents.create({ sessionId: `collaboration-root-${randomUUID()}`, meta: { cwd: workspaceRoot }, agentOptions })
+    const rootModel = rootExecution.modelSnapshot ?? employeeModelRoute(rootState, rootState.employees.find(employee => employee.id === rootSnapshot.employeeId))
+    const rootHandle = await ctx.agents.create({ sessionId: `collaboration-root-${randomUUID()}`, meta: { cwd: workspaceRoot }, agentOptions: nativeOptions(rootModel) })
+    modelSnapshots.set(rootHandle.agent, rootModel)
     entry.handles.add(rootHandle)
     const rootConnection = rootSnapshot.connectionId ? rootState.connections.find(item => item.id === rootSnapshot.connectionId) : null
-    const rootBinding = Object.freeze({ kind: 'root', rootWorkId, workId: rootWorkId, executionId: rootExecution.id, employeeId: rootSnapshot.employeeId, generation, cancelGeneration: rootSnapshot.collaboration.cancelGeneration, planRevision: rootSnapshot.plan.revision, connection: rootConnection ? Object.freeze(connectionSnapshot(rootConnection)) : null, allowedTools: Object.freeze(Object.values(COLLABORATION_TOOLS)) })
+    const rootBinding = Object.freeze({ kind: 'root', modelSnapshot: rootModel, rootWorkId, workId: rootWorkId, executionId: rootExecution.id, employeeId: rootSnapshot.employeeId, generation, cancelGeneration: rootSnapshot.collaboration.cancelGeneration, planRevision: rootSnapshot.plan.revision, connection: rootConnection ? Object.freeze(connectionSnapshot(rootConnection)) : null, allowedTools: Object.freeze(Object.values(COLLABORATION_TOOLS)) })
     bindings.set(rootHandle.agent, rootBinding)
     rootHandle.agent.ctx.on('agent/request', async ({ agent, signal }, next) => {
       if (bindings.get(agent) !== rootBinding || signal.aborted) throw runtimeError('CANCELLED', '协作根执行已停止')
@@ -599,6 +626,7 @@ export function createCollaborationRunner({
     const confirmations = state.confirmations.filter(item => item.ownerMemberId === rootSnapshot.ownerMemberId && item.employeeId === child.employeeId && item.status === 'active').sort((left, right) => left.id.localeCompare(right.id))
     const dependencies = dependencyProjection(state, currentRoot, item, child.employeeId)
     const signal = AbortSignal.any([rootSignal, AbortSignal.timeout(rootSnapshot.collaboration.childTimeoutMs)])
+    const childModel = execution.modelSnapshot ?? employeeModelRoute(state, state.employees.find(employee => employee.id === child.employeeId))
     let run
     try {
       run = await ctx.subagents.start('spawn', {
@@ -606,7 +634,7 @@ export function createCollaborationRunner({
         prompt: [{ type: 'text', text: buildAgentPrompt(childPrompt(child, capability.toolName, confirmations, dependencies.map(item => item.fact)), state.employees.find(employee => employee.id === child.employeeId)?.instructions) }],
         parent: [...entry.handles][0].agent,
         signal,
-        agentOptions,
+        agentOptions: nativeOptions(childModel),
         outputSchema: { type: 'object', additionalProperties: false, properties: { status: { type: 'string', const: 'done' }, explanation: { type: 'string' } }, required: ['status', 'explanation'] },
         maxDepth: 1,
         toolFilter: { allow: [capability.toolName, ...(knowledgeDependent ? Object.values(KNOWLEDGE_TOOLS) : [])] },
@@ -615,7 +643,7 @@ export function createCollaborationRunner({
       entry.runs.add(run)
       const connection = child.connectionId ? state.connections.find(candidate => candidate.id === child.connectionId) : null
       const binding = Object.freeze({
-        kind: 'child', rootWorkId: rootSnapshot.id, workId: child.id, executionId: execution.id,
+        kind: 'child', modelSnapshot: childModel, rootWorkId: rootSnapshot.id, workId: child.id, executionId: execution.id,
         employeeId: child.employeeId, generation, planRevision: currentRoot.plan.revision,
         cancelGeneration: rootSnapshot.collaboration.cancelGeneration,
         allowedTools: Object.freeze([capability.toolName, ...(knowledgeDependent ? Object.values(KNOWLEDGE_TOOLS) : [])]), capabilityId: child.capabilityId,
@@ -628,6 +656,7 @@ export function createCollaborationRunner({
       const gate = gates.get(run.id)
       if (!gate || gate.agent !== run.localAgent || !ctx.agents.isOwnedBy(run.id, [...entry.handles][0].agent)) throw runtimeError('FORBIDDEN', '原生子 Agent 身份无法绑定')
       bindings.set(run.localAgent, binding)
+      modelSnapshots.set(run.localAgent, childModel)
       if (knowledgeDependent) knowledgeSelections.set(run.localAgent, { allowlist: new Map(), selected: [] })
       await bindSession(binding, run.id, 'running')
       gate.gate.resolve({ ok: true })
@@ -646,14 +675,15 @@ export function createCollaborationRunner({
       const failure = signal.aborted && signal.reason?.name === 'TimeoutError'
         ? runtimeError('UPSTREAM_TIMEOUT', '协作子工作超时')
         : error
+      if (run) { const events = run.localAgent.session.snapshotEvents(); failure.runtime = { requestCount: nativeRequestCount(events), usage: nativeUsage(events) } }
       const gate = run && gates.get(run.id)
       if (gate && !gate.gate.settled()) gate.gate.resolve({ ok: false, error: failure })
       await failChild(child.id, execution.id, generation, failure)
       throw failure
     } finally {
       if (run) {
+        await run.dispose()
         entry.runs.delete(run)
-        await run.dispose().catch(() => undefined)
         testHooks.afterChildDispose?.({ workId: child.id, runId: run.id })
       }
     }
@@ -705,11 +735,13 @@ export function createCollaborationRunner({
     let context
     await store.update(state => {
       context = executionAuthorization(state, binding)
-      const { rootWork } = context
+      const { rootWork, work } = context
       if (reserveRequest) {
         if (rootWork.collaboration.requestCount >= rootWork.collaboration.requestLimit) throw runtimeError('BUDGET_EXHAUSTED', '协作模型请求预算已耗尽')
         rootWork.collaboration = { ...rootWork.collaboration, requestCount: rootWork.collaboration.requestCount + 1 }
-        return { ...state, works: state.works.map(candidate => candidate.id === rootWork.id ? rootWork : candidate) }
+        rootWork.executions = rootWork.executions.map(execution => execution.generation === binding.generation && execution.runtime ? { ...execution, runtime: { ...execution.runtime, requestCount: rootWork.collaboration.requestCount } } : execution)
+        if (work.id !== rootWork.id) work.executions = work.executions.map(execution => execution.id === binding.executionId && execution.runtime ? { ...execution, runtime: { ...execution.runtime, requestCount: (execution.runtime.requestCount ?? 0) + 1 } } : execution)
+        return { ...state, works: state.works.map(candidate => candidate.id === rootWork.id ? rootWork : candidate.id === work.id ? work : candidate) }
       }
       return state
     })
@@ -725,7 +757,8 @@ export function createCollaborationRunner({
     const employee = state.employees.find(candidate => candidate.id === binding.employeeId && candidate.enabled === true)
     const skill = state.skills.find(candidate => candidate.id === work?.skillId && candidate.enabled === true)
     const route = state.modelRoutes.find(candidate => candidate.id === employee?.modelRouteId && candidate.enabled === true)
-    if (!rootWork || !member || !member.employeeIds.includes(employee?.id) || !employee?.skillIds?.includes(skill?.id) || !route || route.provider !== 'zenmux' || route.model !== 'deepseek/deepseek-v4.1-flash' || route.credentialRef !== 'ZENMUX_API_KEY') throw runtimeError('FORBIDDEN', '当前成员、员工或模型路由授权已撤销')
+    if (!rootWork || !member || !member.employeeIds.includes(employee?.id) || !employee?.skillIds?.includes(skill?.id) || !route || !binding.modelSnapshot) throw runtimeError('FORBIDDEN', '当前成员、员工或模型路由授权已撤销')
+    assertModelRoute(state, employee, binding.modelSnapshot)
     if (isRetiredWork(state, rootWork)) throw runtimeError('CAPABILITY_RETIRED', '旧来源已停止新执行，可查看历史记录')
     if (rootWork.collaboration.generation !== binding.generation || rootWork.collaboration.cancelGeneration !== binding.cancelGeneration || rootWork.collaboration.status !== 'running') throw runtimeError('CANCELLED', '协作 generation 已关闭')
     if (work.ownerMemberId !== member.id || work.status !== 'running' || !execution || execution.generation !== binding.generation || execution.cancelGeneration !== binding.cancelGeneration || !ACTIVE.has(execution.status)) throw runtimeError('CANCELLED', '当前执行已关闭')
@@ -810,7 +843,7 @@ export function createCollaborationRunner({
       if (isRetiredWork(state, work)) throw runtimeError('CAPABILITY_RETIRED', '旧来源已停止新执行，可查看历史记录')
       const execution = work.executions.find(candidate => candidate.generation === generation && candidate.status === 'accepted')
       if (!execution) throw runtimeError('BUSY', '协作根执行不可启动')
-      const next = { ...work, status: 'running', collaboration: { ...work.collaboration, status: 'running' }, executions: work.executions.map(candidate => candidate.id === execution.id ? { ...candidate, status: 'running', startedAt: clock() } : candidate) }
+      const next = { ...work, status: 'running', collaboration: { ...work.collaboration, status: 'running' }, executions: work.executions.map(candidate => candidate.id === execution.id ? { ...candidate, status: 'running', startedAt: clock(), ...(candidate.runtime ? { runtime: { ...candidate.runtime, startedAt: clock() } } : {}) } : candidate) }
       snapshot = structuredClone(next)
       return { ...state, works: state.works.map(candidate => candidate.id === work.id ? next : candidate) }
     })
@@ -822,7 +855,7 @@ export function createCollaborationRunner({
       const work = state.works.find(candidate => candidate.id === binding.workId)
       const execution = work?.executions.find(candidate => candidate.id === binding.executionId)
       if (!work || !execution || execution.generation !== binding.generation || execution.cancelGeneration !== binding.cancelGeneration || !ACTIVE.has(execution.status)) throw runtimeError('CANCELLED', 'Session 绑定晚于执行关闭')
-      const nextExecution = { ...execution, status, dshSessionRef: sessionId, startedAt: execution.startedAt ?? clock() }
+      const nextExecution = { ...execution, status, dshSessionRef: sessionId, startedAt: execution.startedAt ?? clock(), ...(execution.runtime ? { runtime: { ...execution.runtime, startedAt: execution.runtime.startedAt ?? clock() } } : {}) }
       let nextWork = { ...work, status, executions: work.executions.map(candidate => candidate.id === execution.id ? nextExecution : candidate) }
       if (work.rootWorkId) {
         const rootWork = state.works.find(candidate => candidate.id === work.rootWorkId)
@@ -853,7 +886,7 @@ export function createCollaborationRunner({
       const result = collaborationResult(resultId, child, safeParsed, execution.dshSessionRef, usageFromEvents(events), now, binding.generation, refs, binding.confirmationRefs)
       const handoff = { id: handoffId, childWorkId: child.id, fromEmployeeId: child.employeeId, toEmployeeId: rootWork.employeeId, resultRefs: [resultId], knowledgeRefs: result.knowledgeDependencyRefs ?? [], revision: 1, generation: binding.generation, status: 'current', createdAt: now }
       result.handoffRefs = [handoff.id]
-      const nextChild = { ...child, status: 'completed', results: [...child.results, result], executions: child.executions.map(candidate => candidate.id === execution.id ? { ...candidate, status: 'completed', completedAt: now, resultId, usage: result.usage } : candidate) }
+      const nextChild = { ...child, status: 'completed', results: [...child.results, result], executions: child.executions.map(candidate => candidate.id === execution.id ? { ...candidate, status: 'completed', completedAt: now, resultId, usage: result.usage, runtime: finishExecutionRuntime(candidate.runtime, { events, completedAt: now }) } : candidate) }
       const handoffs = rootWork.handoffs.map(item => item.childWorkId === child.id && item.status === 'current' ? { ...item, status: 'superseded' } : item)
       const nextRoot = { ...rootWork, handoffs: [...handoffs, handoff], plan: { ...rootWork.plan, items: rootWork.plan.items.map(item => item.childWorkId === child.id ? { ...item, status: 'completed' } : item) } }
       return { ...state, works: state.works.map(work => work.id === child.id ? nextChild : work.id === rootWork.id ? nextRoot : work) }
@@ -880,7 +913,7 @@ export function createCollaborationRunner({
       }
       if (confirmationRefs.some(ref => !state.confirmations.some(item => item.id === ref.id && item.revision === ref.revision && item.ownerMemberId === rootWork.ownerMemberId && item.employeeId === rootWork.employeeId && item.status === 'active'))) throw runtimeError('FORBIDDEN', '确认信息授权已失效')
       result = { id: `summary-${randomUUID()}`, kind: 'assistant.collaboration-summary', capabilityId: rootWork.capabilityId, skillId: rootWork.skillId, schemaVersion: 1, input: {}, payload: { resultRefs: refs }, explanation: redactInternalReferences(explanation, state, rootWork), createdAt: clock(), dshSessionRef: sessionId, contextConfirmationRefs: confirmationRefs, employeeId: rootWork.employeeId, handoffRefs: currentHandoffs.map(item => item.id), usage: usageFromEvents(events), knowledgeDependencyRefs, generation: binding.generation }
-      const nextExecution = { ...execution, status: 'completed', completedAt: clock(), resultId: result.id, dshSessionRef: sessionId, usage: result.usage }
+      const nextExecution = { ...execution, status: 'completed', completedAt: clock(), resultId: result.id, dshSessionRef: sessionId, usage: result.usage, runtime: finishExecutionRuntime(execution.runtime, { requestCount: rootWork.collaboration.requestCount, usage: result.usage, completedAt: clock() }) }
       const nextRoot = { ...rootWork, status: 'completed', results: [...rootWork.results, result], executions: rootWork.executions.map(candidate => candidate.id === execution.id ? nextExecution : candidate), collaboration: { ...rootWork.collaboration, status: 'completed', summaryResultRefs: refs } }
       return { ...state, works: state.works.map(work => work.id === rootWork.id ? nextRoot : work) }
     })
@@ -892,7 +925,7 @@ export function createCollaborationRunner({
       const rootWork = state.works.find(work => work.id === binding.rootWorkId)
       const execution = rootWork?.executions.find(candidate => candidate.id === binding.executionId)
       if (!rootWork || rootWork.collaboration.generation !== binding.generation || rootWork.collaboration.cancelGeneration !== binding.cancelGeneration || rootWork.collaboration.status !== 'running' || execution?.status !== 'running') return state
-      const nextExecution = { ...execution, status: 'completed', completedAt: clock(), dshSessionRef: execution.dshSessionRef, usage: unknownUsage() }
+      const nextExecution = { ...execution, status: 'completed', completedAt: clock(), dshSessionRef: execution.dshSessionRef, usage: unknownUsage(), runtime: finishExecutionRuntime(execution.runtime, { requestCount: rootWork.collaboration.requestCount, completedAt: clock() }) }
       const nextRoot = { ...rootWork, status: 'waiting_input', executions: rootWork.executions.map(candidate => candidate.id === execution.id ? nextExecution : candidate), collaboration: { ...rootWork.collaboration, status: 'waiting_input' } }
       return { ...state, works: state.works.map(work => work.id === rootWork.id ? nextRoot : work) }
     })
@@ -910,7 +943,7 @@ export function createCollaborationRunner({
       const now = clock()
       return { ...state, works: state.works.map(work => {
         if (work.id !== rootWork.id && work.rootWorkId !== rootWork.id) return work
-        const executions = work.executions.map(candidate => candidate.generation === generation && ACTIVE.has(candidate.status) ? { ...candidate, status, completedAt: now, error: cause } : candidate)
+        const executions = work.executions.map(candidate => candidate.generation === generation && ACTIVE.has(candidate.status) ? { ...candidate, status, completedAt: now, error: cause, runtime: finishExecutionRuntime(candidate.runtime, { ...(candidate.id === executionId ? error.runtime : {}), completedAt: now, terminationReason: cause.code }) } : candidate)
         if (work.id === rootWork.id) return { ...work, status, executions, collaboration: { ...work.collaboration, status }, plan: { ...work.plan, items: work.plan.items.map(item => ['not_started', 'running'].includes(item.status) ? { ...item, status } : item) } }
         return { ...work, status: ACTIVE.has(work.status) ? status : work.status, executions }
       }) }
@@ -925,7 +958,7 @@ export function createCollaborationRunner({
       const status = cancelled ? 'cancelled' : 'failed', now = clock()
       return { ...state, works: state.works.map(work => {
         if (work.id !== rootWorkId && work.rootWorkId !== rootWorkId) return work
-        const executions = work.executions.map(execution => execution.generation === generation && ACTIVE.has(execution.status) ? { ...execution, status, completedAt: now, error: cause } : execution)
+        const executions = work.executions.map(execution => execution.generation === generation && ACTIVE.has(execution.status) ? { ...execution, status, completedAt: now, error: cause, runtime: finishExecutionRuntime(execution.runtime, { requestCount: work.id === rootWorkId ? rootWork.collaboration.requestCount : execution.runtime?.requestCount, completedAt: now, terminationReason: cause.code }) } : execution)
         if (work.id === rootWorkId) return { ...work, status, executions, collaboration: { ...work.collaboration, status }, plan: { ...work.plan, items: work.plan.items.map(item => ['not_started', 'running'].includes(item.status) ? { ...item, status } : item) } }
         return { ...work, status: ACTIVE.has(work.status) ? status : work.status, executions }
       }) }
@@ -972,7 +1005,7 @@ export function createCollaborationRunner({
       const generation = rootWork.collaboration.generation
       return { ...state, works: state.works.map(work => {
         if (work.id !== rootWorkId && work.rootWorkId !== rootWorkId) return work
-        const executions = work.executions.map(execution => execution.generation === generation && ACTIVE.has(execution.status) ? { ...execution, status: 'interrupted', interruptedAt: now, error: { code: 'PROCESS_SHUTDOWN', message: '进程关闭时未完成' } } : execution)
+        const executions = work.executions.map(execution => execution.generation === generation && ACTIVE.has(execution.status) ? { ...execution, status: 'interrupted', interruptedAt: now, runtime: finishExecutionRuntime(execution.runtime, { completedAt: now, terminationReason: 'PROCESS_SHUTDOWN' }), error: { code: 'PROCESS_SHUTDOWN', message: '进程关闭时未完成' } } : execution)
         if (work.id === rootWorkId) return { ...work, status: 'interrupted', executions, collaboration: { ...work.collaboration, status: 'interrupted' }, plan: { ...work.plan, items: work.plan.items.map(item => ['not_started', 'running'].includes(item.status) ? { ...item, status: 'interrupted' } : item) } }
         return { ...work, status: ACTIVE.has(work.status) ? 'interrupted' : work.status, executions }
       }) }
@@ -980,8 +1013,9 @@ export function createCollaborationRunner({
   }
 
   async function disposeEntry(entry) {
-    await Promise.all([...entry.runs].map(run => run.dispose().catch(() => undefined)))
-    await Promise.all([...entry.handles].map(handle => handle.dispose().catch(() => undefined)))
+    const results = await Promise.allSettled([...entry.runs, ...entry.handles].map(resource => resource.dispose()))
+    const failures = results.filter(result => result.status === 'rejected').map(result => result.reason)
+    if (failures.length) throw new AggregateError(failures, '执行资源尚未确认关闭')
   }
 }
 
@@ -1083,15 +1117,8 @@ function childPrompt(work, toolName, confirmations, dependencies) {
   return `SCENARIO:${work.planItemId} Complete this registered work: ${work.goal}.${confirmed}${facts} Call ${toolName} exactly once with ${JSON.stringify(work.input)}.${knowledge} Then call structured_output with {"status":"done","explanation":"your concise factual explanation"}.`
 }
 
-function usageFromEvents(events) {
-  const total = {}, seen = new Set()
-  for (const event of events) {
-    if (!['assistant/message', 'assistant/attempt'].includes(event.type)) continue
-    const values = event.data.usage ? [event.data.usage] : (event.data.stream ?? []).filter(item => item.type === 'usage').map(item => item.usage)
-    for (const usage of values) for (const key of USAGE_KEYS) if (Number.isFinite(usage?.[key])) { total[key] = (total[key] ?? 0) + usage[key]; seen.add(key) }
-  }
-  return Object.fromEntries(USAGE_KEYS.map(key => [key, seen.has(key) && total[key] !== 0 ? total[key] : null]))
-}
+function usageFromEvents(events) { return nativeUsage(events) }
+
 function businessEvents(events) {
   const omittedCalls = new Set(events.filter(event => event.type === 'tool/call' && ['structured_output', ...Object.values(KNOWLEDGE_TOOLS)].includes(event.data?.name)).map(event => event.data.callId))
   return events.filter(event => !(event.type === 'tool/call' && omittedCalls.has(event.data?.callId)) && !(event.type === 'tool/result' && omittedCalls.has(event.data?.message?.source?.callId)))

@@ -26,6 +26,13 @@ try {
   assert.equal(rejected.boots, 0)
   await rejected.runner.close()
 
+  const disposeFailure = fixture({ disposeError: new Error('synthetic dispose failure') })
+  await assert.rejects(disposeFailure.runner.runChatTurn(options('dispose-failed', 'one')), error => error.closeFailed === true)
+  await assert.rejects(disposeFailure.runner.runChatTurn(options('dispose-failed', 'two')), { code: 'BUSY' })
+  await assert.rejects(disposeFailure.runner.cancelChatTurn('dispose-failed', 'one'), error => error.closeFailed === true)
+  await disposeFailure.runner.close()
+  assert.equal(disposeFailure.shutdowns, 1, 'Host shutdown retains ownership after a failed handle dispose')
+
   const exact = fixture({ held: true })
   const first = exact.runner.runChatTurn(options('conversation-a', 'old'))
   const independent = exact.runner.runChatTurn(options('conversation-b', 'one'))
@@ -160,7 +167,7 @@ try {
 }
 
 function options(conversationId, turnId, overrides = {}) { return { conversationId, turnId, sessionId: null, text: 'SYNTHETIC_INPUT', instructions: 'FROZEN_INSTRUCTIONS', authorize: async () => undefined, onSession: async () => undefined, ...overrides } }
-function fixture({ held = false, holdCreate = false, unexpectedTool = false, emptyReply = false, holdBoot = false, holdInstall = false, holdShutdown = false, closeAtPublication = false, bootError, installError, shutdownError } = {}) {
+function fixture({ held = false, holdCreate = false, unexpectedTool = false, emptyReply = false, holdBoot = false, holdInstall = false, holdShutdown = false, closeAtPublication = false, bootError, installError, shutdownError, disposeError } = {}) {
   const sessions = new Map(), handles = [], scopes = [], prompts = [], opened = []
   let releaseCreate
   const createGate = new Promise(resolve => { releaseCreate = resolve })
@@ -192,7 +199,7 @@ function fixture({ held = false, holdCreate = false, unexpectedTool = false, emp
       cancel() { state.cancellations += 1; value.finish('aborted') },
     }
     value.agent = agent
-    value.dispose = async () => { state.disposals += 1 }
+    value.dispose = async () => { state.disposals += 1; if (disposeError) throw disposeError }
     options.setup(agentCtx, agent)
     handles.push(value)
     if (holdCreate) await createGate

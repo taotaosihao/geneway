@@ -1,3 +1,4 @@
+import { modelRouteSnapshot } from './model-route.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { spawn } from 'node:child_process'
@@ -15,9 +16,6 @@ import { isRepairCreationEcho, KIVO_REPAIR_ACTION } from './domain/kivo-repair.m
 import { authorizeWorkBinding } from './work-service.mjs'
 
 const CAPABILITY_ID = 'gearjob-work-order-read'
-const MODEL_PROVIDER = 'zenmux'
-const MODEL_ID = 'deepseek/deepseek-v4.1-flash'
-const MODEL_CREDENTIAL = 'ZENMUX_API_KEY'
 const ZONE_OFFSET_MS = 8 * 60 * 60 * 1000
 
 export class AutomationServiceError extends Error {
@@ -381,7 +379,7 @@ export function createAutomationService({ store, workService = null, actionServi
     const existing = state.automationOccurrences.find(item => item.occurrenceKey === occurrenceKey)
     if (existing) return { state, admission: occurrenceAdmission(existing, state) }
     const prepared = reason ? null : workService?.prepareAutomationWork?.(state, rule, { occurrenceKey, acceptedAt: now, workId: `work-${idFactory()}`, executionId: `exec-${idFactory()}` })
-    reason ??= !prepared?.ok ? 'auth-blocked' : deriveUsedRuns(rule, state.automationOccurrences) >= rule.maxRuns ? 'budget' : activeAutomationWorkCount(state, rule.id) ? 'overlap' : activeAutomationWorkCount(state) >= 2 ? 'capacity' : null
+    reason ??= !prepared?.ok && prepared?.error?.code !== 'BUSY' ? 'auth-blocked' : deriveUsedRuns(rule, state.automationOccurrences) >= rule.maxRuns ? 'budget' : activeAutomationWorkCount(state, rule.id) ? 'overlap' : activeAutomationWorkCount(state) >= 2 || prepared?.error?.code === 'BUSY' ? 'capacity' : null
     const occurrence = { id: `occurrence-${idFactory()}`, occurrenceKey, ruleId: rule.id, ruleRevision: rule.revision, activationId: rule.activationId,
       scheduledDate, event, query: observed.query, workId: reason ? null : prepared.workId, status: reason ? reason === 'auth-blocked' ? 'blocked' : 'skipped' : null,
       reason, deliveryId: null, createdAt: now }
@@ -710,9 +708,10 @@ function validateBinding(state, member, value, connectionCatalog) {
   const assigned = state.skills.find(item => item.id === value.skillId)
   if (getCapability(assigned?.capabilityId)?.retired) requireAutomationCapability()
   const skill = assigned?.enabled === true && assigned.capabilityId === KIVO_TPM_RECORD_READ_CAPABILITY && employee?.skillIds?.includes(assigned.id) ? assigned : null
-  const route = state.modelRoutes.find(item => item.id === employee?.modelRouteId && item.enabled === true && item.provider === MODEL_PROVIDER && item.model === MODEL_ID && item.credentialRef === MODEL_CREDENTIAL)
+  const route = state.modelRoutes.find(item => item.id === employee?.modelRouteId)
   const connection = state.connections.find(item => item.id === value.connectionId && item.enabled === true && item.status === 'ready' && item.kind === 'kivo-mcp'
     && employee?.connectionIds?.includes(item.id) && item.skillIds?.includes(skill?.id) && item.allowedObjectIds?.length === 0)
+  try { modelRouteSnapshot(route) } catch { throw serviceError('FORBIDDEN', '自动规则模型路由不可用') }
   if (!employee || !skill || !route || !connection) throw serviceError('FORBIDDEN', '自动规则绑定未获准或当前不可用')
   try { assertTrustedConnection(connectionCatalog, connection); connectionSnapshot(connection) } catch { throw serviceError('FORBIDDEN', '连接目标未在主机可信目录登记') }
   const parsed = validateCapabilityInput(KIVO_TPM_RECORD_READ_CAPABILITY, value.input)

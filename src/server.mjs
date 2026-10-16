@@ -517,6 +517,7 @@ export function createGenewayServer({ service, actionService, conversationServic
         await protectedWrite(request, context.token, auth, trustedOrigin, [])
         return sendJson(response, 200, await service.testConnection(actor, decode(connectionTest[1])))
       }
+      if (request.method === 'GET' && url.pathname === '/api/admin/runtime') { exactQuery(url); return sendJson(response, 200, await service.runtimeMetadata(actor)) }
       const configMatch = url.pathname.match(/^\/api\/admin\/(employees|connections|skills|model-routes)(?:\/([^/]+))?$/)
       if (configMatch) {
         const kind = configMatch[1] === 'model-routes' ? 'modelRoutes' : configMatch[1]
@@ -695,7 +696,7 @@ function configFields(kind, create, collectionPatch = false) {
   if (kind === 'employees') return [...id, 'name', 'description', 'instructions', 'enabled', 'modelRouteId', 'connectionIds', 'skillIds', 'memberIds', ...(!create ? ['expectedRevision'] : [])]
   if (kind === 'connections') return [...id, 'name', 'kind', 'targetIdentity', 'baseUrl', 'issuer', 'clientId', 'hostHeader', 'credentialRef', 'allowedObjectIds', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'enabled', 'skillIds']
   if (kind === 'skills') return [...id, 'name', 'capabilityId', 'enabled']
-  return [...id, 'provider', 'model', 'displayName', 'enabled', 'credentialRef']
+  return [...id, 'provider', 'model', 'displayName', 'enabled', 'credentialRef', 'parameters']
 }
 
 function exactWorkInput(input) {

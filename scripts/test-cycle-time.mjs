@@ -42,6 +42,10 @@ try {
   fiber = host.plugin(plugin)
   await fiber
   assert.deepEqual(host.tools.schemas().map(schema => schema.name), [toolName])
+  const schema = host.tools.schemas()[0].parameters
+  assert.equal(schema.properties.availableSeconds.type, 'number')
+  assert.equal(schema.properties.quantity.type, 'number')
+  assert.deepEqual([...schema.required].sort(), ['availableSeconds', 'quantity'])
 
   const execute = (arguments_, callId) => host.tools.execute({
     callId,
@@ -57,6 +61,11 @@ try {
     const nonJsonNumber = await execute(input, `cycle-non-json-number-${index}`)
     assert.equal(nonJsonNumber.isError, true)
     assert.equal(nonJsonNumber.error.message, 'tool execution arguments must be losslessly JSON-serializable')
+  }
+  for (const [index, input] of [{ quantity: 60 }, { availableSeconds: 3600 }, { availableSeconds: '3600', quantity: 60 }, { availableSeconds: 3600, quantity: '60' }].entries()) {
+    const invalid = await execute(input, `cycle-schema-invalid-${index}`)
+    assert.equal(invalid.isError, true)
+    assert.equal(invalid.error.info.code, 'INVALID_ARGS')
   }
   const valid = calculateCycleTime({ availableSeconds: 3600, quantity: 60 })
   const rendered = host.tools.get(toolName).output.render({}, valid)

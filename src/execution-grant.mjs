@@ -1,3 +1,4 @@
+import { assertModelRoute } from './model-route.mjs'
 import { constants } from 'node:fs'
 import { access, lstat, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { isAbsolute, parse, relative, resolve } from 'node:path'
@@ -47,6 +48,10 @@ export async function authorizeExecutionGrant(grant, { readState = readPolicySta
   if (!skill || skill.enabled !== true || skill.capabilityId !== grant.capabilityId) throw grantError('FORBIDDEN', '当前能力绑定已撤销')
   if (!route || route.enabled !== true) throw grantError('FORBIDDEN', '当前模型路由已停用')
   if (!work || work.ownerMemberId !== member.id || work.employeeId !== employee.id || work.skillId !== skill.id || work.capabilityId !== grant.capabilityId) throw grantError('FORBIDDEN', '当前工作授权已失效')
+  if (grant.modelSnapshot) {
+    assertModelRoute(state, employee, grant.modelSnapshot)
+    if (execution?.modelSnapshot && !isDeepStrictEqual(execution.modelSnapshot, grant.modelSnapshot)) throw grantError('FORBIDDEN', '执行模型快照不匹配')
+  }
   if (!execution || execution.operation !== grant.operation) throw grantError('FORBIDDEN', '当前执行授权已失效')
   if (!ACTIVE_EXECUTIONS.has(execution.status)) {
     if (['cancel_requested', 'cancelled'].includes(execution.status)) throw grantError('CANCELLED', '本次执行已停止')

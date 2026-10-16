@@ -80,7 +80,7 @@ async function boot(name, overrides = {}) {
         resolverCalls += 1
         const key = environment.get('ZENMUX_API_KEY')?.value ?? storedKey
         assert(key)
-        return overrides.agentOptions ?? { provider: 'zenmux', model: readRuntimeConfig({}).model.model }
+        return overrides.agentOptions ?? { provider: 'zenmux', model: readRuntimeConfig({}).model.model, maxTokens: 4096 }
       }
       const hook = listeners.get('agent/request')
       return hook ? hook({ agent: {}, signal: new AbortController().signal }, next) : next()

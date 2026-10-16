@@ -1,0 +1,161 @@
+{
+  "source": "DSH 0.2.0-rc.2 native SDK; controlled loopback 503 then SSE success; no real model",
+  "sessionId": "session-0c08bf3c209c4eebab4dc82b117c2616",
+  "events": [
+    {
+      "type": "assistant/attempt",
+      "seq": 12,
+      "time": 1792168062809,
+      "data": {
+        "turn": 1,
+        "step": 1,
+        "stream": [
+          {
+            "type": "chunk",
+            "time": 1792168062808,
+            "chunk": {
+              "type": "usage",
+              "usage": {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "totalTokens": 0
+              }
+            }
+          },
+          {
+            "type": "chunk",
+            "time": 1792168062809,
+            "chunk": {
+              "type": "finish",
+              "reason": {
+                "kind": "error",
+                "failure": {
+                  "message": "503: {\"message\":\"controlled transient failure\",\"type\":\"server_error\",\"code\":\"server_error\"}",
+                  "code": "SERVER"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "assistant/message",
+      "seq": 15,
+      "time": 1792168062825,
+      "data": {
+        "turn": 1,
+        "step": 1,
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "Controlled loopback reply completed"
+            }
+          ],
+          "source": {
+            "kind": "model",
+            "provider": "zenmux",
+            "model": "deepseek/deepseek-v4.1-flash",
+            "replayState": {
+              "response": {
+                "kind": "pi-ai",
+                "version": 2,
+                "api": "openai-completions",
+                "provider": "zenmux",
+                "model": "deepseek/deepseek-v4.1-flash",
+                "responseId": "controlled-199fc538-1c66-4490-a017-ce2340979fe0",
+                "stopReason": "stop"
+              },
+              "blocks": [
+                {
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "id": "0e8008bd-c60a-4ec9-950a-95b6a63eb3b6"
+        },
+        "usage": {
+          "inputTokens": 9,
+          "outputTokens": 7,
+          "totalTokens": 18,
+          "cacheReadTokens": 2
+        },
+        "stream": [
+          {
+            "type": "chunk",
+            "time": 1792168062824,
+            "chunk": {
+              "type": "block-start",
+              "index": 0,
+              "blockType": "text"
+            }
+          },
+          {
+            "type": "text-chunks",
+            "time0": 1792168062824,
+            "index": 0,
+            "dt": [],
+            "texts": [
+              "Controlled loopback reply completed"
+            ]
+          },
+          {
+            "type": "chunk",
+            "time": 1792168062824,
+            "chunk": {
+              "type": "block-end",
+              "index": 0,
+              "block": {
+                "type": "text",
+                "text": "Controlled loopback reply completed"
+              }
+            }
+          },
+          {
+            "type": "chunk",
+            "time": 1792168062824,
+            "chunk": {
+              "type": "usage",
+              "usage": {
+                "inputTokens": 9,
+                "outputTokens": 7,
+                "totalTokens": 18,
+                "cacheReadTokens": 2
+              }
+            }
+          },
+          {
+            "type": "chunk",
+            "time": 1792168062824,
+            "chunk": {
+              "type": "finish",
+              "reason": {
+                "kind": "stop"
+              },
+              "replayState": {
+                "response": {
+                  "kind": "pi-ai",
+                  "version": 2,
+                  "api": "openai-completions",
+                  "provider": "zenmux",
+                  "model": "deepseek/deepseek-v4.1-flash",
+                  "responseId": "controlled-199fc538-1c66-4490-a017-ce2340979fe0",
+                  "stopReason": "stop"
+                },
+                "blocks": [
+                  {
+                    "type": "text"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "surfaceOp": "append"
+    }
+  ]
+}

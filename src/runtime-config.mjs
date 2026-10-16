@@ -2,9 +2,9 @@ import { readFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { resolveCredentialFile } from './execution-grant.mjs'
 
-const ZENMUX_PROVIDER = 'zenmux'
-const ZENMUX_MODEL = 'deepseek/deepseek-v4.1-flash'
-const ZENMUX_BASE_URL = 'https://zenmux.ai/api/v1'
+import { MODEL_IDS, MODEL_PROVIDER as ZENMUX_PROVIDER, MODEL_BASE_URL as ZENMUX_BASE_URL } from './model-route.mjs'
+export { modelRouteSnapshot, employeeModelRoute, assertModelRoute, modelAgentOptions } from './model-route.mjs'
+const ZENMUX_MODEL = MODEL_IDS[0]
 
 export function readRuntimeConfig(env = process.env, root = process.cwd()) {
   const baseUrl = nonEmpty(env.GENEWAY_GEARJOB_BASE_URL)

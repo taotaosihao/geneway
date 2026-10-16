@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { MODEL_IDS, MODEL_PROVIDER, modelRouteSnapshot, employeeModelRoute, assertModelRoute } from './model-route.mjs'
+import { TOP_LEVEL_LIMIT, activeTopLevelCount, newExecutionRuntime, finishExecutionRuntime } from './execution-runtime.mjs'
 import { isDeepStrictEqual } from 'node:util'
 import { getCapability, listCapabilities, validateCapabilityInput, KIVO_TPM_RECORD_READ_CAPABILITY, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
 import { createObservation } from './domain/work-order.mjs'
@@ -25,8 +27,6 @@ const ACTIVE_EXECUTION = new Set(['accepted', 'running', 'cancel_requested'])
 const TERMINAL_EXECUTION = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const CONTINUABLE_WORK = new Set(['waiting_input', 'failed', 'interrupted', 'cancelled'])
 const CONFIG_KINDS = new Set(['employees', 'connections', 'skills', 'modelRoutes'])
-const ZENMUX_PROVIDER = 'zenmux'
-const ZENMUX_MODEL = 'deepseek/deepseek-v4.1-flash'
 const SAFE_ERROR_MESSAGES = Object.freeze({
   SOURCE_NOT_CONFIGURED: '连接凭据不可用或连接未配置',
   UPSTREAM_TIMEOUT: '来源读取超时',
@@ -37,7 +37,7 @@ const SAFE_ERROR_MESSAGES = Object.freeze({
   PROCESS_RESTARTED: '进程重启时未完成',
   BACKUP_INTERRUPTED: '备份操作被中断',
   TOOL_CHAIN_INVALID: '模型工具结果无效',
-  BUDGET_EXHAUSTED: '协作模型请求预算已耗尽',
+  BUDGET_EXHAUSTED: '本次模型请求预算已耗尽，可明确继续工作',
   KNOWLEDGE_PLUGIN_DISABLED: '知识能力已停用',
   KNOWLEDGE_REFERENCE_INVALID: '知识引用无效或已失效',
   CANCELLED: '本次执行已停止',
@@ -108,8 +108,18 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         item.ownerLost = true
         item.controller.abort(serviceError('OWNER_LOCK_LOST', 'automation owner lock 已失效'))
       }
-      await Promise.all(tasks.map(cancelRunner))
+      // The former owner drains resources without publishing state after losing its lock.
+      await Promise.allSettled(tasks.map(cancelRunner))
       await Promise.all(tasks.map(item => item.promise.catch(() => undefined)))
+    },
+
+    async runtimeMetadata(actor) {
+      await recover()
+      const state = await store.read(), member = requireMember(state, actor)
+      if (member.role !== 'admin') throw serviceError('FORBIDDEN', '仅管理员可查看运行元数据')
+      return { capacity: { active: activeTopLevelCount(state), limit: TOP_LEVEL_LIMIT },
+        executions: state.works.flatMap(work => work.executions.map(execution => ({ workId: work.id, executionId: execution.id, employeeId: work.employeeId, status: execution.status, errorCode: execution.error?.code ?? null, runtime: execution.runtime ?? null }))),
+        turns: (state.conversations ?? []).flatMap(conversation => conversation.turns.map(turn => ({ conversationId: conversation.id, turnId: turn.id, employeeId: conversation.employeeId, status: turn.status, errorCode: turn.error?.code ?? null, runtime: turn.runtime ?? null }))) }
     },
 
     async bootstrap(actor) {
@@ -168,8 +178,9 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         }
         let executionId
         if (!parsed.missing.length) {
+          if (activeTopLevelCount(state) >= TOP_LEVEL_LIMIT) { reservation = { error: failure('BUSY', '当前执行已满，请稍后重试') }; return state }
           executionId = `exec-${randomUUID()}`
-          work.executions.push(newExecution(executionId, 'create', requestId, parsed.input, now))
+          work.executions.push(newExecution(executionId, 'create', requestId, parsed.input, now, modelRouteSnapshot(binding.route)))
         }
         reservation = { workId, executionId, work }
         return { ...state, works: [...state.works, work], reservations: { ...state.reservations, [key]: compact({ workId, executionId }) } }
@@ -217,20 +228,21 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
             id: childWorkId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
             capabilityId: binding.capability.id, ...workConnectionFields(binding),
             goal: itemGoal, input: parsed.input, requiredInputs: parsed.missing, status: waiting ? 'waiting_input' : 'accepted', acceptedAt: now, results: [], actions: [],
-            executions: waiting ? [] : [{ ...newExecution(executionId, 'collaboration-child', requestId, parsed.input, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: binding.employee.id }],
+            executions: waiting ? [] : [{ ...newExecution(executionId, 'collaboration-child', requestId, parsed.input, now, modelRouteSnapshot(binding.route), 12), generation, cancelGeneration: 0, planRevision: 1, employeeId: binding.employee.id }],
             workType: 'collaboration-child', parentWorkId: rootWorkId, rootWorkId, collaborationGeneration: generation, planItemId: itemId,
             ...(knowledgeQuery ? { knowledgeQuery } : {}),
           })
           planItems.push({ id: itemId, childWorkId, goal: itemGoal, employeeId: binding.employee.id, status: waiting ? 'waiting_input' : 'not_started', dependsOn: raw.dependsOn ?? [] })
         }
         if (planItems.some(item => !stringIds(item.dependsOn) || item.dependsOn.some(id => !itemIds.has(id) || id === item.id)) || hasDependencyCycle(planItems)) { reservation = { error: failure('INVALID_REQUEST', '协作计划依赖无效') }; return state }
+        if (activeTopLevelCount(state) >= TOP_LEVEL_LIMIT) { reservation = { error: failure('BUSY', '当前执行已满，请稍后重试') }; return state }
         const rootExecutionId = `exec-${randomUUID()}`
         const rootWork = {
           id: rootWorkId, ownerMemberId: member.id, employeeId: leader.employee.id, skillId: leader.skill.id,
           conversationId,
           capabilityId: leader.capability.id, ...workConnectionFields(leader),
           goal, input: {}, requiredInputs: [], status: 'accepted', acceptedAt: now, results: [], actions: [],
-          executions: [{ ...newExecution(rootExecutionId, 'collaboration-root', requestId, {}, now), generation, cancelGeneration: 0, planRevision: 1, employeeId: leader.employee.id }],
+          executions: [{ ...newExecution(rootExecutionId, 'collaboration-root', requestId, {}, now, modelRouteSnapshot(leader.route), 12), generation, cancelGeneration: 0, planRevision: 1, employeeId: leader.employee.id }],
           workType: 'collaboration', collaboration: { generation, cancelGeneration: 0, status: 'accepted', requestLimit: 12, requestCount: 0, childLimit: 4, maxConcurrentChildren: 2, rootTimeoutMs: 360_000, childTimeoutMs: 120_000, outputMaxTokens: 4096, childWorkIds: childWorks.map(work => work.id), summaryResultRefs: [], staleKnowledgeRefs: [], staleItemIds: [] },
           plan: { revision: 1, items: planItems }, handoffs: [],
         }
@@ -346,8 +358,9 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           reservation = { workId: id, work: nextWork }
           return { ...state, works: replaceById(state.works, nextWork) }
         }
+        if (activeTopLevelCount(state) >= TOP_LEVEL_LIMIT) { reservation = { error: failure('BUSY', '当前执行已满，请稍后重试') }; return state }
         const executionId = `exec-${randomUUID()}`
-        const nextWork = { ...work, input: parsed.input, requiredInputs: [], status: 'accepted', executions: [...work.executions, newExecution(executionId, 'continue', requestId, parsed.input, now)] }
+        const nextWork = { ...work, input: parsed.input, requiredInputs: [], status: 'accepted', executions: [...work.executions, newExecution(executionId, 'continue', requestId, parsed.input, now, modelRouteSnapshot(binding.route))] }
         reservation = { workId: id, executionId, work: nextWork }
         return { ...state, works: replaceById(state.works, nextWork), reservations: { ...state.reservations, [key]: { workId: id, executionId } } }
       })
@@ -520,6 +533,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       requireAdmin(state, actor)
       if (!CONFIG_KINDS.has(kind)) throw serviceError('NOT_FOUND', '配置类型不存在')
       if (kind === 'connections') return state.connections.map(item => adminConnection(item, connectionCatalog))
+      if (kind === 'modelRoutes') return state.modelRoutes.map(item => ({ ...item, parameters: { maxOutputTokens: item.parameters?.maxOutputTokens ?? 4096 } }))
       return kind === 'employees' ? state.employees.map(item => adminEmployee(state, item)) : state[kind]
     },
 
@@ -620,7 +634,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           const executions = work.executions.map(execution => {
             if (!taskIds.has(execution.id) || !['accepted', 'running'].includes(execution.status)) return execution
             changed = interrupted = true
-            return { ...execution, status: 'interrupted', interruptedAt: clock(), error: { code: 'PROCESS_SHUTDOWN', message: '进程关闭时未完成' } }
+            return { ...execution, status: 'interrupted', interruptedAt: clock(), runtime: finishExecutionRuntime(execution.runtime, { completedAt: clock(), terminationReason: 'PROCESS_SHUTDOWN' }), error: { code: 'PROCESS_SHUTDOWN', message: '进程关闭时未完成' } }
           })
           return interrupted ? { ...work, status: 'interrupted', executions } : work
         })
@@ -651,8 +665,9 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       if (!binding.ok) { reservation = { error: binding }; return state }
       const parsed = parseInput(work.capabilityId, work.input, false)
       if (!parsed.ok) { reservation = { error: parsed }; return state }
+      if (activeTopLevelCount(state) >= TOP_LEVEL_LIMIT) { reservation = { error: failure('BUSY', '当前执行已满，请稍后重试') }; return state }
       const executionId = `exec-${randomUUID()}`
-      const nextWork = { ...work, status: 'accepted', executions: [...work.executions, compact({ ...newExecution(executionId, operation, requestId, parsed.input, clock()), question: options.question })] }
+      const nextWork = { ...work, status: 'accepted', executions: [...work.executions, compact({ ...newExecution(executionId, operation, requestId, parsed.input, clock(), modelRouteSnapshot(binding.route)), question: options.question })] }
       reservation = { workId: id, executionId, question: options.question, work: nextWork }
       return { ...state, works: replaceById(state.works, nextWork), reservations: { ...state.reservations, [key]: { workId: id, executionId } } }
     })
@@ -673,6 +688,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       requireExecutableWork(state, rootWork)
       const key = reservationKey(member.id, id, recheck ? 'recheck' : 'continue', requestId)
       if (state.reservations[key]) { reservation = { deduplicated: true, ...state.reservations[key] }; return state }
+      if (rootWork.executions.some(execution => execution.closePending)) { reservation = { error: failure('BUSY', '当前协作执行正在关闭') }; return state }
       if (recheck ? rootWork.collaboration.status !== 'stale' : !['waiting_input', 'failed', 'interrupted', 'cancelled'].includes(rootWork.collaboration.status)) { reservation = { error: failure('BUSY', recheck ? '当前协作工作不需要重新核对' : '当前协作工作状态不可继续') }; return state }
       if (recheck && body.itemIds !== undefined) { reservation = { error: failure('INVALID_REQUEST', '重新核对范围由当前失效依据决定') }; return state }
       const selected = recheck ? rootWork.collaboration.staleItemIds : rootWork.plan.items.filter(item => item.status !== 'completed').map(item => item.id)
@@ -691,15 +707,16 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         if (!inputAllowed(binding, parsed.input, parsed.missing.length > 0)) { reservation = { error: failure('FORBIDDEN', '业务对象不在当前连接允许范围内') }; return state }
         childUpdates.set(child.id, { ...child, input: parsed.input, requiredInputs: [] })
       }
+      if (activeTopLevelCount(state) >= TOP_LEVEL_LIMIT) { reservation = { error: failure('BUSY', '当前执行已满，请稍后重试') }; return state }
       const rootExecutionId = `exec-${randomUUID()}`, cancelGeneration = rootWork.collaboration.cancelGeneration
-      const nextRoot = { ...rootWork, status: 'accepted', executions: [...rootWork.executions, { ...newExecution(rootExecutionId, recheck ? 'collaboration-recheck' : 'collaboration-continue', requestId, {}, now), generation, cancelGeneration, planRevision: rootWork.plan.revision, employeeId: rootWork.employeeId }], collaboration: { ...rootWork.collaboration, generation, status: 'accepted', requestCount: 0, summaryResultRefs: [], staleKnowledgeRefs: [], staleItemIds: [] }, plan: { ...rootWork.plan, items: rootWork.plan.items.map(item => selectedSet.has(item.id) ? { ...item, status: 'not_started' } : item) } }
+      const nextRoot = { ...rootWork, status: 'accepted', executions: [...rootWork.executions, { ...newExecution(rootExecutionId, recheck ? 'collaboration-recheck' : 'collaboration-continue', requestId, {}, now, employeeModelRoute(state, state.employees.find(employee => employee.id === rootWork.employeeId)), 12), generation, cancelGeneration, planRevision: rootWork.plan.revision, employeeId: rootWork.employeeId }], collaboration: { ...rootWork.collaboration, generation, status: 'accepted', requestCount: 0, summaryResultRefs: [], staleKnowledgeRefs: [], staleItemIds: [] }, plan: { ...rootWork.plan, items: rootWork.plan.items.map(item => selectedSet.has(item.id) ? { ...item, status: 'not_started' } : item) } }
       const works = state.works.map(work => {
         if (work.id === id) return nextRoot
         const item = rootWork.plan.items.find(candidate => candidate.childWorkId === work.id)
         if (!item) return work
         if (!selectedSet.has(item.id)) return { ...work, collaborationGeneration: generation }
         const updatedChild = childUpdates.get(work.id) ?? work
-        return { ...updatedChild, status: 'accepted', collaborationGeneration: generation, executions: [...updatedChild.executions, { ...newExecution(`exec-${randomUUID()}`, recheck ? 'collaboration-recheck-child' : 'collaboration-continue-child', requestId, updatedChild.input, now), generation, cancelGeneration, planRevision: rootWork.plan.revision, employeeId: updatedChild.employeeId }] }
+        return { ...updatedChild, status: 'accepted', collaborationGeneration: generation, executions: [...updatedChild.executions, { ...newExecution(`exec-${randomUUID()}`, recheck ? 'collaboration-recheck-child' : 'collaboration-continue-child', requestId, updatedChild.input, now, employeeModelRoute(state, state.employees.find(employee => employee.id === updatedChild.employeeId)), 12), generation, cancelGeneration, planRevision: rootWork.plan.revision, employeeId: updatedChild.employeeId }] }
       })
       reservation = { workId: id, executionId: rootExecutionId }
       return { ...state, works, reservations: { ...state.reservations, [key]: reservation } }
@@ -725,7 +742,8 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     const executionId = clean(options.executionId) ?? `exec-${idFactory()}`
     const occurrenceKey = clean(options.occurrenceKey)
     if (!occurrenceKey) return failure('INVALID_REQUEST', '自动发生 identity 无效')
-    const execution = newExecution(executionId, 'automation', occurrenceKey, parsed.input, acceptedAt)
+    if (activeTopLevelCount(state) >= TOP_LEVEL_LIMIT) return failure('BUSY', '当前执行已满，请稍后重试')
+    const execution = newExecution(executionId, 'automation', occurrenceKey, parsed.input, acceptedAt, modelRouteSnapshot(binding.route))
     const work = {
       id: workId, ownerMemberId: member.id, employeeId: binding.employee.id, skillId: binding.skill.id,
       capabilityId: binding.capability.id, ...workConnectionFields(binding),
@@ -736,6 +754,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
   }
 
   function schedule(workId, executionId, operation, question, options = {}) {
+    options = { ...options, deadlineAt: options.deadlineAt ?? new Date(Date.parse(clock()) + 120_000).toISOString() }
     const controller = new AbortController()
     const entry = { controller, executionId, operation, deadlineAt: options.deadlineAt, ownerCheck: options.ownerCheck, ownerLost: false, deadlineExpired: false, userCancelled: false, timer: undefined, promise: undefined, cancelPromise: undefined, clock }
     active.set(executionId, entry)
@@ -772,7 +791,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const sessionResult = latestSessionResult(context.work)
       const runnerOptions = {
         executionId, operation, capabilityId: context.work.capabilityId, input: context.work.input,
-        sessionId: sessionResult?.dshSessionRef, sessionMetadata: context.metadata,
+        sessionId: sessionResult?.dshSessionRef, sessionMetadata: context.metadata, modelSnapshot: context.modelSnapshot,
         grant: compact({ ...grantConnectionFields(context), policyFile: policyPaths.stateFile, policyRoot: policyPaths.dataRoot, secretRoot: policyPaths.secretRoot }),
         confirmations: context.confirmations.map(item => ({ id: item.id, revision: item.revision, label: item.label, value: item.value })),
         agentInstructions: context.agentInstructions,
@@ -793,11 +812,13 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       if (operation === 'follow-up') await finishFollowUp(workId, executionId, question, model, context)
       else await finishBusinessResult(workId, executionId, model, context, entry)
     } catch (error) {
-      const finalError = entry.deadlineExpired && !entry.userCancelled ? timeoutError() : error
+      entry.closeFailed ||= error?.closeFailed === true
+      const finalError = entry.deadlineExpired && !entry.userCancelled && !entry.closeFailed ? timeoutError() : error
       if (!entry.ownerLost && finalError?.code !== 'OWNER_LOCK_LOST') await finishError(workId, executionId, finalError)
     } finally {
       if (entry.timer) clearTimeout(entry.timer)
       active.delete(executionId)
+      if (!entry.closeFailed && !entry.ownerLost) await store.update(state => ({ ...state, works: state.works.map(work => work.id === workId ? { ...work, executions: work.executions.map(execution => execution.id === executionId ? { ...execution, closePending: false } : execution) } : work) }))
       if (operation === 'automation' && !entry.ownerLost) await Promise.resolve(onAutomationTerminal?.({ workId, ownerCheck: entry.ownerCheck })).catch(() => undefined)
     }
   }
@@ -809,7 +830,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const execution = work?.executions.find(item => item.id === executionId)
       if (!work || !execution || execution.status !== 'accepted') return state
       started = true
-      const nextExecution = { ...execution, status: 'running', startedAt: clock() }
+      const nextExecution = { ...execution, status: 'running', startedAt: clock(), ...(execution.runtime ? { runtime: { ...execution.runtime, startedAt: clock(), requestCount: null } } : {}) }
       return { ...state, works: replaceById(state.works, { ...work, status: 'running', executions: replaceById(work.executions, nextExecution) }) }
     })
     return started
@@ -826,6 +847,8 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       requireExecutableWork(state, work)
       const binding = authorizedBinding(state, member, work, connectionCatalog)
       if (!binding.ok) throw serviceError(binding.error.code, binding.error.message)
+      const modelSnapshot = execution.modelSnapshot ?? modelRouteSnapshot(binding.route)
+      assertModelRoute(state, binding.employee, modelSnapshot)
       const parsed = validateCapabilityInput(work.capabilityId, work.input)
       if (!parsed.ok) throw serviceError(parsed.error.code, parsed.error.message)
       if (!inputAllowed(binding, parsed.input)) throw serviceError('FORBIDDEN', '业务对象不在当前连接允许范围内')
@@ -834,15 +857,15 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const fingerprint = confirmationFingerprint(confirmations)
       const mappingContext = binding.capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY ? correlationMappingContext(work) : undefined
       context = {
-        work, connection: binding.connection ?? null, connections: binding.connections, mappingContext, confirmations,
+        work, connection: binding.connection ?? null, connections: binding.connections, mappingContext, confirmations, modelSnapshot,
         agentInstructions: binding.employee.instructions ?? '',
         metadata: {
           ownerMemberId: member.id, workId: work.id, employeeId: work.employeeId, skillId: work.skillId,
           capabilityId: work.capabilityId, ...sessionConnectionMetadata(binding, mappingContext), modelRouteId: binding.route.id,
-          confirmationRefs: refs, confirmationFingerprint: fingerprint,
+          confirmationRefs: refs, confirmationFingerprint: fingerprint, modelSnapshot,
         },
       }
-      const nextExecution = compact({ ...execution, dispatchedAt: clock(), contextConfirmationRefs: refs,
+      const nextExecution = compact({ ...execution, modelSnapshot, dispatchedAt: clock(), contextConfirmationRefs: refs,
         confirmationFingerprint: fingerprint, modelRouteId: binding.route.id, ...sessionConnectionMetadata(binding, mappingContext) })
       return { ...state, works: replaceById(state.works, { ...work, executions: replaceById(work.executions, nextExecution) }) }
     })
@@ -924,14 +947,14 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const legacy = result.kind === 'gearjob.work-order.observation' ? { resultObservationId: result.id } : result.kind === 'assistant.follow-up' ? { resultFollowUpId: result.id } : {}
       const nextExecution = compact({ ...execution, status: 'completed', completedAt: clock(), dshSessionRef: result.dshSessionRef,
         continuedFromDshSessionRef: result.continuedFromDshSessionRef, contextObservationId: result.contextObservationId,
-        continuity: result.continuity, contextConfirmationRefs: result.contextConfirmationRefs, dshEventCount: eventCount(model), resultId: result.id, ...legacy })
+        continuity: result.continuity, contextConfirmationRefs: result.contextConfirmationRefs, dshEventCount: eventCount(model), resultId: result.id, runtime: finishExecutionRuntime(execution.runtime, { ...model.runtime, completedAt: clock() }), ...legacy })
       const nextWork = { ...work, status: 'completed', results: [...work.results, result], executions: replaceById(work.executions, nextExecution) }
       return { ...state, works: replaceById(state.works, nextWork) }
     }, { beforeCommit })
   }
 
   function cancelRunner(entry) {
-    entry.cancelPromise ??= Promise.resolve(runner?.cancel?.(entry.executionId)).catch(() => undefined)
+    entry.cancelPromise ??= Promise.resolve().then(() => runner?.cancel?.(entry.executionId)).catch(error => { entry.closeFailed = true; throw Object.assign(error, { closeFailed: true }) })
     return entry.cancelPromise
   }
 
@@ -940,10 +963,11 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       const work = state.works.find(item => item.id === workId)
       const execution = work?.executions.find(item => item.id === executionId)
       if (!work || !execution || TERMINAL_EXECUTION.has(execution.status)) return state
+      if (error?.closeFailed) return { ...state, works: replaceById(state.works, { ...work, status: 'cancel_requested', executions: replaceById(work.executions, { ...execution, status: 'cancel_requested', closePending: true, error: { code: 'UPSTREAM_ERROR', message: '执行资源尚未确认关闭' } }) }) }
       const timedOut = error?.code === 'UPSTREAM_TIMEOUT'
       const cancelled = !timedOut && (execution.status === 'cancel_requested' || error?.code === 'CANCELLED' || error?.name === 'AbortError')
       const status = cancelled ? 'cancelled' : 'failed'
-      const nextExecution = { ...execution, status, completedAt: clock(), error: cancelled ? { code: 'CANCELLED', message: '本次执行已停止' } : safeError(error) }
+      const nextExecution = { ...execution, status, completedAt: clock(), runtime: finishExecutionRuntime(execution.runtime, { ...error?.runtime, completedAt: clock(), terminationReason: timedOut ? 'UPSTREAM_TIMEOUT' : cancelled ? 'CANCELLED' : safeError(error).code }), error: cancelled ? { code: 'CANCELLED', message: '本次执行已停止' } : safeError(error) }
       return { ...state, works: replaceById(state.works, { ...work, status, executions: replaceById(work.executions, nextExecution) }) }
     })
   }
@@ -957,10 +981,11 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           let changed = false
           const now = clock()
           const works = state.works.map(work => {
-            if (!ACTIVE_EXECUTION.has(work.status) && !work.executions.some(item => ACTIVE_EXECUTION.has(item.status))) return work
+            if (!ACTIVE_EXECUTION.has(work.status) && !work.executions.some(item => ACTIVE_EXECUTION.has(item.status) || item.closePending)) return work
             changed = true
+            if (!ACTIVE_EXECUTION.has(work.status) && !work.executions.some(item => ACTIVE_EXECUTION.has(item.status))) return { ...work, executions: work.executions.map(execution => ({ ...execution, closePending: false })) }
             const interrupted = { ...work, status: 'interrupted', executions: work.executions.map(execution => ACTIVE_EXECUTION.has(execution.status)
-              ? { ...execution, status: 'interrupted', interruptedAt: now, error: { code: 'PROCESS_RESTARTED', message: '进程重启时未完成' } } : execution) }
+              ? { ...execution, closePending: false, status: 'interrupted', interruptedAt: now, runtime: finishExecutionRuntime(execution.runtime, { completedAt: now, terminationReason: 'PROCESS_RESTARTED' }), error: { code: 'PROCESS_RESTARTED', message: '进程重启时未完成' } } : { ...execution, closePending: false }) }
             if (!work.collaboration) return interrupted
             return { ...interrupted, collaboration: { ...work.collaboration, status: 'interrupted' }, plan: { ...work.plan, items: work.plan.items.map(item => ['not_started', 'running', 'waiting_input'].includes(item.status) ? { ...item, status: 'interrupted' } : item) } }
           })
@@ -1023,7 +1048,8 @@ function authorizedBinding(state, member, request, connectionCatalog) {
   const skill = candidateSkills[0]
   const capability = getCapability(skill.capabilityId)
   if (!capability || (clean(request.capabilityId) && request.capabilityId !== capability.id)) return failure('FORBIDDEN', '能力绑定无效')
-  const route = state.modelRoutes.find(item => item.id === employee.modelRouteId && item.enabled === true && item.provider === ZENMUX_PROVIDER && item.model === ZENMUX_MODEL && item.credentialRef === 'ZENMUX_API_KEY')
+  const route = state.modelRoutes.find(item => item.id === employee.modelRouteId)
+  try { modelRouteSnapshot(route) } catch { return failure('FORBIDDEN', '员工模型路由不可用') }
   if (!route) return failure('FORBIDDEN', '员工模型路由不可用')
   let connection
   if (capability.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY) {
@@ -1122,8 +1148,11 @@ function modelRoute(body, current) {
   const id = current?.id ?? clean(body.id), provider = body.provider ?? current?.provider, model = body.model ?? current?.model
   const displayName = clean(body.displayName ?? current?.displayName), enabled = body.enabled ?? current?.enabled ?? true
   const credentialRef = clean(body.credentialRef ?? current?.credentialRef ?? 'ZENMUX_API_KEY')
-  if (!id || provider !== ZENMUX_PROVIDER || model !== ZENMUX_MODEL || !displayName || typeof enabled !== 'boolean' || credentialRef !== 'ZENMUX_API_KEY') throw serviceError('INVALID_REQUEST', '模型路由必须使用固定 ZenMux DeepSeek V4.1 Flash 配置')
-  return { id, provider, model, displayName, enabled, credentialRef }
+  const parameters = body.parameters === undefined ? current?.parameters ?? { maxOutputTokens: 4096 } : body.parameters
+  if (!id || provider !== MODEL_PROVIDER || !MODEL_IDS.includes(model) || !displayName || typeof enabled !== 'boolean' || credentialRef !== 'ZENMUX_API_KEY') throw serviceError('INVALID_REQUEST', '请选择已批准的 ZenMux 模型路由')
+  const route = { id, provider, model, displayName, enabled, credentialRef, parameters }
+  try { modelRouteSnapshot({ ...route, enabled: true }) } catch { throw serviceError('INVALID_REQUEST', '输出上限必须为 1 至 4096，且只能设置 maxOutputTokens') }
+  return { ...route, parameters: { maxOutputTokens: parameters.maxOutputTokens ?? 4096 } }
 }
 function skillConfig(body, current) {
   const capabilityId = body.capabilityId ?? current?.capabilityId, capability = getCapability(capabilityId)
@@ -1271,8 +1300,8 @@ function capabilityAcceptsConnectionKind(capability, kind) {
   return capability?.connectionKind === kind || capability?.id === WORK_ORDER_DEVICE_CORRELATION_CAPABILITY && ['gearjob-rest', 'hive-tenant-records'].includes(kind)
 }
 function success(work, reservation) { return { ok: true, value: work, deduplicated: Boolean(reservation.deduplicated), accepted: Boolean(reservation.executionId && !reservation.deduplicated), active: Boolean(reservation.active) } }
-function newExecution(id, operation, clientRequestId, input, acceptedAt) { return { id, operation, clientRequestId, input: structuredClone(input), status: 'accepted', acceptedAt } }
-function activeExecution(work) { return [...work.executions].reverse().find(item => ACTIVE_EXECUTION.has(item.status)) }
+function newExecution(id, operation, clientRequestId, input, acceptedAt, modelSnapshot, requestLimit = 4) { return { id, operation, clientRequestId, input: structuredClone(input), status: 'accepted', acceptedAt, closePending: true, ...(modelSnapshot ? { modelSnapshot, runtime: newExecutionRuntime(modelSnapshot, requestLimit) } : {}) } }
+function activeExecution(work) { return [...work.executions].reverse().find(item => ACTIVE_EXECUTION.has(item.status) || item.closePending === true) }
 function replaceById(items, value) { return items.map(item => item.id === value.id ? value : item) }
 function reservationKey(ownerMemberId, ...parts) { return [ownerMemberId, ...parts].map(value => String(value ?? '')).join('|') }
 function eventCount(model) { return Number.isInteger(model?.eventCount) && model.eventCount >= 0 ? model.eventCount : undefined }

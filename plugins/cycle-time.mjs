@@ -15,8 +15,8 @@ export function createCycleTimeTool({ authorize = defaultAuthorize } = {}) {
     name: CYCLE_TIME_TOOL,
     description: 'Deterministically calculate manufacturing cycle time in seconds per unit. Both inputs are required numbers.',
     parameters: {
-      availableSeconds: { type: 'json', description: 'Required finite number of available seconds; must not be negative.' },
-      quantity: { type: 'json', description: 'Required finite number of units; must be greater than zero.' },
+      availableSeconds: { type: 'number', required: true, description: 'Required finite number of available seconds; must not be negative.' },
+      quantity: { type: 'number', required: true, description: 'Required finite number of units; must be greater than zero.' },
     },
     output: {
       schema: {

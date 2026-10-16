@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { readRuntimeConfig } from './runtime-config.mjs'
+import { employeeModelRoute, assertModelRoute } from './model-route.mjs'
+import { assertExecutionCapacity, newExecutionRuntime, finishExecutionRuntime } from './execution-runtime.mjs'
 import { conversationSessionDependencies, currentConversationDependencies } from './conversation-dependencies.mjs'
 
 const ACTIVE = new Set(['accepted', 'running'])
-const MODEL = readRuntimeConfig({}).model
 const ERRORS = Object.freeze({
+  BUDGET_EXHAUSTED: '本次回复请求预算已耗尽，请明确发送新消息继续',
   FORBIDDEN: 'Agent 授权已失效',
   MODEL_NOT_CONFIGURED: '模型路由不可用',
   HISTORY_UNAVAILABLE: '历史记录暂时不可用',
@@ -30,7 +31,7 @@ export function createConversationService({ store, runner, connectionCatalog = [
           if (!currentTurn(conversation)) return conversation
           const now = clock()
           return { ...conversation, updatedAt: now, turns: conversation.turns.map(turn => ACTIVE.has(turn.status) ? {
-            ...turn, status: 'interrupted', completedAt: now, error: publicError({ code: 'PROCESS_RESTARTED' }),
+            ...turn, status: 'interrupted', completedAt: now, runtime: finishExecutionRuntime(turn.runtime, { completedAt: now, terminationReason: 'PROCESS_RESTARTED' }), error: publicError({ code: 'PROCESS_RESTARTED' }),
           } : turn) }
         }),
       }))
@@ -151,13 +152,15 @@ export function createConversationService({ store, runner, connectionCatalog = [
       requireWritable(state, member, conversation, connectionCatalog)
       if (currentTurn(conversation)) throw error('CONFLICT', '当前回复尚未结束')
       const employee = state.employees.find(item => item.id === conversation.employeeId)
-      const definition = { employeeRevision: employee.revision ?? 1, instructions: employee.instructions ?? '', modelRouteId: employee.modelRouteId }
+      assertExecutionCapacity(state)
+      const modelSnapshot = employeeModelRoute(state, employee)
+      const definition = { employeeRevision: employee.revision ?? 1, instructions: employee.instructions ?? '', modelRouteId: employee.modelRouteId, modelSnapshot }
       const fingerprint = createHash('sha256').update(JSON.stringify(definition)).digest('hex')
       const last = conversation.sessions.at(-1), interrupted = conversation.turns.at(-1)?.status === 'interrupted'
       const sessionId = !interrupted && last?.definitionFingerprint === fingerprint ? last.id : null
       const dependencies = sessionId ? conversationSessionDependencies(conversation, { sessionId }) : {}
       selected = {
-        id: turnId, clientRequestId, userText: text, status: 'accepted', createdAt: now, startedAt: null, completedAt: null, error: null,
+        id: turnId, runtime: newExecutionRuntime(modelSnapshot, 6), clientRequestId, userText: text, status: 'accepted', createdAt: now, startedAt: null, completedAt: null, error: null,
         definition, definitionFingerprint: fingerprint, sessionId,
         ...Object.fromEntries(Object.entries(dependencies).filter(([, refs]) => refs.length)),
         userMessageId: null, assistantMessageIds: [],
@@ -167,7 +170,7 @@ export function createConversationService({ store, runner, connectionCatalog = [
     if (!deduplicated) {
       const entry = { turnId, stopStatus: null, promise: undefined, authorize }
       active.set(id, entry)
-      entry.promise = Promise.resolve().then(() => execute(actor, id, selected, entry)).finally(() => { if (active.get(id) === entry) active.delete(id) })
+      entry.promise = Promise.resolve().then(() => execute(actor, id, selected, entry)).finally(() => { if (!entry.closeFailed && active.get(id) === entry) active.delete(id) })
       void entry.promise.catch(onError)
     }
     const updated = findOwned(state, actor, id)
@@ -197,14 +200,22 @@ export function createConversationService({ store, runner, connectionCatalog = [
         const member = requireMember(state, actor), conversation = findOwned(state, member, id)
         requireWritable(state, member, conversation, connectionCatalog)
         if (entry.stopStatus) return state
-        return replaceTurn(state, id, selected.id, turn => ({ ...turn, status: 'running', startedAt: clock() }), clock())
+        return replaceTurn(state, id, selected.id, turn => ({ ...turn, status: 'running', startedAt: clock(), ...(turn.runtime ? { runtime: { ...turn.runtime, startedAt: clock() } } : {}) }), clock())
       })
       if (!entry.stopStatus) outcome = await runner.runChatTurn({
-        conversationId: id, turnId: selected.id, sessionId: selected.sessionId, text: selected.userText, instructions: selected.definition.instructions,
+        conversationId: id, turnId: selected.id, sessionId: selected.sessionId, text: selected.userText, instructions: selected.definition.instructions, modelSnapshot: selected.definition.modelSnapshot,
+        onRequest: async () => store.update(state => {
+          const conversation = findOwned(state, actor, id), turn = currentTurn(conversation)
+          if (entry.stopStatus || turn?.id !== selected.id) throw error('CANCELLED', ERRORS.CANCELLED)
+          assertModelRoute(state, state.employees.find(employee => employee.id === conversation.employeeId), selected.definition.modelSnapshot)
+          if (turn.runtime.requestCount >= turn.runtime.requestLimit) throw error('BUDGET_EXHAUSTED', ERRORS.BUDGET_EXHAUSTED)
+          return replaceTurn(state, id, selected.id, value => ({ ...value, runtime: { ...value.runtime, requestCount: value.runtime.requestCount + 1 } }), clock())
+        }),
         authorize: async () => {
           if (entry.stopStatus) throw error('CANCELLED', ERRORS.CANCELLED)
           const state = await store.read(), member = requireMember(state, actor), conversation = findOwned(state, member, id)
           requireWritable(state, member, conversation, connectionCatalog)
+          assertModelRoute(state, state.employees.find(employee => employee.id === conversation.employeeId), selected.definition.modelSnapshot)
           if (currentTurn(conversation)?.id !== selected.id) throw error('CANCELLED', ERRORS.CANCELLED)
           await entry.authorize?.()
         },
@@ -224,6 +235,13 @@ export function createConversationService({ store, runner, connectionCatalog = [
         },
       })
     } catch (error) { failure = error }
+    if (failure?.closeFailed) {
+      entry.closeFailed = true
+      await store.update(state => replaceTurn(state, id, selected.id, turn => ({ ...turn,
+        runtime: turn.runtime ? { ...turn.runtime, ...failure.runtime, terminationReason: 'UPSTREAM_ERROR' } : undefined,
+      }), clock()))
+      throw failure
+    }
     const status = entry.stopStatus ?? (failure || outcome?.stopReason !== 'completed' ? (failure?.code === 'CANCELLED' || outcome?.stopReason === 'aborted' ? 'cancelled' : 'failed') : 'completed')
     await store.update(state => replaceTurn(state, id, selected.id, turn => {
       const dependencies = {}
@@ -232,7 +250,7 @@ export function createConversationService({ store, runner, connectionCatalog = [
         for (const ref of outcome[key]) if (!refs.some(previous => isDeepStrictEqual(previous, ref))) refs.push(structuredClone(ref))
         dependencies[key] = refs
       }
-      return { ...turn, ...dependencies, status, completedAt: clock(),
+      return { ...turn, ...dependencies, status, completedAt: clock(), runtime: finishExecutionRuntime(turn.runtime, { ...(outcome?.runtime ?? failure?.runtime), completedAt: clock(), terminationReason: status === 'completed' ? null : status === 'cancelled' ? 'CANCELLED' : status === 'interrupted' ? 'PROCESS_SHUTDOWN' : publicError(failure ?? outcome?.error).code }),
         assistantMessageIds: outcome?.assistantMessageIds ?? turn.assistantMessageIds,
         error: status === 'completed' ? null : publicError(status === 'cancelled' ? { code: 'CANCELLED' } : status === 'interrupted' ? { code: 'PROCESS_SHUTDOWN' } : failure ?? outcome?.error),
       }
@@ -267,8 +285,7 @@ function findOwned(state, actor, id) {
 }
 export function requireConversationEmployee(state, member, employee) {
   if (!employee || employee.enabled !== true || !member.employeeIds.includes(employee.id)) throw error('FORBIDDEN', ERRORS.FORBIDDEN)
-  const route = state.modelRoutes.find(item => item.id === employee.modelRouteId && item.enabled === true && item.provider === MODEL.provider && item.model === MODEL.model)
-  if (!route) throw error('MODEL_NOT_CONFIGURED', ERRORS.MODEL_NOT_CONFIGURED)
+  employeeModelRoute(state, employee)
 }
 function requireWritable(state, member, conversation, connectionCatalog) {
   if (conversation.archivedAt) throw error('CONFLICT', '对话已归档')
@@ -332,7 +349,7 @@ function nativeMessages(turn, history) {
 function turnProjection(turn, history, authorized = true) {
   const unavailable = turn.sessionId && history.get(turn.sessionId)?.status === 'unavailable'
   return { id: turn.id, userText: unavailable || !authorized ? null : turn.userText, assistantText: authorized ? nativeMessages(turn, history).assistantText : null,
-    status: turn.status, createdAt: turn.createdAt, startedAt: turn.startedAt, completedAt: turn.completedAt, error: turn.error ? publicError(turn.error) : null,
+    status: turn.status, runtime: turn.runtime ?? null, createdAt: turn.createdAt, startedAt: turn.startedAt, completedAt: turn.completedAt, error: turn.error ? publicError(turn.error) : null,
     ...(!authorized ? { contentUnavailableReason: 'CONTEXT_ACCESS_REVOKED' } : {}),
   }
 }

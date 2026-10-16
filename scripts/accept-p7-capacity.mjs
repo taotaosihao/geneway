@@ -622,6 +622,23 @@ async function harnessCheck() {
     await store.update(state => capacityHistory(state, now))
     const state = await store.read()
     assert.deepEqual([state.works.length, state.conversations.length, state.conversations.reduce((n, item) => n + item.turns.length, 0), state.knowledgeMaterials.length, state.automationRules.length], [1000, 200, 5000, 100, 20])
+    const routeService = createWorkService({ store })
+    const routeServer = createGenewayServer({ service: routeService, store,
+      auth: { sessionView: async () => ({ session: { memberId: 'capacity-member-1', sessionVersion: 1 }, csrfToken: 'pure' }) },
+      trustedOrigin: 'http://127.0.0.1:1' })
+    try {
+      const routeRequest = async url => {
+        const result = {}
+        await routeServer.listeners('request')[0]({ method: 'GET', url, headers: { cookie: 'geneway_session=pure' } },
+          { writeHead(status) { result.status = status }, end(body) { result.body = JSON.parse(body) } })
+        return result
+      }
+      const bootstrap = await routeRequest('/api/bootstrap')
+      assert.equal(bootstrap.status, 200)
+      assert.equal(bootstrap.body.works.length, 1000)
+      assert.equal(bootstrap.body.works[0].id, 'capacity-work-0')
+      assert.equal((await routeRequest('/api/works')).status, 404)
+    } finally { await routeService.close() }
     assert.equal((await controlledAutomationCapacity(join(temporary, 'state.json'), temporary)).accepted, 2)
     const controlled = await controlledCapacity(join(temporary, 'state.json'), temporary, { admissionSamples: 4, requireP95: false })
     assert.equal(controlled.check.active, 4)
@@ -743,12 +760,14 @@ async function hostRun(options) {
     assert.equal(simulator.maxActivePolls(reconnectBot.id), 1)
     assert.equal((await hostIpc(host, 'snapshot')).consumers.maxActive, 1)
     report.checks.push({ case: '20-formal-members-5-agents-20-ilink-one-feishu', completeWaitingPolls: accounts.map(item => simulator.calls.filter(call => call.botId === item.id && call.completed && call.heldMs >= 800).length), maxActivePolls: accounts.map(item => simulator.maxActivePolls(item.id)), reconnectBotId: reconnectBot.id, duplicateBotLockRejected: true })
-    const warm = await hostRequest(origin, sessions.get(members[0].id), '/api/works'); assert.equal(warm.status, 200)
+    const warm = await hostRequest(origin, sessions.get(members[0].id), '/api/bootstrap')
+    assert.equal(warm.status, 200); assert.equal(warm.body?.works?.length, 1000)
     const timings = []
     for (let index = 0; index < 80; index++) {
-      const path = index % 2 ? '/api/conversations' : '/api/works'
+      const path = index % 2 ? '/api/conversations' : '/api/bootstrap'
       const started = performance.now(), response = await hostRequest(origin, sessions.get(members[0].id), path)
       assert.equal(response.status, 200)
+      if (path === '/api/bootstrap') assert.equal(response.body?.works?.length, 1000)
       timings.push({ path, ms: performance.now() - started })
     }
     report.latencies.read = { count: timings.length, p95Ms: percentile(timings.map(item => item.ms), 95), raw: timings }
@@ -784,8 +803,9 @@ async function hostRun(options) {
     const restoredLogin = await hostRequest(restoredOrigin, null, '/api/session', 'POST', { loginName: members[0].loginName, password: passwords[members[0].authRef] })
     assert.equal(restoredLogin.status, 200)
     const restoredSession = { cookie: restoredLogin.cookie.split(';')[0], csrf: restoredLogin.body.csrfToken }
-    const restoredRead = await hostRequest(restoredOrigin, restoredSession, '/api/works')
+    const restoredRead = await hostRequest(restoredOrigin, restoredSession, '/api/bootstrap')
     assert.equal(restoredRead.status, 200)
+    assert.equal(restoredRead.body?.works?.length, 1000)
     const restoreToReadMs = performance.now() - restoreStart
     assert(backupMs <= 600_000 && restoreToReadMs <= 600_000)
     const recoveredState = await createFileStore(restoredStateFile).read()

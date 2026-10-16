@@ -727,7 +727,7 @@ async function acceptance(options) {
     }, '390×844 可停止选定回复而不误停工作；正常重启保留原生历史。普通备份不含秘密，受限秘密单独配对；恢复后渠道关闭、旧身份不复活、业务与投递不重放。')
   }
   async function transfer(args) {
-    const child = launch(process.execPath, [join(root, 'scripts/state-transfer.mjs'), ...args], { env: { ...systemEnvironment(), GENEWAY_STATE: stateFile, GENEWAY_DSH_HOME: dshHome }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = launch(process.execPath, [join(root, 'scripts/state-transfer.mjs'), ...args], { env: { ...systemEnvironment(), GENEWAY_STATE: stateFile, GENEWAY_DSH_HOME: dshHome, GENEWAY_MODEL_CREDENTIAL_REF: options['model-ref'] }, stdio: ['ignore', 'pipe', 'pipe'] })
     let output = ''; child.stdout.on('data', chunk => { output += chunk; assert(output.length < 32_000, 'unexpected transfer output') })
     const code = await new Promise((resolveExit, reject) => { child.once('error', reject); child.once('exit', code => resolveExit(code)) })
     assert.equal(code, 0, 'actual state-transfer command failed')

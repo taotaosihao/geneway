@@ -459,7 +459,7 @@ async function acceptance(options) {
     if (result.endpointId !== undefined) assert.equal(result.endpointId, fixture.producer.endpointId)
   }
   async function transfer(args) {
-    const child = launch(process.execPath, [join(root, 'scripts/state-transfer.mjs'), ...args], { env: { ...systemEnvironment(), GENEWAY_STATE: stateFile, GENEWAY_DSH_HOME: dshHome }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = launch(process.execPath, [join(root, 'scripts/state-transfer.mjs'), ...args], { env: { ...systemEnvironment(), GENEWAY_STATE: stateFile, GENEWAY_DSH_HOME: dshHome, GENEWAY_MODEL_CREDENTIAL_REF: options['model-ref'] }, stdio: ['ignore', 'pipe', 'pipe'] })
     let output = ''; child.stdout.on('data', chunk => { output += chunk; if (output.length > 32_000) fail(new Error('state transfer output exceeded bound')) })
     const code = await new Promise((done, reject) => { child.once('error', reject); child.once('exit', done) }); assert.equal(code, 0, 'actual state transfer failed'); return JSON.parse(output.trim())
   }

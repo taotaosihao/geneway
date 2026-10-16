@@ -10,7 +10,7 @@ import { createAutomationService } from '../src/automation-service.mjs'
 import { getCapability } from '../src/capabilities.mjs'
 import { normalizeTpmObservation } from '../src/domain/tpm.mjs'
 import { digest, KIVO_EVENT_SOURCES_FILE, readKivoEventSources, verifyKivoEvent } from '../src/kivo-events.mjs'
-import { readRuntimeConfig } from '../src/runtime-config.mjs'
+import { readModelCredential, readRuntimeConfig } from '../src/runtime-config.mjs'
 import { createFileStore, STATE_VERSION } from '../src/store/file-store.mjs'
 
 const execFile = promisify(execFileCallback)
@@ -21,6 +21,7 @@ const now = '2026-10-16T01:00:00.000Z'
 const objectId = '00000000-0000-4000-8000-000000000001', deviceId = '00000000-0000-4000-8000-000000000002'
 const cap = getCapability('kivo-tpm-record-read'), actor = { id: 'owner' }
 const signingKey = Buffer.from('synthetic-event-signing-key-only')
+const modelCredentialRef = 'synthetic-model.key'
 const checks = []
 let serial = 0, passed = false
 
@@ -53,7 +54,7 @@ async function fixture({ ruleStatus = 'active', pending = true } = {}) {
   const sourcePath = join(root, KIVO_EVENT_SOURCES_FILE)
   await put(root, KIVO_EVENT_SOURCES_FILE, bytes(config))
   await mkdir(secretRoot, { mode: 0o700 })
-  for (const [ref, value] of Object.entries({ 'synthetic.pem': 'SYNTHETIC_MACHINE_KEY', ZENMUX_API_KEY: 'SYNTHETIC_MODEL_KEY', 'event.key': `whsec_${signingKey.toString('base64')}` })) await put(secretRoot, ref, Buffer.from(value))
+  for (const [ref, value] of Object.entries({ 'synthetic.pem': 'SYNTHETIC_MACHINE_KEY', [modelCredentialRef]: 'SYNTHETIC_MODEL_KEY', 'event.key': `whsec_${signingKey.toString('base64')}` })) await put(secretRoot, ref, Buffer.from(value))
   const service = createAutomationService({ store, clock: () => now, connectionCatalog, readEventSources: () => readKivoEventSources(root),
     workService: { async ensureReady() {}, async dispatchAutomationWork() { assert.fail('backup must not dispatch work') } },
     async readCurrentRecord(options) {
@@ -87,7 +88,7 @@ for (const name of ['access','lstat','open','opendir','readFile','readdir','read
 for (const name of ['accessSync','existsSync','lstatSync','openSync','opendirSync','readFileSync','readdirSync','readlinkSync','realpathSync','statSync']) { const original = fs[name]; fs[name] = (...args) => { guarded(args[0]); return original(...args); }; }
 syncBuiltinESMExports(); process.on('exit', () => write(log, JSON.stringify({ count })));
 `)
-  await run(['backup', '--output', ordinary, '--event-sources', join(temp, 'unused-override.json')], { ...f.env, GENEWAY_SECRET_ROOT: f.secretRoot, GENEWAY_KIVO_EVENT_SOURCES: join(temp, 'unused-env-override.json') }, guard)
+  await run(['backup', '--output', ordinary, '--event-sources', join(temp, 'unused-override.json')], { ...f.env, GENEWAY_MODEL_CREDENTIAL_REF: '', GENEWAY_SECRET_ROOT: f.secretRoot, GENEWAY_KIVO_EVENT_SOURCES: join(temp, 'unused-env-override.json') }, guard)
   assert.deepEqual(await json(accesses), { count: 0 })
   const ordinaryManifest = await json(join(ordinary, 'manifest.json'))
   assert.deepEqual(ordinaryManifest.entries.map(entry => entry.path), [KIVO_EVENT_SOURCES_FILE, 'state.json'])
@@ -120,17 +121,30 @@ syncBuiltinESMExports(); process.on('exit', () => write(log, JSON.stringify({ co
   checks.push('fixed-data-root', 'ordinary-zero-secret-access', 'restore-disabled', 'pending-suppressed', 'old-signature-no-wakeup')
 
   const backup = join(temp, 'paired-backup'), secrets = join(temp, 'paired-secrets')
+  const missingMapping = join(temp, 'missing-model-mapping')
+  await rejected(['backup', '--output', missingMapping, '--secret-output', join(temp, 'missing-mapping-secrets'), '--secret-root', f.secretRoot], { ...f.env, GENEWAY_MODEL_CREDENTIAL_REF: '' }, /GENEWAY_MODEL_CREDENTIAL_REF/)
+  assert.equal(await exists(missingMapping), false)
+  await f.store.update(state => ({ ...state, modelRoutes: [...state.modelRoutes, { ...state.modelRoutes[0], id: 'second-route', model: 'z-ai/glm-5.3-flash' }] }))
   await run(['backup', '--output', backup, '--secret-output', secrets, '--secret-root', f.secretRoot], f.env)
   const manifest = await json(join(secrets, 'manifest.json'))
   assert.equal(manifest.version, 2)
   assert.equal(manifest.stateSha256, digest(await readFile(join(backup, 'state.json'))))
   assert.equal(manifest.sourcesSha256, digest(await readFile(join(backup, KIVO_EVENT_SOURCES_FILE))))
-  assert.deepEqual(manifest.entries.map(entry => entry.path), ['secrets/ZENMUX_API_KEY', 'secrets/event.key', 'secrets/synthetic.pem'])
+  assert.deepEqual(manifest.entries.map(entry => entry.path), ['secrets/event.key', `secrets/${modelCredentialRef}`, 'secrets/synthetic.pem'])
+  assert.equal(await exists(join(secrets, 'secrets', 'ZENMUX_API_KEY')), false)
+  const refusedTarget = join(temp, 'missing-mapping-restored'), refusedSecrets = join(temp, 'missing-mapping-restored-secrets')
+  await rejected(['restore', '--input', backup, '--data-root', refusedTarget, '--secret-input', secrets, '--secret-root', refusedSecrets], { GENEWAY_MODEL_CREDENTIAL_REF: '' }, /GENEWAY_MODEL_CREDENTIAL_REF/)
+  assert.equal(await exists(refusedTarget), false)
+  assert.equal(await exists(refusedSecrets), false)
+  await rejected(['restore', '--input', backup, '--data-root', refusedTarget, '--secret-input', secrets, '--secret-root', refusedSecrets], { GENEWAY_MODEL_CREDENTIAL_REF: 'wrong-model.key' }, /引用集合/)
+  assert.equal(await exists(refusedTarget), false)
+  assert.equal(await exists(refusedSecrets), false)
   const target = join(temp, 'paired-restored'), secretTarget = join(temp, 'paired-restored-secrets')
   await run(['restore', '--input', backup, '--data-root', target, '--secret-input', secrets, '--secret-root', secretTarget])
   assert.equal((await readKivoEventSources(target)).sources[0].enabled, false)
+  assert.equal(await readModelCredential(readRuntimeConfig({ GENEWAY_STATE: join(target, 'state.json'), GENEWAY_DSH_HOME: join(target, 'dsh'), GENEWAY_SECRET_ROOT: secretTarget, GENEWAY_MODEL_CREDENTIAL_REF: modelCredentialRef }, repo)), 'SYNTHETIC_MODEL_KEY')
   for (const entry of manifest.entries) assert.deepEqual(await readFile(join(secretTarget, entry.path.slice('secrets/'.length))), await readFile(join(secrets, entry.path)))
-  checks.push('secret-v2-dual-binding', 'signing-ref-in-separate-pack')
+  checks.push('secret-v2-dual-binding', 'signing-ref-in-separate-pack', 'host-model-ref-required-before-write', 'two-routes-one-model-secret')
   return { backup, secrets, ordinary }
 }
 
@@ -280,7 +294,7 @@ function signedEvent(source) {
 }
 
 async function run(args, env = {}, hook) {
-  return execFile(process.execPath, [...(hook ? ['--import', hook] : []), transfer, ...args], { cwd: repo, env: { ...process.env, ...env }, maxBuffer: 1024 * 1024 })
+  return execFile(process.execPath, [...(hook ? ['--import', hook] : []), transfer, ...args], { cwd: repo, env: { ...process.env, GENEWAY_MODEL_CREDENTIAL_REF: modelCredentialRef, ...env }, maxBuffer: 1024 * 1024 })
 }
 async function rejected(args, env, pattern, hook) {
   await assert.rejects(run(args, env, hook), error => {

@@ -82,7 +82,7 @@ async function backup(outputArg, options = {}) {
       // Reopen the live path: the original descriptor can point at a pre-rename state inode.
       await unchangedState(statePath, sourceHash)
       await unchangedSources(dataRoot, eventSources.sha256)
-      secrets = await openSecrets(secretPaths.root, collectSecretRefs(state, eventSources.sources), opened)
+      secrets = await openSecrets(secretPaths.root, collectSecretRefs(state, eventSources.sources, process.env.GENEWAY_MODEL_CREDENTIAL_REF), opened)
       await unchangedState(statePath, sourceHash)
       await unchangedSources(dataRoot, eventSources.sha256)
     }
@@ -143,7 +143,7 @@ async function restore(inputArg, dataRootArg, options = {}) {
     const eventSources = await readKivoEventSources(input)
     if (eventSources.sha256 !== (files.find(file => file.path === KIVO_EVENT_SOURCES_FILE)?.sha256 ?? null)) throw new Error('备份事件来源未列入 manifest 或摘要不匹配')
     requireEventSources(sourceState, eventSources.sources)
-    const secrets = secretPaths ? await verifySecretPackage(secretPaths.package, { stateSha256: digest(sourceStateBuffer), sourcesSha256: eventSources.sha256 }, collectSecretRefs(sourceState, eventSources.sources), opened) : undefined
+    const secrets = secretPaths ? await verifySecretPackage(secretPaths.package, { stateSha256: digest(sourceStateBuffer), sourcesSha256: eventSources.sha256 }, collectSecretRefs(sourceState, eventSources.sources, process.env.GENEWAY_MODEL_CREDENTIAL_REF), opened) : undefined
     const sessionRefs = collectSessionRefs(sourceState)
     const expectedSchema = schemaSummary(sourceState, sessionRefs)
     if (JSON.stringify(manifest.schema) !== JSON.stringify(expectedSchema)) throw new Error('备份 schema 摘要不匹配')
@@ -316,14 +316,21 @@ function requireEventSources(state, sources) {
   if ([...required].some(id => !ids.has(id))) throw new Error('可恢复事件规则或待处理目标缺少事件来源配置')
 }
 
-function collectSecretRefs(state, sources = []) {
+function collectSecretRefs(state, sources = [], modelCredentialRef) {
   const refs = new Set()
   const add = ref => {
     if (ref === null || ref === undefined) return
     if (typeof ref !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(ref) || ref === '.' || ref === '..') throw new Error('秘密引用无效')
     refs.add(ref)
   }
-  for (const key of ['modelRoutes', 'connections', 'channelApps']) for (const item of state[key] ?? []) add(item.credentialRef)
+  for (const route of state.modelRoutes ?? []) {
+    // The route stores an environment key; the host configuration owns the actual file reference.
+    if (route.credentialRef === 'ZENMUX_API_KEY') {
+      if (!modelCredentialRef) throw new Error('模型秘密包需要显式 GENEWAY_MODEL_CREDENTIAL_REF 文件引用')
+      add(modelCredentialRef)
+    } else add(route.credentialRef)
+  }
+  for (const key of ['connections', 'channelApps']) for (const item of state[key] ?? []) add(item.credentialRef)
   for (const identity of state.channelIdentities ?? []) if (identity.weixin) for (const key of ['tokenRef', 'cursorRef', 'contextRef']) add(identity.weixin[key])
   // QR references are allocated before login; only the published challenge exists at this stage.
   for (const link of state.linkCodes ?? []) if (link.kind === 'weixin-qr' && link.qrcodeUrl) add(link.loginRef)

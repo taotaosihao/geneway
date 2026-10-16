@@ -1,2 +1,8 @@
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local@0.2.0-rc.2': false
+  '@google/genai@2.21.0': false
+  'koffi@3.1.1': false
+  'node-pty@1.2.0-beta.15': false
+  'protobufjs@7.6.6': false
 overrides:
   '@deepseek-ai/cordis-plugin-group': 1.0.4

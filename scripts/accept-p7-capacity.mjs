@@ -29,6 +29,7 @@ const script = fileURLToPath(import.meta.url)
 const require = createRequire(join(root, 'package.json'))
 const model = 'deepseek/deepseek-v4.1-flash'
 const dummyKey = 'controlled-no-real-credential-p7'
+const capacityWeixinAppId = 'channel-app-weixin'
 
 if (resolve(process.argv[1] ?? '') === script) {
   const options = args(process.argv.slice(2))
@@ -553,6 +554,23 @@ async function harnessCheck() {
       assert.equal(first.executions.at(-1).error.code, 'INTERNAL_ERROR')
       assert.equal(nativeHarnessCalls, 1, 'first native fixture never reached the controlled harness boundary')
     } finally { await nativeService.close() }
+    const hostSeedStore = createFileStore(join(temporary, 'host-seed-state.json'))
+    const hostSeedNow = new Date().toISOString(), feishuRef = 'P7_CAPACITY_FEISHU'
+    await hostSeedStore.update(state => hostCapacitySeed(state, hostSeedNow, feishuRef))
+    const hostSeed = await hostSeedStore.read()
+    assert.deepEqual(hostSeed.modelRoutes.map(item => item.id), ['capacity-route'])
+    assert.deepEqual(hostSeed.skills.map(item => item.id), ['capacity-skill', 'skill-cycle-time-calculate'])
+    assert.deepEqual(hostSeed.connections.map(item => item.id), ['capacity-connection'])
+    assert.deepEqual(hostSeed.employees.map(item => item.id), Array.from({ length: 5 }, (_, index) => 'capacity-agent-' + (index + 1)))
+    assert(hostSeed.employees.every(item => item.modelRouteId === 'capacity-route' && item.skillIds.includes('capacity-skill') && item.connectionIds.includes('capacity-connection')))
+    assert.deepEqual(hostSeed.channelApps.map(item => [item.id, item.provider, item.credentialRef, item.enabled, item.status]),
+      [[capacityWeixinAppId, 'weixin', null, true, 'active'], ['capacity-feishu', 'feishu', feishuRef, true, 'active']])
+    await assert.rejects(hostSeedStore.update(state => {
+      const legacy = hostCapacitySeed(state, hostSeedNow, feishuRef)
+      legacy.channelApps[0].id = 'capacity-weixin'
+      return legacy
+    }), /旧微信应用不可重新启用/)
+    assert.deepEqual(await hostSeedStore.read(), hostSeed, 'rejected legacy Weixin seed changed durable state')
     const store = createFileStore(join(temporary, 'state.json')), now = new Date().toISOString()
     await store.update(state => ({ ...state,
       members: [{ id: 'capacity-member-1', loginName: 'capacity1', displayName: '容量成员', role: 'admin', enabled: true, authRef: 'capacity-auth-1', employeeIds: ['capacity-agent-1'], sessionVersion: 1, createdAt: now, updatedAt: now }],
@@ -575,6 +593,17 @@ async function harnessCheck() {
   console.log('P7 capacity harness checks passed (explicit isolated run guard and target history schema; native/provider/Host calls=0)')
 }
 
+function hostCapacitySeed(state, now, feishuRef) {
+  return { ...state,
+    modelRoutes: [{ id: 'capacity-route', provider: 'zenmux', model, credentialRef: 'ZENMUX_API_KEY', parameters: { maxOutputTokens: 4096 }, enabled: true }],
+    skills: [{ id: 'capacity-skill', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true }, { id: 'skill-cycle-time-calculate', name: '正式节拍换算', capabilityId: 'cycle-time-calculate', enabled: true }],
+    connections: [{ id: 'capacity-connection', kind: 'capacity-fixture', enabled: true, revision: 1 }],
+    employees: Array.from({ length: 5 }, (_, index) => ({ id: 'capacity-agent-' + (index + 1), name: '容量 Agent ' + (index + 1), enabled: true, revision: 1, modelRouteId: 'capacity-route', instructions: 'CAPACITY_SYNTHETIC_ONLY', skillIds: ['capacity-skill', 'skill-cycle-time-calculate'], connectionIds: ['capacity-connection'] })),
+    channelApps: [{ id: capacityWeixinAppId, provider: 'weixin', providerAppId: 'ilink', providerTenantId: 'personal', credentialRef: null, enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now },
+      { id: 'capacity-feishu', provider: 'feishu', providerAppId: 'cli_aaaaaaaaaaaaaaaa', providerTenantId: 'capacity', credentialRef: feishuRef, enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now }],
+  }
+}
+
 async function hostRun(options) {
   const manifest = await privateJson(options.candidate)
   await candidateCheck(options, manifest.value)
@@ -595,14 +624,7 @@ async function hostRun(options) {
   try {
     await writeFile(join(secretRoot, 'ZENMUX_API_KEY'), dummyKey, { mode: 0o600, flag: 'wx' })
     await writeFile(join(secretRoot, feishuRef), JSON.stringify({ appId: 'cli_aaaaaaaaaaaaaaaa', appSecret: 'synthetic_' + randomBytes(24).toString('hex') }), { mode: 0o600, flag: 'wx' })
-    await store.update(state => ({ ...state,
-      modelRoutes: [{ id: 'capacity-route', provider: 'zenmux', model, credentialRef: 'ZENMUX_API_KEY', parameters: { maxOutputTokens: 4096 }, enabled: true }],
-      skills: [{ id: 'capacity-skill', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true }, { id: 'skill-cycle-time-calculate', name: '正式节拍换算', capabilityId: 'cycle-time-calculate', enabled: true }],
-      connections: [{ id: 'capacity-connection', kind: 'capacity-fixture', enabled: true, revision: 1 }],
-      employees: Array.from({ length: 5 }, (_, index) => ({ id: 'capacity-agent-' + (index + 1), name: '容量 Agent ' + (index + 1), enabled: true, revision: 1, modelRouteId: 'capacity-route', instructions: 'CAPACITY_SYNTHETIC_ONLY', skillIds: ['capacity-skill', 'skill-cycle-time-calculate'], connectionIds: ['capacity-connection'] })),
-      channelApps: [{ id: 'capacity-weixin', provider: 'weixin', providerAppId: 'ilink', providerTenantId: 'personal', credentialRef: null, enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now },
-        { id: 'capacity-feishu', provider: 'feishu', providerAppId: 'cli_aaaaaaaaaaaaaaaa', providerTenantId: 'capacity', credentialRef: feishuRef, enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now }],
-    }))
+    await store.update(state => hostCapacitySeed(state, now, feishuRef))
     const roster = join(options.output, 'members.json')
     await writeFile(roster, JSON.stringify(members), { mode: 0o600, flag: 'wx' })
     await promisify(execFile)(process.execPath, [join(root, 'scripts/init-p2-auth.mjs'), '--mode', 'bootstrap', '--state', stateFile, '--auth', authFile, '--members', roster],
@@ -637,7 +659,7 @@ async function hostRun(options) {
       const login = await hostRequest(origin, null, '/api/session', 'POST', { loginName: member.loginName, password: passwords[member.authRef] })
       assert.equal(login.status, 200)
       sessions.set(member.id, { cookie: login.cookie.split(';')[0], csrf: login.body.csrfToken })
-      const link = await hostRequest(origin, sessions.get(member.id), '/api/channels/weixin/bindings', 'POST', { channelAppId: 'capacity-weixin' })
+      const link = await hostRequest(origin, sessions.get(member.id), '/api/channels/weixin/bindings', 'POST', { channelAppId: capacityWeixinAppId })
       assert.equal(link.status, 201)
       simulator.queueLogin(simulator.confirmedLogin(account.id))
       await until(async () => { const channels = await hostRequest(origin, sessions.get(member.id), '/api/channels'); return channels.body.linkCodes.some(item => item.id === link.body.id && item.status === 'matched') }, 'matched iLink binding ' + index)

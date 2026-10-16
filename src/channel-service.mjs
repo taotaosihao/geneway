@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { currentKnowledgeReference } from './knowledge-service.mjs'
 import { newConversationRecord, requireConversationEmployee } from './conversation-service.mjs'
 import { currentConversationDependencies } from './conversation-dependencies.mjs'
+import { authorizeWorkBinding } from './work-service.mjs'
 
 const LINK_TTL_MS = 10 * 60 * 1000
 const LINK_FAILURE_LIMIT = 5
@@ -234,7 +235,7 @@ export function createChannelService({
           const work = state.works.find(item => item.id === occurrence.workId)
           const execution = work?.executions?.find(item => item.operation === 'automation' && item.clientRequestId === occurrence.occurrenceKey)
           if (!work || !execution || !['completed', 'failed', 'cancelled', 'interrupted'].includes(execution.status)) continue
-          const created = automationDelivery(next, occurrence, work, execution, clock, idFactory)
+          const created = automationDelivery(next, occurrence, work, execution, clock, idFactory, connectionCatalog)
           if (!created) continue
           next = created.state
           outputs.push(created.delivery)
@@ -1048,7 +1049,7 @@ function currentDeliveryAuthorization(state, delivery, { validateClaim = false, 
   const fixed = Object.hasOwn(FIXED_CONTENT, delivery.contentKey)
   const occurrence = automationOccurrence(state, delivery)
   const rule = occurrence && state.automationRules.find(item => item.id === occurrence.ruleId)
-  const workAuthorized = work && workBindingAuthorized(state, member, work)
+  const workAuthorized = work && (occurrence?.query ? automationWorkAuthorized(state, member, work, connectionCatalog) : workBindingAuthorized(state, member, work))
   const sourceAuthorized = source && turn && source.channelIdentityId === identity?.id && source.ownerMemberId === member?.id && employee
     && currentConversationDependencies(state, source, turn, connectionCatalog)
   if (!app || !identity || !conversation || !member
@@ -1056,12 +1057,18 @@ function currentDeliveryAuthorization(state, delivery, { validateClaim = false, 
     || (conversation.type === 'private' && (conversation.memberId !== member.id || conversation.identityId !== identity.id))
     || (app.provider === 'weixin' && identity.weixin?.runtimeState !== 'connected')
     || (confirmation && identity.status === 'pending' && !state.linkCodes.some(link => link.status === 'matched' && link.matchedIdentityId === identity.id && link.matchedConversationId === conversation.id))
-    || (occurrence && (conversation.type !== 'private' || rule?.ownerMemberId !== work?.ownerMemberId || rule.status !== 'active' || rule.notificationIdentityId !== identity.id))
+    || (occurrence && (conversation.type !== 'private' || rule?.ownerMemberId !== work?.ownerMemberId || rule.status !== 'active'
+      || rule.revision !== occurrence.ruleRevision || rule.notificationIdentityId !== identity.id
+      || occurrence.query && rule.activationId !== occurrence.activationId))
     || (!fixed && ((!sourceAuthorized && (!workAuthorized || !employee || !skill || (work?.connectionId !== undefined && !connection)))
       || !app.allowedScopes.includes(delivery.contentScope) || !conversation.allowedScopes.includes(delivery.contentScope) || (delivery.resultId !== undefined && !result)
       || result?.knowledgeDependencyRefs?.some(ref => !currentKnowledgeReference(state, ref, member.id, result.employeeId ?? work.employeeId))))) return undefined
   if (validateClaim && (!revisions || revisions.app !== app.revision || revisions.identity !== identity.revision || revisions.conversation !== conversation.revision)) return undefined
   return { app, identity, conversation, work, member, employee, skill, connection, result }
+}
+
+function automationWorkAuthorized(state, member, work, connectionCatalog) {
+  try { authorizeWorkBinding(state, member, work, connectionCatalog); return true } catch { return false }
 }
 
 function deliveryEnvelope(state, delivery, renderedText) {
@@ -1122,7 +1129,7 @@ function invalidateClaims(deliveries, predicate, timestamp, code, message) {
 
 function automationOccurrence(state, delivery) { return state.automationOccurrences?.find(item => item.deliveryId === delivery.id) }
 
-function automationDelivery(state, occurrence, work, execution, clock, idFactory) {
+function automationDelivery(state, occurrence, work, execution, clock, idFactory, connectionCatalog) {
   const rule = state.automationRules.find(item => item.id === occurrence.ruleId)
   const identity = state.channelIdentities.find(item => item.id === rule?.notificationIdentityId && item.status === 'active')
   const conversation = identity && uniquePrivateConversation(state, identity.channelAppId, identity.id)
@@ -1140,7 +1147,7 @@ function automationDelivery(state, occurrence, work, execution, clock, idFactory
     contentKey: completed ? 'automation.completed' : 'automation.failed', status: 'pending', attempts: 0, createdAt: timestamp, updatedAt: timestamp,
   })
   let next = { ...state, deliveries: [...state.deliveries, delivery], automationOccurrences: replaceById(state.automationOccurrences, { ...occurrence, deliveryId: delivery.id }) }
-  if (rule.revision !== occurrence.ruleRevision || !currentDeliveryAuthorization(next, delivery)) {
+  if (rule.revision !== occurrence.ruleRevision || !currentDeliveryAuthorization(next, delivery, { connectionCatalog })) {
     delivery = { ...delivery, status: 'blocked', error: { code: 'DELIVERY_FORBIDDEN', message: '自动通知当前不允许发送' } }
     next = { ...next, deliveries: replaceById(next.deliveries, delivery) }
   }

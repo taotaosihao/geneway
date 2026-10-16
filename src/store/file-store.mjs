@@ -2,13 +2,14 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { getCapability, parseCapabilityToolResult } from '../capabilities.mjs'
+import { getCapability, parseCapabilityToolResult, validateCapabilityInput } from '../capabilities.mjs'
 import { KIVO_TPM_RESULT_KIND } from '../domain/tpm.mjs'
 import { connectionSnapshot } from '../execution-grant.mjs'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 import { normalizeWeixinApiBaseUrl } from '../../vendor/dsh-im/weixin/weixin-api.mjs'
+import { canonicalRevision, digest, canonical, KIVO_EVENT_RECORD_TYPES, KIVO_EVENT_TRIGGER } from '../kivo-events.mjs'
 
-export const STATE_VERSION = 10
+export const STATE_VERSION = 11
 export const KNOWLEDGE_LIMITS = Object.freeze({
   maxMaterials: 100,
   maxBodyBytes: 32 * 1024,
@@ -55,6 +56,7 @@ const EMPTY_STATE = {
   linkCodes: [],
   automationRules: [],
   automationOccurrences: [],
+  automationInbox: [],
   conversations: [],
   works: [],
   reservations: {},
@@ -93,6 +95,7 @@ export function createFileStore(filePath, fsOps = {}) {
         assertActionFactsImmutable(immutableBaseline, next)
         assertConversationFactsImmutable(immutableBaseline, next)
         assertChannelFactsImmutable(immutableBaseline, next)
+        assertAutomationFactsImmutable(immutableBaseline, next)
         await io.mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
         const fileName = filePath.split('/').pop()
         const tempPath = join(dirname(filePath), `.${fileName}.${process.pid}.tmp`)
@@ -122,10 +125,16 @@ export function createFileStore(filePath, fsOps = {}) {
 
 export function migrateState(value) {
   if (!record(value)) throw new Error('产品状态不是对象')
+  if ((value.version ?? 3) === STATE_VERSION) return normalizeV11(value)
+  return normalizeV11({ ...migrateLegacyState(value), version: STATE_VERSION, automationInbox: [] })
+}
+
+function migrateLegacyState(value) {
+  if (!record(value)) throw new Error('产品状态不是对象')
   if (value.version !== undefined && !Number.isInteger(value.version)) throw new Error('产品状态版本无效')
   const version = value.version ?? 3
-  if (version > STATE_VERSION) throw new Error(`不支持未来产品状态版本：${version}`)
-  if (version === STATE_VERSION) return normalizeV10(value)
+  if (version > 10) throw new Error(`不支持未来产品状态版本：${version}`)
+  if (version === 10) return normalizeV10(value)
   if (version === 9) return migrateV9ToV10(value)
   if (version === 8) return migrateV9ToV10(migrateV8ToV9(normalizeV8(value)))
   if (version === 7) return migrateV9ToV10(migrateV8ToV9(migrateV7ToV8(normalizeV7(value))))
@@ -598,8 +607,8 @@ function normalizeV6(value, { channels = false } = {}) {
 function normalizeV7(value, options = {}) {
   const { automationRules: _automationRules, automationOccurrences: _automationOccurrences, ...legacy } = value
   const common = normalizeV6({ ...legacy, version: 6 }, options)
-  const automationRules = requiredArray(value, 'automationRules').map(item => normalizeAutomationRule(item, options.channels))
-  const automationOccurrences = requiredArray(value, 'automationOccurrences').map(normalizeAutomationOccurrence)
+  const automationRules = requiredArray(value, 'automationRules').map(item => item.capabilityId === 'kivo-tpm-record-read' && options.kivoEvents ? normalizeKivoAutomationRule(item) : normalizeAutomationRule(item, options.channels))
+  const automationOccurrences = requiredArray(value, 'automationOccurrences').map(item => item.query && options.kivoEvents ? normalizeKivoAutomationOccurrence(item) : normalizeAutomationOccurrence(item))
   uniqueIds(automationRules, '自动规则')
   uniqueIds(automationOccurrences, '自动发生')
   const occurrenceKeys = new Set()
@@ -632,6 +641,10 @@ function normalizeV7(value, options = {}) {
         || !app || app.id !== conversation.channelAppId) throw new Error(`自动规则 ${rule.id} 通知会话引用不闭合`)
     }
     if (rule.status === 'revoked' ? !rule.revokedAt : rule.revokedAt !== null) throw new Error(`自动规则 ${rule.id} revokedAt 状态不闭合`)
+    if (rule.capabilityId === 'kivo-tpm-record-read') {
+      if (skill.capabilityId !== rule.capabilityId || connection.kind !== 'kivo-mcp') throw new Error('TPM 自动规则能力或连接引用不闭合')
+      continue
+    }
     const event = rule.trigger.kind === 'gearjob-work-order-update'
     if (event && rule.effectiveFrom !== null) throw new Error(`自动规则 ${rule.id} event effectiveFrom 状态不闭合`)
     if (!event && ((rule.status === 'draft' && rule.effectiveFrom !== null) || (['active', 'paused'].includes(rule.status) && !rule.effectiveFrom))) throw new Error(`自动规则 ${rule.id} effectiveFrom 状态不闭合`)
@@ -642,7 +655,11 @@ function normalizeV7(value, options = {}) {
   const workOccurrenceIds = new Set(), deliveryOccurrenceIds = new Set(), successfulByRule = new Map()
   for (const occurrence of automationOccurrences) {
     const rule = ruleById.get(occurrence.ruleId)
-    const identityClosed = rule?.trigger.kind === 'daily-time' && occurrence.event === null
+    const identityClosed = rule?.capabilityId === 'kivo-tpm-record-read' && occurrence.query
+      ? occurrence.activationId <= rule.revision && occurrence.query.objectId === rule.objectId
+        && (occurrence.scheduledDate !== null ? dailyAutomationOccurrenceKey(rule.id, occurrence.scheduledDate) === occurrence.occurrenceKey
+          : occurrence.occurrenceKey.startsWith(`${rule.id}:manual:`) || occurrence.occurrenceKey === kivoAutomationClaimKey(rule.id, occurrence.query))
+      : rule?.trigger.kind === 'daily-time' && occurrence.event === null
       ? occurrence.scheduledDate !== null
         ? dailyAutomationOccurrenceKey(occurrence.ruleId, occurrence.scheduledDate) === occurrence.occurrenceKey
         : occurrence.occurrenceKey.startsWith(`${occurrence.ruleId}:manual:`) && occurrence.occurrenceKey.length > `${occurrence.ruleId}:manual:`.length
@@ -657,6 +674,8 @@ function normalizeV7(value, options = {}) {
       successfulByRule.set(rule.id, (successfulByRule.get(rule.id) ?? 0) + 1)
       const work = workById.get(occurrence.workId)
       if (!work || work.ownerMemberId !== rule.ownerMemberId) throw new Error(`自动发生 ${occurrence.id} 工作引用不闭合`)
+      if (occurrence.query && (work.capabilityId !== rule.capabilityId || work.employeeId !== rule.employeeId || work.skillId !== rule.skillId
+        || work.connectionId !== rule.connectionId || !isDeepStrictEqual(work.input, rule.input))) throw new Error('TPM 自动发生与工作身份不闭合')
     }
     if (occurrence.deliveryId !== null) {
       const delivery = deliveryById.get(occurrence.deliveryId)
@@ -719,8 +738,8 @@ function normalizeV9(value, options = {}) {
   return { ...common, version: 9, conversations, works }
 }
 
-function normalizeV10(value) {
-  const common = normalizeV9(value, { channels: true })
+function normalizeV10(value, options = {}) {
+  const common = normalizeV9(value, { ...options, channels: true })
   const defaultChannelEmployeeId = nullableId(value.defaultChannelEmployeeId, '全局渠道默认员工')
   if (defaultChannelEmployeeId && !common.employees.some(item => item.id === defaultChannelEmployeeId)) throw new Error('全局渠道默认员工不存在')
   for (const conversation of common.conversations) {
@@ -752,6 +771,164 @@ function normalizeV10(value) {
     }
   }
   return { ...common, version: 10, defaultChannelEmployeeId }
+}
+
+function normalizeV11(value) {
+  const { automationInbox: _inbox, ...legacy } = value
+  const common = normalizeV10(legacy, { kivoEvents: true })
+  const automationInbox = requiredArray(value, 'automationInbox').map(normalizeAutomationInbox)
+  uniqueIds(automationInbox, 'Kivo 事件入站')
+  const events = new Set(), deliveries = new Set()
+  for (const entry of automationInbox) {
+    const eventKey = JSON.stringify([entry.event.sourceId, entry.event.eventId])
+    if (events.has(eventKey)) throw new Error('Kivo canonical 事件重复')
+    events.add(eventKey)
+    for (const delivery of entry.deliveries) {
+      const key = JSON.stringify([entry.event.sourceId, delivery.id])
+      if (deliveries.has(key)) throw new Error('Kivo 投递 ID 重复')
+      deliveries.add(key)
+    }
+    const targets = new Set()
+    for (const target of entry.targets) {
+      const rule = common.automationRules.find(item => item.id === target.ruleId)
+      if (!rule || rule.capabilityId !== 'kivo-tpm-record-read' || target.activationId > rule.revision
+        || rule.trigger.kind !== KIVO_EVENT_TRIGGER || rule.trigger.sourceId !== entry.event.sourceId
+        || rule.input.recordType !== entry.event.recordType || rule.objectId !== entry.event.objectId || targets.has(rule.id)) throw new Error('Kivo 入站目标规则引用不闭合')
+      targets.add(rule.id)
+      if (target.occurrenceId !== null) {
+        const occurrence = common.automationOccurrences.find(item => item.id === target.occurrenceId)
+        if (!occurrence || occurrence.ruleId !== rule.id || occurrence.activationId !== target.activationId
+          || occurrence.query.objectId !== entry.event.objectId || occurrence.query.sourceInstance !== entry.event.sourceInstance) throw new Error('Kivo 入站目标发生引用不闭合')
+      }
+    }
+  }
+  return { ...common, version: STATE_VERSION, automationInbox }
+}
+
+function normalizeKivoAutomationRule(rule) {
+  exactKeys(rule, ['id', 'ownerMemberId', 'revision', 'status', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'input', 'trigger', 'maxRuns', 'notificationIdentityId', 'effectiveFrom', 'eventAcceptAfter', 'createdAt', 'updatedAt', 'revokedAt', 'objectId', 'activationId', 'baselineRevision', 'handledRevision', 'pauseReason'], 'TPM 自动规则')
+  for (const key of ['id', 'ownerMemberId', 'employeeId', 'skillId', 'connectionId']) requiredText(rule[key], `TPM 自动规则 ${key}`)
+  boundedInteger(rule.revision, 1, Number.MAX_SAFE_INTEGER, 'TPM 规则 revision')
+  boundedInteger(rule.maxRuns, 1, 10, 'TPM 规则预算')
+  if (!['draft', 'active', 'paused', 'revoked'].includes(rule.status)) throw new Error('TPM 规则状态无效')
+  const input = validateCapabilityInput(rule.capabilityId, rule.input)
+  if (!input.ok || !isDeepStrictEqual(input.input, rule.input) || !KIVO_EVENT_RECORD_TYPES.includes(rule.input.recordType)) throw new Error('TPM 自动目标无效')
+  if (rule.trigger?.kind === KIVO_EVENT_TRIGGER) {
+    exactKeys(rule.trigger, ['kind', 'sourceId'], 'TPM 事件触发')
+    requiredText(rule.trigger.sourceId, 'TPM sourceId')
+    if (rule.effectiveFrom !== null) throw new Error('TPM 事件不能持有每日生效时间')
+  } else normalizeAutomationTrigger(rule.trigger, 'TPM 自动规则 trigger')
+  if (!['daily-time', KIVO_EVENT_TRIGGER].includes(rule.trigger.kind) || rule.eventAcceptAfter !== null) throw new Error('TPM 自动规则触发无效')
+  for (const key of ['createdAt', 'updatedAt']) isoTimestamp(rule[key], `TPM 规则 ${key}`)
+  for (const key of ['effectiveFrom', 'revokedAt']) if (rule[key] !== null) isoTimestamp(rule[key], `TPM 规则 ${key}`)
+  nullableId(rule.notificationIdentityId, 'TPM 通知身份')
+  if (rule.activationId === null) {
+    if (rule.objectId !== null || rule.baselineRevision !== null || rule.handledRevision !== null || !['draft', 'revoked'].includes(rule.status)) throw new Error('未激活 TPM 规则不得持有 baseline 或暂停状态')
+  } else {
+    boundedInteger(rule.activationId, 1, rule.revision, 'TPM activationId')
+    if (rule.status === 'draft' || !uuid(rule.objectId) || !canonicalRevision(rule.baselineRevision) || !canonicalRevision(rule.handledRevision)
+      || BigInt(rule.handledRevision) < BigInt(rule.baselineRevision)) throw new Error('TPM 激活版本状态不闭合')
+    if (rule.trigger.kind === 'daily-time' && !rule.effectiveFrom) throw new Error('TPM 每日生效时间缺失')
+  }
+  if (rule.pauseReason !== null) normalizeChannelError(rule.pauseReason, 'TPM 暂停原因')
+  return rule
+}
+
+function normalizeKivoAutomationOccurrence(value) {
+  exactKeys(value, ['id', 'occurrenceKey', 'ruleId', 'ruleRevision', 'activationId', 'scheduledDate', 'event', 'query', 'workId', 'status', 'reason', 'deliveryId', 'createdAt'], 'TPM 自动发生')
+  for (const key of ['id', 'occurrenceKey', 'ruleId']) requiredText(value[key], `TPM 自动发生 ${key}`)
+  boundedInteger(value.ruleRevision, 1, Number.MAX_SAFE_INTEGER, 'TPM 发生 ruleRevision')
+  boundedInteger(value.activationId, 1, value.ruleRevision, 'TPM 发生 activationId')
+  isoTimestamp(value.createdAt, 'TPM 发生 createdAt')
+  if (value.scheduledDate !== null && !isDateOnly(value.scheduledDate)) throw new Error('TPM 发生 scheduledDate 无效')
+  exactKeys(value.query, ['sourceInstance', 'recordType', 'objectId', 'sourceRevision', 'queriedAt'], 'TPM 当前查询')
+  requiredText(value.query.sourceInstance, 'TPM 查询来源')
+  if (!KIVO_EVENT_RECORD_TYPES.includes(value.query.recordType) || !uuid(value.query.objectId) || !canonicalRevision(value.query.sourceRevision)) throw new Error('TPM 当前查询版本无效')
+  isoTimestamp(value.query.queriedAt, 'TPM 查询时间')
+  if (value.event !== null) {
+    exactKeys(value.event, ['sourceId', 'eventId', 'sourceRevision', 'occurredAt'], 'TPM 事件发生')
+    requiredText(value.event.sourceId, 'TPM 发生 sourceId')
+    if (!uuid(value.event.eventId) || !canonicalRevision(value.event.sourceRevision) || BigInt(value.query.sourceRevision) < BigInt(value.event.sourceRevision)) throw new Error('TPM 事件与查询版本不闭合')
+    isoTimestamp(value.event.occurredAt, 'TPM 事件时间')
+  }
+  nullableId(value.workId, 'TPM 发生工作'); nullableId(value.deliveryId, 'TPM 发生投递')
+  const success = value.workId !== null && value.status === null && value.reason === null
+  const terminal = value.workId === null && ['skipped', 'blocked'].includes(value.status) && text(value.reason)
+  if (!success && !terminal) throw new Error('TPM 自动发生结果不闭合')
+  return value
+}
+
+function normalizeAutomationInbox(value) {
+  exactKeys(value, ['id', 'event', 'fingerprint', 'deliveries', 'targets', 'acceptedAt', 'ignoredReason'], 'Kivo 事件入站')
+  requiredText(value.id, 'Kivo 入站 ID'); isoTimestamp(value.acceptedAt, 'Kivo 受理时间')
+  const event = value.event
+  exactKeys(event, ['sourceId', 'resource', 'sourceInstance', 'adapter', 'kind', 'version', 'eventId', 'recordType', 'objectId', 'sourceRevision', 'occurredAt', 'traceId', 'actorId', 'action', 'before', 'after', 'subject'], 'Kivo typed 事件')
+  for (const key of ['sourceId', 'resource', 'sourceInstance', 'traceId']) requiredText(event[key], `Kivo typed ${key}`)
+  if (event.adapter !== 'mes.native' || event.kind !== 'notification.business_event' || event.version !== 1 || !uuid(event.eventId)
+    || !uuid(event.objectId) || !KIVO_EVENT_RECORD_TYPES.includes(event.recordType) || !canonicalRevision(event.sourceRevision)
+    || event.actorId !== null && !uuid(event.actorId) || event.action !== null && (typeof event.action !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(event.action))) throw new Error('Kivo typed 事件身份无效')
+  isoTimestamp(event.occurredAt, 'Kivo 事件时间')
+  exactKeys(event.subject, ['id', 'type', 'deviceId', 'organizationId', 'organizationAncestorIds'], 'Kivo subject')
+  if (event.subject.id !== event.objectId || event.subject.type !== event.recordType || !uuid(event.subject.deviceId) || !uuid(event.subject.organizationId)
+    || !Array.isArray(event.subject.organizationAncestorIds) || event.subject.organizationAncestorIds.some(id => !uuid(id))) throw new Error('Kivo subject 身份无效')
+  const allowed = { repair: ['status', 'executorId'], maintenance: ['status', 'assigneeId'], inspection: ['status', 'startedAt', 'completedAt'] }[event.recordType]
+  if (!record(event.before) || !record(event.after) || !Object.keys(event.before).length || Object.keys(event.before).sort().join() !== Object.keys(event.after).sort().join()
+    || Object.keys(event.before).some(key => !allowed.includes(key))) throw new Error('Kivo typed 变化无效')
+  for (const changes of [event.before, event.after]) for (const [key, value] of Object.entries(changes)) {
+    if (['executorId', 'assigneeId'].includes(key)) { if (value !== null && !uuid(value)) throw new Error('Kivo typed 人员身份无效') }
+    else if (['startedAt', 'completedAt'].includes(key)) { if (value !== null) isoTimestamp(value, 'Kivo typed 业务时间') }
+    else if (typeof value !== 'string' || !value.trim() || value !== value.trim() || value.length > 64 || /[\u0000-\u001f\u007f]/.test(value)) throw new Error('Kivo typed 状态无效')
+  }
+  if (digest(JSON.stringify(canonical(event))) !== value.fingerprint) throw new Error('Kivo 事件 fingerprint 不匹配')
+  if (!Array.isArray(value.deliveries) || !value.deliveries.length || !Array.isArray(value.targets)) throw new Error('Kivo 事件投递或目标缺失')
+  for (const delivery of value.deliveries) {
+    exactKeys(delivery, ['id', 'rawDigest'], 'Kivo 投递')
+    if (!uuid(delivery.id)) throw new Error('Kivo deliveryId 无效')
+    hexDigest(delivery.rawDigest, 'Kivo rawDigest')
+  }
+  if (new Set(value.deliveries.map(item => item.id)).size !== value.deliveries.length) throw new Error('Kivo 投递重复')
+  for (const target of value.targets) {
+    exactKeys(target, ['ruleId', 'activationId', 'status', 'occurrenceId', 'reason'], 'Kivo 事件目标')
+    requiredText(target.ruleId, 'Kivo 目标 ruleId'); boundedInteger(target.activationId, 1, Number.MAX_SAFE_INTEGER, 'Kivo 目标 activationId')
+    nullableId(target.occurrenceId, 'Kivo 目标 occurrenceId'); nullableId(target.reason, 'Kivo 目标 reason')
+    if (!['pending', 'settled', 'ignored', 'restore-suppressed'].includes(target.status) || (target.status === 'settled') !== (target.occurrenceId !== null)
+      || ['ignored', 'restore-suppressed'].includes(target.status) && target.reason === null) throw new Error('Kivo 事件目标终态不闭合')
+  }
+  if (value.ignoredReason !== (value.targets.length ? null : 'no-active-target')) throw new Error('Kivo 首次无目标状态不闭合')
+  return value
+}
+
+export function kivoAutomationClaimKey(ruleId, query) {
+  return `${ruleId}:kivo:${digest(JSON.stringify([ruleId, query.sourceInstance, query.recordType, query.objectId, query.sourceRevision]))}`
+}
+
+function assertAutomationFactsImmutable(before, after) {
+  for (const previous of before.automationRules) {
+    if (previous.capabilityId !== 'kivo-tpm-record-read') continue
+    const current = after.automationRules.find(item => item.id === previous.id)
+    if (!current || current.ownerMemberId !== previous.ownerMemberId || current.createdAt !== previous.createdAt) throw new Error('TPM 规则归属不可改写或删除')
+    if (previous.status !== 'draft' && (['employeeId', 'skillId', 'connectionId', 'capabilityId'].some(key => current[key] !== previous[key]) || !isDeepStrictEqual(current.input, previous.input)
+      || current.trigger.kind !== previous.trigger.kind || current.trigger.sourceId !== previous.trigger.sourceId)) throw new Error('已激活 TPM 规则身份不可改写')
+    if (previous.activationId !== null && current.activationId === previous.activationId
+      && (current.objectId !== previous.objectId || current.baselineRevision !== previous.baselineRevision || BigInt(current.handledRevision) < BigInt(previous.handledRevision))) throw new Error('TPM activation baseline 或已处理版本不可倒退')
+    if (current.activationId !== previous.activationId && (current.status !== 'active' || !['draft', 'paused'].includes(previous.status) || current.activationId !== current.revision)) throw new Error('TPM activation 只能显式启用或恢复')
+  }
+  for (const previous of before.automationOccurrences) {
+    if (!previous.query) continue
+    const current = after.automationOccurrences.find(item => item.id === previous.id)
+    const { deliveryId: beforeDelivery, ...beforeFact } = previous
+    const { deliveryId: afterDelivery, ...afterFact } = current ?? {}
+    if (!isDeepStrictEqual(beforeFact, afterFact) || beforeDelivery !== null && beforeDelivery !== afterDelivery) throw new Error('TPM 已认领发生不可改写或删除')
+  }
+  for (const previous of before.automationInbox ?? []) {
+    const current = after.automationInbox.find(item => item.id === previous.id)
+    if (!current || !isDeepStrictEqual(current.event, previous.event) || current.fingerprint !== previous.fingerprint || current.acceptedAt !== previous.acceptedAt || current.ignoredReason !== previous.ignoredReason
+      || !appendOnly(previous.deliveries, current.deliveries) || previous.targets.length !== current.targets.length) throw new Error('Kivo 受理事实不可改写或扩展目标')
+    previous.targets.forEach((target, index) => {
+      const next = current.targets[index]
+      if (next.ruleId !== target.ruleId || next.activationId !== target.activationId || target.status !== 'pending' && !isDeepStrictEqual(target, next)) throw new Error('Kivo 终态目标不可复活或改绑')
+    })
+  }
 }
 
 function normalizeConversation(value, channels = false) {

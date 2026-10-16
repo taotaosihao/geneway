@@ -78,6 +78,7 @@ async function missedWindowAndNoBackfillChecks() {
   assert.deepEqual({ ruleId: calls[0].ruleId, scheduledDate: calls[0].scheduledDate, scheduledAt: calls[0].scheduledAt }, { ruleId: 'rule-a', scheduledDate: '2026-09-21', scheduledAt: '2026-09-21T00:00:00.000Z' })
   assert.equal(calls[0].ownerCheck(), true)
   assert.equal(prepared, 0)
+  state.automationRules = state.automationRules.map(({ capabilityId: _current, ...legacy }) => legacy)
   await assert.rejects(automation.acceptDailyOccurrence(calls[0]), { code: 'CAPABILITY_RETIRED' })
   assert.deepEqual(state.automationOccurrences, [])
   assert.deepEqual(state.works, [])
@@ -204,7 +205,7 @@ async function ownerLossCancellationChecks() {
 
 function timerState(ruleIds = ['rule-a']) {
   return {
-    automationRules: ruleIds.map(id => ({ id, status: 'active', maxRuns: 10, effectiveFrom: '2026-09-20T00:00:00.000Z', trigger: { kind: 'daily-time', time: '08:00', timeZone: 'Asia/Shanghai' } })),
+    automationRules: ruleIds.map(id => ({ id, capabilityId: 'kivo-tpm-record-read', status: 'active', maxRuns: 10, effectiveFrom: '2026-09-20T00:00:00.000Z', trigger: { kind: 'daily-time', time: '08:00', timeZone: 'Asia/Shanghai' } })),
     automationOccurrences: [],
   }
 }

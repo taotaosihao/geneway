@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
 import { recoverActionFacts } from '../src/work-service.mjs'
 import { resolveCredentialFile } from '../src/execution-grant.mjs'
+import { KIVO_EVENT_SOURCES_FILE, KIVO_EVENT_TRIGGER, readKivoEventSources } from '../src/kivo-events.mjs'
 
 const scriptPath = fileURLToPath(import.meta.url)
 const root = dirname(dirname(scriptPath))
@@ -30,6 +31,7 @@ async function backup(outputArg, options = {}) {
   if (!outputArg) throw new Error('backup 需要 --output')
   const output = resolve(outputArg)
   const statePath = resolve(process.env.GENEWAY_STATE ?? join(root, 'var', STATE_PATH))
+  const dataRoot = dirname(statePath)
   const dshHome = resolve(process.env.GENEWAY_DSH_HOME ?? join(root, 'var', 'dsh'))
   const target = await emptyTarget(output)
   await requireNoSymlinkComponents(output, '备份输出路径')
@@ -41,12 +43,15 @@ async function backup(outputArg, options = {}) {
     const sourceStateBuffer = await readFileFromStart(stateFile.handle)
     const sourceState = parseState(sourceStateBuffer, { versions: [STATE_VERSION] })
     const sourceHash = digest(sourceStateBuffer)
+    const eventSources = await readKivoEventSources(dataRoot)
+    requireEventSources(sourceState, eventSources.sources)
     const createdAt = new Date().toISOString()
     const state = interruptActiveForBackup(sourceState, createdAt)
     migrateState(structuredClone(state))
     const stateBuffer = state === sourceState ? sourceStateBuffer : Buffer.from(JSON.stringify(state, null, 2) + '\n')
     const sessionRefs = collectSessionRefs(state)
     const files = [{ path: STATE_PATH, buffer: stateBuffer, bytes: stateBuffer.length, sha256: digest(stateBuffer) }]
+    if (eventSources.buffer !== null) files.push({ path: KIVO_EVENT_SOURCES_FILE, buffer: eventSources.buffer, bytes: eventSources.buffer.length, sha256: eventSources.sha256 })
     const sessionsRoot = join(dshHome, 'sessions')
     if (await pathExists(dshHome)) await requireDirectory(dshHome, 'DSH 根目录')
     if (await pathExists(sessionsRoot)) {
@@ -76,8 +81,10 @@ async function backup(outputArg, options = {}) {
     if (secretPaths) {
       // Reopen the live path: the original descriptor can point at a pre-rename state inode.
       await unchangedState(statePath, sourceHash)
-      secrets = await openSecrets(secretPaths.root, collectSecretRefs(state), opened)
+      await unchangedSources(dataRoot, eventSources.sha256)
+      secrets = await openSecrets(secretPaths.root, collectSecretRefs(state, eventSources.sources), opened)
       await unchangedState(statePath, sourceHash)
+      await unchangedSources(dataRoot, eventSources.sha256)
     }
     await buildAndPublish(output, target, async stage => {
       for (const file of files) await copyOpenFile(file, join(stage, ...file.path.split('/')))
@@ -85,11 +92,13 @@ async function backup(outputArg, options = {}) {
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
       await chmod(manifestPath, 0o600)
       await verifyBuilt(stage, manifest.entries)
+      await unchangedSources(dataRoot, eventSources.sha256)
     })
     if (secretPaths) {
       try {
         await unchangedState(statePath, sourceHash)
-        await publishSecrets(secretPaths.package, secretPaths.target, secrets, { stateSha256: digest(stateBuffer), createdAt })
+        await unchangedSources(dataRoot, eventSources.sha256)
+        await publishSecrets(secretPaths.package, secretPaths.target, secrets, { stateSha256: digest(stateBuffer), sourcesSha256: eventSources.sha256, createdAt }, dataRoot)
       } catch (cause) { throw new Error('普通备份已写入，秘密包未完成；请使用新目标重新制作配对备份', { cause }) }
     }
     console.log(JSON.stringify({ command: 'backup', output, entries: files.length, bytes: files.reduce((total, item) => total + item.bytes, 0), sessionRefs: includedSessionRefs.length }))
@@ -120,7 +129,7 @@ async function restore(inputArg, dataRootArg, options = {}) {
       const path = safeRelative(entry.path)
       if (seen.has(path)) throw new Error(`备份 entry 重复：${path}`)
       seen.add(path)
-      if (path !== STATE_PATH && !SESSION_PATH.test(path)) throw new Error(`备份路径不在允许范围：${path}`)
+      if (path !== STATE_PATH && path !== KIVO_EVENT_SOURCES_FILE && !SESSION_PATH.test(path)) throw new Error(`备份路径不在允许范围：${path}`)
       const file = await openRegularPath(input, path)
       opened.push(file)
       const actualHash = await sha256(file.handle)
@@ -130,8 +139,11 @@ async function restore(inputArg, dataRootArg, options = {}) {
     if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
     const stateFile = files.find(item => item.path === STATE_PATH)
     const sourceStateBuffer = await readFileFromStart(stateFile.file.handle)
-    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, 8, 9, STATE_VERSION], migrate: false })
-    const secrets = secretPaths ? await verifySecretPackage(secretPaths.package, digest(sourceStateBuffer), collectSecretRefs(sourceState), opened) : undefined
+    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, 8, 9, 10, STATE_VERSION], migrate: false })
+    const eventSources = await readKivoEventSources(input)
+    if (eventSources.sha256 !== (files.find(file => file.path === KIVO_EVENT_SOURCES_FILE)?.sha256 ?? null)) throw new Error('备份事件来源未列入 manifest 或摘要不匹配')
+    requireEventSources(sourceState, eventSources.sources)
+    const secrets = secretPaths ? await verifySecretPackage(secretPaths.package, { stateSha256: digest(sourceStateBuffer), sourcesSha256: eventSources.sha256 }, collectSecretRefs(sourceState, eventSources.sources), opened) : undefined
     const sessionRefs = collectSessionRefs(sourceState)
     const expectedSchema = schemaSummary(sourceState, sessionRefs)
     if (JSON.stringify(manifest.schema) !== JSON.stringify(expectedSchema)) throw new Error('备份 schema 摘要不匹配')
@@ -146,9 +158,12 @@ async function restore(inputArg, dataRootArg, options = {}) {
     const state = prepareRestoredState(sourceState)
     assertNoSecretKeys(state)
     const restoredStateBuffer = Buffer.from(JSON.stringify(state, null, 2) + '\n')
+    const restoredSourcesBuffer = Buffer.from(JSON.stringify({ version: 1, sources: eventSources.sources.map(source => ({ ...source, enabled: false })) }, null, 2) + '\n')
     const restoredEntries = files.map(file => file.path === STATE_PATH
       ? { path: STATE_PATH, buffer: restoredStateBuffer, bytes: restoredStateBuffer.length, sha256: digest(restoredStateBuffer) }
-      : file)
+      : file.path === KIVO_EVENT_SOURCES_FILE
+        ? { path: KIVO_EVENT_SOURCES_FILE, buffer: restoredSourcesBuffer, bytes: restoredSourcesBuffer.length, sha256: digest(restoredSourcesBuffer) }
+        : file)
 
     // All manifest, path, type, byte, hash, source schema and migration checks finish before the first target byte is written.
     await buildAndPublish(dataRoot, target, async stage => {
@@ -238,6 +253,9 @@ export function prepareRestoredState(sourceState, timestamp = new Date().toISOSt
     automationRules: state.automationRules.map(rule => rule.status === 'active'
       ? { ...rule, status: 'paused', revision: rule.revision + 1, updatedAt: timestamp }
       : rule),
+    automationInbox: state.automationInbox.map(entry => ({ ...entry, targets: entry.targets.map(target => target.status === 'pending'
+      ? { ...target, status: 'restore-suppressed', reason: 'restore-suppressed', occurrenceId: null }
+      : target) })),
     channelApps: state.channelApps.map(app => app.enabled || app.status !== 'disabled'
       ? { ...app, enabled: false, status: 'disabled', revision: app.revision + 1, updatedAt: timestamp }
       : app),
@@ -291,7 +309,14 @@ function collectSessionRefs(state) {
   return [...refs].sort()
 }
 
-function collectSecretRefs(state) {
+function requireEventSources(state, sources) {
+  const ids = new Set(sources.map(source => source.id))
+  const required = new Set((state.automationRules ?? []).filter(rule => rule.capabilityId === 'kivo-tpm-record-read' && rule.trigger.kind === KIVO_EVENT_TRIGGER && rule.status !== 'revoked').map(rule => rule.trigger.sourceId))
+  for (const entry of state.automationInbox ?? []) if (entry.targets.some(target => target.status === 'pending')) required.add(entry.event.sourceId)
+  if ([...required].some(id => !ids.has(id))) throw new Error('可恢复事件规则或待处理目标缺少事件来源配置')
+}
+
+function collectSecretRefs(state, sources = []) {
   const refs = new Set()
   const add = ref => {
     if (ref === null || ref === undefined) return
@@ -302,6 +327,7 @@ function collectSecretRefs(state) {
   for (const identity of state.channelIdentities ?? []) if (identity.weixin) for (const key of ['tokenRef', 'cursorRef', 'contextRef']) add(identity.weixin[key])
   // QR references are allocated before login; only the published challenge exists at this stage.
   for (const link of state.linkCodes ?? []) if (link.kind === 'weixin-qr' && link.qrcodeUrl) add(link.loginRef)
+  for (const source of sources) add(source.signingSecretRef)
   return [...refs].sort()
 }
 
@@ -341,6 +367,10 @@ async function unchangedState(statePath, expectedHash) {
   finally { await current.handle.close() }
 }
 
+async function unchangedSources(dataRoot, expectedHash) {
+  if ((await readKivoEventSources(dataRoot)).sha256 !== expectedHash) throw new Error('事件来源配置在备份期间变化，请重新备份')
+}
+
 async function openSecrets(secretRoot, refs, opened) {
   const files = []
   for (const ref of refs) {
@@ -353,23 +383,26 @@ async function openSecrets(secretRoot, refs, opened) {
   return files
 }
 
-async function publishSecrets(packagePath, target, files, { stateSha256, createdAt }) {
-  const manifest = { format: 'geneway-secret-transfer', version: 1, createdAt, stateSha256, entries: files.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 })) }
+async function publishSecrets(packagePath, target, files, { stateSha256, sourcesSha256, createdAt }, dataRoot) {
+  const manifest = { format: 'geneway-secret-transfer', version: sourcesSha256 === null ? 1 : 2, createdAt, stateSha256, ...(sourcesSha256 === null ? {} : { sourcesSha256 }), entries: files.map(({ path, bytes, sha256 }) => ({ path, bytes, sha256 })) }
   await buildAndPublish(packagePath, target, async stage => {
     for (const file of files) await copyOpenFile(file, join(stage, ...file.path.split('/')))
     await writeFile(join(stage, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
     await verifyBuilt(stage, manifest.entries)
+    await unchangedSources(dataRoot, sourcesSha256)
   })
 }
 
-async function verifySecretPackage(packagePath, stateSha256, refs, opened) {
+async function verifySecretPackage(packagePath, { stateSha256, sourcesSha256 }, refs, opened) {
   const manifestFile = await openRegularPath(packagePath, 'manifest.json')
   opened.push(manifestFile)
   requirePrivateFile(manifestFile)
   let manifest
   try { manifest = JSON.parse((await readFileFromStart(manifestFile.handle)).toString('utf8')) } catch { throw new Error('秘密包 manifest JSON 无效') }
-  if (!record(manifest) || Object.keys(manifest).sort().join(',') !== 'createdAt,entries,format,stateSha256,version'
-    || manifest.format !== 'geneway-secret-transfer' || manifest.version !== 1 || manifest.stateSha256 !== stateSha256
+  const keys = sourcesSha256 === null ? 'createdAt,entries,format,stateSha256,version' : 'createdAt,entries,format,sourcesSha256,stateSha256,version'
+  if (!record(manifest) || Object.keys(manifest).sort().join(',') !== keys
+    || manifest.format !== 'geneway-secret-transfer' || manifest.version !== (sourcesSha256 === null ? 1 : 2) || manifest.stateSha256 !== stateSha256
+    || sourcesSha256 !== null && manifest.sourcesSha256 !== sourcesSha256
     || typeof manifest.createdAt !== 'string' || !Number.isFinite(Date.parse(manifest.createdAt)) || !Array.isArray(manifest.entries)) throw new Error('秘密包与普通备份不匹配')
   const paths = manifest.entries.map(entry => { validateEntry(entry); return safeRelative(entry.path) })
   if (JSON.stringify(paths) !== JSON.stringify(refs.map(ref => `secrets/${ref}`))) throw new Error('秘密包引用集合与产品状态不匹配')

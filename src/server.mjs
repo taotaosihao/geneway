@@ -18,6 +18,7 @@ import { createWeixinChannelRuntime } from '../plugins/weixin.mjs'
 import { createChannelSecretStore } from './channel-secret-store.mjs'
 import { ChannelServiceError, createChannelService } from './channel-service.mjs'
 import { AutomationServiceError, createAutomationRuntime, createAutomationService } from './automation-service.mjs'
+import { readKivoEventBody, readKivoEventSources, readKivoSigningSecret, verifyKivoEvent } from './kivo-events.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
@@ -59,7 +60,10 @@ export async function start({ feishuSdk, weixinApi } = {}) {
       const result = await testKivoTpmConnection({ connection, secretRoot: runtimeConfig.secretRoot, authorize })
       return `MCP ${result.protocolVersion}；工具目录：${result.toolNames.join('、')}。目录测试通过不代表机器账号对象范围非空。`
     },
-    onAutomationTerminal: () => channelRuntime?.sendAutomationNotifications({ ownerCheck: () => automationRuntime?.ownsLock() === true }),
+    onAutomationTerminal: async refs => {
+      await automation.handleWorkTerminal(refs)
+      await channelRuntime?.sendAutomationNotifications({ ownerCheck: () => automationRuntime?.ownsLock() === true })
+    },
   })
   const conversationService = createConversationService({ store, runner: collaborationRunner, connectionCatalog, onError: error => console.error('渠道回复处理失败', /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code) ? error.code : 'INTERNAL_ERROR'), onTurnTerminal: async refs => {
     const created = await channel.ensureConversationDeliveries(refs)
@@ -69,7 +73,8 @@ export async function start({ feishuSdk, weixinApi } = {}) {
   } })
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
-  const automation = createAutomationService({ store, workService: service, connectionCatalog })
+  const readEventSources = () => readKivoEventSources(runtimeConfig.dataRoot)
+  const automation = createAutomationService({ store, workService: service, connectionCatalog, secretRoot: runtimeConfig.secretRoot, readEventSources, eventSourceReady: () => automationRuntime?.ownsLock() === true })
   automationRuntime = createAutomationRuntime({
     store, automationService: automation, workService: service, dataRoot: runtimeConfig.dataRoot,
     onError: error => console.error(error),
@@ -96,7 +101,7 @@ export async function start({ feishuSdk, weixinApi } = {}) {
     await automationRuntime.close().catch(() => undefined)
     throw error
   }
-  const server = createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog, store, auth, index, trustedOrigin })
+  const server = createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog, store, auth, index, trustedOrigin, readEventSources, secretRoot: runtimeConfig.secretRoot })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
   let shuttingDown = false
@@ -111,13 +116,30 @@ export async function start({ feishuSdk, weixinApi } = {}) {
   return server
 }
 
-export function createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog = [], store, auth, index = '', trustedOrigin }) {
+export function createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog = [], store, auth, index = '', trustedOrigin, readEventSources = async () => ({ sources: [] }), secretRoot }) {
   if (!service || !store || !auth || !trustedOrigin) throw new Error('server dependencies are required')
   channel ??= createChannelService({ store, workService: service, conversationService, connectionCatalog })
   const channelRuntimeReady = channelAppId => channelRuntime?.isAvailable?.(channelAppId) === true
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', trustedOrigin)
+      const eventMatch = url.pathname.match(/^\/api\/events\/kivo\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/)
+      if (request.method === 'POST' && eventMatch) {
+        try {
+          exactQuery(url)
+          if (!automationRuntime?.ownsLock()) throw Object.assign(new Error('owner unavailable'), { code: 'OWNER_NOT_RUNNING' })
+          const config = await readEventSources(), source = config.sources.find(item => item.id === eventMatch[1] && item.enabled)
+          if (!source) throw Object.assign(new Error('source unavailable'), { code: 'SOURCE_NOT_CONFIGURED' })
+          const rawBody = await readKivoEventBody(request)
+          const signingKey = await readKivoSigningSecret(secretRoot, source.signingSecretRef)
+          const verified = verifyKivoEvent({ rawBody, rawHeaders: request.rawHeaders, source, signingKey })
+          return sendJson(response, 202, await automationRuntime.acceptKivoEvent({ ...verified, sourceConfigSha256: config.sha256 }))
+        } catch (error) {
+          const status = EVENT_ERROR_STATUS[error?.code] ?? 503
+          const code = Object.hasOwn(EVENT_ERROR_STATUS, error?.code) ? error.code : 'STORAGE_UNAVAILABLE'
+          return sendJson(response, status, { error: { code, message: EVENT_ERROR_MESSAGES[code], status } })
+        }
+      }
       if (request.method === 'GET' && url.pathname === '/') return send(response, 200, index, 'text/html; charset=utf-8')
       if (request.method === 'GET' && url.pathname === '/favicon.ico') return send(response, 204, '', 'image/x-icon')
 
@@ -188,11 +210,11 @@ export function createGenewayServer({ service, conversationService, knowledge, c
       }
       if (request.method === 'GET' && url.pathname === '/api/automations') {
         exactQuery(url)
-        return sendJson(response, 200, automation ? { rules: await automation.listRules(actor), occurrences: await automation.listOccurrences(actor), eventSource: automation.eventSourceCapability() } : { rules: [], occurrences: [], eventSource: { status: 'unavailable', code: 'SOURCE_NOT_CONFIGURED' } })
+        return sendJson(response, 200, automation ? { rules: await automation.listRules(actor), occurrences: await automation.listOccurrences(actor), eventSource: await automation.eventSourceCapability(actor) } : { rules: [], occurrences: [], eventSource: { status: 'unavailable', code: 'SOURCE_NOT_CONFIGURED', reconcileIntervalSeconds: 60, sources: [] } })
       }
       if (automation && request.method === 'POST' && url.pathname === '/api/automations') {
         exactQuery(url)
-        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationIdentityId'])
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['employeeId', 'skillId', 'connectionId', 'workOrderId', 'input', 'trigger', 'maxRuns', 'notificationIdentityId'])
         const rule = await automation.createRule(actor, body)
         return sendJson(response, 200, rule)
       }
@@ -200,11 +222,11 @@ export function createGenewayServer({ service, conversationService, knowledge, c
       if (automation && automationMatch && request.method === 'GET' && !automationMatch[2]) {
         exactQuery(url)
         const id = decode(automationMatch[1])
-        return sendJson(response, 200, { rule: await automation.getRule(actor, id), occurrences: await automation.listOccurrences(actor, id), eventSource: automation.eventSourceCapability() })
+        return sendJson(response, 200, { rule: await automation.getRule(actor, id), occurrences: await automation.listOccurrences(actor, id), eventSource: await automation.eventSourceCapability(actor) })
       }
       if (automation && automationMatch && request.method === 'PATCH' && !automationMatch[2]) {
         exactQuery(url)
-        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'trigger', 'maxRuns', 'notificationIdentityId'])
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'employeeId', 'skillId', 'connectionId', 'workOrderId', 'input', 'trigger', 'maxRuns', 'notificationIdentityId'])
         const rule = await automation.updateRule(actor, decode(automationMatch[1]), body)
         await automationRuntime?.refresh?.()
         return sendJson(response, 200, rule)
@@ -518,9 +540,21 @@ const CHANNEL_ERROR_STATUS = {
 const AUTOMATION_ERROR_STATUS = {
   INVALID_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404,
   REVISION_CONFLICT: 409, INVALID_STATE: 409, BUDGET_EXHAUSTED: 409, CONFLICT: 409, CAPABILITY_RETIRED: 409,
-  SOURCE_NOT_CONFIGURED: 503,
+  SOURCE_NOT_CONFIGURED: 503, UPSTREAM_ERROR: 502, UPSTREAM_TIMEOUT: 504, INVALID_SOURCE: 502,
   OWNER_NOT_RUNNING: 503, OWNER_LOCK_LOST: 503,
 }
+
+const EVENT_ERROR_STATUS = Object.freeze({
+  INVALID_REQUEST: 400, EVENT_SIGNATURE_INVALID: 401, EVENT_INVALID: 400, EVENT_SOURCE_INVALID: 403,
+  EVENT_BODY_TOO_LARGE: 413, EVENT_BODY_TIMEOUT: 408, CONFLICT: 409,
+  SOURCE_NOT_CONFIGURED: 503, OWNER_NOT_RUNNING: 503, OWNER_LOCK_LOST: 503,
+})
+const EVENT_ERROR_MESSAGES = Object.freeze({
+  INVALID_REQUEST: '事件请求无效', EVENT_SIGNATURE_INVALID: '事件签名无效或已过期', EVENT_INVALID: '事件格式无效',
+  EVENT_SOURCE_INVALID: '事件来源未获准', EVENT_BODY_TOO_LARGE: '事件正文超出限制', EVENT_BODY_TIMEOUT: '事件正文读取超时',
+  CONFLICT: '相同事件或投递标识内容不一致', SOURCE_NOT_CONFIGURED: '事件来源当前不可用',
+  OWNER_NOT_RUNNING: '事件接收暂不可用', OWNER_LOCK_LOST: '事件接收暂不可用', STORAGE_UNAVAILABLE: '事件尚未持久受理，请核对来源投递状态',
+})
 
 const CONVERSATION_ERROR_STATUS = {
   INVALID_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404,

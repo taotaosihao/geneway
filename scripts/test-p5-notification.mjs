@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,6 +9,8 @@ import { createAutomationService } from '../src/automation-service.mjs'
 import { createChannelService } from '../src/channel-service.mjs'
 import { migrateState } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
+import { getCapability, parseCapabilityToolResult } from '../src/capabilities.mjs'
+import { normalizeTpmObservation } from '../src/domain/tpm.mjs'
 
 const now = '2026-09-21T00:00:00.000Z'
 let sequence = 0
@@ -15,6 +18,7 @@ const ids = () => `n-${++sequence}`
 
 await deliveryLifecycle()
 await terminalCallback()
+await kivoNotificationChecks()
 await runtimeOwnerGates()
 console.log('P5 automation notification checks passed; fake SDK only; extra work/execution=0; blind unknown retries=0')
 
@@ -207,6 +211,7 @@ function fakeSdk() {
       this.im = { v1: { message: { create: async request => {
         fake.calls.push(structuredClone(request))
         fake.afterIo?.()
+        if (fake.responseGate) await fake.responseGate
         const outcome = fake.outcomes.shift() ?? 'success'
         return outcome === 'failed' ? { code: 230001 } : { code: 0, data: { message_id: `om-${fake.calls.length}`, chat_id: request.data.receive_id } }
       } } } }
@@ -215,4 +220,117 @@ function fakeSdk() {
   }
   fake.WSClient = class { constructor(options) { this.options = options } async start({ eventDispatcher }) { this.eventDispatcher = eventDispatcher; this.options.onReady() } close() {} }
   return fake
+}
+
+async function kivoNotificationChecks() {
+  const capability = getCapability('kivo-tpm-record-read'), owner = { id: 'member-owner' }
+  const deviceId = '00000000-0000-4000-8000-000000000002', objectId = '00000000-0000-4000-8000-000000000001'
+  const connection = { id: 'connection-owner', name: '合成Kivo', kind: 'kivo-mcp', targetIdentity: 'pure-kivo', baseUrl: 'http://127.0.0.1:41001/api/v1/mes/mcp', issuer: 'http://127.0.0.1:41001', clientId: '00000000-0000-4000-8000-000000000003', credentialRef: 'not-read.pem', revision: 1, enabled: true, status: 'ready', allowedObjectIds: [], skillIds: [capability.skillId], sourceSystem: 'Kivo', sourceInstance: 'pure-a', sourceEnvironment: 'pure-test', dataMode: 'synthetic', evidenceMode: 'controlled-function' }
+  const trusted = Object.fromEntries(['kind', 'targetIdentity', 'baseUrl', 'issuer', 'clientId', 'credentialRef', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode'].map(key => [key, connection[key]]))
+  const source = { system: 'kivo', path: '/api/v1/mes/tpm/repairs/R-1', queriedAt: now, traceId: 'pure-notification' }
+  const observation = normalizeTpmObservation({ mode: 'record', input: { recordType: 'repair', reference: 'R-1' }, connection,
+    result: { status: 'ok', source, value: { id: objectId, orderNo: 'R-1', deviceId, status: 'reported', revision: 1 } },
+    deviceResult: { status: 'ok', source: { ...source, path: '/api/v1/mes/equipment/ledger/devices/' + deviceId }, value: { id: deviceId, lifecycleStatus: 'active' } } })
+  async function setup(catalog = [trusted]) {
+    const seed = fixture()
+    seed.skills = [{ id: capability.skillId, capabilityId: capability.id, enabled: true }]
+    seed.connections = [connection]
+    seed.employees[0] = { ...seed.employees[0], skillIds: [capability.skillId], connectionIds: [connection.id] }
+    const memory = memoryStore(migrateState(seed))
+    const workService = createWorkService({ store: memory, connectionCatalog: [trusted], clock: () => now })
+    const automation = createAutomationService({ store: memory, workService: { ...workService, async ensureReady() {}, async dispatchAutomationWork() {} }, connectionCatalog: [trusted], clock: () => now, idFactory: ids,
+      readCurrentRecord: async ({ authorize }) => { await authorize(); return structuredClone(observation) } })
+    const rule = await automation.createRule(owner, { employeeId: 'employee-owner', skillId: capability.skillId, connectionId: connection.id, input: { recordType: 'repair', reference: 'R-1' }, trigger: { kind: 'daily-time', time: '08:00', timeZone: 'Asia/Shanghai' }, maxRuns: 2, notificationIdentityId: 'identity-owner' })
+    const active = await automation.enableRule(owner, rule.id, { expectedRevision: rule.revision })
+    const admission = await automation.acceptManualOccurrence(owner, rule.id, { expectedRevision: active.revision, clientRequestId: 'notification-work' })
+    await memory.update(state => ({ ...state, works: state.works.map(work => {
+      const result = { ...parseCapabilityToolResult(capability.id, { ok: true, observation }, work.input), id: 'tpm-notify-result', capabilityId: capability.id, skillId: capability.skillId, schemaVersion: 1, input: work.input, explanation: '合成单据当前状态已核对', createdAt: now, dshSessionRef: 'explicit-pure-fixture', contextConfirmationRefs: [] }
+      return { ...work, status: 'completed', results: [result], executions: work.executions.map(execution => ({ ...execution, status: 'completed', completedAt: now, resultId: result.id })) }
+    }) }))
+    const channel = createChannelService({ store: memory, workService, connectionCatalog: catalog, clock: () => now, idFactory: ids })
+    return { memory, automation, channel, active, workId: admission.workId }
+  }
+  const positive = await setup(), before = counts(await positive.memory.read())
+  const delivery = (await positive.channel.ensureAutomationDeliveries()).deliveries[0]
+  assert.equal(delivery.status, 'pending')
+  await positive.channel.authorizeDelivery({ deliveryId: delivery.id })
+  const envelope = await positive.channel.validateSendClaim({ deliveryId: delivery.id })
+  assert.match(envelope.text, /合成单据当前状态已核对/)
+  assert.deepEqual(counts(await positive.memory.read()), before)
+  await positive.channel.recordDeliveryOutcome({ deliveryId: delivery.id, status: 'failed', error: { code: 'SYNTHETIC_RETRY' } })
+  await positive.automation.updateRule(owner, positive.active.id, { expectedRevision: positive.active.revision, maxRuns: 3 })
+  await assert.rejects(positive.channel.retryDelivery({ deliveryId: delivery.id }), hasCode('DELIVERY_FORBIDDEN'), 'config revision invalidates the prior occurrence notification')
+
+  const changedBeforeCreation = await setup()
+  await changedBeforeCreation.automation.updateRule(owner, changedBeforeCreation.active.id, { expectedRevision: changedBeforeCreation.active.revision, maxRuns: 3 })
+  assert.equal((await changedBeforeCreation.channel.ensureAutomationDeliveries()).deliveries[0].status, 'blocked')
+
+  const noTrust = await setup([])
+  assert.equal((await noTrust.channel.ensureAutomationDeliveries()).deliveries[0].status, 'blocked', 'TPM notification must use the same trusted catalogue as work authorization')
+  for (const revoke of [
+    state => { state.members[0].employeeIds = [] },
+    state => { state.skills[0].enabled = false },
+    state => { state.modelRoutes[0].enabled = false },
+    state => { state.connections[0].enabled = false },
+    state => { state.connections[0].credentialRef = 'unregistered-rotation.pem'; state.connections[0].revision += 1 },
+  ]) {
+    const sample = await setup(), delivery = (await sample.channel.ensureAutomationDeliveries()).deliveries[0]
+    await sample.channel.authorizeDelivery({ deliveryId: delivery.id })
+    await sample.memory.update(state => { revoke(state); return state })
+    await assert.rejects(sample.channel.validateSendClaim({ deliveryId: delivery.id }), hasCode('DELIVERY_FORBIDDEN'))
+  }
+  const segmented = await setup(), segmentDelivery = (await segmented.channel.ensureAutomationDeliveries()).deliveries[0]
+  await segmented.channel.authorizeDelivery({ deliveryId: segmentDelivery.id })
+  const segmentEnvelope = await segmented.channel.validateSendClaim({ deliveryId: segmentDelivery.id })
+  const sha = value => createHash('sha256').update(value).digest('hex'), attemptId = segmentEnvelope.uuid, textDigest = sha(segmentEnvelope.text)
+  const firstPart = { index: 0, clientId: 'geneway-weixin-' + sha(attemptId + '\0' + 0).slice(0, 32) }
+  await segmented.channel.validateSendClaim({ deliveryId: segmentDelivery.id, attemptId, totalParts: 2, textDigest, partIndex: 0, clientId: firstPart.clientId })
+  await segmented.automation.pauseRule(owner, segmented.active.id, { expectedRevision: segmented.active.revision })
+  await segmented.channel.recordSendProgress({ deliveryId: segmentDelivery.id, attemptId, totalParts: 2, textDigest, status: 'sending', acknowledgedParts: [firstPart] })
+  await assert.rejects(segmented.channel.validateSendClaim({ deliveryId: segmentDelivery.id, attemptId, totalParts: 2, textDigest, partIndex: 1, clientId: 'geneway-weixin-' + sha(attemptId + '\0' + 1).slice(0, 32) }), hasCode('DELIVERY_FORBIDDEN'))
+  const partial = (await segmented.memory.read()).deliveries[0]
+  assert.equal(partial.status, 'unknown')
+  assert.deepEqual(partial.sendProgress.acknowledgedParts, [firstPart], 'known ACK prefix survives while the next segment is forbidden')
+
+  const runtimeRoot = await mkdtemp(join(tmpdir(), 'geneway-kivo-notify-flight-'))
+  await writeFile(join(runtimeRoot, 'FEISHU_TEST'), JSON.stringify({ appId: 'cli_aaaaaaaaaaaaaaaa', appSecret: 'synthetic_flight_secret' }), { mode: 0o600 })
+  try {
+    for (const operation of ['pause', 'budget', 'known-failure', 'timeout', 'before-io']) {
+      const sample = await setup(), fake = fakeSdk()
+      let reached, release
+      const entered = new Promise(resolve => { reached = resolve })
+      fake.responseGate = new Promise(resolve => { release = resolve }); fake.afterIo = reached
+      if (operation === 'known-failure') fake.outcomes.push('failed')
+      const channel = operation === 'before-io' ? { ...sample.channel, async authorizeDelivery(input) {
+        const claimed = await sample.channel.authorizeDelivery(input)
+        await sample.automation.pauseRule(owner, sample.active.id, { expectedRevision: sample.active.revision })
+        return claimed
+      } } : sample.channel
+      const runtime = createFeishuRuntime({ store: sample.memory, channelService: channel, secretRoot: runtimeRoot, recover: false, flushOnStart: false,
+        sdk: { ...Lark, Client: fake.Client, WSClient: fake.WSClient }, httpTimeoutMs: operation === 'timeout' ? 20 : 1000, automationOwnerCheck: () => true })
+      try {
+        await runtime.start()
+        const sending = runtime.sendAutomationNotifications({ ownerCheck: () => true })
+        if (operation === 'before-io') {
+          await sending
+          assert.equal(fake.calls.length, 0, 'pause before I/O must still stop the request')
+          assert.equal((await sample.memory.read()).deliveries[0].status, 'unknown')
+          continue
+        }
+        await entered
+        if (operation === 'budget') await sample.automation.updateRule(owner, sample.active.id, { expectedRevision: sample.active.revision, maxRuns: 3 })
+        else await sample.automation.pauseRule(owner, sample.active.id, { expectedRevision: sample.active.revision })
+        assert.equal((await sample.memory.read()).deliveries[0].status, 'sending', 'rule edit must leave the original in-flight attempt for actual settlement')
+        if (operation !== 'timeout') release()
+        await sending
+        const final = (await sample.memory.read()).deliveries[0]
+        assert.equal(final.status, operation === 'known-failure' ? 'failed' : operation === 'timeout' ? 'unknown' : 'delivered')
+        assert.equal(final.providerMessageId, ['pause', 'budget'].includes(operation) ? 'om-1' : undefined)
+        assert.equal(fake.calls.length, 1)
+        if (operation === 'timeout') { release(); await new Promise(resolve => setImmediate(resolve)); assert.equal((await sample.memory.read()).deliveries[0].status, 'unknown', 'a timed-out attempt must not blindly settle a late SDK response') }
+        await assert.rejects(sample.channel.retryDelivery({ deliveryId: final.id }), hasCode(operation === 'known-failure' ? 'DELIVERY_FORBIDDEN' : 'INVALID_STATE'))
+      } finally { release(); await runtime.close() }
+    }
+  } finally { await rm(runtimeRoot, { recursive: true, force: true }) }
+
 }

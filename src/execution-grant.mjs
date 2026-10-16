@@ -62,12 +62,13 @@ export async function authorizeExecutionGrant(grant, { readState = readPolicySta
 
   const occurrence = (state.automationOccurrences ?? []).find(item => item?.workId === work.id)
   if (occurrence) {
-    if (KIVO_TPM_CAPABILITIES.has(grant.capabilityId)) throw grantError('FORBIDDEN', '当前自动规则不支持 TPM 执行')
     const rule = (state.automationRules ?? []).find(item => item?.id === occurrence.ruleId)
     const workOrderId = work.input?.workOrderId
     if (!rule || rule.status !== 'active' || rule.ownerMemberId !== member.id
       || rule.employeeId !== work.employeeId || rule.skillId !== work.skillId || rule.connectionId !== work.connectionId
-      || rule.workOrderId !== workOrderId) throw grantError('FORBIDDEN', '当前自动规则授权已失效')
+      || (KIVO_TPM_CAPABILITIES.has(grant.capabilityId)
+        ? rule.capabilityId !== KIVO_TPM_RECORD_READ_CAPABILITY || !isDeepStrictEqual(rule.input, work.input) || rule.activationId !== occurrence.activationId
+        : rule.workOrderId !== workOrderId)) throw grantError('FORBIDDEN', '当前自动规则授权已失效')
   }
 
   const capability = getCapability(grant.capabilityId)

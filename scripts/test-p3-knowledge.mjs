@@ -20,7 +20,7 @@ function checkMigrations() {
   const emptyChannels = Object.fromEntries(['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes'].map(key => [key, []]))
   assert.equal(migrated.version, STATE_VERSION)
   assert.deepEqual(migrated.knowledgeMaterials, [])
-  assert.deepEqual(migrated, { ...v4, version: STATE_VERSION, works: v4.works.map(work => ({ ...work, actions: [], conversationId: null })), knowledgeMaterials: [], ...emptyChannels, automationRules: [], automationOccurrences: [], conversations: [], defaultChannelEmployeeId: null })
+  assert.deepEqual(migrated, { ...v4, version: STATE_VERSION, works: v4.works.map(work => ({ ...work, actions: [], conversationId: null })), knowledgeMaterials: [], ...emptyChannels, automationRules: [], automationOccurrences: [], automationInbox: [], conversations: [], defaultChannelEmployeeId: null })
   assert.equal(migrated.works[0].id, v4.works[0].id)
   assert.equal(migrated.works[0].results[0].id, v4.works[0].results[0].id)
   assert.equal(migrated.works[0].results[0].dshSessionRef, 'session-stable')

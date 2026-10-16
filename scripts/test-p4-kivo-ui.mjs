@@ -263,7 +263,7 @@ async function checkUi(bootstrap, adminBootstrap, adminSkills) {
   assert.equal(navigationHistory.at(-1), '?view=work&work=work%2Fnavigation')
   box.api = previousApi
   assert.ok(index.includes('id="quantity"') && index.includes('id="available-seconds"'))
-  assert.doesNotMatch(index, /id="(?:automation-form|new-automation|gearjob-input)"/)
+  assert.doesNotMatch(index, /id="gearjob-input"/)
   // Drive the existing collaborative form helpers, then the real continuation handler.
   for(const prefix of ['collab-a','collab-b']){node(prefix+'-employee').value=employee.id}
   node('work-employee').value=employee.id;node('work-mode').value='collaboration';runInContext('updateCreateOptions()',box)

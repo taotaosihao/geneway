@@ -225,11 +225,11 @@ async function liveEventCapabilityLossChecks() {
   runtime = createAutomationRuntime({ store, automationService: automation, workService, dataRoot: root, lockFactory: async () => ({ lost: new Promise(resolve => { loseOwner = resolve }), async release() {} }), onOwnerLost: () => receiver.close() })
   try {
     await runtime.start()
-    assert.deepEqual(automation.eventSourceCapability(), { status: 'unavailable', code: 'CAPABILITY_RETIRED' })
+    assert.deepEqual(await automation.eventSourceCapability({ id: 'member-owner' }), { status: 'unavailable', code: 'SOURCE_NOT_CONFIGURED', reconcileIntervalSeconds: 60, sources: [] })
     await assert.rejects(automation.createRule({ id: 'member-owner' }, { employeeId: 'employee-owner', skillId: 'skill-gearjob-work-order-read', connectionId: 'connection-owner', workOrderId: 'WO-1', trigger: { kind: 'gearjob-work-order-update', sourceId: 'gearjob:dev.localhost' } }), error => error.code === 'CAPABILITY_RETIRED')
     loseOwner(new Error('lost'))
     await waitFor(() => !receiver.isListening() && !runtime.ownsLock() && ownerLosses === 1)
-    assert.deepEqual(automation.eventSourceCapability(), { status: 'unavailable', code: 'CAPABILITY_RETIRED' })
+    assert.deepEqual(await automation.eventSourceCapability({ id: 'member-owner' }), { status: 'unavailable', code: 'SOURCE_NOT_CONFIGURED', reconcileIntervalSeconds: 60, sources: [] })
   } finally { await receiver.close(); await runtime.close(); await rm(root, { recursive: true, force: true }) }
 }
 

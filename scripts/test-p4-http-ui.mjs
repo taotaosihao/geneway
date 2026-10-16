@@ -237,7 +237,7 @@ async function waitWork(service, actor, workId) { for (let i = 0; i < 200; i += 
 
 async function harnessCheck() {
   const { migrateState, STATE_VERSION } = await import('../src/store/file-store.mjs')
-  const fixture = migrateState(seed({ version: STATE_VERSION, works: [], confirmations: [], knowledgeMaterials: [], channelMessages: [], deliveries: [], linkCodes: [], automationRules: [], automationOccurrences: [], conversations: [], reservations: {}, defaultChannelEmployeeId: null }))
+  const fixture = migrateState(seed({ version: STATE_VERSION, works: [], confirmations: [], knowledgeMaterials: [], channelMessages: [], deliveries: [], linkCodes: [], automationRules: [], automationOccurrences: [], automationInbox: [], conversations: [], reservations: {}, defaultChannelEmployeeId: null }))
   assert.deepEqual(fixture.connections, []); assert.deepEqual(fixture.skills.map(item => item.capabilityId), ['cycle-time-calculate'])
   assert.equal(fixture.channelConversations[0].defaultDispatch, null)
   const controlled = runner(), outcome = await controlled.run({ capabilityId: 'cycle-time-calculate', executionId: 'pure', input: { availableSeconds: 60, quantity: 2 } })

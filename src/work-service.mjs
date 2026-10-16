@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { getCapability, listCapabilities, validateCapabilityInput, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
+import { getCapability, listCapabilities, validateCapabilityInput, KIVO_TPM_RECORD_READ_CAPABILITY, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
 import { createObservation } from './domain/work-order.mjs'
 import { KIVO_TPM_RESULT_KIND } from './domain/tpm.mjs'
 import { assertTrustedConnection, CONNECTION_IDENTITY_FIELDS } from './connection-catalog.mjs'
@@ -711,7 +711,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     const binding = authorizedBinding(state, member, rule, connectionCatalog)
     if (!binding.ok) return binding
     if (binding.capability.retired) return failure('CAPABILITY_RETIRED', SAFE_ERROR_MESSAGES.CAPABILITY_RETIRED)
-    const parsed = parseInput(binding.capability.id, { workOrderId: rule.workOrderId }, false)
+    const parsed = parseInput(binding.capability.id, rule.capabilityId === KIVO_TPM_RECORD_READ_CAPABILITY ? rule.input : { workOrderId: rule.workOrderId }, false)
     if (!parsed.ok) return parsed
     if (!inputAllowed(binding, parsed.input)) return failure('FORBIDDEN', '业务对象不在当前连接允许范围内')
     const acceptedAt = clean(options.acceptedAt) ?? clock()
@@ -792,7 +792,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     } finally {
       if (entry.timer) clearTimeout(entry.timer)
       active.delete(executionId)
-      if (operation === 'automation' && !entry.ownerLost) await Promise.resolve(onAutomationTerminal?.({ ownerCheck: entry.ownerCheck })).catch(() => undefined)
+      if (operation === 'automation' && !entry.ownerLost) await Promise.resolve(onAutomationTerminal?.({ workId, ownerCheck: entry.ownerCheck })).catch(() => undefined)
     }
   }
 

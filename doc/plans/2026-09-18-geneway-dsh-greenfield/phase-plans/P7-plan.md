@@ -214,6 +214,28 @@ root于本节形成前只读核42个Docker网络与45条route：上述网段无�
 
 方案参照[PostgreSQL CREATE DATABASE](https://www.postgresql.org/docs/current/sql-createdatabase.html)的独立新库边界，以及[AWS transactional outbox说明](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)中事务内持久事件与消费者重放/幂等职责；这些资料不替代本地生产者与真实worker证据，也不授权清理旧outbox。
 
+### 8.2 T5 初始化校验的有界续行规划（2026-10-16 22:03 UTC）
+
+本节先于续行包实施。两名独立Astra planner分别读取冻结源码及真实A/B快照，均建议保留run02资源，以新冻结准备包和新候选继续尚未开始的初始化消费；交换后双方明确CONSENSUS，无剩余方向差异；独立过度设计审查为PASS/issues[]，实际审查计划SHA为76f574d981f6904c8750a2bcbd36545d97f3cd578267b7deb640c2116f636bb4，审查先于新包实施。源码冻结、独审和root运行GO仍为不同门。
+
+candidate12对应的新schema、两次首次License激活和A/B正式fixture均已成功；`setup-check.mjs`实际exit1。其第128行在只读snapshot后的`beforeSetup`抛错，第129行尚未保存A snapshot，第131行尚未写`consume-a-setup` once marker，第132行尚未调用worker。原gate SHA `84e0298d94131b20839a9da4a03e3fc31897dd692476a96ec70e65e4ed1c351e`，保持`phase: unknown`、`operations: {}`且没有A/B snapshot。实际只读回核两库各14条outbox，worker instance/execution均0，三条evaluate仍pending，维修reported/revision0，通知occurrence/recipient/delivery/attempt均0，旧两库指纹未变。这支持“尚未启动worker”，不把gate文件写入称为零副作用，也不把unknown改为完成；续行前必须实时复核，不能仅信旧快照。
+
+根因是准备脚本`otherProducers`除维修事件外，把全部行都要求为configuration receipt。正式非消费域共11条：组织changed 1、device changed 1、device-organization-binding changed 1、device-ledger changed 1、Hive binding changed 3（create/validate/publish）、TPM repair changed 1、已处理notification configuration audit 3。本次一次核全这些真实producer及其API调用顺序，逐trace/actor/object/action/aggregate/payload/幂等键证明归属；拒绝缺失、重复、未知或错归属。14是此已冻结fixture的基线，不是产品通用数量限制。原三通知eventTypes与三条setup intent严格校验不变，全部11非消费域完整行在worker前后保持相同，不扩大worker allowlist。
+
+采用新产物目录`p7-kivo-runtime-continuation/`及candidate13；仅唯一Sol准备包writer可写该新目录。原fresh包16文件、candidate12、run02的run/fixture/原unknown gate及诊断快照保持原字节。candidate12 SHA固定为`e4166136b0603432b01f73537797506492224ebfab13cc3b5b63ff004b662078`，fresh manifest SHA固定为`aab3e923d7f2730947892d2935c395a2b9482fe50eee62ce7096ec1b594ad896`；A/B诊断快照固定SHA分别为`30c01924b4430a6af584caf11dc173beb8780c14c0e36511e27b01144634ff97`、`ffbd39f7f3e6db1191122c86c87cc28863147275899a2f1656249db906a4e80f`。这些材料均在唯一验证记录中给出路径；另固定原run、两fixture和失败命令的精确摘要。manifest SHA与run.bundleSha256按各自原算法分别验证，不能混用。新包只支持这一组base→current关系，不做任意predecessor兼容、恢复平台或通用事件注册表；复用已冻结base io/schema/worker能力，必要的绑定和producer校验集中在最少现有职责边界。
+
+新候选必须完整绑定新包所有实际消费源码、observer及其相对依赖，并绑定原base闭包。机器比较Geneway的142源码文件、Kivo源码/真实runtime/迁移/worker、精确Node、事件allowlist、资源和秘密引用与base一致；计划文档提交带来的HEAD变化单独如实记录，不能以HEAD不同放宽产品比较。原worker真实执行若使用base包，其receipt保留candidate12身份，续行gate明确绑定该真实worker闭包与当前candidate；不改写历史身份。worker launcher、observer、operator实际入口及收尾均核base/current适用闭包，不能只校验base而漏掉运行中的新源码。主验收入口默认保持原样，observer仍提供正式exact3消费接口。
+
+新增一次性门固定为run02下`setup-notification-continuation-01.json`，不能覆盖、挪走或重试原unknown。新门在任何worker操作前重新确认原unknown字节/形状、原run/fixtures及base source pins、没有worker journal或已申请操作、没有相关owned launcher/worker进程、A/B没有instance/execution/领取痕迹；以实时只读snapshot逐行比较上述已保存14行及完整业务/configuration指纹，确认三条未领取与旧两库逻辑指纹仍相同。若有未解释差异，停止，不自动重建、删行或复位。只有这些条件成立，才持久化新once intent并首次启动普通A worker；新门排他创建，自身出现requested/unknown后禁止重入；没有force、通用resume或搜索任意已完成gate。
+
+运行成功条件完整沿§8.1：A恰3条evaluate processed，执行ID精确相同且claim/lease/heartbeat及正常退出可证；维修与所有业务/configuration不变；occurrence/recipient/delivery/attempt与实际webhook HTTP新增0；11非消费域完整行不变；B全snapshot及旧两库指纹不变。允许变化仍仅A三条通知outbox和对应worker生命周期。新gate同时绑定base/current候选、两个manifest、run/fixtures、原unknown、诊断基线及实际worker journal/exit；满足全部后才可completed。
+
+新operator只接受该新gate并核固定路径及内容SHA，不回退原gate；主旅程仍保留A无通知backlog、B三条未领取及每次release精确business/evaluate/derived-delivery集合。现有API journal必须等主候选，故root核当前owner身份后正常停止A/B，在同run02/runtime上使用窄适配launcher和新launch ID真实重启，写新的base12/current13 journal。停止前另存旧ready journal原始字节及摘要；旧journal仅由其原launcher正常写exited/diagnostics生命周期，不改其中candidate12、baseCandidate、launch和process身份，不伪造ready。首次schema/License/fixture均不重做。
+
+先以已保存真实A/B快照直接运行新validator，取得原validator红、新validator绿对照；负例覆盖未知/缺失/重复producer、错trace/actor/object/payload、非消费域被变成通知事件、已有领取/worker/once marker、base/source pin变化。纯检查不能启动服务、访问DB/HTTP或读取真实秘密。冻结包由未实施者独审通过后，root才给实际续行GO；先完成真实初始化门和独立回核，再运行完整J10，不能用准备门替代J10或最终用户验收。
+
+Hive window02仍按原61×30秒有限窗口自然结束，120秒freshness不变，不为赶窗口减少审查；此续行不授权自动延窗。若需新有限窗口，先据实际完成/退出证据单独冻结并审查同设备追加方案。无法证明run02无消费、出现未解释业务/外发变化或不能建立精确相容绑定时，停依赖动作并重新核查；run03只是后续重新评估的选择，不自动重建掩盖问题。无需改变产品目标、用户授权或Kivo公共claim接口。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

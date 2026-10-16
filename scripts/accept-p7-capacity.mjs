@@ -328,6 +328,18 @@ async function readOwnedSample(stage, rootPid, io = { readFile, readdir, mono: (
       values.push({ pid, ppid: stat.ppid, starttime: stat.starttime, statReadMonoNs: statReadMonoNs.toString(),
         cpuTicks: stat.cpuTicks, rssKiB: Number(rss[1]), fds: fds.length })
     } catch (error) {
+      if (error.code === 'EACCES' && failedPart === 'fd') {
+        let recheck
+        try { recheck = procStat(await io.readFile(statPath, 'utf8')) }
+        catch (recheckError) {
+          if (pid !== rootPid && ['ENOENT', 'ESRCH'].includes(recheckError.code)) { recordExit(); continue }
+          error.message += `; owned pid=${pid} fd recheck=${recheckError.code ?? recheckError.message}`
+          throw error
+        }
+        if (pid !== rootPid && recheck.starttime === stat.starttime && ['Z', 'X', 'x'].includes(recheck.state)) { recordExit(); continue }
+        error.message += `; owned pid=${pid} fd recheck state=${recheck.state} starttime=${recheck.starttime} expected=${stat.starttime}${pid === rootPid ? ' root' : ''}`
+        throw error
+      }
       if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error
       if (pid === rootPid) { missing.push({ pid, part: failedPart, code: error.code }); continue }
       let stillThere
@@ -471,6 +483,29 @@ async function harnessCheck() {
   await assert.rejects(sample('pure-live-child-unreadable', 100, { ...procIo, readFile: async path => path === '/proc/200/status' ? Promise.reject(gone()) : procIo.readFile(path) }), /owned process tree incomplete/)
   const denied = Object.assign(new Error('EACCES'), { code: 'EACCES' })
   await assert.rejects(sample('pure-live-child-denied', 100, { ...procIo, readFile: async path => path === '/proc/200/status' ? Promise.reject(denied) : procIo.readFile(path) }), error => error === denied)
+  const deniedFdIo = recheckStat => {
+    let childStatReads = 0
+    const fdError = Object.assign(new Error('EACCES'), { code: 'EACCES' })
+    return { fdError, io: { ...procIo,
+      readFile: async path => {
+        if (path === '/proc/200/stat') return childStatReads++ === 0 ? files.get(path) : recheckStat()
+        if (path === '/proc/200/task/200/children') return ''
+        return procIo.readFile(path)
+      },
+      readdir: async path => path === '/proc/200/fd' ? Promise.reject(fdError) : procIo.readdir(path),
+    } }
+  }
+  const fdGone = deniedFdIo(() => Promise.reject(gone()))
+  const goneOnFd = await sample('pure-fd-eacces-gone', 100, fdGone.io)
+  assert(goneOnFd.complete && goneOnFd.exitedDuringSample[0]?.pid === 200)
+  const fdZombie = deniedFdIo(() => stat(200, 100, 2000, 10, 'Z'))
+  const zombieOnFd = await sample('pure-fd-eacces-zombie', 100, fdZombie.io)
+  assert(zombieOnFd.complete && zombieOnFd.exitedDuringSample[0]?.reason === 'EXITED')
+  const fdLive = deniedFdIo(() => files.get('/proc/200/stat'))
+  await assert.rejects(sample('pure-fd-eacces-live', 100, fdLive.io), error => error === fdLive.fdError && error.code === 'EACCES' && /state=S/.test(error.message))
+  const fdReused = deniedFdIo(() => stat(200, 999, 2001))
+  await assert.rejects(sample('pure-fd-eacces-reused', 100, fdReused.io), error => error === fdReused.fdError && /expected=2000/.test(error.message))
+  await assert.rejects(sample('pure-root-fd-eacces', 100, { ...procIo, readdir: async path => path === '/proc/100/fd' ? Promise.reject(denied) : procIo.readdir(path) }), error => error === denied && /root/.test(error.message))
   const frame = (at, parentTicks, childTicks, childStarttime = '2000', includeChild = true, exits = []) => ({
     complete: true, sampleMonoStartNs: String(at), sampleMonoEndNs: String(at + 10_000n), sampleSpanMs: 0.01,
     parent: { pid: 100, starttime: '1000', statReadMonoNs: String(at + 2_000n), cpuTicks: parentTicks },

@@ -383,13 +383,11 @@ export function createChannelService({
 
     async setWeixinRuntime({ identityId, botId, state: runtimeState, error: runtimeError } = {}) {
       if (!['connecting', 'connected', 'reconnecting', 'unavailable', 'stopped'].includes(runtimeState)) throw error('INVALID_REQUEST', '微信连接状态无效')
+      const report = { identityId, botId, runtimeState, runtimeError }
+      if (!weixinRuntimeChange(await store.read(), report).changed) return
       await store.update(state => {
-        const identity = state.channelIdentities.find(item => item.id === clean(identityId) && item.weixin?.botId === botId)
-        const app = state.channelApps.find(item => item.id === identity?.channelAppId && item.enabled === true)
-        if (!identity || ((!app || !['active', 'pending'].includes(identity.status)) && !['stopped', 'unavailable'].includes(runtimeState))) throw error('CHANNEL_RUNTIME_STALE', '微信身份已变化')
-        if (identity.weixin.runtimeState === 'unavailable' && (runtimeState === 'stopped' || identity.status === 'rebind-required')) return state
-        const code = runtimeError ? /^[A-Z][A-Z0-9_]{0,63}$/.test(runtimeError.code) ? runtimeError.code : 'WEIXIN_UNAVAILABLE' : undefined
-        const invalid = runtimeState === 'unavailable' && ['WEIXIN_STALE_TOKEN', 'WEIXIN_AUTH_REJECTED', 'WEIXIN_SECRET_UNAVAILABLE'].includes(code)
+        const { identity, code, invalid, changed } = weixinRuntimeChange(state, report)
+        if (!changed) return state
         const timestamp = now(clock)
         const next = { ...identity, ...(invalid ? { status: 'rebind-required', activeConversationId: null, revision: identity.revision + 1 } : {}),
           weixin: compact({ ...identity.weixin, runtimeState, error: code ? { code } : undefined }), updatedAt: timestamp,
@@ -1256,6 +1254,16 @@ function appDto(app, admin) {
   if (!admin) delete value.credentialRef
   return value
 }
+function weixinRuntimeChange(state, { identityId, botId, runtimeState, runtimeError }) {
+  const identity = state.channelIdentities.find(item => item.id === clean(identityId) && item.weixin?.botId === botId)
+  const app = state.channelApps.find(item => item.id === identity?.channelAppId && item.enabled === true)
+  if (!identity || ((!app || !['active', 'pending'].includes(identity.status)) && !['stopped', 'unavailable'].includes(runtimeState))) throw error('CHANNEL_RUNTIME_STALE', '微信身份已变化')
+  if (identity.weixin.runtimeState === 'unavailable' && (runtimeState === 'stopped' || identity.status === 'rebind-required')) return { changed: false }
+  const code = runtimeError ? /^[A-Z][A-Z0-9_]{0,63}$/.test(runtimeError.code) ? runtimeError.code : 'WEIXIN_UNAVAILABLE' : undefined
+  const invalid = runtimeState === 'unavailable' && ['WEIXIN_STALE_TOKEN', 'WEIXIN_AUTH_REJECTED', 'WEIXIN_SECRET_UNAVAILABLE'].includes(code)
+  return { identity, code, invalid, changed: invalid || identity.weixin.runtimeState !== runtimeState || identity.weixin.error?.code !== code }
+}
+
 function identityDto(identity) {
   const value = structuredClone(identity)
   if (value.weixin) value.weixin = compact({ runtimeState: value.weixin.runtimeState, error: value.weixin.error })

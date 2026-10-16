@@ -18,7 +18,7 @@
 
 渠道为模拟验收，必须经过实际 iLink 协议及飞书 SDK 事件入口，不发真实产品消息、不扫描联系人或群。阶段视频、离线说明按已授权 `geneway-product` 飞书路径交给用户并逐条 GET 回读。管理员仅看运维元数据，不能读取成员正文。
 
-第一模型保持 ZenMux `deepseek/deepseek-v4.1-flash`。唯一已授权模型秘密来源仍是 `~/.paseo/config.json` 中精确 ZenMux 项及其服务端秘密引用，不扫描其他配置。第二模型实际目标正在等待用户选择；未知不阻塞不依赖它的任务，但阻塞其外发与 AC-21 关闭。无自动 fallback。
+第一模型保持 ZenMux `deepseek/deepseek-v4.1-flash`。唯一已授权模型秘密来源仍是 `~/.paseo/config.json` 中精确 ZenMux 项及其服务端秘密引用，不扫描其他配置。第二模型由用户在本轮指定为 ZenMux GLM 5.3 Flash；官方模型目录已核实精确 ID 为 `z-ai/glm-5.3-flash`。沿同一 ZenMux 账号与秘密引用调用本任务 synthetic 数据，不扩其他模型或凭据；可用性仍须原生实测，无自动 fallback。
 
 用户已将整体界面逻辑调整后置至功能实施完成；P7 仅补本阶段必需配置、反馈、导航、手机操作和安全/误操作缺陷，不自行全面重设计。
 
@@ -44,7 +44,7 @@
 
 交换结果：两名 planner 最终均返回 `CONSENSUS`，工程 planner 已逐项复核唯一计划。两项原保留为硬4受理不能条件实施、idle回收必须有稳定上界实测，均已采纳；同时落实幂等先于容量、取消关闭前不释放、渠道turn/work分别占位、CLI半成功可恢复。引用为两名同一 agent 的 `#exchange` 与工程 planner 的 `#final-consensus`。
 
-未参与规划的 `/root/p7_overdesign_astra` 与 `/root/p7_plan_review_astra` 分别独立审查候选 `3bc8d5197b6f7947f26dae9056fb1b06b93d0566d8a3d6c94d411a37621cc020`，均返回 schema v2 PASS、issues为空；首轮不交换意见。过设计做两项静态消融：删除全局容量门不能由仅自动并发2替代；立即关闭所有成功Harness会改变same-session续接且无等价实证。因此保留原子硬4与条件idle回收，未增加独立服务。正式审查核对完整合同覆盖、就绪任务和代码接缝。两审保留第二模型授权、T0原生/资源事实、J10/运维实测与AC-22原始时序未证，不将计划PASS当运行PASS。此次门后只改本节与顶部状态，方案正文不变。
+未参与规划的 `/root/p7_overdesign_astra` 与 `/root/p7_plan_review_astra` 分别独立审查候选 `3bc8d5197b6f7947f26dae9056fb1b06b93d0566d8a3d6c94d411a37621cc020`，均返回 schema v2 PASS、issues为空；首轮不交换意见。过设计做两项静态消融：删除全局容量门不能由仅自动并发2替代；立即关闭所有成功Harness会改变same-session续接且无等价实证。因此保留原子硬4与条件idle回收，未增加独立服务。正式审查核对完整合同覆盖、就绪任务和代码接缝。两审当时保留第二模型授权、T0原生/资源事实、J10/运维实测与AC-22原始时序未证，不将计划PASS当运行PASS。计划门后的首个提交只更新本节与顶部状态；随后用户指定GLM，按已审的用户选择分支落实于§1/4.1及澄清§11.10，不扩大其他执行范围。
 
 ## 3. 已观察事实与未证假设
 
@@ -75,7 +75,7 @@ Geneway 未声明 Control；Kivo 的 `agent-controlled-actions`、`control/agent
 
 改变实际模型/接收方或影响上下文的参数时，用干净 successor 承接当前获准事实，保留原 owner、work/conversation 与历史谱系；不把旧 Session 全文自动送给新接收方。请求守卫同时核实际路由与目标。仅支持实测支持的 `maxOutputTokens`，范围 1–4096，其他推理/温度选项不先造。
 
-第二路由分支：用户允许同 ZenMux 另一款 DeepSeek 后，先读官方公开目录/文档选精确工具可用 ID，做无业务内容有限原生探针，再 synthetic 业务；默认仍 Flash且无 fallback。若用户指定其他接入，必须先明确秘密来源和接收数据范围。相同请求目标的两个 route ID 不算第二真实路由。候选不可用则记录失败，在用户已授权范围内选择下一明确候选；超出范围只暂停该分支。
+第二路由分支已由用户选择：ZenMux `z-ai/glm-5.3-flash`，第一路由仍为 `deepseek/deepseek-v4.1-flash`。2026-10-16 16:23 UTC 实际读取 `https://zenmux.ai/api/v1/models` 返回 HTTP 200，精确名称与官方模型页面一致；这只证明目录存在，不是调用成功。先做无业务内容的原生工具调用探针，再 synthetic 业务；不同模型族的 tool-call、usage、重试和参数行为按实际返回验证，不能继承 DeepSeek 专属假设。用户此前允许另一款 DeepSeek 的答复已被最新 GLM 指定取代，禁止静默选回其他模型。两者显式选择，不自动 fallback；不可用只暂停对应分支并保留 AC-21 缺口。秘密来源与 ZenMux 接口保持原授权。
 
 ### 4.2 请求预算、硬容量与反馈
 
@@ -164,7 +164,7 @@ Kivo支持组合记录两仓commit、SDK2.3.1、协议2026-07-28和ext-auth `fb3
 
 | 任务 | 文件/责任与产出 | 依赖及就绪条件 |
 |---|---|---|
-| T0 有限事实核实 | 运行owner：净安装、现有model/Session probe、原生request/usage/route参数、idle驻留、恢复配置及旧格式素材核实 | 本计划双规划收敛与双独审通过后才准入。第二实际模型需用户答复；其余可先做。每探针一个问题、有限输入与成功/失败分支。 |
+| T0 有限事实核实 | 运行owner：净安装、现有model/Session probe、原生request/usage/route参数、idle驻留、恢复配置及旧格式素材核实 | 本计划双规划收敛与双独审通过后才准入。第二实际模型按用户已选GLM做有限原生探针；其余可并行。每探针一个问题、有限输入与成功/失败分支。 |
 | T1 路由/预算/容量/元数据 | core唯一writer：runtime-config、dsh-runner/host、collaboration-runner、work/conversation/automation-service、grant、store、server、runtime patches及对应测试 | T0对应原生边界成立；先共享解析/复权与原子受理，再投影反馈；不与其他lane同文件并写。 |
 | T2 J10接线 | 同core owner：现有渠道工作工具、collaboration/child/action/notification接缝与相关测试 | T1接口稳定；复用既有服务与refs，完成同对象主链和发送前权限。 |
 | T3 安装/恢复/说明 | ops owner：init-p2-auth、state-transfer、对应测试、doc/operations.md及最少打包步骤 | 说明可并行；需T1确定schema/route秘密后集成。package/lock由core所有，必要修改串行交接。 |

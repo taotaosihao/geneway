@@ -4,8 +4,9 @@ import { spawn, execFile } from 'node:child_process'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { cpus, tmpdir } from 'node:os'
-import { constants } from 'node:fs'
-import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFileSync, closeSync, constants, openSync } from 'node:fs'
+import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { EventEmitter } from 'node:events'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -536,6 +537,29 @@ async function harnessCheck() {
   await assert.rejects(recordResourceWindow({ stop: async () => ({ sampleCount: 2, peakRssKiB: 4 * 1024 * 1024 + 1 }) }, { resourceWindows: [] }, 'native active or close'), /RSS exceeded 4 GiB/)
   const temporary = await mkdtemp(join(tmpdir(), 'p7-capacity-schema-'))
   try {
+    const fakeHost = pid => Object.assign(new EventEmitter(), { pid, stderr: new EventEmitter() })
+    const rawHost = join(temporary, 'pure-host.stderr'), child = fakeHost(100)
+    const diagnostics = trackHostStderr(child, rawHost, openSync(rawHost, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600), 32)
+    child.stderr.emit('data', Buffer.from('before-'))
+    child.emit('exit', 7, null)
+    child.stderr.emit('data', Buffer.from('tail'))
+    child.emit('close', 7, null)
+    const observed = await diagnostics.finish()
+    assert.deepEqual(await readFile(rawHost), Buffer.from('before-tail'))
+    assert.equal((await lstat(rawHost)).mode & 0o777, 0o600)
+    assert.equal(observed.pid, 100); assert.equal(observed.exitCode, 7); assert.equal(observed.exitSignal, null)
+    assert.equal(observed.closed, true); assert.equal(observed.bytesSaved, 11); assert.equal(observed.sha256, sha(Buffer.from('before-tail')))
+    const cappedRaw = join(temporary, 'pure-host-capped.stderr'), capped = fakeHost(101)
+    const cappedDiagnostics = trackHostStderr(capped, cappedRaw, openSync(cappedRaw, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600), 4)
+    capped.stderr.emit('data', Buffer.from('before-tail')); capped.emit('exit', 1, null); capped.emit('close', 1, null)
+    const cappedObserved = await cappedDiagnostics.finish()
+    assert.equal((await readFile(cappedRaw)).toString(), 'befo')
+    assert.equal(cappedObserved.bytesObserved, 11); assert.equal(cappedObserved.bytesSaved, 4); assert.equal(cappedObserved.truncated, true)
+    const failedRaw = join(temporary, 'pure-host-close-failed.stderr'), failed = fakeHost(102)
+    const failedDiagnostics = trackHostStderr(failed, failedRaw, openSync(failedRaw, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600), 32,
+      fd => { closeSync(fd); throw new Error('SYNTHETIC_CLOSE_FAILED') })
+    failed.emit('exit', 1, null); failed.emit('close', 1, null)
+    await assert.rejects(failedDiagnostics.finish(), /private Host diagnostics I\/O failed/)
     const nativeStateFile = join(temporary, 'native-state.json'), nativeSecretRoot = join(temporary, 'native-secrets')
     await mkdir(nativeSecretRoot, { mode: 0o700 })
     await writeFile(join(nativeSecretRoot, 'ZENMUX_API_KEY'), dummyKey, { mode: 0o600 })
@@ -608,6 +632,8 @@ async function hostRun(options) {
   const manifest = await privateJson(options.candidate)
   await candidateCheck(options, manifest.value)
   await mkdir(options.output, { mode: 0o700 })
+  const outputStat = await lstat(options.output)
+  assert(outputStat.isDirectory() && !outputStat.isSymbolicLink() && outputStat.uid === process.getuid() && (outputStat.mode & 0o777) === 0o700)
   const secretRoot = join(options.output, 'secrets'), dataRoot = join(options.output, 'data')
   await mkdir(secretRoot, { mode: 0o700 }); await mkdir(dataRoot, { mode: 0o700 })
   const stateFile = join(dataRoot, 'state.json'), authFile = join(options.output, 'auth.json'), dshHome = join(dataRoot, 'dsh')
@@ -620,6 +646,14 @@ async function hostRun(options) {
   const passwords = Object.fromEntries(members.map(item => [item.authRef, randomBytes(24).toString('base64url')]))
   const accounts = members.map((item, index) => ({ id: 'capacity-bot-' + (index + 1), ownerUserId: 'capacity-wx-' + (index + 1), token: 'SYNTHETIC_TOKEN_' + randomBytes(24).toString('hex') }))
   const sessions = new Map()
+  const recordedHosts = new Set()
+  const recordHostDiagnostics = async child => {
+    if (!child?.hostDiagnostics || recordedHosts.has(child.pid)) return
+    const observed = await child.hostDiagnostics.finish()
+    report.hostDiagnostics ??= []
+    report.hostDiagnostics.push(observed)
+    recordedHosts.add(child.pid)
+  }
   let simulator, host, origin, failure, hostStopped = false
   try {
     await writeFile(join(secretRoot, 'ZENMUX_API_KEY'), dummyKey, { mode: 0o600, flag: 'wx' })
@@ -650,7 +684,7 @@ async function hostRun(options) {
       GENEWAY_MODEL_CREDENTIAL_REF: 'ZENMUX_API_KEY', GENEWAY_CHANNEL_ACCEPT_HOST: '1', GENEWAY_CHANNEL_HOST_CONFIG: hostConfig,
       GENEWAY_NETWORK_AUDIT_ROLE: 'host', P7_LOOPBACK_PORT: String(new URL(simulator.url).port), P7_NETWORK_LOG: networkFile,
       NODE_OPTIONS: '--import=' + pathToFileURL(options['network-guard']).href }
-    host = startHost(baseEnv)
+    host = startHost(baseEnv, options.output)
     await until(async () => { if (host.exitCode !== null || host.signalCode !== null) throw new Error('Host exited before readiness'); try { return (await fetch(origin, { signal: AbortSignal.timeout(1000) })).status === 200 } catch { return false } }, 'capacity Host startup')
     const snapshot = await hostIpc(host, 'snapshot')
     assert(snapshot.sdkDispatcher && snapshot.consumers.maxActive === 1 && snapshot.consumers.active === 1)
@@ -700,6 +734,7 @@ async function hostRun(options) {
     assert(report.ownedPeakRssKiB <= 4 * 1024 * 1024, 'owned Host/SDK/lock sampled peak RSS exceeds 4 GiB')
     assert(online20.idleCpuCores <= 1, 'owned Host/SDK/lock stable CPU exceeds one core')
     await stopHost(host); hostStopped = true
+    await recordHostDiagnostics(host)
     assert(accounts.every(account => simulator.activePolls(account.id) === 0), 'stopped Host kept iLink poll open')
     const backup = join(options.output, 'backup'), backupSecrets = join(options.output, 'backup-secrets'), restored = join(options.output, 'restored'), restoredSecrets = join(options.output, 'restored-secrets')
     const transferEnv = { PATH: process.env.PATH, HOME: options.output, LANG: 'C.UTF-8', GENEWAY_STATE: stateFile, GENEWAY_DSH_HOME: dshHome, GENEWAY_MODEL_CREDENTIAL_REF: 'ZENMUX_API_KEY', GENEWAY_CANDIDATE: manifest.sha256 }
@@ -717,7 +752,7 @@ async function hostRun(options) {
     const restoredConfig = join(options.output, 'restored-host.json')
     await writeFile(restoredConfig, JSON.stringify({ ilinkUrl: simulator.url }), { mode: 0o600, flag: 'wx' })
     host = startHost({ ...baseEnv, DSH_HOME: join(restored, 'dsh'), GENEWAY_DSH_HOME: join(restored, 'dsh'), GENEWAY_STATE: restoredStateFile, GENEWAY_AUTH_FILE: restoredAuth, GENEWAY_PORT: String(restoredPort), GENEWAY_TRUSTED_ORIGIN: restoredOrigin,
-      GENEWAY_SECRET_ROOT: restoredSecrets, GENEWAY_CHANNEL_HOST_CONFIG: restoredConfig })
+      GENEWAY_SECRET_ROOT: restoredSecrets, GENEWAY_CHANNEL_HOST_CONFIG: restoredConfig }, options.output)
     hostStopped = false
     await until(async () => { if (host.exitCode !== null || host.signalCode !== null) throw new Error('restored Host exited'); try { return (await fetch(restoredOrigin, { signal: AbortSignal.timeout(1000) })).status === 200 } catch { return false } }, 'restored Host startup')
     const restoredLogin = await hostRequest(restoredOrigin, null, '/api/session', 'POST', { loginName: members[0].loginName, password: passwords[members[0].authRef] })
@@ -732,6 +767,7 @@ async function hostRun(options) {
     assert.equal(recoveredState.conversations.reduce((n, item) => n + item.turns.length, 0), 5000)
     report.checks.push({ case: 'target-history-backup-empty-restore-login-read', backupMs, restoreToReadMs, restoredRoot: restored, counts: { works: recoveredState.works.length, conversations: recoveredState.conversations.length, turns: 5000, knowledge: recoveredState.knowledgeMaterials.length, rules: recoveredState.automationRules.length } })
     await stopHost(host); hostStopped = true
+    await recordHostDiagnostics(host)
     assert.equal(simulator.failures.length, 0)
     const audit = (await readFile(networkFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line))
     assert(audit.length && audit.every(row => row.allowed === true && row.host === '127.0.0.1' && row.port === Number(new URL(simulator.url).port)))
@@ -742,6 +778,7 @@ async function hostRun(options) {
   } catch (error) { failure = error; report.failure = { code: error.code ?? 'HOST_CAPACITY_FAILED', message: String(error.message).slice(0, 2048) } }
   finally {
     if (host && !hostStopped) try { await stopHost(host) } catch (error) { failure ??= error; report.cleanupFailure = String(error.message) }
+    try { await recordHostDiagnostics(host) } catch (error) { failure ??= error; report.cleanupFailure = String(error.message) }
     try { await simulator?.close() } catch (error) { failure ??= error; report.cleanupFailure = String(error.message) }
     report.ok = !failure
     await writeFile(join(options.output, 'capacity-host.json'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
@@ -985,7 +1022,45 @@ function controlledCycleResult(executionId, input) {
 function gate() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); promise.catch(() => undefined); return { promise, resolve, reject } }
 
 async function freeTcpPort() { const server = createServer(); await new Promise((done, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', done) }); const port = server.address().port; await new Promise(done => server.close(done)); return port }
-function startHost(env) { const child = spawn(process.execPath, [join(root, 'scripts/accept-p4.mjs'), '--host'], { cwd: root, env, detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] }); child.stderr.on('data', () => {}); return child }
+function startHost(env, directory) {
+  const rawPath = join(directory, 'host-' + randomUUID() + '.stderr')
+  const fd = openSync(rawPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  try {
+    const child = spawn(process.execPath, [join(root, 'scripts/accept-p4.mjs'), '--host'], { cwd: root, env, detached: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+    child.hostDiagnostics = trackHostStderr(child, rawPath, fd)
+    return child
+  } catch (error) { closeSync(fd); throw error }
+}
+
+function trackHostStderr(child, rawPath, fd, limitBytes = 8 * 1024 * 1024, closeFd = closeSync) {
+  let bytesObserved = 0, bytesSaved = 0, ioFailure, exitCode = null, exitSignal = null, spawnErrorCode = null, exitObserved = false, closedObserved = false
+  let resolveClose
+  const closed = new Promise(resolve => { resolveClose = resolve })
+  const fail = error => { ioFailure ??= error?.code ?? 'IO_ERROR' }
+  child.stderr.on('data', chunk => {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    bytesObserved += bytes.length
+    const saved = bytes.subarray(0, Math.max(0, limitBytes - bytesSaved))
+    if (saved.length && !ioFailure) try { appendFileSync(fd, saved); bytesSaved += saved.length } catch (error) { fail(error) }
+  })
+  child.stderr.on('error', fail)
+  child.once('error', error => { spawnErrorCode = error?.code ?? 'SPAWN_ERROR' })
+  child.once('exit', (code, signal) => { exitObserved = true; exitCode = code; exitSignal = signal })
+  child.once('close', (code, signal) => {
+    if (!exitObserved) { exitCode = code; exitSignal = signal }
+    try { closeFd(fd) } catch (error) { fail(error) }
+    closedObserved = true
+    resolveClose()
+  })
+  return { async finish() {
+    await deadline(closed, 'Host stderr close', 10_000)
+    if (ioFailure) throw Object.assign(new Error('private Host diagnostics I/O failed: ' + ioFailure), { code: 'HOST_DIAGNOSTICS_IO_FAILED' })
+    const raw = await readFile(rawPath)
+    assert.equal(raw.length, bytesSaved, 'private Host diagnostics byte count changed')
+    return { pid: child.pid, exitCode, exitSignal, spawnErrorCode, closed: closedObserved, rawPath, sha256: sha(raw),
+      bytesObserved, bytesSaved, limitBytes, truncated: bytesObserved > limitBytes }
+  } }
+}
 async function hostIpc(child, method) { const id = randomUUID(); assert(child.connected && child.exitCode === null); return new Promise((done, fail) => { const finish = () => { clearTimeout(timer); child.off('message', receive); child.off('exit', exited) }; const receive = message => { if (message?.kind === 'channel-acceptance' && message.id === id) { finish(); message.ok ? done(message.value) : fail(new Error('Host IPC rejected ' + method)) } }; const exited = () => { finish(); fail(new Error('Host exited during IPC')) }; const timer = setTimeout(() => { finish(); fail(new Error('Host IPC timeout')) }, 20_000); child.on('message', receive); child.once('exit', exited); child.send({ kind: 'channel-acceptance', id, method }, error => { if (error) { finish(); fail(error) } }) }) }
 async function hostRequest(origin, session, path, method = 'GET', body) { const response = await fetch(origin + path, { method, headers: { origin, ...(session ? { cookie: session.cookie, 'x-csrf-token': session.csrf } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) }); const raw = await response.text(); return { status: response.status, body: raw ? JSON.parse(raw) : null, cookie: response.headers.get('set-cookie') } }
 async function stopHost(child) { if (!child?.pid) return; if (alive(child.pid)) process.kill(-child.pid, 'SIGTERM'); await until(() => !alive(child.pid), 'Host normal exit'); await until(() => !alive(-child.pid), 'Host process group exit') }

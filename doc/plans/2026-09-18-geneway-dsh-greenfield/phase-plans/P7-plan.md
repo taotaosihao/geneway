@@ -322,6 +322,20 @@ Hive04保持既定110–170、transport898→1020、61x30/最大1860/最多122�
 
 **前置回归与最终门。** 使用保存真实human形状做原红/新绿，覆盖可信audit各错配及字段缺省、机器严格分支、实际producer分类、额外pending、跨run/候选/API混用、observer once和unknown不可重入。新包/窗口各冻结后由未实施者独立SOURCE审查，只有所需门全部通过才给对应runtime GO。新全十步仍实际验证同对象/root/child/action/receipt链、两真实模型、事件来源重读、本人手机拒绝/批准、真实唯一创建与machine echo、同渠道回执、正常重启、空目录恢复及恢复后只读执行。旧四步仅历史证据，容量/安装不改签为新候选重跑。任一旧数据变化、未知pending、错误审计、重复写入、候选变化、活worker/publisher或freshness失败即停止相应动作。阶段最终验收仍由用户执行，不部署、不发布。
 
+### 8.7 T5 后续验收调用契约修正（2026-10-16T23:49 UTC）
+
+本节先于实施。工程与产品两名Astra各自核正式源码和final05保存state后完成正式交换，三项方案均CONSENSUS；独立过度设计审查对计划SHA `7a9cc268abf22344e469a35c813debe51a34071cf87af8ec91fea38c5b299f65` 判PASS/issues=[]，先于实施；SOURCE独审与runtime GO仍为后续门。唯一实现范围为`scripts/accept-p7.mjs`的三个调用位置及同文件定向纯回归。产品、vendor、已通过B读取段、模型权限、十步旅程以及§8.6的run03资源/四旧库保护/单次有限窗口和准备排序均不变。
+
+**事实与证明边界。** `src/domain/tpm.mjs:100–129`的正式单记录结果为`kind=kivo.tpm.observation`、`payload.records[]`，而主验收第791行检查`payload.tpm.id || payload.record.id`。final05保存state SHA `6a9149402eae81a3fa7dc7c12f02d8b9ada2ba89fd9c91ae25ebd8280d29a547`内A reviewer及B read均为records形状，旧predicate对各自正确UUID仍为false。这是事件前真实读取形状证据，不能称事件后follow-up已运行。第836行模拟HTTP503时，vendor/weixin-api先抛http-error而不读取body，正式插件将其归unknown；第858行等待failed与该fixture不符。第862行撤权retry使用仅接受2xx的api，但正式channel-service先保存blocked再抛DELIVERY_FORBIDDEN，server返回403。这两个后续行为尚未在final05执行，当前证据来自正式连接源码与已有协议回归。
+
+1. 同对象follow-up改用本步骤专用小断言，runtime与同文件harness共用。选择最新实际observation，核work completed、owner/read capability/skill、当前A connection及input；kind必须正确，payload status=ok、mode=record、recordType=repair且records恰一条。记录UUID/reference/deviceId及linkedDevice.id匹配当前fixture；payload.source与result.source五项scope及sourceRecordId=repair:<reference>均匹配。不增加correlation/list/旧tpm或record兼容，不要求整个results数组只能一条，不抽通用validator，不改B段。
+2. 可重试失败fixture改为明确HTTP200、body {ret:403}；非零协议码且不是stale-token -14，正式路径产生send-rejected及durable failed/WEIXIN_SEND_REJECTED。继续核同action/work的failed delivery。HTTP503仍归unknown，unknown禁止重试的产品语义和负例保留。
+3. 仅撤权retry改用request，断言HTTP403及body.error.code=DELIVERY_FORBIDDEN；从状态读回同delivery ID的blocked及错误码，并核实际发送次数未增加。恢复原权限后仍用原api重试同delivery并要求delivered，保留work/action/recipient关联和唯一业务创建约束。
+
+**最小回归。** 用正式normalizeTpmObservation生成最小合法形状，当前步骤断言直接接受A/B各自匹配并拒B对A；覆盖错kind/status/mode/type、零或多记录、错UUID/reference/device、内外source错配和仅旧tpm/record旁路，最新错误结果不得被旧正确结果掩盖。保存A/B样本仅作外置只读原红/新绿对照，不嵌私有state/旧UUID。实际adapter配内存响应证明503仍unknown且retry不新增发送，200/ret403进入failed；实际channel service配内存store证明先持久blocked后抛错、复权允许同delivery重试；实际caller断言拒绝错误HTTP/code/delivery或未持久blocked。运行语法和完整--harness-check，核无真实Host/模型/外部服务/秘密效果，源码冻结后由未实施者独审。纯检查不替代完整J10实际事件后读取、failed→blocked→delivered及唯一创建。
+
+本节显式替代§8.6的142源码全部不变要求：集合仍142项，仅已审accept-p7.mjs允许旧SHA `dfd5ed144bb74ddef268173883b57ef69f2cbfe12da8d992d56e71235822d872`→实际新SHA，其他141项及Kivo源码/runtime保持原绑定。run03包可继续既有独立SOURCE工作，最终manifest/candidate冻结必须等待此修正的实际新HEAD、SHA、定向回归和独立SOURCE审查，不填预计值、不改签candidate16或历史证据。如需修改产品、扩大source范围或放宽unknown/权限门，停止对应分支返回规划。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

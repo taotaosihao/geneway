@@ -2,7 +2,7 @@
 
 > 合同 v4.4 原位重规划，2026-10-16。本文替换旧 GearJob/Hive P6 方案；旧方案与运行证据保留在 Git 历史，不作为本阶段通过证据。当前合同、clarification-notes.md §10/11 及用户后续明确决定优先。
 
-状态：**Team Astra 双独立规划、主代理汇总、独立过度设计与正式计划审查均已完成。两审对方案候选 `082579222573f98d153abe533ac56848b5ecdec50f42d3b5fc2112cb53b1cb42` 均 PASS，无阻断项；当前仅 T0 与先行 Control 文档就绪，尚无 P6 运行 PASS。**
+状态：**Team Astra 规划与独立计划审查先于实施完成；T0–T5 技术实施及同候选真实验收已通过，T6 视频、离线材料和飞书发送回读已完成。当前等待用户 P6 最终验收，尚未启动 P7；不代表发布或现场验收。**
 
 基线：Geneway `/home/gewu/.devspace/worktrees/geneway-f4222c66`，`rebuild/dsh-greenfield`，HEAD `6dd9db9abc216251c5869af7b16bf5e97c0ae405`（仅记录 P5 用户验收，产品源码同 `3794cbaca3181d9375eddc822dde179dd7772e15`）；Kivo 独立 clone `/home/gewu/.devspace/worktrees/kivo-geneway-mcp`，`codex/geneway-kivo-mcp`，HEAD `c429483ac0d423cc1092c1d9d6d517dc4c910e44`。P4 和 P5-K1 已由用户最终验收；2026-10-16 用户明确“P5 通过，开始 Team Astra 规划 P6”。
 
@@ -71,7 +71,7 @@ P5 留存的 HTTP 201／事务 rollback 现象内部原因未证，必须先最�
 
 本期明确政策：采样最大年龄120秒，最多未来偏差5秒；这是新 Kivo 路径待验证政策，不沿用旧 PASS。缺采样时间、陈旧、未来异常、来源不完整或明确坏质量时可呈现不完整分析，但不能批准依赖这些事实的动作。质量/平台接收时间无字段时保留 unknown，不伪造；投影 receivedAt/snapshotAt 只标投影时间，不能当 Hive 接收时间。纯 queriedAt/投影 now 不进入变化冲突摘要；真正相关的目标、映射、依据和业务条件变化必须使旧批准失效。
 
-预览有效期10分钟；批准后首次写请求窗口15秒，从批准事实可靠持久化的decision.decidedAt到首次维修POST开始，metadata/OAuth/复读不重置计时。写前仍须重新复权与验证必要事实；过窗禁止首次POST，须新预览批准，已持久attempt但可证明尚未发送时记确定no-effect，否则保留unknown。已有unknown只读核对不受此窗限制。过期按请求检查，不建TTL调度。批准后成员移出再加入、Agent 停用再启用不能复活旧批准；连接身份改变不迁移旧动作。只读核对也复权，不因未知结果而绕过权限。
+预览有效期10分钟；批准后首次写派发窗口15秒，从批准事实可靠持久化的decision.decidedAt起算，到Geneway完成最终授权、取消及期限检查后调用真实传输函数、发送唯一的tools/call(tpm.repair.create) MCP HTTP POST为止。metadata/OAuth/来源复读及attempt持久化均不重置计时。该窗口不是Kivo内部业务POST或事务提交期限；开始外发后按在途、当前事务权限及真实回读结果处理，不能因跨窗宣称撤回或无效果。写前仍须重新复权与验证必要事实；过窗禁止首次POST，须新预览批准，已持久attempt但可证明尚未发送时记确定no-effect，否则保留unknown。已有unknown只读核对不受此窗限制。过期按请求检查，不建TTL调度。批准后成员移出再加入、Agent 停用再启用不能复活旧批准；连接身份改变不迁移旧动作。只读核对也复权，不因未知结果而绕过权限。
 
 MCP 版本、OAuth resource/private_key_jwt 和唯一共享机器账号权威沿用 P4 已锁定依赖，不无故升级。同步插件固定输入/输出 schema 指纹目录：新增已知 monitor/read 与 repair/create，写工具只供确定性执行器，不登记到 DSH、模型列表或 prompt。未知/schema漂移仍失败，不为新增已知工具破坏原 TPM 查询。实际工具列表/模型输入验收无写工具和秘密。
 
@@ -161,6 +161,12 @@ T0写边界先读实际schema/actor/事务；201/rollback诊断采用单个owned
 
 ## 12. 阶段门与当前结论
 
-独立过设计 `/root/p6_kivo_overdesign_review` 与正式阶段审查 `/root/p6_kivo_plan_phase_review` 均对同一方案候选给出schema v2 PASS；两者未参与规划且首轮独立。主代理已核对双规划、共识和两审；当前仅T0/先行Control准入，尚无P6技术PASS。审查结论、方案候选SHA、最终文档SHA及时间记录在唯一验证记录；先本地提交本计划，再执行T0/Control先行及就绪实施。遇实质合同或接口否定，原位重规划并按同门复审，不在实施后补写计划。
+独立过设计 `/root/p6_kivo_overdesign_review` 与正式阶段审查 `/root/p6_kivo_plan_phase_review` 在实施前对方案候选 `082579222573f98d153abe533ac56848b5ecdec50f42d3b5fc2112cb53b1cb42` 分别给出 schema v2 PASS；两者未参与规划且首轮独立。主代理先以 `34a4f25` 本地提交本计划，再从 T0/先行 Control 开始按就绪依赖实施。规划与实施时间、命令、退出码、原始失败和修复证据保存在工作流 `20260919-006-geneway-dsh-greenfield` 的唯一记录 `p6-kivo-verification.md`；本节只更新实际阶段结果，不追补规划。
+
+2026-10-16 的 `geneway-p6-t5-final16` 在候选 `479d80e959281bd889b1a2b68b41e2a0db6fb3b59e05185129823a7d56c0fb24` 上完成 13/13 真实旅程，启动器退出码 0，前后输入与安装闭包一致。覆盖双实例关联、390px 预览/拒绝/冲突/本人批准、真实维修创建及 producer/worker 回声、高版本跟进、缺事件回读、模拟渠道、撤权、unknown、正常重启和备份恢复。独立 T5 正式审查通过；23 次模型请求未提供写工具，记录的 121 个进程和 30 个进程组均已退出，无强制清理。此前失败运行保持失败，未拼接为本轮通过。
+
+产品本地提交为 Geneway `700b1ec34584b047849470c2bf68c1097b9a67b3`、Kivo `ae27a4e97ddfa5248d4461bd563d9e907489b81c`；提交后 66 项 Geneway 和 301 项 Kivo 候选文件字节仍一致。Kivo 全仓边界检查的 634 项既有问题与基线相同，不称全仓检查通过。审计范围为所选 Node Host/SDK 路径，不是整机审计。
+
+T6 交付目录为工作流产物 `p6-kivo-delivery-final16/`：视频 486.2 秒、51 张截图、离线 HTML 与 ZIP。视频完整解码、1 倍速离线播放至自然结束，无 seek/error/外部请求；播放前后字节相同，独立媒体审查通过。人工视觉检查为关键手机截图及抽帧，不宣称人工连续观看。首次离线浏览器启动失败的记录另行保留。视频、HTML、ZIP 和阶段说明已通过原 `geneway-product` 飞书入口发送，4 项 GET 回读均核对收件 chat、发送 app、类型、文件名/时长或正文；回执保存在交付目录 `receipts/summary.json`。材料明确标注“渠道为模拟验收”和 synthetic/external-test。
 
 P6完整材料交付后由用户最终验收，未验收不得启动P7。P7另行Team Astra规划；P6不顺带加入第二模型路由、部署或其他P7义务，也不宣称完整v4.4已经完成。

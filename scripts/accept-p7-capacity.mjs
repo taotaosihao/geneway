@@ -793,7 +793,7 @@ async function controlledAutomationCapacity(stateFile, dataRoot, { ackHttp = fal
   const sources = normalizeKivoEventSources({ version: 1, sources: [source] })
   const sourceBytes = Buffer.from(JSON.stringify(sources)), sourceConfig = { ...sources, sha256: sha(sourceBytes) }
   const automation = createAutomationService({ store, clock: () => now, connectionCatalog: catalog,
-    workService: { ...actualWork, async ensureReady() {}, async dispatchAutomationWork() {} },
+    workService: { ...actualWork, async dispatchAutomationWork() {} },
     readEventSources: async () => sourceConfig,
     async readCurrentRecord(options) {
       await options.authorize()
@@ -820,11 +820,17 @@ async function controlledAutomationCapacity(stateFile, dataRoot, { ackHttp = fal
     assert.equal(saved.automationOccurrences.length, 3)
     assert.equal(activeTopLevelCount(saved), 2, 'two automation works must count in global capacity')
     assert.equal(saved.works.length, 1002)
+    const ordinary = await actualWork.createWork(actor, { employeeId: 'capacity-agent-1', skillId: cap.skillId, connectionId: connection.id,
+      input: { recordType: 'repair', reference: 'R-1' }, clientRequestId: 'capacity-model-held' })
+    assert.equal(ordinary.ok, true)
+    const withOrdinary = await store.read()
+    assert.equal(activeTopLevelCount(withOrdinary), 3)
+    for (const admission of accepted) {
+      const work = withOrdinary.works.find(item => item.id === admission.workId)
+      assert(['accepted', 'running'].includes(work?.status) && work.executions.every(execution => execution.error?.code !== 'PROCESS_RESTARTED'), 'ordinary work interrupted a held automatic work')
+    }
     let eventAck
     if (ackHttp) {
-      const ordinary = await actualWork.createWork(actor, { employeeId: 'capacity-agent-1', skillId: cap.skillId, connectionId: connection.id,
-        input: { recordType: 'repair', reference: 'R-1' }, clientRequestId: 'capacity-model-held' })
-      assert.equal(ordinary.ok, true)
       await deadline(modelEntered.promise, 'controlled model dispatch hold')
       holdMcp = true
       heldRead = automation.acceptManualOccurrence(actor, rules[2].id, { expectedRevision: rules[2].revision, clientRequestId: 'capacity-mcp-held' })

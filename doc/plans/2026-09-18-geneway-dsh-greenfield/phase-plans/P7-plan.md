@@ -1,6 +1,6 @@
 # P7 全量集成与可运维交付详细计划
 
-计划首次落盘：2026-10-16 16:14:01 UTC（2026-10-17 Asia/Shanghai），此前标称 16:10 为起草时间，不能作为实施顺序证据。状态：**双 Astra 规划、交换及两项独审通过；计划提交 `38a804e` 先于 T0。T0 原生检查及真实 GLM 工具调用通过；净安装构建策略已窄修并通过一次预验。T1/T3/T4 源码与局部检查独审通过并分别本地提交，T2 渠道协作与回执接线独审通过并本地提交；T5 验收脚本已独审并提交，所选20个回归入口实际通过。原生容量经采样范围及退出竞态修复后完整实测通过，原失败保留；Host 容量在§6.1最小修复后以原门完整通过，20身份空闲CPU为0.8403核、读取p95为337.5ms，原失败保留；两空目录冻结锁安装、原生探针及正式供应/登录/正常停止实际通过；旧应用、新版读取与空目录旧版回退完整演练通过，原始全量业务状态不存在的限制保留。最终同候选两路由、组合旅程及运维验收尚未完成。J10三轮在环境、共用select及继承库outbox前提处失败，旧证据保留；§8.1记录实施前的双Astra局部重规划，已通过独立过度设计审查及通知消费域口径复核；新准备包尚待实施。**
+计划首次落盘：2026-10-16 16:14:01 UTC（2026-10-17 Asia/Shanghai），此前标称 16:10 为起草时间，不能作为实施顺序证据。状态：**双 Astra 规划、交换及两项独审通过；计划提交 `38a804e` 先于 T0。T0 原生检查及真实 GLM 工具调用通过；净安装构建策略已窄修并通过一次预验。T1/T3/T4 源码与局部检查独审通过并分别本地提交，T2 渠道协作与回执接线独审通过并本地提交；T5 验收脚本已独审并提交，所选20个回归入口实际通过。原生容量经采样范围及退出竞态修复后完整实测通过，原失败保留；Host 容量在§6.1最小修复后以原门完整通过，20身份空闲CPU为0.8403核、读取p95为337.5ms，原失败保留；两空目录冻结锁安装、原生探针及正式供应/登录/正常停止实际通过；旧应用、新版读取与空目录旧版回退完整演练通过，原始全量业务状态不存在的限制保留。最终同候选两路由、组合旅程及运维验收尚未完成。J10三轮在环境、共用select及继承库outbox前提处失败，旧证据保留；§8.1记录实施前的双Astra局部重规划，已通过独立过度设计审查及通知消费域口径复核；新准备包和初始化门已实际完成并独立回核。final04通过配置与渠道待补充，重启补充因reviewer缺接收Skill失败；§8.4最小修复经双Astra与独立过度设计审查进入SOURCE。Hive观察链的日期接口与实际消息反序分别由§8.3/§8.5规划处理，旧失败原件保留，完整J10仍未通过。**
 
 依据：合同 v4.4 全文、clarification-notes.md §10/11、P1–P6 计划顶部有效决定及实际验证记录。用户在 P6 完整材料交付后明确“开始p7”，进入门已解除；P7 技术交付后仍由用户最终验收。本文是唯一 P7 计划，不是正式发布认证，不另建执行许可、receipt 或验收平台。
 
@@ -224,7 +224,7 @@ candidate12对应的新schema、两次首次License激活和A/B正式fixture均�
 
 采用新产物目录`p7-kivo-runtime-continuation/`及candidate13；仅唯一Sol准备包writer可写该新目录。原fresh包16文件、candidate12、run02的run/fixture/原unknown gate及诊断快照保持原字节。candidate12 SHA固定为`e4166136b0603432b01f73537797506492224ebfab13cc3b5b63ff004b662078`，fresh manifest SHA固定为`aab3e923d7f2730947892d2935c395a2b9482fe50eee62ce7096ec1b594ad896`；A/B诊断快照固定SHA分别为`30c01924b4430a6af584caf11dc173beb8780c14c0e36511e27b01144634ff97`、`ffbd39f7f3e6db1191122c86c87cc28863147275899a2f1656249db906a4e80f`。这些材料均在唯一验证记录中给出路径；另固定原run、两fixture和失败命令的精确摘要。manifest SHA与run.bundleSha256按各自原算法分别验证，不能混用。新包只支持这一组base→current关系，不做任意predecessor兼容、恢复平台或通用事件注册表；复用已冻结base io/schema/worker能力，必要的绑定和producer校验集中在最少现有职责边界。
 
-新候选必须完整绑定新包所有实际消费源码、observer及其相对依赖，并绑定原base闭包。机器比较Geneway的142源码文件、Kivo源码/真实runtime/迁移/worker、精确Node、事件allowlist、资源和秘密引用与base一致；计划文档提交带来的HEAD变化单独如实记录，不能以HEAD不同放宽产品比较。原worker真实执行若使用base包，其receipt保留candidate12身份，续行gate明确绑定该真实worker闭包与当前candidate；不改写历史身份。worker launcher、observer、operator实际入口及收尾均核base/current适用闭包，不能只校验base而漏掉运行中的新源码。主验收入口默认保持原样，observer仍提供正式exact3消费接口。
+新候选必须完整绑定新包所有实际消费源码、observer及其相对依赖，并绑定原base闭包。机器比较Geneway的142源码文件、Kivo源码/真实runtime/迁移/worker、精确Node、事件allowlist、资源和秘密引用与base一致；计划文档提交带来的HEAD变化单独如实记录，不能以HEAD不同放宽产品比较。原worker真实执行若使用base包，其receipt保留candidate12身份，续行gate明确绑定该真实worker闭包与当前candidate；不改写历史身份。worker launcher、observer、operator实际入口及收尾均核base/current适用闭包，不能只校验base而漏掉运行中的新源码。observer的完整Kivo/runtime/迁移及HEAD门由root在Host guard外包住整个正式生命周期：精确Node对同candidate路径/SHA运行冻结support.checkSources，主J10/Host启动前成功才准入，所有Host/observer退出后再次成功才允许判PASS。两次原始命令、exit、时间、runId、mainOutput、candidate与源码pins保存为同次绑定前后回执；失败不启动或将整旅程判失败。observer内部仅核其publicBindings，不能冒称内部完成全闭包。该外层路线经独立源码审查者明确接受，避免在guard内spawn git或复制完整checker。主验收入口默认保持原样，observer仍提供正式exact3消费接口。
 
 新增一次性门固定为run02下`setup-notification-continuation-01.json`，不能覆盖、挪走或重试原unknown。新门在任何worker操作前重新确认原unknown字节/形状、原run/fixtures及base source pins、没有worker journal或已申请操作、没有相关owned launcher/worker进程、A/B没有instance/execution/领取痕迹；以实时只读snapshot逐行比较上述已保存14行及完整业务/configuration指纹，确认三条未领取与旧两库逻辑指纹仍相同。若有未解释差异，停止，不自动重建、删行或复位。只有这些条件成立，才持久化新once intent并首次启动普通A worker；新门排他创建，自身出现requested/unknown后禁止重入；没有force、通用resume或搜索任意已完成gate。
 
@@ -235,6 +235,64 @@ candidate12对应的新schema、两次首次License激活和A/B正式fixture均�
 先以已保存真实A/B快照直接运行新validator，取得原validator红、新validator绿对照；负例覆盖未知/缺失/重复producer、错trace/actor/object/payload、非消费域被变成通知事件、已有领取/worker/once marker、base/source pin变化。纯检查不能启动服务、访问DB/HTTP或读取真实秘密。冻结包由未实施者独审通过后，root才给实际续行GO；先完成真实初始化门和独立回核，再运行完整J10，不能用准备门替代J10或最终用户验收。
 
 Hive window02仍按原61×30秒有限窗口自然结束，120秒freshness不变，不为赶窗口减少审查；此续行不授权自动延窗。若需新有限窗口，先据实际完成/退出证据单独冻结并审查同设备追加方案。无法证明run02无消费、出现未解释业务/外发变化或不能建立精确相容绑定时，停依赖动作并重新核查；run03只是后续重新评估的选择，不自动重建掩盖问题。无需改变产品目标、用户授权或Kivo公共claim接口。
+
+### 8.3 T5 Hive 观察接口与有限追加窗规划（2026-10-16 22:23 UTC）
+
+本节先于新窗口源码实施。工程、产品两名独立Astra planner分别读取冻结publish/probe及真实只读readback后，均选择固定NATS INFO五整数投影；交换后双方明确CONSENSUS，无剩余分歧，实际消费者核实后撤去不必要的新窗口目录接线变更。独立过度设计审查PASS/issues[]，实际审查计划SHA为65997196097bc2a2261994d140de3fe809675301e6a79993b9fc34823d50e592，审查先于新窗口实施。此工作与§8.2的Kivo初始化续行独立，不能改变其已冻结fixture或消费范围。
+
+window02实际exit1，最后safe为sample98/transport876；sample99 request已落盘而safe缺失，原state仍running/last98，不能重发99或把原窗口改completed。原publish先落request并发两条MQTT，之后调用pipeline_snapshot；后者在同容器Python3.10的NATS SDK consumer_info时间转换上稳定抛ValueError。实际delivered.last_active为`2026-10-16T22:08:55.49708Z`，五位小数纯调用失败，等值六位通过。原失败日志未留原stack，诊断使用同函数复现和真实stream/latest回读，不冒称已有原异常栈。
+
+只读readback04已精确比较seq877 heartbeat与878 DDATA的subject/完整bytes，按冻结publish及request99 timestamp重建完全一致；latest同tenant/device/code/时间、status及完整规范化data SHA一致，lastSequence=ackFloor=878、pending=ackPending=0。readback04 SHA `801b685290273f74020f358b81f75e1d732cc5e0e77d145e25aabd2eb88b4a97`，进程退出receipt SHA `5b34cff35a43a39877c9dd224d6bcf59ded004107b8e74475d714d7560c88134`确认host 441248/441332/441364及其PG、container PID72383均gone。这只确认99已发生效果；不授予旧样本freshness、不补写99safe或window02completed，不改旧request/state/log。
+
+root在独立`hive-window02-resolved-effect01/receipt.json`排他创建效果判定：逐原件验证并绑定window02/frozen Hive/publish源码、host request、window-state、98safe、99request、失败命令与exit、readback03/04及诊断源码、进程退出证据、完整规范化data和消息匹配。明确原窗口失败未完成、sample99效果已观察、重发0、freshness资格false、下一边界100/878。无需重复已成功只读诊断；实际启动前边界仍须重新核。该判定不伪装原producer回执，也不自动授权发布。
+
+新源码目录固定`p7-acceptance/hive-window03/`，运行输出固定`/tmp/p6-kivo-hive-20261016-jOp6FxI7/private/run/p7-j10-20261017-01-window03`；与旧目录分离、排他创建，唯一Sol writer负责源码/纯检查，root唯一runtime owner。只在新窗口独立加载的probe实例中显式装配新的pipeline_snapshot：沿同一`nats://nats:4222`、5秒连接/请求超时、allow_reconnect=False及finally close，调用固定`$JS.API.STREAM.INFO.telemetry_stream`和`$JS.API.CONSUMER.INFO.telemetry_stream.telemetry_processor`。拒绝error、缺字段、身份不符、bool/字符串/负数等非严格非负整数，投影原有五字段messages/lastSequence/ackFloor/pending/ackPending；不默认0、不做数值强转、不回退旧parser。没有门需要的日期转换被移除，未使用的日期只保原字符串（若记录），不改变ACK、transport或业务判断。不修改SDK、site-packages、第三仓、Hive服务或全局Base方法，不增加通用日期层/NATS客户端/重试平台。
+
+新前驱仅接受上述固定效果判定及原件，不能放宽旧window02的completed条件。保持同tenant、device UUID `2e31def5-08f8-4975-b7b0-2815003db549`、code、container/image/mount和既有秘密引用，sample100–160共61次、周期30秒、最大1860秒、最多122次应用层MQTT publish，起始transport878、全部成功则1000。冻结原publish函数SHA `ad9e6f1a58f5fe4db70fb25d1b00999fef92451ef16424cf57cf9660da8591cc`字节不变，birth=False，不建新设备或发DBIRTH，不重发99，不自动补样/延窗。原request先落盘、两条精确字节读回、ACK、latest/online及真实120秒freshness门全部保留。
+
+纯检查直接覆盖实际五位时间数据、正常响应新旧五字段等价及不同无关时间格式不影响投影；拒绝错误response/身份/类型/缺字段、错前驱SHA/设备/99时间或消息摘要/边界、原进程仍在；验证100起点、61上限、122publish、birthFalse、原publishSHA和中途失败不重试/不写completed。实际网络/容器/publish/秘密读取均0。冻结完整源码由未实施者独审通过后，root才可给runtime GO。
+
+先完成§8.2源码独审、真实API和初始化gate、主J10输入；全部就绪后才启动采样时钟。启动前重新核旧host/PG/inside发布者均退出、没有该固定client的另一owned发布者、实际raw INFO为lastSequence=ackFloor=878且pending=ackPending=0，任一变化停止而非自动前移边界。sample100必须经过完整publish检查并有真实safe后，才允许依赖新鲜来源的J10继续。旧fixture保留window02 sample64/66创建时的真实历史来源；真实callsite已核：prepare-fixture:98–110仅创建时读取hiveWindowDirectory，accept-p7:276/377后续读取fixture原64/66 receipt核SHA作为历史完整性，未读取window03目录。新鲜业务走同设备Kivo实时接口，因此不改continuation资源、主候选或旧fixture；新窗口独立绑定source/receipt，不扩大受信目录。
+
+这仍是本机隔离synthetic同设备采样观察链修正，不增加产品写动作、接收方或秘密来源。任何原件变化、消息/持久投影不匹配、未退出发布者、额外stream消息或新效果未知，均停止依赖动作保留证据；不把初始化门、单样本或有限窗口成功扩大为J10/P7/用户验收。
+
+### 8.4 T5 交接接收权限配置与已完成初始化的候选续行（2026-10-16 22:56:50 UTC）
+
+本节先于修复实施。工程、产品两名Astra planner分别阅读final04实际state与授权callsite后完成独立方案，正式交换均明确CONSENSUS。未参与规划的过度设计审查PASS/issues=[]，审查计划SHA为2e948091e1e1b79f0fbf95694a69fe2c25bb01da7aa256795855666592798488，审查先于harness或新准备包实施。用户目标、两条模型、产品权限、业务动作和现有隔离资源均不变。
+
+candidate14的final04真实完成新配置、渠道交办及待补充工作保存；重启补充后correlate子工作已完成，review子工作在原生Agent和模型请求之前FORBIDDEN，root随后failed。原first-failure在accept-p7:665是后续断言，不是首因。harness给reviewer仅record-read Skill，而产品handoffProjection要求接收者拥有来源correlation Skill和同A连接。core使用原函数、全部真实helpers、失败state及实际catalog内存重放：原配置拒绝，仅追加correlation后同来源结果、连接、知识检查全部通过；源码/原state未变。保持产品授权门，不将failed改waiting_input、不替换GLM或跳过依赖。
+
+Geneway既有142路径集合中只改`scripts/accept-p7.mjs`：reviewer增加同A的既有只读correlation Skill；仍属于成员a、使用GLM、review计划项仍record-read，产品按该child capability限制实际工具。正式Web保存后读回其准确skills/connection/member/route，不能直接修state。纯检查调用实际handoffProjection/dependencyProjection及真实连接/来源/知识函数，覆盖原配置拒绝、只补Skill通过、单独撤该Skill与单独撤A连接均再次拒绝；不用新产品导出、权限stub或新runner框架。已有真实失败state对照作为因果证据；常规harness纯检查不依赖秘密或实际服务，原模型/工具/动作范围不扩。
+
+新主run固定`geneway-p7-20261017-02-j10-final05`，producer仍`geneway-p7-20261017-02`。主脚本与新包observer都严格推导`<setupOutput>/private/create-observer-<mainRunId>`，沿既有runId字符/长度约束，不接受任意路径；以新mainrun生成独立operator journal、新配置及新主output。旧`private/create-observer`的baseline和空attempts保留，不清空、迁移或重写。开始前核旧目录无prepared/arm/claim/consumed/dispatch，旧operator只完成switch-endpoints；存在未知写意图就停。新main可重新执行只读端点核验，不能重放业务写入。
+
+新外置包固定`p7-kivo-runtime-continuation-r3/`，原r2及candidate12/13/14原件保留。新候选相对candidate14仅允许accept-p7的已审旧/新SHA差异，其余141项逐字一致，完整Kivo/source/runtime/worker/迁移/精确Node相同；必要observer和准备接线完整列入新manifest。历史源码以固定原归档/包与历史candidate核验，当前源码按新candidate核验；不得用新文件冒充历史字节，也不得删除142项比较或开放任意scripts差异。新HEAD与实际Git差异精确核定；计划文档变化单列。主脚本修复独审并本地提交后才冻结包含其实际SHA/HEAD的新包。依赖旧base io时使用明确、最小的当前源码校验入口，不隐式修改旧模块、文件或全局行为。完整当前闭包仍由launcher/operator入口及退出、root主Host前后双门核验；observer内部仅public bindings，不能冒称内部全闭包。
+
+初始化已真实完成，不再执行setup：固定`setup-notification-continuation-01.json` SHA `88a8b1551d1856eb4fe95c24b892f63e845f8c7111d160c1565e66b5e17af5fa`，原candidate14 SHA `9a8dd099504b26459b43b34ead95589c2f876482742d3da2553e4da198699cb6`、r2 manifest SHA `bb8a6fb695b39feae92c0185ff4752931ededf89db65c36863c2994c9fb9d145`及base12 worker身份不改。按其原绑定验证gate/实际worker/日志，另验证当前candidate的精确相容关系。只接受这一固定gate，不搜索任意completed、不改gate身份、不新造已重跑setup回执、不再次领取三条evaluate。新前置只读门实际核A==原gate.after、B==原gate.before、旧两库完整指纹未变、没有活跃worker；允许的A初始化worker历史保留，不能再要求其从未存在。后续release仍只允许当前business event、精确evaluate sibling和对应derived delivery，原三条无重复消费资格。
+
+旧API已在candidate14源码仍匹配时正常停止，ready原件保存于`p7-acceptance/continuation-api-ready02/`，A/B SHA分别`ac408bb15fcf9b361e84add45bd4f9d9b57294dec0089a4f851bbe6e123a67ea`、`19d98b14eb86d871b53e3eae3b64f6333b7eab910493b09aedada562177de193`；launcher退出0，四个owner/child PID及PG均gone。新launcher必须保留此前fresh01/continuation01/continuation02各自immutable identity和正常退出验证，使用新launch ID真实启动同runtime/DB；新journal仍base12并记录新current，不伪造旧ready/current。fixture、License、schema和秘密来源均不重做。
+
+唯一writer：core Sol负责accept-p7；Kivo Sol只负责新r3外置包；root负责计划、候选及实际runtime，互不改对方文件。源码最小回归、语法、harness纯检查及新包负例（错gate/SHA、多一源码差异、旧observer路径、run/candidate混用、setup再次领取、状态漂移）完成后交未实施者独审。新冻结包及candidate通过后才实际重启API、执行上述只读接续门，最后新完整J10；历史安装/容量证据保留原候选归属，不能改签。
+
+Hive window03继续原sample100–160有限窗口，不延长、不补样、不重发；实际120秒freshness门保留，不为赶窗口跳过检查。窗口不足时停止依赖实时来源的动作，另据真实完成/退出证据确定后续有限方案。若需要第二个Geneway源码路径、产品权限变化、连接/成员/知识范围扩大，或发现未知写意图、setup状态漂移、候选闭包不完整，停止对应动作重新确认边界。计划与纯green不代表GLM原生执行、完整J10、P7或用户验收通过。
+
+### 8.5 T5 精确消息观察顺序与下一有限窗口（2026-10-16 23:03:32 UTC）
+
+本节先于window04源码实施，独立于§8.4的harness/r3工作。工程、产品两Astra分别核原publish和实际readback，离线重建完整消息后交换均CONSENSUS；未参与规划的过度设计审查PASS/issues=[]，审查计划SHA为43e78fb29f873f53fdae8a38c193510b342db3b744583055eb215fecc9ef0267，先于本节源码实施；源码独审和runtime GO仍为独立后续门。产品验收要求本请求两条完整唯一消息、同设备/时间/业务数据和ACK，不要求下游stream保持两种消息的发布顺序；仅移除这个被实测否定的观察假设。
+
+window03实际exit1，lastsafe108/transport896；request109 timestamp1792191077422已落盘而safe109/window-safe缺失，原日志只有固定码，无首次异常栈。只读readback01 receipt SHA `9336a92352d276fa26708a079f5f5656a7aa0a088d2d206ee56368f1ea62453e`、source SHA `f92e2dd1306b4273f382118d220973d9514fed2758ba094576b78dc06702337a`：seq897为DDATA334B，seq898为heartbeat{}2B，恰与发布顺序反转；原SDK两次get_msg和latest日期转换均成功。按冻结publish/request109完整重建subject/bytes，两条摘要精确匹配反序集合；latest完整normalizedData及timestamp相等，lastSequence=ackFloor898、pending=ackPending0。原publish按offset固定kind在这个响应必拒绝；这支持可复现原因，不伪称已有原故障栈。进程退出receipt SHA `07c4c53093eac9952859ba5b47c2a56fbff9bc9ca49c29a7e807e78d970b8842`证明host1298121 PID/PGgone、inside76357gone、同UID其他stdinPython为空。
+
+root排他创建独立`hive-window03-resolved-effect01/receipt.json`：绑定window03/frozen Hive/旧publish源码、host-request、state、108safe、109request、原日志/实际命令和exit、readback source/receipt、进程退出证明及完整消息/规范化数据。保留原执行失败未完成；109仅effects observed、重发0、freshnessQualified false、下一110/898。原request、state、日志均不改，不补109safe或旧completed。启动时再核实时边界，历史效果判定不授予新鲜度。
+
+新源码`p7-acceptance/hive-window04/`、输出`/tmp/p6-kivo-hive-20261016-jOp6FxI7/private/run/p7-j10-20261017-01-window04`由既有唯一Sol窗口writer/root runtime owner负责，排他新建。保留旧source及旧publish SHA `ad9e6f1a58f5fe4db70fb25d1b00999fef92451ef16424cf57cf9660da8591cc`；新窗口显式局部publish函数单独固定SHA，与原函数逐字差分只允许消息观察循环变化。这是§8.3字节不变要求的明确有界例外，不假称新函数仍旧SHA，不修改旧文件、SDK、全局方法或第三仓。MQTT内容/发送顺序/QoS/retain/次数、request先盘、ACK等待、latest/online/120秒freshness、失败不重试保持原逻辑。
+
+每次只读本次边界后两个连续序号；每条按完整subject和完整bytes与两条预期消息一对一匹配、每项只允许消费一次、最后全部匹配。receipt记录实际sequence和实际到达顺序，不排序伪装。重复、缺失、额外、错tenant/device/kind、错完整bytes或timestamp、序号越界均拒绝；不能扩大扫描窗寻找两条、按kind覆盖字典隐藏重复，或放宽总transport/ACK约束。新函数只用于birth=False的固定窗口，不能推导额外业务支持。
+
+新失败诊断最小保留静态allowlist code、异常class、栈的basename/function/line；未知异常用固定fallback，禁止异常message、源码行、locals、请求头或凭据。内层首因不能再被外层仅通用码覆盖；继续exit1、保留unknown、不写safe/不重发。纯检查用敏感标记异常确认诊断不泄内容。旧异常栈不可补造。
+
+纯回归对实际109反序旧红/新绿，正常顺序亦绿；重复、缺失、额外、错subject、错完整bytes/时间、越界均红；覆盖失败无safe/二次发送、安全诊断和仅观察循环差分，保留零文件写/网络/进程/秘密。冻结源码由未实施者独审通过后，root才可给runtime GO。运行前必须§8.4新candidate/API/只读接续门/observer/J10 inputs全部准备好，重新核固定前驱SHA、旧进程与其他publisher无残留、同container/image/mount/tenant/device、实时898/898/0/0。仅此后启动计时；sample110完整safe后才继续依赖新鲜来源的J10。
+
+固定sample110–170共61次、周期30秒、最长1860秒、最多122次应用层MQTT publish、birth=False、transport898→1020。设备/秘密引用不变，不重发109、不自动补样/延长。边界漂移、未知发送者、消息/业务不匹配、超时或任一pin变化就停止保留证据，不能调低门赶进度。若必须改发布、ACK、业务数据或freshness语义，回到规划；源修复、小检查、单样本或有限窗口成功均不代替J10/P7/用户验收。
 
 ## 9. 验证矩阵与证据复用
 

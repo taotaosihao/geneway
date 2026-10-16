@@ -353,7 +353,7 @@ function v5Fixture() {
       member('member-owner', 'member', ['employee-1']),
       member('member-peer', 'member', ['employee-peer']),
     ],
-    modelRoutes: [{ id: 'model-fixture', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', enabled: true, credentialRef: 'SYNTHETIC_MODEL_UNUSED' }],
+    modelRoutes: [{ id: 'model-fixture', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', enabled: true, credentialRef: 'ZENMUX_API_KEY' }],
     employees: [
       { id: 'employee-1', name: '合成员工', enabled: true, revision: 1, instructions: 'synthetic', modelRouteId: 'model-fixture', connectionIds: ['connection-1'], skillIds: ['skill-1', 'skill-gearjob-work-order-read'] },
       { id: 'employee-peer', name: '合成同事', enabled: true, revision: 1, instructions: 'synthetic', modelRouteId: 'model-fixture', connectionIds: [], skillIds: ['skill-peer'] },

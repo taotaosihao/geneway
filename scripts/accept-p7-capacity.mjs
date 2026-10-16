@@ -17,6 +17,7 @@ import { createConversationService } from '../src/conversation-service.mjs'
 import { createAutomationService } from '../src/automation-service.mjs'
 import { activeTopLevelCount } from '../src/execution-runtime.mjs'
 import { createFileStore } from '../src/store/file-store.mjs'
+import { readConnectionCatalog } from '../src/connection-catalog.mjs'
 import { createGenewayServer } from '../src/server.mjs'
 import { readRuntimeConfig } from '../src/runtime-config.mjs'
 import { getCapability } from '../src/capabilities.mjs'
@@ -31,6 +32,7 @@ const require = createRequire(join(root, 'package.json'))
 const model = 'deepseek/deepseek-v4.1-flash'
 const dummyKey = 'controlled-no-real-credential-p7'
 const capacityWeixinAppId = 'channel-app-weixin'
+const emptyHostCatalog = Buffer.from('{"version":1,"targets":[]}\n')
 
 if (resolve(process.argv[1] ?? '') === script) {
   const options = args(process.argv.slice(2))
@@ -537,6 +539,20 @@ async function harnessCheck() {
   await assert.rejects(recordResourceWindow({ stop: async () => ({ sampleCount: 2, peakRssKiB: 4 * 1024 * 1024 + 1 }) }, { resourceWindows: [] }, 'native active or close'), /RSS exceeded 4 GiB/)
   const temporary = await mkdtemp(join(tmpdir(), 'p7-capacity-schema-'))
   try {
+    const missingCatalogConfig = readRuntimeConfig({}, root)
+    await assert.rejects(readConnectionCatalog(missingCatalogConfig.connectionCatalogFile, root), /必须配置仓库外绝对路径/)
+    const pureCatalog = await writeEmptyHostCatalog(join(temporary, 'host-catalog.json'))
+    const pureRestored = join(temporary, 'restored')
+    await mkdir(pureRestored, { mode: 0o700 })
+    const pureRestoredCatalog = await writeEmptyHostCatalog(join(pureRestored, 'host-catalog.json'))
+    assert.notEqual(pureCatalog, pureRestoredCatalog)
+    assert.equal(sha(await readFile(pureCatalog)), sha(await readFile(pureRestoredCatalog)))
+    for (const path of [pureCatalog, pureRestoredCatalog]) {
+      const env = { GENEWAY_CONNECTION_CATALOG: path }
+      assert.equal(readRuntimeConfig(env, root).connectionCatalogFile, path)
+      assert.deepEqual(await readConnectionCatalog(path, root), [])
+      assert.equal((await lstat(path)).mode & 0o777, 0o600)
+    }
     const fakeHost = pid => Object.assign(new EventEmitter(), { pid, stderr: new EventEmitter() })
     const rawHost = join(temporary, 'pure-host.stderr'), child = fakeHost(100)
     const diagnostics = trackHostStderr(child, rawHost, openSync(rawHost, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600), 32)
@@ -628,6 +644,13 @@ function hostCapacitySeed(state, now, feishuRef) {
   }
 }
 
+async function writeEmptyHostCatalog(path) {
+  await writeFile(path, emptyHostCatalog, { mode: 0o600, flag: 'wx' })
+  assert.deepEqual(await readConnectionCatalog(path, root), [])
+  assert.equal(sha(await readFile(path)), sha(emptyHostCatalog))
+  return path
+}
+
 async function hostRun(options) {
   const manifest = await privateJson(options.candidate)
   await candidateCheck(options, manifest.value)
@@ -638,6 +661,7 @@ async function hostRun(options) {
   await mkdir(secretRoot, { mode: 0o700 }); await mkdir(dataRoot, { mode: 0o700 })
   const stateFile = join(dataRoot, 'state.json'), authFile = join(options.output, 'auth.json'), dshHome = join(dataRoot, 'dsh')
   const hostConfig = join(options.output, 'host.json'), networkFile = join(options.output, 'network.jsonl')
+  const catalogPath = await writeEmptyHostCatalog(join(options.output, 'connection-catalog.json'))
   const report = { phase: 'P7-capacity-host', host: { platform: process.platform, arch: process.arch, node: process.execPath, version: process.version, cpuCount: cpus().length }, candidate: manifest.sha256, provider: 'none', channel: 'synthetic-iLink-plus-official-Feishu-SDK', target: { members: 20, agents: 5, weixin: 20, feishuConsumers: 1, endedWorks: 1000, conversations: 200, turns: 5000, knowledge: 100, rules: 20 }, samples: [], bindingSamples: [], checks: [], latencies: {}, ok: false }
   const store = createFileStore(stateFile)
   const now = new Date().toISOString(), feishuRef = 'P7_CAPACITY_FEISHU'
@@ -681,7 +705,7 @@ async function hostRun(options) {
     const port = await freeTcpPort(); origin = 'http://127.0.0.1:' + port
     const baseEnv = { PATH: process.env.PATH, HOME: options.output, LANG: 'C.UTF-8', DSH_HOME: dshHome, GENEWAY_DSH_HOME: dshHome, DSH_TELEMETRY_MODE: 'DISABLED',
       GENEWAY_STATE: stateFile, GENEWAY_AUTH_FILE: authFile, GENEWAY_PORT: String(port), GENEWAY_HOST: '127.0.0.1', GENEWAY_TRUSTED_ORIGIN: origin, GENEWAY_SECRET_ROOT: secretRoot,
-      GENEWAY_MODEL_CREDENTIAL_REF: 'ZENMUX_API_KEY', GENEWAY_CHANNEL_ACCEPT_HOST: '1', GENEWAY_CHANNEL_HOST_CONFIG: hostConfig,
+      GENEWAY_MODEL_CREDENTIAL_REF: 'ZENMUX_API_KEY', GENEWAY_CONNECTION_CATALOG: catalogPath, GENEWAY_CHANNEL_ACCEPT_HOST: '1', GENEWAY_CHANNEL_HOST_CONFIG: hostConfig,
       GENEWAY_NETWORK_AUDIT_ROLE: 'host', P7_LOOPBACK_PORT: String(new URL(simulator.url).port), P7_NETWORK_LOG: networkFile,
       NODE_OPTIONS: '--import=' + pathToFileURL(options['network-guard']).href }
     host = startHost(baseEnv, options.output)
@@ -751,8 +775,10 @@ async function hostRun(options) {
     const restoredPort = await freeTcpPort(), restoredOrigin = 'http://127.0.0.1:' + restoredPort
     const restoredConfig = join(options.output, 'restored-host.json')
     await writeFile(restoredConfig, JSON.stringify({ ilinkUrl: simulator.url }), { mode: 0o600, flag: 'wx' })
+    const restoredCatalogPath = await writeEmptyHostCatalog(join(restored, 'connection-catalog.json'))
+    assert.equal(sha(await readFile(restoredCatalogPath)), sha(await readFile(catalogPath)))
     host = startHost({ ...baseEnv, DSH_HOME: join(restored, 'dsh'), GENEWAY_DSH_HOME: join(restored, 'dsh'), GENEWAY_STATE: restoredStateFile, GENEWAY_AUTH_FILE: restoredAuth, GENEWAY_PORT: String(restoredPort), GENEWAY_TRUSTED_ORIGIN: restoredOrigin,
-      GENEWAY_SECRET_ROOT: restoredSecrets, GENEWAY_CHANNEL_HOST_CONFIG: restoredConfig }, options.output)
+      GENEWAY_SECRET_ROOT: restoredSecrets, GENEWAY_CONNECTION_CATALOG: restoredCatalogPath, GENEWAY_CHANNEL_HOST_CONFIG: restoredConfig }, options.output)
     hostStopped = false
     await until(async () => { if (host.exitCode !== null || host.signalCode !== null) throw new Error('restored Host exited'); try { return (await fetch(restoredOrigin, { signal: AbortSignal.timeout(1000) })).status === 200 } catch { return false } }, 'restored Host startup')
     const restoredLogin = await hostRequest(restoredOrigin, null, '/api/session', 'POST', { loginName: members[0].loginName, password: passwords[members[0].authRef] })

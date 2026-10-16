@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util'
 
-export const KIVO_TPM_TOOLS = Object.freeze({ readRecord: 'geneway_kivo_tpm_read_record', listRecords: 'geneway_kivo_tpm_list_records' })
+export const KIVO_TPM_TOOLS = Object.freeze({ readRecord: 'geneway_kivo_tpm_read_record', listRecords: 'geneway_kivo_tpm_list_records', correlateDevice: 'geneway_kivo_tpm_correlate_device' })
 export const KIVO_TPM_RESULT_KIND = 'kivo.tpm.observation'
 export const TPM_RECORD_TYPES = Object.freeze(['repair', 'maintenance', 'inspection', 'exception', 'plan', 'device'])
 export const TPM_LIST_RECORD_TYPES = Object.freeze(TPM_RECORD_TYPES.filter(type => type !== 'device'))
@@ -208,6 +208,7 @@ function instant(value) {
   const time = Date.parse(value)
   return Number.isFinite(time) ? time : undefined
 }
+export { instant as parseTpmInstant }
 function uuid(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value) }
 function object(value, label) { if (!value || typeof value !== 'object' || Array.isArray(value)) throw tpmError('INVALID_SOURCE', `${label}必须是对象`); return value }
 function requiredText(value, message) { if (typeof value !== 'string' || !value.trim()) throw tpmError('INVALID_SOURCE', message); return value }

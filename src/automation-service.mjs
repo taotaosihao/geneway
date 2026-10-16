@@ -11,6 +11,8 @@ import { readKivoTpmRecord } from '../plugins/kivo-tpm.mjs'
 import { assertTpmObservation } from './domain/tpm.mjs'
 import { KIVO_EVENT_RECORD_TYPES, KIVO_EVENT_TRIGGER, KIVO_RECONCILE_MS, revisionString } from './kivo-events.mjs'
 import { kivoAutomationClaimKey } from './store/file-store.mjs'
+import { isRepairCreationEcho, KIVO_REPAIR_ACTION } from './domain/kivo-repair.mjs'
+import { authorizeWorkBinding } from './work-service.mjs'
 
 const CAPABILITY_ID = 'gearjob-work-order-read'
 const MODEL_PROVIDER = 'zenmux'
@@ -26,7 +28,7 @@ export class AutomationServiceError extends Error {
   }
 }
 
-export function createAutomationService({ store, workService = null, clock = () => new Date().toISOString(), idFactory = randomUUID, connectionCatalog = [], secretRoot, readCurrentRecord = readKivoTpmRecord, readEventSources = async () => ({ sources: [], sha256: null }), eventSourceReady = () => true } = {}) {
+export function createAutomationService({ store, workService = null, actionService = null, clock = () => new Date().toISOString(), idFactory = randomUUID, connectionCatalog = [], secretRoot, readCurrentRecord = readKivoTpmRecord, readEventSources = async () => ({ sources: [], sha256: null }), eventSourceReady = () => true } = {}) {
   if (!store?.read || !store?.update) throw new TypeError('automation service 需要 store')
   if (typeof readCurrentRecord !== 'function' || typeof readEventSources !== 'function' || typeof eventSourceReady !== 'function') throw new TypeError('automation source 依赖无效')
 
@@ -153,6 +155,7 @@ export function createAutomationService({ store, workService = null, clock = () 
 
     async processPending({ ownerCheck, reconcile = false } = {}) {
       checkOwner(ownerCheck)
+      await reconcileActionEvents(ownerCheck)
       const state = await store.read()
       const ids = new Set(state.automationInbox.flatMap(entry => entry.targets.filter(target => target.status === 'pending').map(target => target.ruleId)))
       if (reconcile) for (const rule of state.automationRules) if (rule.capabilityId === KIVO_TPM_RECORD_READ_CAPABILITY && rule.status === 'active' && rule.trigger.kind === KIVO_EVENT_TRIGGER) ids.add(rule.id)
@@ -222,6 +225,38 @@ export function createAutomationService({ store, workService = null, clock = () 
     },
   }
   return service
+
+  async function reconcileActionEvents(ownerCheck) {
+    if (!actionService) return
+    const snapshot = await store.read(), config = await readEventSources()
+    for (const entry of pendingActionEvents(snapshot)) {
+      checkOwner(ownerCheck)
+      const source = config.sources.find(item => item.enabled && item.id === entry.event.sourceId && item.resource === entry.event.resource && item.sourceInstance === entry.event.sourceInstance)
+      if (!source || !eventSourceReady()) continue
+      const candidates = snapshot.works.filter(item => item.actions.some(action => action.id === entry.event.traceId))
+      if (candidates.length !== 1) continue
+      const work = candidates[0]
+      try {
+        await actionService.reconcile({ id: work.ownerMemberId }, work.id, entry.event.traceId)
+        await store.update(state => {
+          checkOwner(ownerCheck)
+          const current = state.automationInbox.find(item => item.id === entry.id)
+          if (!current || current.actionRef) return state
+          const binding = authorizeWorkBinding(state, { id: work.ownerMemberId }, work.id, connectionCatalog)
+          const action = binding.work.actions.find(item => item.id === entry.event.traceId)
+          if (!isRepairCreationEcho(current.event, action) || binding.binding.connection?.baseUrl !== current.event.resource
+            || binding.binding.connection.sourceInstance !== current.event.sourceInstance || binding.binding.connection.clientId !== action.preview.target.clientId) return state
+          return { ...state, automationInbox: replaceById(state.automationInbox, { ...current, actionRef: { workId: work.id, actionId: action.id } }) }
+        }, { beforeCommit: async () => {
+          checkOwner(ownerCheck)
+          const latest = await readEventSources()
+          if (latest.sha256 !== config.sha256 || !eventSourceReady()) throw serviceError('SOURCE_NOT_CONFIGURED', '创建事件来源配置已变化')
+        } })
+      } catch (error) {
+        if (!['FORBIDDEN', 'UNAUTHORIZED', 'NOT_FOUND', 'SOURCE_NOT_CONFIGURED', 'REVISION_CONFLICT', 'UPSTREAM_TIMEOUT', 'UPSTREAM_ERROR', 'INVALID_SOURCE'].includes(error?.code)) throw error
+      }
+    }
+  }
 
   async function activate(actor, id, input, from) {
     exactInput(input, ['expectedRevision'])
@@ -476,7 +511,7 @@ export function createAutomationRuntime({ store, automationService, workService,
     const candidates = rules.map(rule => ({ rule, dueAt: nextDailyOccurrence(rule, new Date(now).toISOString(), state.automationOccurrences) }))
       .filter(item => item.dueAt).sort((a, b) => a.dueAt.localeCompare(b.dueAt) || a.rule.id.localeCompare(b.rule.id))
     const needsReconcile = Boolean(automationService.processPending && (rules.some(rule => rule.status === 'active' && rule.trigger.kind === KIVO_EVENT_TRIGGER)
-      || state.automationInbox?.some(entry => entry.targets.some(target => target.status === 'pending'))))
+      || state.automationInbox?.some(entry => entry.targets.some(target => target.status === 'pending')) || pendingActionEvents(state).length))
     if (!candidates.length && !needsReconcile) return
     const dailyAt = candidates.length ? Date.parse(candidates[0].dueAt) : Infinity
     const reconcileAt = needsReconcile ? nextReconcileAt ?? now + KIVO_RECONCILE_MS : Infinity
@@ -722,12 +757,15 @@ function hardRevocation(error) { return ['FORBIDDEN', 'UNAUTHORIZED', 'SOURCE_NO
 function projectEvent(event) { return { sourceId: event.sourceId, eventId: event.eventId, sourceRevision: event.sourceRevision, occurredAt: event.occurredAt } }
 function isActionEcho(state, event, observed) {
   if (event.recordType !== 'repair' || observed.record.id !== event.objectId) return false
-  return state.works.some(work => work.actions?.some(action => {
-    const target = action.preview?.target
-    return action.id === event.traceId && action.intent?.kind === 'kivo.tpm.repair.create' && action.attempt && !action.attempt.noEffectAt
-      && target?.resource === event.resource && target.sourceInstance === event.sourceInstance && target.recordType === 'repair'
-      && target.orderNo === observed.record.reference && (!action.receipt || action.receipt.upstreamRecordId === event.objectId)
-  }))
+  return state.works.some(work => work.actions?.some(action => isRepairCreationEcho(event, action)
+    && observed.record.reference === action.preview.payload.orderNo))
+}
+function pendingActionEvents(state) {
+  return (state.automationInbox ?? []).filter(entry => !entry.actionRef && entry.event.recordType === 'repair' && entry.event.action === 'create'
+    && entry.event.actorKind === 'machine' && state.works.some(work => work.actions?.some(action => action.id === entry.event.traceId
+      && action.intent.kind === KIVO_REPAIR_ACTION && action.attempt && !action.attempt.noEffectAt
+      && action.preview.target.resource === entry.event.resource && action.preview.target.sourceInstance === entry.event.sourceInstance
+      && entry.event.actorId === `machine-account:${action.preview.target.clientId}` && entry.event.subject.deviceId === action.preview.target.deviceId)))
 }
 function uuid(value) { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) }
 function reasonText(reason) {

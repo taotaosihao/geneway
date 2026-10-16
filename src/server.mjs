@@ -19,6 +19,7 @@ import { createChannelSecretStore } from './channel-secret-store.mjs'
 import { ChannelServiceError, createChannelService } from './channel-service.mjs'
 import { AutomationServiceError, createAutomationRuntime, createAutomationService } from './automation-service.mjs'
 import { readKivoEventBody, readKivoEventSources, readKivoSigningSecret, verifyKivoEvent } from './kivo-events.mjs'
+import { createActionService } from './action-service.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
@@ -74,7 +75,8 @@ export async function start({ feishuSdk, weixinApi } = {}) {
   const auth = createAuthRuntime({ filePath: authPath })
   const index = await readFile(join(root, 'web', 'index.html'), 'utf8')
   const readEventSources = () => readKivoEventSources(runtimeConfig.dataRoot)
-  const automation = createAutomationService({ store, workService: service, connectionCatalog, secretRoot: runtimeConfig.secretRoot, readEventSources, eventSourceReady: () => automationRuntime?.ownsLock() === true })
+  const actionService = createActionService({ store, connectionCatalog, secretRoot: runtimeConfig.secretRoot })
+  const automation = createAutomationService({ store, workService: service, actionService, connectionCatalog, secretRoot: runtimeConfig.secretRoot, readEventSources, eventSourceReady: () => automationRuntime?.ownsLock() === true })
   automationRuntime = createAutomationRuntime({
     store, automationService: automation, workService: service, dataRoot: runtimeConfig.dataRoot,
     onError: error => console.error(error),
@@ -101,7 +103,7 @@ export async function start({ feishuSdk, weixinApi } = {}) {
     await automationRuntime.close().catch(() => undefined)
     throw error
   }
-  const server = createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog, store, auth, index, trustedOrigin, readEventSources, secretRoot: runtimeConfig.secretRoot })
+  const server = createGenewayServer({ service, actionService, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog, store, auth, index, trustedOrigin, readEventSources, secretRoot: runtimeConfig.secretRoot })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
   let shuttingDown = false
@@ -116,7 +118,7 @@ export async function start({ feishuSdk, weixinApi } = {}) {
   return server
 }
 
-export function createGenewayServer({ service, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog = [], store, auth, index = '', trustedOrigin, readEventSources = async () => ({ sources: [] }), secretRoot }) {
+export function createGenewayServer({ service, actionService, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog = [], store, auth, index = '', trustedOrigin, readEventSources = async () => ({ sources: [] }), secretRoot }) {
   if (!service || !store || !auth || !trustedOrigin) throw new Error('server dependencies are required')
   channel ??= createChannelService({ store, workService: service, conversationService, connectionCatalog })
   const channelRuntimeReady = channelAppId => channelRuntime?.isAvailable?.(channelAppId) === true
@@ -257,6 +259,18 @@ export function createGenewayServer({ service, conversationService, knowledge, c
       if (confirmationMatch && request.method === 'DELETE') {
         await protectedWrite(request, context.token, auth, trustedOrigin, [])
         return sendJson(response, 200, await service.deleteConfirmation(actor, decode(confirmationMatch[1])))
+      }
+
+      const actionMatch = url.pathname.match(/^\/api\/works\/([^/]+)\/actions(?:\/([^/]+)\/(approve|reject|revoke|reconcile))?$/)
+      if (actionMatch && request.method === 'POST') {
+        exactQuery(url)
+        if (!actionService) throw httpError('UNAVAILABLE', '维修动作服务尚未就绪')
+        const operation = actionMatch[3], workId = decode(actionMatch[1])
+        const allowed = !operation ? ['reason', 'description', 'clientRequestId'] : operation === 'reconcile' ? [] : ['expectedRevision', 'previewDigest', 'clientRequestId']
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, allowed)
+        if (operation !== 'reconcile' && (typeof body.clientRequestId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.clientRequestId))) throw httpError('INVALID_REQUEST', '请求标识无效')
+        const action = operation ? await actionService[operation](actor, workId, decode(actionMatch[2]), body) : await actionService.createPreview(actor, workId, body)
+        return sendJson(response, 200, action)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/works') {

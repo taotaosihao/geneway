@@ -43,6 +43,17 @@ try {
   assert.notEqual(verifyKivoEvent(signed(display)).rawDigest, accepted.rawDigest)
   const conflict = structuredClone(value); conflict.data.businessEvent.after.status = 'completed'
   assert.notEqual(verifyKivoEvent(signed(conflict)).fingerprint, accepted.fingerprint)
+  const creation = structuredClone(value)
+  Object.assign(creation.data.businessEvent, { action: 'create', actorKind: 'machine', actorId: `machine-account:${uuid()}`, sourceRevision: '0', before: null, after: { status: 'reported', executorId: null } })
+  creation.data.source.revision = '0'
+  const created = verifyKivoEvent(signed(creation))
+  assert.equal(created.event.before, null); assert.equal(created.event.actorKind, 'machine')
+  for (const change of [
+    b => { b.data.businessEvent.actorId = uuid() }, b => { delete b.data.businessEvent.actorKind },
+    b => { b.data.businessEvent.actorKind = 'human' }, b => { b.data.businessEvent.sourceRevision = '1'; b.data.source.revision = '1' },
+    b => { b.data.businessEvent.before = {} }, b => { b.data.businessEvent.after.status = 'dispatched' },
+    b => { b.data.businessEvent.action = 'dispatch' }, b => { b.data.businessEvent.objectType = 'maintenance' },
+  ]) { const body = structuredClone(creation); change(body); assert.throws(() => verifyKivoEvent(signed(body))) }
   for (const change of [
     body => { body.version = 1 },
     body => { body.data.source.adapter = 'another-adapter' },

@@ -253,7 +253,7 @@ try {
 }
 
 function checkMigrations() {
-  assert.equal(STATE_VERSION, 11)
+  assert.equal(STATE_VERSION, 12)
   const fromV3 = migrateState({ version: 3 })
   assert.equal(fromV3.version, STATE_VERSION)
   for (const key of ['channelApps', 'channelIdentities', 'channelConversations', 'channelMessages', 'deliveries', 'linkCodes']) assert.deepEqual(fromV3[key], [])

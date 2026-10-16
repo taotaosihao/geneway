@@ -90,21 +90,24 @@ export function normalizeKivoBusinessEvent(value, source) {
   keys(data.rule, ['id', 'revision', 'name'])
   if (!source.subscriptionIds.includes(data.rule.id) || !Number.isSafeInteger(data.rule.revision) || data.rule.revision < 1) throw failure('EVENT_SOURCE_INVALID', '事件订阅不在当前来源允许范围内', 403)
   const event = data.businessEvent
-  keys(event, ['version', 'eventId', 'sourceKind', 'objectType', 'objectId', 'sourceRevision', 'occurredAt', 'timezone', 'actorId', 'traceId', 'action', 'before', 'after', 'subject', 'businessLink', 'displayBefore', 'displayAfter'])
+  keys(event, ['version', 'eventId', 'sourceKind', 'objectType', 'objectId', 'sourceRevision', 'occurredAt', 'timezone', 'actorId', 'traceId', 'action', 'before', 'after', 'subject', 'businessLink', 'displayBefore', 'displayAfter', ...(Object.hasOwn(event, 'actorKind') ? ['actorKind'] : [])])
+  const machineCreate = event.objectType === 'repair' && event.action === 'create' && event.actorKind === 'machine'
   if (event.version !== 1 || !uuid(event.eventId) || event.sourceKind !== 'native_audit' || !KIVO_EVENT_RECORD_TYPES.includes(event.objectType)
     || !uuid(event.objectId) || event.timezone !== 'Asia/Shanghai' || !canonicalRevision(event.sourceRevision)
-    || event.actorId !== null && !uuid(event.actorId) || event.action !== null && (typeof event.action !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(event.action))) throw failure('EVENT_INVALID', '业务事件身份或版本无效', 400)
+    || (machineCreate ? !/^machine-account:[0-9a-f-]{36}$/i.test(event.actorId) || !uuid(event.actorId.slice(16)) : event.actorId !== null && !uuid(event.actorId))
+    || Object.hasOwn(event, 'actorKind') && !machineCreate || event.action !== null && (typeof event.action !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(event.action))) throw failure('EVENT_INVALID', '业务事件身份或版本无效', 400)
   instant(event.occurredAt)
   if (value.timestamp !== event.occurredAt || data.source.revision !== event.sourceRevision || data.source.adapter !== 'mes.native' || data.source.authority !== `mes.native.${event.objectType}`) throw failure('EVENT_SOURCE_INVALID', '业务事件来源或时间不一致', 400)
   boundedText(event.traceId, 'traceId', 128)
   const subject = normalizeSubject(event.subject, event), object = normalizeSubject(data.object, event)
   if (JSON.stringify(canonical(subject)) !== JSON.stringify(canonical(object))) throw failure('EVENT_SOURCE_INVALID', '业务对象身份不一致', 400)
-  const before = transitionFields(event.before, event.objectType), after = transitionFields(event.after, event.objectType)
-  if (Object.keys(before).sort().join() !== Object.keys(after).sort().join()) throw failure('EVENT_INVALID', '业务变化字段不闭合', 400)
+  const before = machineCreate ? null : transitionFields(event.before, event.objectType), after = transitionFields(event.after, event.objectType)
+  if (machineCreate ? event.before !== null || event.sourceRevision !== '0' || after.status !== 'reported' || after.executorId !== null || Object.keys(after).length !== 2
+    : Object.keys(before).sort().join() !== Object.keys(after).sort().join()) throw failure('EVENT_INVALID', '业务变化字段不闭合', 400)
   return { sourceId: source.id, resource: source.resource, sourceInstance: source.sourceInstance, adapter: data.source.adapter,
     kind: value.type, version: event.version, eventId: event.eventId, recordType: event.objectType, objectId: event.objectId,
     sourceRevision: event.sourceRevision, occurredAt: event.occurredAt, traceId: event.traceId, actorId: event.actorId, action: event.action,
-    before, after, subject }
+    before, after, subject, ...(machineCreate ? { actorKind: 'machine' } : {}) }
 }
 
 export async function readKivoEventBody(request) {

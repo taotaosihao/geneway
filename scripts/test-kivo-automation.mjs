@@ -9,6 +9,8 @@ import { createFileStore } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
 import { getCapability, parseCapabilityToolResult } from '../src/capabilities.mjs'
 import { normalizeTpmObservation } from '../src/domain/tpm.mjs'
+import { correlationFixture } from './fixtures/kivo-device-correlation.mjs'
+import { repairIntentKey } from '../src/domain/kivo-repair.mjs'
 import { authorizeExecutionGrant, connectionSnapshot } from '../src/execution-grant.mjs'
 import { canonical, digest, normalizeKivoEventSources } from '../src/kivo-events.mjs'
 
@@ -202,24 +204,33 @@ async function grantChecks() {
 }
 
 async function echoChecks() {
+  const correlationCap = getCapability('kivo-tpm-device-correlate')
   for (const variant of ['exact', 'higher-current', 'no-effect', 'other-source', 'read-trace', 'approximate-order', 'receipt-mismatch', 'missing-attempt']) {
-    const f = await fixture(), active = await f.activate(), actionId = randomUUID(), previewDigest = 'a'.repeat(64)
-    const target = { resource: f.connection.baseUrl, sourceInstance: f.connection.sourceInstance, recordType: 'repair', orderNo: variant === 'approximate-order' ? 'R-' : 'R-1' }
-    if (variant === 'other-source') target.sourceInstance = 'other-instance'
-    const result = { ...parseCapabilityToolResult(cap.id, { ok: true, observation: f.lastObservation }, active.input), id: 'fixture-result', schemaVersion: 1, capabilityId: cap.id, skillId: cap.skillId, input: active.input, dshSessionRef: 'explicit-synthetic-fixture-not-native', contextConfirmationRefs: [], createdAt: now }
-    const action = { id: actionId, requestKeys: ['fixture-request'], proposalKey: 'fixture-proposal', intent: { kind: variant === 'read-trace' ? 'kivo.tpm.record.read' : 'kivo.tpm.repair.create', targetKey: 'fixture-target' },
-      preview: { digest: previewDigest, resultId: result.id, target, payload: {}, expectedRevision: '0', createdAt: now, expiresAt: '2026-10-16T02:00:00.000Z' },
+    const f = await fixture(), active = await f.activate({ input: { recordType: 'repair', reference: 'GW-ECHO' } }), actionId = `action-${randomUUID()}`, previewDigest = 'a'.repeat(64)
+    const originalId = '00000000-0000-4000-8000-000000000009'
+    const payload = correlationFixture({ at: now, sampleAt: now, reference: 'R-ORIGINAL', binding: f.connection, record: { id: originalId, createdAt: now, updatedAt: now } })
+    if (variant === 'other-source') { payload.source.sourceInstance = 'other-instance'; payload.binding.sourceInstance = 'other-instance' }
+    const target = { system: 'kivo', resource: f.connection.baseUrl, sourceInstance: payload.source.sourceInstance, sourceEnvironment: f.connection.sourceEnvironment, dataMode: f.connection.dataMode,
+      connectionId: f.connection.id, connectionRevision: 1, clientId: f.connection.clientId, recordType: 'repair', recordId: originalId, recordReference: 'R-ORIGINAL', deviceId, deviceCode: 'D-1' }
+    const result = { ...parseCapabilityToolResult(correlationCap.id, { ok: true, observation: payload }, payload.input), id: 'fixture-result', schemaVersion: 1, capabilityId: correlationCap.id, skillId: correlationCap.skillId,
+      input: payload.input, dshSessionRef: 'explicit-synthetic-fixture-not-native', contextConfirmationRefs: [], createdAt: now }
+    const orderNo = variant === 'approximate-order' ? 'GW-OTHER' : 'GW-ECHO'
+    const action = { id: actionId, requestKeys: ['fixture-request'], proposalKey: 'fixture-proposal', intent: { kind: 'kivo.tpm.repair.create', targetKey: repairIntentKey(actor.id, target) },
+      preview: { digest: previewDigest, resultId: result.id, target, payload: { orderNo, deviceId, reason: '合成原因', description: '合成说明' }, expectedRevision: '1', createdAt: now, expiresAt: '2026-10-16T02:00:00.000Z' },
       decision: { kind: 'approved', memberId: actor.id, previewDigest, decidedAt: now },
       attempt: variant === 'missing-attempt' ? null : { previewDigest, preparedAt: now, ...(variant === 'no-effect' ? { noEffectAt: now, noEffectReason: 'SOURCE_REVISION_CONFLICT' } : {}) },
-      receipt: variant === 'receipt-mismatch' ? { previewDigest, upstreamRecordId: randomUUID(), recordedAt: now } : null }
-    await f.store.update(state => ({ ...state, works: [...state.works, { id: 'fixture-history', ownerMemberId: actor.id, employeeId: 'agent', skillId: cap.skillId, capabilityId: cap.id, connectionId: 'kivo', input: active.input, goal: 'explicit P5 action consumer fixture only', status: 'completed', acceptedAt: now, results: [result], actions: [action], executions: [] }] }))
-    f.revision = variant === 'higher-current' ? 2 : 1
-    await f.service.acceptKivoEvent(f.event(1, { traceId: actionId }))
+      receipt: ['no-effect', 'missing-attempt'].includes(variant) ? null : { previewDigest, upstreamRecordId: variant === 'receipt-mismatch' ? randomUUID() : objectId, recordedAt: now,
+        orderNo, deviceId, status: 'reported', creation: { actorKind: 'machine', machineAccountId: f.connection.clientId, traceId: actionId, revision: '0' }, currentRevision: '0', replayed: false, queriedAt: now } }
+    await f.store.update(state => ({ ...state, skills: [...state.skills, { id: correlationCap.skillId, name: '关联', enabled: true, capabilityId: correlationCap.id }],
+      employees: state.employees.map(e => ({ ...e, skillIds: [...e.skillIds, correlationCap.skillId] })), connections: state.connections.map(c => ({ ...c, skillIds: [...c.skillIds, correlationCap.skillId] })),
+      works: [...state.works, { id: 'fixture-history', ownerMemberId: actor.id, employeeId: 'agent', skillId: correlationCap.skillId, capabilityId: correlationCap.id, connectionId: 'kivo', input: payload.input, goal: 'explicit consumer fixture only; not a real creation', status: 'completed', acceptedAt: now, results: [result], actions: [action], executions: [] }] }))
+    f.revision = variant === 'exact' ? 0 : 1
+    await f.service.acceptKivoEvent(f.event(0, { traceId: variant === 'read-trace' ? randomUUID() : actionId, actorKind: 'machine', actorId: `machine-account:${f.connection.clientId}`, action: 'create', before: null, after: { status: 'reported', executorId: null } }))
     await f.service.processPending()
     const state = await f.store.read(), suppressed = ['exact', 'higher-current'].includes(variant)
     assert.equal(state.automationInbox[0].targets[0].reason === 'echo', suppressed, variant)
     assert.equal(state.automationOccurrences.length, variant === 'exact' ? 0 : 1, variant)
-    assert.equal(state.automationRules[0].handledRevision, variant === 'higher-current' ? '2' : '1', variant)
+    assert.equal(state.automationRules[0].handledRevision, variant === 'exact' ? '0' : '1', variant)
     if (variant === 'exact') { await f.service.processPending({ reconcile: true }); assert.equal((await f.store.read()).automationOccurrences.length, 0) }
   }
 }

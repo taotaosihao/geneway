@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { getCapability, listCapabilities, validateCapabilityInput, KIVO_TPM_RECORD_READ_CAPABILITY, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
 import { createObservation } from './domain/work-order.mjs'
 import { KIVO_TPM_RESULT_KIND } from './domain/tpm.mjs'
+import { KIVO_TPM_DEVICE_CORRELATION_KIND } from './domain/tpm-device-correlation.mjs'
 import { assertTrustedConnection, CONNECTION_IDENTITY_FIELDS } from './connection-catalog.mjs'
 import { connectionInputAllowed, connectionSnapshot, correlationMappingContext } from './execution-grant.mjs'
 import { currentKnowledgeReference, sweepKnowledgeDependencies } from './knowledge-service.mjs'
@@ -16,6 +17,7 @@ export const ERROR_STATUS = {
   NOT_FOUND: 404, BUSY: 409, SOURCE_NOT_CONFIGURED: 503, MODEL_NOT_CONFIGURED: 503,
   UPSTREAM_TIMEOUT: 504, UPSTREAM_ERROR: 502, INVALID_SOURCE: 502,
   REVISION_CONFLICT: 409, CAPACITY_EXCEEDED: 400, BUDGET_EXHAUSTED: 409, CAPABILITY_RETIRED: 409,
+  ACTION_CONFLICT: 409,
   KNOWLEDGE_PLUGIN_DISABLED: 503, KNOWLEDGE_REFERENCE_INVALID: 409,
 }
 
@@ -546,7 +548,11 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         if (kind === 'employees' && body.expectedRevision !== (current.revision ?? 1)) throw serviceError('REVISION_CONFLICT', 'Agent 配置已变化，请刷新后重试')
         updated = configEntity(state, kind, body, current, clock(), connectionCatalog)
         let next = { ...state, [kind]: replaceById(state[kind], updated) }
-        if (kind !== 'employees') return next
+        if (kind !== 'employees') {
+          if (kind === 'connections' || updated.enabled !== true) next = invalidatePendingApprovals(next, work => work.capabilityId === 'kivo-tpm-device-correlate'
+            && (kind === 'connections' ? work.connectionId === id : kind === 'skills' ? work.skillId === id : state.employees.some(employee => employee.id === work.employeeId && employee.modelRouteId === id)), clock())
+          return next
+        }
         const now = clock()
         if (body.memberIds !== undefined) next = setEmployeeMembers(next, id, body.memberIds, now)
         if (updated.enabled !== true || current.modelRouteId !== updated.modelRouteId || !sameStrings(current.skillIds, updated.skillIds) || !sameStrings(current.connectionIds, updated.connectionIds)) {
@@ -907,7 +913,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
         const nextExecution = { ...execution, status: 'failed', completedAt: clock(), error: safeError(timeoutError()) }
         return { ...state, works: replaceById(state.works, { ...work, status: 'failed', executions: replaceById(work.executions, nextExecution) }) }
       }
-      if (getCapability(work.capabilityId)?.resultKind === KIVO_TPM_RESULT_KIND) {
+      if ([KIVO_TPM_RESULT_KIND, KIVO_TPM_DEVICE_CORRELATION_KIND].includes(getCapability(work.capabilityId)?.resultKind)) {
         const authorized = authorizeWorkBinding(state, { id: work.ownerMemberId }, work, connectionCatalog)
         if (!context || authorized.binding.route.id !== context.metadata.modelRouteId
           || !isDeepStrictEqual(work.input, context.work.input) || !isDeepStrictEqual(execution.input, context.work.input)
@@ -946,6 +952,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     if (recovered) return
     if (!recoveryPromise) {
       recoveryPromise = (async () => {
+        await store.confirmDurability?.()
         await store.update(state => {
           let changed = false
           const now = clock()
@@ -973,7 +980,8 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
   }
 
   async function projectOwned(actor, work) {
-    if (!work.collaboration && !work.rootWorkId && !work.results.some(result => result.knowledgeDependencyRefs?.length) && !work.handoffs?.some(handoff => handoff.knowledgeRefs?.length)) return publicWork({ works: [work] }, { id: actor?.id }, work)
+    if (!work.collaboration && !work.rootWorkId && !work.actions?.some(action => action.intent.kind === 'kivo.tpm.repair.create')
+      && !work.results.some(result => result.knowledgeDependencyRefs?.length) && !work.handoffs?.some(handoff => handoff.knowledgeRefs?.length)) return publicWork({ works: [work] }, { id: actor?.id }, work)
     const state = await store.read()
     const member = requireMember(state, actor)
     const current = findOwned(state, member, work.id)
@@ -994,7 +1002,7 @@ function businessEnvelope(model, work, now) {
     Object.assign(payload, compact({ explanation: clean(model.explanation), dshSessionRef: clean(model.dshSessionRef),
       continuedFromDshSessionRef: clean(model.continuedFromDshSessionRef), contextObservationId: clean(model.contextResultId ?? model.contextObservationId), continuity: clean(model.continuity) }))
   }
-  if (base.kind === 'manufacturing.work-order-device-correlation' || base.kind === KIVO_TPM_RESULT_KIND) createdAt = clean(payload.queriedAt)
+  if (['manufacturing.work-order-device-correlation', KIVO_TPM_RESULT_KIND, KIVO_TPM_DEVICE_CORRELATION_KIND].includes(base.kind)) createdAt = clean(payload.queriedAt)
   const result = compact({
     id, kind: base.kind, capabilityId: work.capabilityId, skillId: work.skillId, schemaVersion: 1,
     input: structuredClone(work.input), payload, explanation: clean(model.explanation), source: base.source, createdAt,
@@ -1092,7 +1100,7 @@ function businessResults(work) { return work.results.filter(item => item.kind !=
 function followUpFact(result) {
   if (result.kind === 'manufacturing.takt') return { kind: result.kind, payload: pick(result.payload, ['availableSeconds', 'quantity', 'secondsPerUnit', 'unit']) }
   if (result.kind === 'manufacturing.work-order-device-correlation') return { kind: result.kind, payload: structuredClone(result.payload), source: structuredClone(result.source) }
-  if (result.kind === KIVO_TPM_RESULT_KIND) return { kind: result.kind, payload: structuredClone(result.payload), source: structuredClone(result.source) }
+  if ([KIVO_TPM_RESULT_KIND, KIVO_TPM_DEVICE_CORRELATION_KIND].includes(result.kind)) return { kind: result.kind, payload: structuredClone(result.payload), source: structuredClone(result.source) }
   return compact({
     kind: result.kind,
     payload: pick(result.payload, ['workOrderId', 'status', 'plannedQuantity', 'completedQuantity', 'unit', 'sourceTime', 'sourceRecordId', 'sourceRevision', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']),
@@ -1152,7 +1160,8 @@ function setEmployeeMembers(state, employeeId, memberIds, now) {
 }
 
 function invalidatePendingApprovals(state, affected, now) {
-  return { ...state, works: state.works.map(work => affected(work) ? { ...work, actions: (work.actions ?? []).map(action => action.decision?.kind === 'approved' && !action.decision.invalidatedAt && !action.attempt
+  return { ...state, works: state.works.map(work => affected(work) ? { ...work, actions: (work.actions ?? []).map(action => action.decision?.kind === 'approved' && !action.decision.invalidatedAt
+    && !action.receipt && !action.attempt?.noEffectAt && (!action.attempt || action.intent.kind === 'kivo.tpm.repair.create')
     ? { ...action, decision: { ...action.decision, invalidatedAt: now, invalidationReason: 'OWNER_REVOKED' } }
     : action) } : work) }
 }
@@ -1187,6 +1196,8 @@ function publicWork(state, member, work) {
     explanation: item.explanation, at: item.createdAt, dshSessionRef: item.dshSessionRef, continuedFromDshSessionRef: item.continuedFromDshSessionRef,
     contextObservationId: item.contextObservationId, continuity: item.continuity, contextConfirmationRefs: item.contextConfirmationRefs }))
   const value = structuredClone(work)
+  value.actions = value.actions.map(action => action.intent.kind === 'kivo.tpm.repair.create' ? { ...action, echoEvents: (state.automationInbox ?? []).filter(entry => entry.actionRef?.workId === work.id && entry.actionRef.actionId === action.id)
+    .map(entry => ({ eventId: entry.event.eventId, sourceRevision: entry.event.sourceRevision, occurredAt: entry.event.occurredAt, acceptedAt: entry.acceptedAt })) } : action)
   value.results = results
   if (results.some(result => result.knowledgeUnavailable)) delete value.knowledgeQuery
   if (value.handoffs) value.handoffs = value.handoffs.map(handoff => {

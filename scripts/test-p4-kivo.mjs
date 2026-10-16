@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { generateKeyPairSync, randomUUID, verify } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomUUID, verify } from 'node:crypto'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -13,11 +13,11 @@ await errorClassificationChecks()
 
 const fixturePath = process.argv[2]
 assert.ok(fixturePath, '请显式传入脱敏 tpm-wire-tools.json；本测试不寻找或读取运行凭据')
-const fixture = JSON.parse(await readFile(fixturePath, 'utf8'))
-assert.equal(fixture.sourceCommit, 'c54d38af47c735b039a45bf40eb63b94bf30e337')
-const tools = fixture.tools.map(({ name, inputSchema, outputSchema }) => ({ name, inputSchema, outputSchema }))
+const fixtureBytes = await readFile(fixturePath)
+assert.equal(createHash('sha256').update(fixtureBytes).digest('hex'), 'a50cfe4688335c79369e06c3672450b01f830af711696080ec5265a47f16a7dd', '必须使用 P6 已冻结的13-tool脱敏目录')
+const tools = JSON.parse(fixtureBytes).map(({ name, inputSchema, outputSchema }) => ({ name, inputSchema, outputSchema }))
 assert.deepEqual([...assertKivoTpmTools(tools).keys()].sort(), Object.keys(KIVO_TPM_SCHEMA_FINGERPRINTS).sort())
-for (const tool of fixture.tools) assert.equal(schemaFingerprint(tool), tool.sha256)
+for (const tool of tools) assert.equal(schemaFingerprint(tool), KIVO_TPM_SCHEMA_FINGERPRINTS[tool.name])
 for (const variant of [tools.slice(1), [...tools, { ...tools[0], name: 'tpm.repair.create' }], [...tools.slice(1), tools[1]]]) {
   assert.throws(() => assertKivoTpmTools(variant), { code: 'INVALID_SOURCE' })
 }
@@ -32,7 +32,7 @@ try {
   process.env.GENEWAY_DSH_GRANT_FILE = join(tmpdir(), `missing-kivo-lifecycle-grant-${randomUUID()}.json`)
   const dispose = apply({ tools: { register(tool) { mountedTools.push(tool) } } })
   assert.equal(typeof dispose, 'function', 'Cordis4 must receive the native apply disposer')
-  assert.equal(mountedTools.length, 2)
+  assert.equal(mountedTools.length, 3)
   dispose()
   assert.equal((await mountedTools[0].execute({ recordType: 'repair', reference: 'R-1' })).error.code, 'CANCELLED')
 } finally {
@@ -94,7 +94,7 @@ const servers = []
 try {
   const a = await serve('controlled-a'), b = await serve('controlled-b')
   const options = (server, extra = {}) => ({ connection: server.connection, secretRoot: secrets, traceId: 'test-trace', authorize: async () => { if (!server.authorized) throw Object.assign(new Error('do-not-log-secret'), { code: 'FORBIDDEN' }) }, ...extra })
-  assert.equal((await testKivoTpmConnection(options(a))).toolNames.length, 11)
+  assert.equal((await testKivoTpmConnection(options(a))).toolNames.length, 13)
   assert.ok(a.events.some(event => event.path === '/.well-known/oauth-protected-resource/api/v1/mes/mcp'))
   assert.ok(a.events.some(event => event.path === '/.well-known/oauth-authorization-server'))
   assert.ok(a.events.some(event => event.method === 'server/discover'))
@@ -174,13 +174,12 @@ try {
   a.reset(); a.parentResource = true
   await assert.rejects(() => testKivoTpmConnection(options(a)), { code: 'FORBIDDEN' })
   assert.equal(a.events.some(event => event.path === '/api/v1/oauth/token'), false)
-  for (const changedScope of ['challenge', 'metadata']) {
-    a.reset()
-    if (changedScope === 'challenge') a.challengeScope = 'tpm.repair.report'
-    else a.metadataWriteScope = true
-    await assert.rejects(() => testKivoTpmConnection(options(a)), { code: 'FORBIDDEN' })
-    assert.equal(a.events.some(event => event.path === '/api/v1/oauth/token'), false)
-  }
+  a.reset(); a.challengeScope = 'tpm.repair.report'
+  await assert.rejects(() => testKivoTpmConnection(options(a)), { code: 'FORBIDDEN' })
+  assert.equal(a.events.some(event => event.path === '/api/v1/oauth/token'), false)
+  a.reset(); a.metadataWriteScope = true
+  assert.equal((await testKivoTpmConnection(options(a))).toolNames.length, 13)
+  assert.equal(a.events.filter(event => event.path === '/api/v1/oauth/token').length, 1, 'full advertised metadata must not broaden the fixed read scope')
   a.reset(); a.retryUnauthorized = true; a.retryWriteScope = true
   await assert.rejects(() => readKivoTpmRecord(options(a, { input })), { code: 'FORBIDDEN' })
   assert.equal(a.events.filter(event => event.path === '/api/v1/oauth/token').length, 1)

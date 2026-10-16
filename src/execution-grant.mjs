@@ -2,10 +2,10 @@ import { constants } from 'node:fs'
 import { access, lstat, open, readFile, realpath, rename, stat, unlink } from 'node:fs/promises'
 import { isAbsolute, parse, relative, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { getCapability, KIVO_TPM_RECORD_LIST_CAPABILITY, KIVO_TPM_RECORD_READ_CAPABILITY, validateCapabilityInput, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
+import { getCapability, KIVO_TPM_RECORD_LIST_CAPABILITY, KIVO_TPM_RECORD_READ_CAPABILITY, KIVO_TPM_DEVICE_CORRELATION_CAPABILITY, validateCapabilityInput, WORK_ORDER_DEVICE_CORRELATION_CAPABILITY } from './capabilities.mjs'
 
 const ACTIVE_EXECUTIONS = new Set(['accepted', 'running'])
-const KIVO_TPM_CAPABILITIES = new Set([KIVO_TPM_RECORD_READ_CAPABILITY, KIVO_TPM_RECORD_LIST_CAPABILITY])
+const KIVO_TPM_CAPABILITIES = new Set([KIVO_TPM_RECORD_READ_CAPABILITY, KIVO_TPM_RECORD_LIST_CAPABILITY, KIVO_TPM_DEVICE_CORRELATION_CAPABILITY])
 
 export async function consumeExecutionGrant({ filePath = process.env.GENEWAY_DSH_GRANT_FILE, toolName, input } = {}) {
   if (!text(filePath)) throw grantError('FORBIDDEN', '本次执行没有工具授权')

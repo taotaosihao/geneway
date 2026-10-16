@@ -10,6 +10,7 @@ import { createObservation } from './domain/work-order.mjs'
 import { connectionInputAllowed, connectionSnapshot } from './execution-grant.mjs'
 import { assertTrustedConnection } from './connection-catalog.mjs'
 import { KIVO_TPM_RESULT_KIND, KIVO_TPM_TOOLS } from './domain/tpm.mjs'
+import { KIVO_TPM_DEVICE_CORRELATION_KIND } from './domain/tpm-device-correlation.mjs'
 import { isRetiredWork } from './work-service.mjs'
 import { conversationSessionDependencies, currentConversationDependencies } from './conversation-dependencies.mjs'
 import { assertDshHome, readModelCredential, readRuntimeConfig } from './runtime-config.mjs'
@@ -992,7 +993,7 @@ function collaborationResult(id, work, parsed, sessionId, usage, now, generation
   return {
     id, kind: base.kind, capabilityId: work.capabilityId, skillId: work.skillId, schemaVersion: 1,
     input: structuredClone(work.input), payload, explanation: work.inputProvenance ? `用户提供的计算条件下平均分摊：${parsed.explanation}` : parsed.explanation, source: base.source,
-    createdAt: base.kind === KIVO_TPM_RESULT_KIND ? payload.queriedAt : now, toolName: base.toolName, pluginId: base.pluginId, pluginVersion: base.pluginVersion,
+    createdAt: [KIVO_TPM_RESULT_KIND, KIVO_TPM_DEVICE_CORRELATION_KIND].includes(base.kind) ? payload.queriedAt : now, toolName: base.toolName, pluginId: base.pluginId, pluginVersion: base.pluginVersion,
     dshSessionRef: sessionId, contextConfirmationRefs, employeeId: work.employeeId, handoffRefs: [], usage,
     knowledgeDependencyRefs, generation, ...(work.inputProvenance ? { inputProvenance: structuredClone(work.inputProvenance) } : {}),
   }

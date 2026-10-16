@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { generateKeyPairSync, randomUUID, verify } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomUUID, verify } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -16,10 +16,10 @@ import { createWorkService } from '../src/work-service.mjs'
 
 const fixturePath = process.argv[2]
 assert.ok(fixturePath, '请显式传入脱敏 tpm-wire-tools.json；不寻找或读取其他项目凭据')
-const fixture = JSON.parse(await readFile(fixturePath, 'utf8'))
-assert.equal(fixture.sourceCommit, 'c54d38af47c735b039a45bf40eb63b94bf30e337')
-const tools = fixture.tools.map(({ name, inputSchema, outputSchema }) => ({ name, inputSchema, outputSchema }))
-assert.equal(assertKivoTpmTools(tools).size, 11)
+const fixtureBytes = await readFile(fixturePath)
+assert.equal(createHash('sha256').update(fixtureBytes).digest('hex'), 'a50cfe4688335c79369e06c3672450b01f830af711696080ec5265a47f16a7dd', '必须使用 P6 已冻结的13-tool脱敏目录')
+const tools = JSON.parse(fixtureBytes).map(({ name, inputSchema, outputSchema }) => ({ name, inputSchema, outputSchema }))
+assert.equal(assertKivoTpmTools(tools).size, 13)
 const temp = await mkdtemp(join(tmpdir(), 'geneway-kivo-runtime-'))
 const home = join(temp, 'dsh'), secretRoot = join(temp, 'secrets'), stateFile = join(temp, 'state.json')
 process.env.DSH_HOME = home

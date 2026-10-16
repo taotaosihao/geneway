@@ -243,7 +243,16 @@ async function legacyTransfer() {
   assert.equal(result.version, STATE_VERSION)
   assert.deepEqual(result.automationInbox, [])
   assert.equal(await exists(join(restored, KIVO_EVENT_SOURCES_FILE)), false)
-  checks.push('state-v10-to-v11-no-sources')
+  checks.push('state-v10-to-current-no-sources')
+  const v11 = { ...state, version: 11 }, v11Raw = bytes(v11), v11Restored = join(temp, 'v11-restored')
+  await writeFile(join(backup, 'state.json'), v11Raw)
+  await editJson(join(backup, 'manifest.json'), manifest => {
+    manifest.schema.stateVersion = 11
+    Object.assign(manifest.entries.find(entry => entry.path === 'state.json'), { bytes: v11Raw.length, sha256: digest(v11Raw) })
+  })
+  await run(['restore', '--input', backup, '--data-root', v11Restored])
+  assert.deepEqual(await json(join(v11Restored, 'state.json')), { ...v11, version: STATE_VERSION })
+  checks.push('state-v11-to-v12-explicit-migration')
 
   const emptyRoot = join(temp, 'empty-source-secrets'), withSources = join(temp, 'empty-source-backup'), secrets = join(temp, 'empty-source-pack')
   await mkdir(emptyRoot, { mode: 0o700 })

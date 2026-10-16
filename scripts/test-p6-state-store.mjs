@@ -14,6 +14,7 @@ try {
   await immutableChecks()
   await authorizationCommitChecks()
   await durableCommitChecks()
+  await durabilityAvailabilityChecks()
   await recoveryChecks()
   console.log(`P6 state/store checks passed; state=v${STATE_VERSION}; durable faults=5; recovery replay/dispatch=0`)
 } finally {
@@ -48,7 +49,7 @@ async function authorizationCommitChecks() {
 
 function migrationAndValidationChecks() {
   const migrated = migrateState(v7State())
-  assert.equal(STATE_VERSION, 11)
+  assert.equal(STATE_VERSION, 12)
   assert.equal(migrated.version, STATE_VERSION)
   assert.deepEqual(migrated.works[0].actions, [])
   assert.throws(() => migrateState({ ...migrated, version: STATE_VERSION + 1 }), /未来/)
@@ -154,17 +155,71 @@ async function durableCommitChecks() {
   const ordered = []
   const orderedStore = createFileStore(path, tracingOps(ordered))
   await orderedStore.update(state => ({ ...state, reservations: { ordered: true } }), { beforeCommit() { ordered.push('beforeCommit') } })
-  assert.deepEqual(ordered, ['write', 'fileSync', 'beforeCommit', 'rename', 'dirSync'])
+  assert.deepEqual(ordered, ['fileSync', 'dirSync', 'write', 'fileSync', 'beforeCommit', 'rename', 'dirSync'])
 
   const dirStore = createFileStore(path, faultOps('dirSync'))
   await assert.rejects(dirStore.update(state => ({ ...state, reservations: { dirSync: true } })), /dirSync/)
   assert.equal(migrateState(JSON.parse(await readFile(path, 'utf8'))).reservations.dirSync, true)
+  await assert.rejects(dirStore.read(), { code: 'STORE_UNAVAILABLE' })
 
   const pendingPath = join(root, 'pending.json')
   const pendingStore = createFileStore(pendingPath)
   await assert.rejects(pendingStore.update(state => state, { beforeCommit() { throw new Error('first failed') } }), /first failed/)
   await pendingStore.update(state => ({ ...state, reservations: { recovered: true } }))
   assert.equal((await pendingStore.read()).reservations.recovered, true)
+}
+
+async function durabilityAvailabilityChecks() {
+  const path = join(root, 'availability', 'state.json'), directory = dirname(path)
+  await createFileStore(path).update(state => ({ ...state, reservations: { old: true } }))
+  const failure = Object.assign(new Error('synthetic directory sync'), { code: 'EIO' })
+  let failDirectory = false, releaseRead, readEntered, failDirectoryOpen = false
+  const io = {
+    async open(target, flags, mode) {
+      if (failDirectoryOpen && target === directory) throw failure
+      const handle = await fsOpen(target, flags, mode)
+      return { writeFile: (...args) => handle.writeFile(...args), close: () => handle.close(), async sync() {
+        if (target === directory && failDirectory) throw failure
+        await handle.sync()
+      } }
+    },
+    async readFile(target, encoding) {
+      const text = await readFile(target, encoding)
+      if (readEntered) {
+        const entered = readEntered; readEntered = undefined; entered()
+        await new Promise(resolve => { releaseRead = resolve })
+      }
+      return text
+    },
+  }
+  const store = createFileStore(path, io)
+  await store.confirmDurability()
+  const reading = new Promise(resolve => { readEntered = resolve }), read = store.read()
+  await reading
+  failDirectory = true
+  const writing = store.update(state => ({ ...state, reservations: { new: true } }))
+  let mutationRan = false
+  const deniedMutation = store.update(state => { mutationRan = true; return state })
+  releaseRead()
+  assert.deepEqual((await read).reservations, { old: true }, 'read is serialized with rename, not allowed to return an unconfirmed new snapshot')
+  await assert.rejects(writing, error => error === failure)
+  const unavailable = error => error.code === 'STORE_UNAVAILABLE' && error.cause === failure
+  await assert.rejects(deniedMutation, unavailable)
+  assert.equal(mutationRan, false)
+  await assert.rejects(store.read(), unavailable)
+  await assert.rejects(store.confirmDurability(), error => error === failure)
+  await assert.rejects(store.read(), unavailable)
+  const cold = createFileStore(path, io)
+  await assert.rejects(cold.read(), error => error === failure)
+  await assert.rejects(cold.read(), unavailable)
+  failDirectory = false; failDirectoryOpen = true
+  await assert.rejects(store.confirmDurability(), error => error === failure)
+  await assert.rejects(store.read(), unavailable)
+  failDirectoryOpen = false
+  await store.confirmDurability()
+  assert.deepEqual((await store.read()).reservations, { new: true })
+  await cold.confirmDurability()
+  assert.deepEqual((await cold.read()).reservations, { new: true })
 }
 
 async function recoveryChecks() {
@@ -196,24 +251,30 @@ async function recoveryChecks() {
 }
 
 function faultOps(stage) {
+  let renamed = false
   return {
     async open(path, flags, mode) {
       const handle = await fsOpen(path, flags, mode)
-      const directory = flags === 'r'
+      const directory = flags === 'r' && !String(path).endsWith('.json')
       return {
         async writeFile(value) {
           if (stage === 'write') throw new Error('write')
           return handle.writeFile(value)
         },
         async sync() {
-          if (stage === 'fileSync' && !directory) throw new Error('fileSync')
-          if (stage === 'dirSync' && directory) throw new Error('dirSync')
+          if (stage === 'fileSync' && flags === 'w') throw new Error('fileSync')
+          if (stage === 'dirSync' && directory && renamed) throw new Error('dirSync')
           return handle.sync()
         },
         async close() { return handle.close() },
       }
     },
-    ...(stage === 'rename' ? { async rename() { throw new Error('rename') } } : {}),
+    async rename(from, to) {
+      if (stage === 'rename') throw new Error('rename')
+      const { rename } = await import('node:fs/promises')
+      await rename(from, to)
+      renamed = true
+    },
   }
 }
 
@@ -221,7 +282,7 @@ function tracingOps(events) {
   return {
     async open(path, flags, mode) {
       const handle = await fsOpen(path, flags, mode)
-      const directory = flags === 'r'
+      const directory = flags === 'r' && !String(path).endsWith('.json')
       return {
         async writeFile(value) { events.push('write'); return handle.writeFile(value) },
         async sync() { events.push(directory ? 'dirSync' : 'fileSync'); return handle.sync() },

@@ -139,7 +139,7 @@ async function restore(inputArg, dataRootArg, options = {}) {
     if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
     const stateFile = files.find(item => item.path === STATE_PATH)
     const sourceStateBuffer = await readFileFromStart(stateFile.file.handle)
-    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, 8, 9, 10, STATE_VERSION], migrate: false })
+    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, 8, 9, 10, 11, STATE_VERSION], migrate: false })
     const eventSources = await readKivoEventSources(input)
     if (eventSources.sha256 !== (files.find(file => file.path === KIVO_EVENT_SOURCES_FILE)?.sha256 ?? null)) throw new Error('备份事件来源未列入 manifest 或摘要不匹配')
     requireEventSources(sourceState, eventSources.sources)

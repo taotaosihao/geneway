@@ -4,12 +4,14 @@ import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { getCapability, parseCapabilityToolResult, validateCapabilityInput } from '../capabilities.mjs'
 import { KIVO_TPM_RESULT_KIND } from '../domain/tpm.mjs'
+import { KIVO_TPM_DEVICE_CORRELATION_KIND } from '../domain/tpm-device-correlation.mjs'
+import { assertRepairReceipt, assertRepairTarget, isRepairCreationEcho, KIVO_REPAIR_ACTION, repairIntentKey, repairPayload, repairTargetFromCorrelation } from '../domain/kivo-repair.mjs'
 import { connectionSnapshot } from '../execution-grant.mjs'
 import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 import { normalizeWeixinApiBaseUrl } from '../../vendor/dsh-im/weixin/weixin-api.mjs'
 import { canonicalRevision, digest, canonical, KIVO_EVENT_RECORD_TYPES, KIVO_EVENT_TRIGGER } from '../kivo-events.mjs'
 
-export const STATE_VERSION = 11
+export const STATE_VERSION = 12
 export const KNOWLEDGE_LIMITS = Object.freeze({
   maxMaterials: 100,
   maxBodyBytes: 32 * 1024,
@@ -34,10 +36,10 @@ const CORRELATION_SKILL_ID = 'skill-manufacturing-work-order-device-correlate'
 const CORRELATION_TOOL_NAME = 'geneway_correlate_work_order_device'
 const CORRELATION_PLUGIN_ID = 'geneway-work-order-device-correlation'
 const CORRELATION_RESULT_KIND = 'manufacturing.work-order-device-correlation'
-const RESULT_KINDS = new Set(['gearjob.work-order.observation', 'manufacturing.takt', CORRELATION_RESULT_KIND, KIVO_TPM_RESULT_KIND, 'assistant.follow-up', 'assistant.collaboration-summary'])
+const RESULT_KINDS = new Set(['gearjob.work-order.observation', 'manufacturing.takt', CORRELATION_RESULT_KIND, KIVO_TPM_RESULT_KIND, KIVO_TPM_DEVICE_CORRELATION_KIND, 'assistant.follow-up', 'assistant.collaboration-summary'])
 const ACTION_INVALIDATION_REASONS = new Set(['RECOVERY_INVALIDATED', 'PREVIEW_SUPERSEDED', 'OWNER_REVOKED', 'PREVIEW_EXPIRED', 'PREVIEW_DIGEST_CHANGED', 'SOURCE_FACTS_CHANGED', 'SOURCE_RECHECK_FAILED', 'DISPATCH_DEADLINE_EXPIRED'])
 const ACTION_UNKNOWN_REASONS = new Set(['RECOVERY_UNKNOWN', 'ALREADY_UNKNOWN', 'ACTION_ID_CONFLICT', 'UPSTREAM_TIMEOUT', 'UPSTREAM_DISCONNECTED', 'UPSTREAM_RESULT_UNKNOWN', 'UPSTREAM_5XX', 'INVALID_SUCCESS_RESPONSE', 'READBACK_NOT_FOUND', 'READBACK_MISMATCH', 'READBACK_FAILED', 'READBACK_AUTHORIZATION_FAILED', 'RECEIPT_PERSIST_FAILED'])
-const ACTION_NO_EFFECT_REASONS = new Set(['DISPATCH_DEADLINE_EXPIRED', 'SOURCE_REVISION_CONFLICT', 'P6_SCOPE_UNAVAILABLE', 'CONNECTOR_AUTH_FAILED', 'INVALID_REQUEST', 'INVALID_COMMENT_ACTION'])
+const ACTION_NO_EFFECT_REASONS = new Set(['DISPATCH_DEADLINE_EXPIRED', 'SOURCE_REVISION_CONFLICT', 'P6_SCOPE_UNAVAILABLE', 'CONNECTOR_AUTH_FAILED', 'INVALID_REQUEST', 'INVALID_COMMENT_ACTION', 'ACTION_ID_CONFLICT', 'OWNER_REVOKED'])
 
 const EMPTY_STATE = {
   version: STATE_VERSION,
@@ -68,6 +70,40 @@ const DEFAULT_FS_OPS = { mkdir, open, readFile, rename, unlink }
 export function createFileStore(filePath, fsOps = {}) {
   const io = { ...DEFAULT_FS_OPS, ...fsOps }
   let pending = Promise.resolve()
+  let confirmed = false, durabilityFailure
+  const enqueue = operation => {
+    const result = pending.then(operation)
+    pending = result.catch(() => undefined)
+    return result
+  }
+  const syncAndClose = async handle => {
+    let failure
+    try { await handle.sync() } catch (error) { failure = error }
+    try { await handle.close() } catch (error) { failure ??= error }
+    if (failure) throw failure
+  }
+  const confirmDurability = async () => {
+    try {
+      let handle
+      try { handle = await io.open(filePath, 'r') } catch (error) {
+        if (error?.code !== 'ENOENT' || durabilityFailure) throw error
+      }
+      if (handle) {
+        await syncAndClose(handle)
+        await syncAndClose(await io.open(dirname(filePath), 'r'))
+      }
+      confirmed = true
+      durabilityFailure = undefined
+    } catch (error) {
+      confirmed = false
+      durabilityFailure = error
+      throw error
+    }
+  }
+  const requireReliable = async () => {
+    if (durabilityFailure) throw Object.assign(new Error('产品存储尚未可靠确认，暂时不可用', { cause: durabilityFailure }), { code: 'STORE_UNAVAILABLE' })
+    if (!confirmed) await confirmDurability()
+  }
   const readState = async () => {
     try {
       return migrateState(JSON.parse(await io.readFile(filePath, 'utf8')))
@@ -78,17 +114,17 @@ export function createFileStore(filePath, fsOps = {}) {
   }
 
   return {
-    async read() {
-      let barrier
-      do {
-        barrier = pending
-        await barrier
-      } while (barrier !== pending)
-      return readState()
+    read() {
+      return enqueue(async () => { await requireReliable(); return readState() })
+    },
+
+    confirmDurability() {
+      return enqueue(confirmDurability)
     },
 
     update(mutator, options = {}) {
-      const operation = pending.then(async () => {
+      return enqueue(async () => {
+        await requireReliable()
         const current = await readState()
         const immutableBaseline = structuredClone(current)
         const next = migrateState(await mutator(current))
@@ -109,23 +145,27 @@ export function createFileStore(filePath, fsOps = {}) {
           await options.beforeCommit?.()
           await io.rename(tempPath, filePath)
           committed = true
-          const directoryHandle = await io.open(dirname(filePath), 'r')
-          try { await directoryHandle.sync() } finally { await directoryHandle.close() }
+          await syncAndClose(await io.open(dirname(filePath), 'r'))
+        } catch (error) {
+          if (committed) {
+            // Rename may have exposed new facts before the directory became durable.
+            confirmed = false
+            durabilityFailure = error
+          }
+          throw error
         } finally {
           await tempHandle?.close().catch(() => undefined)
           if (!committed) await io.unlink(tempPath).catch(() => undefined)
         }
         return next
       })
-      pending = operation.catch(() => undefined)
-      return operation
     },
   }
 }
 
 export function migrateState(value) {
   if (!record(value)) throw new Error('产品状态不是对象')
-  if ((value.version ?? 3) === STATE_VERSION) return normalizeV11(value)
+  if ([11, STATE_VERSION].includes(value.version)) return normalizeV11(value)
   return normalizeV11({ ...migrateLegacyState(value), version: STATE_VERSION, automationInbox: [] })
 }
 
@@ -715,7 +755,14 @@ function normalizeV8(value, options = {}) {
     uniqueIds(actions, `工作 ${work.id} 的动作`)
     const requestKeys = actions.flatMap(action => action.requestKeys)
     if (new Set(requestKeys).size !== requestKeys.length) throw new Error(`工作 ${work.id} 的动作 requestKey 重复`)
-    if (new Set(actions.map(action => action.proposalKey)).size !== actions.length) throw new Error(`工作 ${work.id} 的动作 proposalKey 重复`)
+    for (const action of actions) {
+      const same = actions.filter(item => item.proposalKey === action.proposalKey)
+      if (same.length < 2) continue
+      const ordered = [...same].sort((a, b) => a.preview.createdAt.localeCompare(b.preview.createdAt))
+      if (same.some(item => item.intent.kind !== KIVO_REPAIR_ACTION) || ordered.slice(0, -1).some(item => item.attempt && !item.attempt.noEffectAt
+        || !item.decision?.invalidatedAt && !['rejected', 'revoked', 'expired'].includes(item.decision?.kind)
+          && Date.parse(item.preview.expiresAt) > Date.parse(ordered.at(-1).preview.createdAt))) throw new Error(`工作 ${work.id} 的动作 proposalKey 重复`)
+    }
     return { ...work, actions }
   })
   return { ...common, version: 8, works }
@@ -801,6 +848,11 @@ function normalizeV11(value) {
           || occurrence.query.objectId !== entry.event.objectId || occurrence.query.sourceInstance !== entry.event.sourceInstance) throw new Error('Kivo 入站目标发生引用不闭合')
       }
     }
+    if (entry.actionRef) {
+      const work = common.works.find(item => item.id === entry.actionRef.workId)
+      const action = work?.actions.find(item => item.id === entry.actionRef.actionId)
+      if (!action || !isRepairCreationEcho(entry.event, action)) throw new Error('Kivo 创建事件与原动作回执不闭合')
+    }
   }
   return { ...common, version: STATE_VERSION, automationInbox }
 }
@@ -859,22 +911,29 @@ function normalizeKivoAutomationOccurrence(value) {
 }
 
 function normalizeAutomationInbox(value) {
-  exactKeys(value, ['id', 'event', 'fingerprint', 'deliveries', 'targets', 'acceptedAt', 'ignoredReason'], 'Kivo 事件入站')
+  exactKeys(value, ['id', 'event', 'fingerprint', 'deliveries', 'targets', 'acceptedAt', 'ignoredReason', 'actionRef'], 'Kivo 事件入站')
+  if (value.actionRef !== undefined && value.actionRef !== null) {
+    exactKeys(value.actionRef, ['workId', 'actionId'], 'Kivo 创建动作引用')
+    requiredText(value.actionRef.workId, 'Kivo 创建动作 workId'); requiredText(value.actionRef.actionId, 'Kivo 创建动作 actionId')
+  }
   requiredText(value.id, 'Kivo 入站 ID'); isoTimestamp(value.acceptedAt, 'Kivo 受理时间')
   const event = value.event
-  exactKeys(event, ['sourceId', 'resource', 'sourceInstance', 'adapter', 'kind', 'version', 'eventId', 'recordType', 'objectId', 'sourceRevision', 'occurredAt', 'traceId', 'actorId', 'action', 'before', 'after', 'subject'], 'Kivo typed 事件')
+  exactKeys(event, ['sourceId', 'resource', 'sourceInstance', 'adapter', 'kind', 'version', 'eventId', 'recordType', 'objectId', 'sourceRevision', 'occurredAt', 'traceId', 'actorId', 'actorKind', 'action', 'before', 'after', 'subject'], 'Kivo typed 事件')
+  const machineCreate = event.recordType === 'repair' && event.action === 'create' && event.actorKind === 'machine'
   for (const key of ['sourceId', 'resource', 'sourceInstance', 'traceId']) requiredText(event[key], `Kivo typed ${key}`)
   if (event.adapter !== 'mes.native' || event.kind !== 'notification.business_event' || event.version !== 1 || !uuid(event.eventId)
     || !uuid(event.objectId) || !KIVO_EVENT_RECORD_TYPES.includes(event.recordType) || !canonicalRevision(event.sourceRevision)
-    || event.actorId !== null && !uuid(event.actorId) || event.action !== null && (typeof event.action !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(event.action))) throw new Error('Kivo typed 事件身份无效')
+    || (machineCreate ? !/^machine-account:[0-9a-f-]{36}$/i.test(event.actorId) || !uuid(event.actorId.slice(16)) : event.actorId !== null && !uuid(event.actorId))
+    || Object.hasOwn(event, 'actorKind') && !machineCreate || event.action !== null && (typeof event.action !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(event.action))) throw new Error('Kivo typed 事件身份无效')
   isoTimestamp(event.occurredAt, 'Kivo 事件时间')
   exactKeys(event.subject, ['id', 'type', 'deviceId', 'organizationId', 'organizationAncestorIds'], 'Kivo subject')
   if (event.subject.id !== event.objectId || event.subject.type !== event.recordType || !uuid(event.subject.deviceId) || !uuid(event.subject.organizationId)
     || !Array.isArray(event.subject.organizationAncestorIds) || event.subject.organizationAncestorIds.some(id => !uuid(id))) throw new Error('Kivo subject 身份无效')
   const allowed = { repair: ['status', 'executorId'], maintenance: ['status', 'assigneeId'], inspection: ['status', 'startedAt', 'completedAt'] }[event.recordType]
-  if (!record(event.before) || !record(event.after) || !Object.keys(event.before).length || Object.keys(event.before).sort().join() !== Object.keys(event.after).sort().join()
-    || Object.keys(event.before).some(key => !allowed.includes(key))) throw new Error('Kivo typed 变化无效')
-  for (const changes of [event.before, event.after]) for (const [key, value] of Object.entries(changes)) {
+  if (!record(event.after) || !Object.keys(event.after).length || Object.keys(event.after).some(key => !allowed.includes(key))
+    || (machineCreate ? event.before !== null || event.sourceRevision !== '0' || event.after.status !== 'reported' || event.after.executorId !== null || Object.keys(event.after).length !== 2
+      : !record(event.before) || !Object.keys(event.before).length || Object.keys(event.before).sort().join() !== Object.keys(event.after).sort().join())) throw new Error('Kivo typed 变化无效')
+  for (const changes of [event.before, event.after].filter(Boolean)) for (const [key, value] of Object.entries(changes)) {
     if (['executorId', 'assigneeId'].includes(key)) { if (value !== null && !uuid(value)) throw new Error('Kivo typed 人员身份无效') }
     else if (['startedAt', 'completedAt'].includes(key)) { if (value !== null) isoTimestamp(value, 'Kivo typed 业务时间') }
     else if (typeof value !== 'string' || !value.trim() || value !== value.trim() || value.length > 64 || /[\u0000-\u001f\u007f]/.test(value)) throw new Error('Kivo typed 状态无效')
@@ -924,6 +983,7 @@ function assertAutomationFactsImmutable(before, after) {
     const current = after.automationInbox.find(item => item.id === previous.id)
     if (!current || !isDeepStrictEqual(current.event, previous.event) || current.fingerprint !== previous.fingerprint || current.acceptedAt !== previous.acceptedAt || current.ignoredReason !== previous.ignoredReason
       || !appendOnly(previous.deliveries, current.deliveries) || previous.targets.length !== current.targets.length) throw new Error('Kivo 受理事实不可改写或扩展目标')
+    if (previous.actionRef && !isDeepStrictEqual(previous.actionRef, current.actionRef)) throw new Error('Kivo 创建动作引用不可改写')
     previous.targets.forEach((target, index) => {
       const next = current.targets[index]
       if (next.ruleId !== target.ruleId || next.activationId !== target.activationId || target.status !== 'pending' && !isDeepStrictEqual(target, next)) throw new Error('Kivo 终态目标不可复活或改绑')
@@ -1095,6 +1155,14 @@ function normalizeAction(action, work) {
   if (!/^[a-f0-9]{64}$/.test(requiredText(preview.digest, `动作 ${id} preview digest 无效`))) throw new Error(`动作 ${id} preview digest 无效`)
   if (!work.results.some(result => result.id === requiredText(preview.resultId, `动作 ${id} resultId 无效`))) throw new Error(`动作 ${id} 引用不存在的结果`)
   if (!record(preview.target) || !record(preview.payload)) throw new Error(`动作 ${id} target 或 payload 无效`)
+  if (intent.kind === KIVO_REPAIR_ACTION) {
+    assertRepairTarget(preview.target)
+    repairPayload(preview.payload)
+    const source = work.results.find(item => item.id === preview.resultId)
+    if (source.kind !== KIVO_TPM_DEVICE_CORRELATION_KIND || !isDeepStrictEqual(preview.target, repairTargetFromCorrelation(source.payload))
+      || preview.payload.deviceId !== preview.target.deviceId || intent.targetKey !== repairIntentKey(work.ownerMemberId, preview.target)
+      || preview.expectedRevision !== source.payload.tpm.revision || preview.target.recordId !== source.payload.tpm.id) throw new Error(`动作 ${id} 维修依据不闭合`)
+  }
   requiredText(preview.expectedRevision, `动作 ${id} expectedRevision 无效`)
   const createdAt = isoTimestamp(preview.createdAt, `动作 ${id} createdAt`)
   const expiresAt = isoTimestamp(preview.expiresAt, `动作 ${id} expiresAt`)
@@ -1102,9 +1170,9 @@ function normalizeAction(action, work) {
 
   const decision = action.decision === null ? null : normalizeActionDecision(action.decision, id, preview.digest)
   const attempt = action.attempt === null ? null : normalizeActionAttempt(action.attempt, id, preview.digest)
-  const receipt = action.receipt === null ? null : normalizeActionReceipt(action.receipt, id, preview.digest)
+  const receipt = action.receipt === null ? null : normalizeActionReceipt(action.receipt, id, preview.digest, action)
   if (decision && decision.memberId !== work.ownerMemberId) throw new Error(`动作 ${id} decision memberId 不是工作 owner`)
-  if (attempt && (decision?.kind !== 'approved' || decision.invalidatedAt)) throw new Error(`动作 ${id} attempt 与批准不闭合`)
+  if (attempt && (decision?.kind !== 'approved' || decision.invalidatedAt && intent.kind !== KIVO_REPAIR_ACTION)) throw new Error(`动作 ${id} attempt 与批准不闭合`)
   if (receipt && !attempt) throw new Error(`动作 ${id} receipt 未回链 attempt`)
   if (receipt && attempt?.noEffectAt) throw new Error(`动作 ${id} receipt 与 noEffect 互斥`)
   return { id, requestKeys, proposalKey, intent, preview, decision, attempt, receipt }
@@ -1141,8 +1209,9 @@ function normalizeActionAttempt(attempt, id, digest) {
   return attempt
 }
 
-function normalizeActionReceipt(receipt, id, digest) {
+function normalizeActionReceipt(receipt, id, digest, action) {
   if (!record(receipt)) throw new Error(`动作 ${id} receipt 无效`)
+  if (action.intent.kind === KIVO_REPAIR_ACTION) return assertRepairReceipt(receipt, action)
   exactKeys(receipt, ['previewDigest', 'upstreamRecordId', 'recordedAt'], `动作 ${id} receipt`)
   if (receipt.previewDigest !== digest) throw new Error(`动作 ${id} receipt digest 不闭合`)
   requiredText(receipt.upstreamRecordId, `动作 ${id} upstreamRecordId 无效`)
@@ -1846,9 +1915,9 @@ function normalizeResult(result, { allowKnowledgeDependencyRefs = false } = {}) 
   } else if (result.inputProvenance !== undefined) {
     throw new Error(`结果 ${id} 不得包含输入来源`)
   }
-  if (kind === KIVO_TPM_RESULT_KIND) {
+  if ([KIVO_TPM_RESULT_KIND, KIVO_TPM_DEVICE_CORRELATION_KIND].includes(kind)) {
     const capability = getCapability(result.capabilityId)
-    if (capability?.resultKind !== KIVO_TPM_RESULT_KIND || result.skillId !== capability.skillId) throw new Error(`结果 ${id} TPM 能力无效`)
+    if (capability?.resultKind !== kind || result.skillId !== capability.skillId) throw new Error(`结果 ${id} TPM 能力无效`)
     const parsed = parseCapabilityToolResult(capability.id, { ok: true, observation: result.payload }, result.input)
     if (result.toolName !== parsed.toolName || result.pluginId !== parsed.pluginId || result.pluginVersion !== parsed.pluginVersion
       || !isDeepStrictEqual(result.source, parsed.source) || result.createdAt !== parsed.payload.queriedAt) throw new Error(`结果 ${id} TPM 能力来源或时间不匹配`)

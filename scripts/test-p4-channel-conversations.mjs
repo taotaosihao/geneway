@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
+import { connection as receiptConnection, correlationFixture, createCompletedCorrelationTree, now as receiptNow } from './fixtures/kivo-device-correlation.mjs'
 
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) await runChannelChecks()
 
@@ -71,7 +72,11 @@ async function runChannelChecks() {
     ['backup: permission, path, omission, tamper and pairing failures publish nothing', transferRejects, { noFixture: true }],
     ['backup: live atomic state replacement invalidates the secret snapshot', transferSnapshotRace, { noFixture: true }],
   ]
-  const checks = process.argv.includes('--transfer-only') ? transferChecks : [
+  const receiptChecks = [
+    ['receipt: child Feishu delivery, exact reply parent, retry isolation and late revocation', receiptFeishu, { receipt: true }],
+    ['receipt: child iLink delivery, recent context and late revocation', receiptWeixin, { receipt: true, weixinPrebound: true }],
+  ]
+  const checks = process.argv.includes('--receipt-only') ? receiptChecks : process.argv.includes('--transfer-only') ? transferChecks : [
     ['fixture: S1 HTTP and synthetic model boundary', webBoundary],
     ['fixture: both actual transports enter the product inbox', transportBoundary, { weixinPrebound: true }],
     ['Feishu: pending confirmation and isolated natural-text conversations', confirmation],
@@ -95,6 +100,7 @@ async function runChannelChecks() {
     ['notification: legacy target survives rotation and never moves on relink', notificationIdentity, { legacyNotification: true }],
     ['restore: paired and missing secrets preserve history and require a fresh Weixin identity', restoreWeixin, { weixinPrebound: true }],
     ...transferChecks,
+    ...receiptChecks,
   ]
   for (const [name, check, options] of checks) {
     let h
@@ -105,8 +111,92 @@ async function runChannelChecks() {
     }
   }
   const failed = results.filter(item => item.status === 'failed')
-  console.log(JSON.stringify({ ok: failed.length === 0, channelAcceptance: 'controlled transport/API fixture; no real native/model/browser acceptance', nativeStarts: 0, ownerLockProcesses, transferProcesses, realModelCalls: 0, nonLoopbackAttempts, httpCalls, ...(process.argv.includes('--transfer-only') ? { skipped: 'channel transports/API assertions; --transfer-only' } : {}), results }))
+  console.log(JSON.stringify({ ok: failed.length === 0, channelAcceptance: 'controlled transport/API fixture; no real native/model/browser acceptance', nativeStarts: 0, ownerLockProcesses, transferProcesses, realModelCalls: 0, nonLoopbackAttempts, httpCalls, ...(process.argv.includes('--transfer-only') ? { skipped: 'channel transports/API assertions; --transfer-only' } : {}), ...(process.argv.includes('--receipt-only') ? { skipped: 'unrelated channel/transfer assertions; --receipt-only' } : {}), results }))
   process.exitCode = failed.length || nonLoopbackAttempts ? 1 : 0
+
+  async function receiptPreview(h, conversationId) {
+    const { createActionService } = await import('../src/action-service.mjs')
+    const tree = await createCompletedCorrelationTree({ store: h.store, workService: h.workService, actor: { id: 'a' }, conversationId, leaderEmployeeId: 'agent-a', childEmployeeId: 'agent-b', at: receiptNow })
+    h.actionService = createActionService({ store: h.store, clock: () => receiptNow, connectionCatalog: [receiptConnection],
+      async readCorrelation(options) { await options.authorize(); return correlationFixture({ ...options.input, at: receiptNow, sampleAt: receiptNow }) },
+      adapter: { async dispatch(options) {
+        const claim = await options.claimAttempt()
+        if (!claim.claimed) return { kind: 'not-claimed', action: claim.action }
+        await options.authorize(); h.injectedBusinessWrites = (h.injectedBusinessWrites ?? 0) + 1
+        const action = options.action
+        return { kind: 'receipt', receipt: { upstreamRecordId: randomUUID(), orderNo: action.preview.payload.orderNo, deviceId: action.preview.payload.deviceId, status: 'reported',
+          creation: { actorKind: 'machine', machineAccountId: receiptConnection.clientId, traceId: action.id, revision: '0' }, currentRevision: '0', replayed: false, queriedAt: receiptNow } }
+      } },
+    })
+    const path = `/api/works/${tree.child.id}/actions`
+    const preview = await h.request('a', path, { reason: '合成异常', description: '受控渠道回执', clientRequestId: 'receipt-preview' })
+    assert.equal(preview.status, 200, JSON.stringify(preview.body))
+    const action = preview.body, body = { expectedRevision: action.preview.expectedRevision, previewDigest: action.preview.digest, clientRequestId: 'receipt-approve' }
+    return { ...tree, action, body, approvePath: `${path}/${action.id}/approve` }
+  }
+
+  async function receiptFeishu(h) {
+    await h.bindFeishu('a')
+    const source = await h.active('a'), prepared = await receiptPreview(h, source.id)
+    const before = h.platform.sent.length, models = h.runner.calls.length
+    const approved = await h.request('a', prepared.approvePath, prepared.body)
+    assert.equal(approved.status, 200); assert(approved.body.receipt)
+    let delivery = (await h.disk()).deliveries.find(item => item.actionId === prepared.action.id)
+    assert.equal(delivery.status, 'delivered'); assert.equal(delivery.workId, prepared.child.id)
+    assert.equal(h.platform.sent.length, before + 1); assert.equal(h.injectedBusinessWrites, 1)
+    assert(h.platform.sent.at(-1).data.content.includes(approved.body.receipt.orderNo))
+    assert.equal(h.runner.calls.length, models)
+    await h.request('a', prepared.approvePath, prepared.body)
+    assert.equal(h.platform.sent.length, before + 1); assert.equal(h.injectedBusinessWrites, 1)
+    await h.feishuEvent('a', 'receipt-exact-parent', '本人明确补充', delivery.providerMessageId)
+    assert.equal((await h.disk()).channelMessages.find(item => item.providerMessageId === 'receipt-exact-parent').memberConversationId, source.id)
+    const analysis = await h.channel.createWorkDelivery({ id: 'a' }, { workId: prepared.child.id, resultId: prepared.action.preview.resultId, requestId: 'receipt-separate-analysis' })
+    assert.equal(analysis.delivery.actionId, undefined); assert.notEqual(analysis.delivery.id, delivery.id)
+
+    delivery = (await h.channel.createWorkDelivery({ id: 'a' }, { workId: prepared.child.id, actionId: prepared.action.id, requestId: 'receipt-retry-check' })).delivery
+    h.platform.queueSend({ code: 230001 })
+    assert.equal((await h.transports.sendDelivery(delivery.id)).status, 'failed')
+    h.platform.queueSend(new Error('controlled unknown send'))
+    assert.equal((await h.request('a', `/api/channels/deliveries/${delivery.id}/retry`, {})).body.status, 'unknown')
+    const sent = h.platform.sent.length
+    assert.equal((await h.request('a', `/api/channels/deliveries/${delivery.id}/retry`, {})).status, 409)
+    assert.equal(h.platform.sent.length, sent); assert.equal(h.injectedBusinessWrites, 1)
+    await receiptRevocation(h, prepared, () => h.platform.sent.length)
+  }
+
+  async function receiptWeixin(h) {
+    await h.startWeixin()
+    h.simulator.push(h.bot.id, [h.message('receipt-context')])
+    await until(async () => (await h.disk()).channelMessages.some(item => item.providerMessageId === 'receipt-context' && item.status === 'accepted'))
+    await until(() => h.sent().length > 0)
+    const identity = (await h.disk()).channelIdentities.find(item => item.id === 'wx-fixture')
+    const prepared = await receiptPreview(h, identity.activeConversationId), before = h.sent().length, models = h.runner.calls.length
+    const approved = await h.request('a', prepared.approvePath, prepared.body)
+    assert.equal(approved.status, 200); assert(approved.body.receipt)
+    const delivery = (await h.disk()).deliveries.find(item => item.actionId === prepared.action.id)
+    assert.equal(delivery.status, 'delivered'); assert.equal(delivery.workId, prepared.child.id)
+    assert.equal(h.sent().length, before + 1); assert.equal(h.injectedBusinessWrites, 1); assert.equal(h.runner.calls.length, models)
+    const pending = (await h.channel.createWorkDelivery({ id: 'a' }, { workId: prepared.child.id, actionId: prepared.action.id, requestId: 'receipt-missing-context' })).delivery
+    const context = await h.secrets.read(h.bot.contextRef)
+    await h.secrets.write(h.bot.contextRef, {})
+    const missing = await h.transports.sendDelivery(pending.id)
+    assert.equal(missing.status, 'failed'); assert.equal(missing.error.code, 'WEIXIN_CONTEXT_UNAVAILABLE')
+    assert.equal(h.sent().length, before + 1)
+    await h.secrets.write(h.bot.contextRef, context)
+    await receiptRevocation(h, prepared, () => h.sent().length)
+  }
+
+  async function receiptRevocation(h, prepared, sendCount) {
+    const pending = (await h.channel.createWorkDelivery({ id: 'a' }, { workId: prepared.child.id, actionId: prepared.action.id, requestId: 'receipt-late-revoke' })).delivery
+    const before = sendCount()
+    h.beforeSendClaim = async () => {
+      h.beforeSendClaim = undefined
+      await h.store.update(state => ({ ...state, members: state.members.map(member => member.id === 'a' ? { ...member, employeeIds: ['agent-a'] } : member) }))
+    }
+    await assert.rejects(h.transports.sendDelivery(pending.id), { code: 'DELIVERY_FORBIDDEN' })
+    assert.equal((await h.disk()).deliveries.find(item => item.id === pending.id).status, 'blocked')
+    assert.equal(sendCount(), before); assert.equal(h.injectedBusinessWrites, 1)
+  }
 
   async function webBoundary(h) {
     assert.equal(h.automationFlushes, 1, 'aggregate alone owns the first notification flush')
@@ -746,20 +836,22 @@ async function runChannelChecks() {
       return next
     }, options) }
     const runner = h.runner = syntheticRunner()
-    service = createWorkService({ store, runner: { configured: false }, collaborationRunner: runner, connectionCatalog: [], policyPaths: { stateFile, dataRoot: root, secretRoot } })
+    const connectionCatalog = options.receipt ? [receiptConnection] : []
+    service = h.workService = createWorkService({ store, runner: { configured: false }, collaborationRunner: options.receipt ? { ...runner, async run() {} } : runner,
+      connectionCatalog, ...(options.receipt ? { clock: () => receiptNow } : {}), policyPaths: { stateFile, dataRoot: root, secretRoot } })
     conversation = h.conversation = createConversationService({ store, runner, onTurnTerminal: async ref => {
       const created = await channel.ensureConversationDeliveries(ref)
       for (const delivery of created.deliveries) if (delivery.status === 'pending') {
         try { await h.transports.sendDelivery(delivery.id) } catch (error) { if (!['INVALID_STATE', 'DELIVERY_FORBIDDEN'].includes(error?.code)) throw error }
       }
     } })
-    channel = h.channel = createChannelService({ store, workService: service, conversationService: conversation, onIdentityChanged: async () => { if (h.weixinStarted) await h.weixinChannel.sync() } })
+    channel = h.channel = createChannelService({ store, workService: service, conversationService: conversation, connectionCatalog, onIdentityChanged: async () => { if (h.weixinStarted) await h.weixinChannel.sync() } })
     const observed = { ...channel, async recover() { h.recoveries = (h.recoveries ?? 0) + 1; return channel.recover() }, async ensureAutomationDeliveries(input) { h.automationFlushes = (h.automationFlushes ?? 0) + 1; return channel.ensureAutomationDeliveries(input) }, async handleInbound(input) {
       h.entered.push(structuredClone(input))
       const value = await channel.handleInbound(input)
       h.receipts.push({ id: input.providerMessageId, value })
       return value
-    }, async recordSendProgress(input) { const result = await channel.recordSendProgress(input); await h.afterProgress?.(input); return result } }
+    }, async validateSendClaim(input) { await h.beforeSendClaim?.(input); return channel.validateSendClaim(input) }, async recordSendProgress(input) { const result = await channel.recordSendProgress(input); await h.afterProgress?.(input); return result } }
     h.simulator = await createILinkSimulator({ holdMs: 30 }); origins.add(new URL(h.simulator.url).origin)
     const serial = randomUUID(), token = `SYNTHETIC_TOKEN_${serial}`
     h.bot = { id: `bot-${serial}`, ownerUserId: 'wx-owner', channelAppId: weixinAppId, baseUrl: h.simulator.url, tokenRef: 'bot-token', cursorRef: 'bot-cursor', contextRef: 'bot-context' }
@@ -782,7 +874,8 @@ async function runChannelChecks() {
     const probe = createServer(); await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve))
     const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
     origin = `http://127.0.0.1:${port}`; origins.add(origin)
-    server = createGenewayServer({ service, conversationService: conversation, channel: observed, channelRuntime: h.transports, weixinRuntime: h.weixinChannel, store, auth, knowledge: {}, collaborationRunner: runner, automation: {}, automationRuntime: { ownsLock: () => true }, index: '', trustedOrigin: origin })
+    server = createGenewayServer({ service, conversationService: conversation, channel: observed, channelRuntime: h.transports, weixinRuntime: h.weixinChannel, store, auth, knowledge: {}, collaborationRunner: runner, automation: {}, automationRuntime: { ownsLock: () => true },
+      ...(options.receipt ? { actionService: Object.fromEntries(['createPreview', 'approve', 'reject', 'revoke', 'reconcile'].map(name => [name, (...args) => h.actionService[name](...args)])) } : {}), index: '', trustedOrigin: origin })
     await new Promise(resolve => server.listen(port, '127.0.0.1', resolve))
     const sessions = new Map()
     h.request = async (member, path, json, method = json === undefined ? 'GET' : 'POST') => {
@@ -833,7 +926,7 @@ async function runChannelChecks() {
     } catch (error) { await h.close(); throw error }
   }
 
-  function seed(state, { legacyNotification = false, weixinPrebound = false, bot } = {}) {
+  function seed(state, { legacyNotification = false, weixinPrebound = false, receipt = false, bot } = {}) {
     const member = id => ({ id, loginName: id, displayName: id, role: id === 'admin' ? 'admin' : 'member', enabled: true, authRef: id, employeeIds: ['agent-a', 'agent-b'], sessionVersion: 1, createdAt: now, updatedAt: now })
     const app = (id, provider, credentialRef) => ({ id, provider, providerAppId: id === 'feishu' ? appId : 'ilink', providerTenantId: id === 'feishu' ? 'fixture-tenant' : 'personal', credentialRef, enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now })
     const value = { ...state, defaultChannelEmployeeId: 'agent-a', members: [member('a'), member('b'), member('admin')], modelRoutes: [{ id: 'fixture-model', enabled: true, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'NO_REAL_MODEL' }], employees: ['agent-a', 'agent-b'].map(id => ({ id, name: id, enabled: true, revision: 1, instructions: 'synthetic fixture', modelRouteId: 'fixture-model', skillIds: [], connectionIds: [] })),
@@ -842,6 +935,12 @@ async function runChannelChecks() {
       channelIdentities: weixinPrebound ? [{ id: 'wx-fixture', memberId: 'a', channelAppId: weixinAppId, providerUserId: 'wx-owner', verificationMethod: 'weixin-qr', status: 'active', revision: 1,
         defaultEmployeeId: null, activeConversationId: null, weixin: { botId: bot.id, baseUrl: bot.baseUrl, tokenRef: bot.tokenRef, cursorRef: bot.cursorRef, contextRef: bot.contextRef, runtimeState: 'stopped' }, createdAt: now, updatedAt: now }] : [],
       channelConversations: weixinPrebound ? [{ id: 'wx-endpoint', memberId: 'a', identityId: 'wx-fixture', channelAppId: weixinAppId, providerConversationId: 'wx-owner', type: 'private', allowedScopes: ['result'], verificationMethod: 'weixin-qr', status: 'active', revision: 1, createdAt: now, updatedAt: now }] : [],
+    }
+    if (receipt) {
+      value.modelRoutes[0].credentialRef = 'ZENMUX_API_KEY'
+      value.skills = [{ id: 'skill-kivo-tpm-device-correlate', capabilityId: 'kivo-tpm-device-correlate', enabled: true }]
+      value.connections = [receiptConnection]
+      value.employees = value.employees.map(employee => ({ ...employee, skillIds: ['skill-kivo-tpm-device-correlate'], connectionIds: [receiptConnection.id] }))
     }
     if (legacyNotification) {
       value.version = 9

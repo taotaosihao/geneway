@@ -14,7 +14,11 @@ import { canonical, digest } from '../src/kivo-events.mjs'
 import { randomUUID } from 'node:crypto'
 import { Readable } from 'node:stream'
 import { createGenewayServer } from '../src/server.mjs'
-import { connection, correlationFixture, deviceId, now } from './fixtures/kivo-device-correlation.mjs'
+import { createChannelService } from '../src/channel-service.mjs'
+import { newConversationRecord } from '../src/conversation-service.mjs'
+import { createKnowledgeService } from '../src/knowledge-service.mjs'
+import { segmentKnowledgeBody } from '../src/knowledge-search.mjs'
+import { connection, correlationFixture, createCompletedCorrelationTree, deviceId, now } from './fixtures/kivo-device-correlation.mjs'
 
 const roots = [], owner = { id: 'owner' }, cap = getCapability(KIVO_TPM_DEVICE_CORRELATION_CAPABILITY)
 const originalFetch = globalThis.fetch
@@ -27,8 +31,9 @@ try {
   await authorityAndPinning()
   await creationEchoChecks()
   await httpAdmissionChecks()
+  await childReceiptDeliveryChecks()
   await persistenceAndRecovery()
-  console.log(JSON.stringify({ ok: true, checks: ['current-work-entry', 'preview-cas', 'owner-only', 'durable-attempt', 'separate-readback', 'creation-current-versions', 'renewed-sample-conditions', 'edit-expiry-recheck', '15s-window', 'cross-work-account-unresolved', 'atomic-double-approval', 'fsync-zero-write', 'temp-sync-failure-unknown', 'post-rename-fail-closed', 'cold-open-confirmation', 'restart-zero-write', 'off-on-never-revives', 'original-machine-key-rotation-read-only', 'zero-rule-creation-echo', 'authenticated-handler-without-listen'], networkCalls: 0, modelCalls: 0 }))
+  console.log(JSON.stringify({ ok: true, checks: ['current-work-entry', 'preview-cas', 'owner-only', 'durable-attempt', 'separate-readback', 'creation-current-versions', 'renewed-sample-conditions', 'edit-expiry-recheck', '15s-window', 'cross-work-account-unresolved', 'atomic-double-approval', 'fsync-zero-write', 'temp-sync-failure-unknown', 'post-rename-fail-closed', 'cold-open-confirmation', 'restart-zero-write', 'off-on-never-revives', 'original-machine-key-rotation-read-only', 'zero-rule-creation-echo', 'authenticated-handler-without-listen', 'child-durable-receipt-notification', 'analysis-receipt-independent', 'failed-unknown-without-business-replay', 'current-child-knowledge-and-channel-revocation'], networkCalls: 0, modelCalls: 0 }))
 } finally { globalThis.fetch = originalFetch; for (const root of roots) await fs.rm(root, { recursive: true, force: true }) }
 
 async function fixture({ refresh = value => value } = {}) {
@@ -46,7 +51,7 @@ async function fixture({ refresh = value => value } = {}) {
   await store.update(state => ({ ...state, members: ['owner', 'peer', 'admin'].map(id => ({ id, loginName: id, displayName: id, authRef: id, enabled: true, role: id === 'admin' ? 'admin' : 'member', sessionVersion: 1, employeeIds: id === 'owner' ? ['agent'] : [] })), employees: [{ id: 'agent', name: '关联员工', enabled: true, revision: 1, instructions: '', skillIds: [cap.skillId], connectionIds: [connection.id], modelRouteId: 'model' }], skills: [{ id: cap.skillId, name: '设备关联', enabled: true, capabilityId: cap.id }], modelRoutes: [{ id: 'model', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'ZENMUX_API_KEY', enabled: true }], connections: [connection] }))
   const workService = createWorkService({ store, clock: () => at, connectionCatalog: catalog, connectionTester: async (_connection, { authorize }) => { await authorize(); return '合成目录已核对' }, runner: { configured: true, async run({ input, grant }) {
     return { explanation: '合成关联结果', dshSessionRef: 'synthetic-session', result: parseCapabilityToolResult(cap.id, { ok: true, observation: correlationFixture({ at, ...input, binding: grant.connection }) }, input) }
-  } } })
+  } }, collaborationRunner: { async run() {}, async close() {} } })
   const saved = new Map()
   const source = id => ({ system: 'kivo', path: '/api/v1/mes/tpm/repairs', queriedAt: at, traceId: id })
   const adapter = createKivoRepairAdapter({ clock: () => at,
@@ -98,6 +103,88 @@ async function fixture({ refresh = value => value } = {}) {
   }
 }
 function approval(action) { return { expectedRevision: action.preview.expectedRevision, previewDigest: action.preview.digest, clientRequestId: 'approve-1' } }
+
+async function childReceiptDeliveryChecks() {
+  const f = await fixture(), origin = 'http://127.0.0.1:41002'
+  await f.store.update(state => {
+    const next = { ...state, members: state.members.map(member => member.id === owner.id ? { ...member, employeeIds: ['agent', 'leader'] } : member),
+      employees: [...state.employees, { ...state.employees[0], id: 'leader', name: '负责人' }],
+      channelApps: [{ id: 'receipt-app', provider: 'feishu', providerAppId: 'cli_aaaaaaaaaaaaaaaa', providerTenantId: 'synthetic', credentialRef: 'RECEIPT_TEST', enabled: true, status: 'active', revision: 1, allowedScopes: ['result'], createdAt: now, updatedAt: now }],
+      channelIdentities: [{ id: 'receipt-identity', channelAppId: 'receipt-app', memberId: owner.id, providerUserId: 'synthetic-owner', verificationMethod: 'link-code', status: 'active', revision: 1, defaultEmployeeId: null, activeConversationId: null, createdAt: now, updatedAt: now }],
+      channelConversations: [{ id: 'receipt-endpoint', channelAppId: 'receipt-app', memberId: owner.id, identityId: 'receipt-identity', providerConversationId: 'synthetic-chat', type: 'private', status: 'active', revision: 1, allowedScopes: ['result'], verificationMethod: 'link-code', createdAt: now, updatedAt: now }],
+    }
+    return { ...next, conversations: [newConversationRecord(next, owner, { id: 'receipt-conversation', employeeId: 'leader', source: 'feishu', channelIdentityId: 'receipt-identity' }, now)] }
+  })
+  const { root, child } = await createCompletedCorrelationTree({ store: f.store, workService: f.workService, actor: owner, conversationId: 'receipt-conversation', leaderEmployeeId: 'leader', childEmployeeId: 'agent' })
+  const channel = createChannelService({ store: f.store, workService: f.workService, connectionCatalog: f.catalog, clock: () => now })
+  await assert.rejects(f.preview(root), { code: 'REVISION_CONFLICT' })
+  const rejected = await f.preview(child)
+  await f.service.reject(owner, child.id, rejected.id, approval(rejected))
+  assert.equal(f.writes, 0)
+  const preview = await f.preview(child, 'receipt-preview')
+  await assert.rejects(channel.createWorkDelivery(owner, { workId: child.id, actionId: preview.id, requestId: 'too-early' }), { code: 'FORBIDDEN' })
+  const auth = { async sessionView(token) { return { session: { memberId: token, sessionVersion: 1 }, csrfToken: 'synthetic-csrf' } }, async verifyCsrf(_token, value) { return value === 'synthetic-csrf' } }
+  const sent = [], outcomes = ['failed', 'unknown']
+  const runtime = { isAvailable: () => true, async sendDelivery(id, { retry = false } = {}) {
+    assert((await f.store.read()).works.find(work => work.id === child.id).actions.find(action => action.id === preview.id).receipt, 'notification follows durable receipt')
+    await channel.authorizeDelivery({ deliveryId: id, retry })
+    const envelope = await channel.validateSendClaim({ deliveryId: id }); sent.push(envelope)
+    const status = outcomes.shift() ?? 'delivered'
+    return channel.recordDeliveryOutcome({ deliveryId: id, status, ...(status === 'delivered' ? { providerMessageId: 'synthetic-ack' } : { error: { code: 'CONTROLLED_SEND_FAILURE' } }) })
+  } }
+  const server = createGenewayServer({ service: f.workService, actionService: f.service, channel, channelRuntime: runtime, store: f.store, auth, trustedOrigin: origin })
+  try {
+    const path = `/api/works/${child.id}/actions/${preview.id}/approve`
+    const approved = await request(path, approval(preview))
+    assert.equal(approved.status, 200); assert(approved.body.receipt)
+    assert.equal(f.writes, 1); assert.equal(sent.length, 1)
+    assert.match(sent[0].text, new RegExp(preview.preview.payload.orderNo))
+    assert.doesNotMatch(sent[0].text, /machineAccountId|clientId|credential|secret/)
+    const receipt = (await f.store.read()).deliveries.find(item => item.actionId === preview.id)
+    assert.equal(receipt.workId, child.id); assert.equal(receipt.resultId, preview.preview.resultId)
+    assert.equal(receipt.status, 'failed'); assert.equal(receipt.targetIdentityId, 'receipt-identity')
+    await request(path, approval(preview))
+    assert.equal(sent.length, 1); assert.equal(f.writes, 1)
+    const analysis = await channel.createWorkDelivery(owner, { workId: child.id, resultId: preview.preview.resultId, requestId: 'ordinary-analysis' })
+    assert.equal(analysis.delivery.actionId, undefined); assert.notEqual(analysis.delivery.id, receipt.id)
+    assert.equal((await channel.createWorkDelivery(owner, { workId: child.id, actionId: preview.id, requestId: receipt.requestId })).delivery.id, receipt.id)
+    assert.equal((await request(`/api/channels/deliveries/${receipt.id}/retry`, {})).body.status, 'unknown')
+    assert.equal((await request(`/api/channels/deliveries/${receipt.id}/retry`, {})).status, 409)
+    assert.equal(sent.length, 2); assert.equal(f.writes, 1)
+    await assert.rejects(f.store.update(state => ({ ...state, deliveries: state.deliveries.map(item => item.id === receipt.id ? { ...item, actionId: rejected.id } : item) })), /回执引用不闭合|不可改写/)
+
+    const knowledge = createKnowledgeService({ store: f.store, clock: () => now })
+    const material = await knowledge.createMaterial(owner, { employeeIds: ['agent', 'leader'], title: '维护依据', body: 'SYNTHETIC_RECEIPT_STANDARD', sourceLabel: 'synthetic', authorizationBasis: 'controlled test' })
+    const ref = { knowledgeId: material.id, revision: material.revision, segmentId: segmentKnowledgeBody('SYNTHETIC_RECEIPT_STANDARD')[0].segmentId }
+    await f.store.update(state => ({ ...state, works: state.works.map(work => [root.id, child.id].includes(work.id) ? { ...work,
+      results: work.results.map(result => ({ ...result, knowledgeDependencyRefs: [ref] })), ...(work.handoffs ? { handoffs: work.handoffs.map(handoff => ({ ...handoff, knowledgeRefs: [ref] })) } : {}),
+    } : work) }))
+    const pending = (await channel.createWorkDelivery(owner, { workId: child.id, actionId: preview.id, requestId: 'revoke-before-send' })).delivery
+    const snapshot = await f.store.read()
+    for (const change of [
+      state => { state.members.find(member => member.id === owner.id).employeeIds = ['leader'] },
+      state => { state.employees.find(employee => employee.id === 'agent').enabled = false },
+      state => { state.connections[0].enabled = false },
+      state => { state.connections[0].sourceInstance = 'different-instance' },
+      state => { state.channelIdentities[0].status = 'unlinked' },
+      state => { state.works.find(work => work.id === root.id).collaboration.childWorkIds = [] },
+    ]) {
+      let state = structuredClone(snapshot); change(state)
+      const memory = { async read() { return structuredClone(state) }, async update(fn) { state = await fn(structuredClone(state)); return structuredClone(state) } }
+      await assert.rejects(createChannelService({ store: memory, connectionCatalog: f.catalog }).authorizeDelivery({ deliveryId: pending.id }), { code: 'DELIVERY_FORBIDDEN' })
+    }
+    await knowledge.deleteMaterial(owner, material.id, { expectedRevision: material.revision })
+    await assert.rejects(channel.authorizeDelivery({ deliveryId: pending.id }), { code: 'DELIVERY_FORBIDDEN' })
+    assert.equal(sent.length, 2); assert.equal(f.writes, 1)
+    assert.equal((await f.store.read()).works.find(work => work.id === root.id).actions.length, 0)
+  } finally { server.close(); await f.workService.close() }
+
+  function request(url, body) {
+    const req = Readable.from([Buffer.from(JSON.stringify(body))]); req.method = 'POST'; req.url = url
+    req.headers = { cookie: 'geneway_session=owner', origin, 'x-csrf-token': 'synthetic-csrf', 'content-type': 'application/json' }
+    return new Promise(resolve => server.emit('request', req, { writeHead(status) { this.status = status }, end(text) { resolve({ status: this.status, body: JSON.parse(text) }) } }))
+  }
+}
 
 async function successAndOwner() {
   const f = await fixture(), w = await f.work(), action = await f.preview(w)

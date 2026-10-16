@@ -13,6 +13,7 @@ import { createDshRunner } from '../src/dsh-runner.mjs'
 import { readRuntimeConfig } from '../src/runtime-config.mjs'
 import { createFileStore, STATE_VERSION } from '../src/store/file-store.mjs'
 import { createWorkService } from '../src/work-service.mjs'
+import { conversationSessionDependencies, currentConversationDependencies } from '../src/conversation-dependencies.mjs'
 
 const execFile = promisify(execFileCallback), root = process.cwd(), temp = await mkdtemp(join(tmpdir(), 'geneway-conversation-runtime-'))
 const dshHome = join(temp, 'dsh'), secretRoot = join(temp, 'secrets'), stateFile = join(temp, 'state.json')
@@ -325,6 +326,34 @@ async function channelWorkChecks() {
   capture.release('WORK:66'); await waitWork(w2.id, 'completed')
   assert.equal(hosts, 1)
 
+  const delegation = { workType: 'collaboration', skillId: 'skill-cycle-time-calculate', goal: '明确跨员工协作节拍',
+    items: [{ id: 'cycle-review', employeeId: 'private', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 180 } }] }
+  await operation('delegate-waiting', tools.create, delegation)
+  const root = (await store.read()).works.find(item => item.goal === delegation.goal)
+  assert(root?.collaboration); assert.equal(root.conversationId, id)
+  await waitWork(root.id, 'waiting_input')
+  await waitFor(async () => (await store.read()).works.find(item => item.id === root.id).executions.every(item => !item.closePending))
+  const childId = root.plan.items[0].childWorkId
+  const beforeDelegateReplay = capture.requests.length
+  assert.equal((await chat.sendTurn(actor, id, { text: command(tools.create, delegation), clientRequestId: 'delegate-waiting' })).deduplicated, true)
+  assert.equal(capture.requests.length, beforeDelegateReplay)
+  await operation('delegate-continue', tools.continue, { workId: root.id, workType: 'collaboration', inputs: { 'cycle-review': { quantity: 3 } } })
+  const summarized = await waitWork(root.id, 'completed'), child = (await store.read()).works.find(item => item.id === childId)
+  assert.equal(summarized.collaboration.generation, 2); assert.equal(child.results[0].payload.secondsPerUnit, 60)
+  assert.equal(child.executions.at(-1).modelSnapshot.model, secondModel)
+  assert.equal(child.rootWorkId, root.id); assert.equal(child.conversationId, null)
+  await operation('delegate-facts', tools.status, { workId: root.id })
+  const related = await store.read(), conversation = related.conversations.find(item => item.id === id)
+  const references = conversationSessionDependencies(conversation, conversation.turns.at(-1))
+  assert(references.workDependencyRefs.some(ref => ref.workId === root.id))
+  assert.equal(currentConversationDependencies(related, conversation, references), true)
+  for (const change of [
+    state => { state.members.find(item => item.id === actor.id).employeeIds = ['public'] },
+    state => { state.employees.find(item => item.id === 'private').enabled = false },
+    state => { state.works.find(item => item.id === childId).ownerMemberId = peer.id },
+    state => { state.works.find(item => item.id === root.id).collaboration.childWorkIds = [] },
+  ]) { const revoked = structuredClone(related); change(revoked); assert.equal(currentConversationDependencies(revoked, conversation, references), false) }
+
   // Revoke between the existing service read and the product tool's fact commit.
   const beforeLate = capture.requests.length
   revokeOnRead = first.id
@@ -339,7 +368,7 @@ async function channelWorkChecks() {
   assert(capture.requests.every(item => [model, secondModel].includes(item.model) && !item.credentialLeak && !item.sessionLog))
   report = { ok: true, mode: 'native-controlled-loopback-channel-work', actualProvider: 'local capture', requestedModel: model, requestedModels: [...new Set(capture.requests.map(request => request.model))], routingAndBudget: capture.routingAndBudget ?? null, nativeHosts: hosts, nativeSdkHarnesses: harnesses, modelRequests: capture.requests.length,
     fixedProductTools: Object.values(tools), webTools: [], plainChatWorks: 0, partialInputWithoutExecution: true, continuationSameWork: true, replayWithoutRequest: true, ownerInjectionRejected: true, sameConversationOnly: true,
-    factsCommittedBeforeModel: true, nativeIdsExcludedFromToolOutput: true, factualFollowUpWithoutRefresh: true, explicitSelection: true, independentWorkStop: true, lateRevocationBlocksContinuation: true, failedTurnPersisted: true, rejectedToolTurn, credentialCanaryLeaks: 0, sessionLogAttachments: 0,
+    factsCommittedBeforeModel: true, nativeIdsExcludedFromToolOutput: true, factualFollowUpWithoutRefresh: true, explicitSelection: true, independentWorkStop: true, explicitCollaborationWaitingAndContinuation: true, mixedNativeChildSummary: true, childPermissionRecheckedFromSummary: true, lateRevocationBlocksContinuation: true, failedTurnPersisted: true, rejectedToolTurn, credentialCanaryLeaks: 0, sessionLogAttachments: 0,
   }
   function command(name, args) { return `CHANNEL_WORK:${JSON.stringify({ name, args })}` }
   async function operation(request, name, args) { return turn(id, command(name, args), request) }

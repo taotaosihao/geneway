@@ -1081,10 +1081,32 @@ export function authorizeWorkBinding(state, actor, workOrId, connectionCatalog =
   if (!work) throw serviceError('NOT_FOUND', '工作不存在')
   const binding = authorizedBinding(state, member, work, connectionCatalog)
   if (!binding.ok) throw serviceError(binding.error.code, binding.error.message)
+  if (work.collaboration) {
+    for (const item of work.plan.items) {
+      const child = state.works.find(candidate => candidate.id === item.childWorkId && candidate.ownerMemberId === member.id
+        && candidate.rootWorkId === work.id && candidate.parentWorkId === work.id && candidate.employeeId === item.employeeId)
+      if (!child || !work.collaboration.childWorkIds.includes(child.id)) throw serviceError('FORBIDDEN', '协作子工作归属已失效')
+      const selected = authorizedBinding(state, member, child, connectionCatalog)
+      if (!selected.ok) throw serviceError(selected.error.code, selected.error.message)
+      const partial = validateCapabilityInput(child.capabilityId, child.input, { allowMissing: true })
+      if (!partial.ok || !inputAllowed(selected, partial.input, partial.missing.length > 0)) throw serviceError('FORBIDDEN', '协作子工作输入或范围已失效')
+    }
+    return { member, work, binding, input: {} }
+  }
   const parsed = validateCapabilityInput(work.capabilityId, work.input)
   if (!parsed.ok) throw serviceError(parsed.error.code, parsed.error.message)
   if (!inputAllowed(binding, parsed.input)) throw serviceError('FORBIDDEN', '业务对象不在当前连接允许范围内')
   return { member, work, binding, input: parsed.input }
+}
+
+export function workConversationSource(state, work) {
+  const root = work?.rootWorkId ? state.works.find(item => item.id === work.rootWorkId) : work
+  if (!root || root.ownerMemberId !== work.ownerMemberId) return undefined
+  if (work.rootWorkId && (!root.collaboration || work.parentWorkId !== root.id
+    || !root.collaboration.childWorkIds.includes(work.id)
+    || !root.plan.items.some(item => item.childWorkId === work.id && item.employeeId === work.employeeId && item.id === work.planItemId))) return undefined
+  const conversation = state.conversations?.find(item => item.id === root.conversationId && item.ownerMemberId === root.ownerMemberId && item.employeeId === root.employeeId)
+  return conversation ? { root, conversation } : undefined
 }
 
 function inputAllowed(binding, input, allowMissing = false) {

@@ -13,7 +13,7 @@ import { connectionInputAllowed, connectionSnapshot } from './execution-grant.mj
 import { assertTrustedConnection } from './connection-catalog.mjs'
 import { KIVO_TPM_RESULT_KIND, KIVO_TPM_TOOLS } from './domain/tpm.mjs'
 import { KIVO_TPM_DEVICE_CORRELATION_KIND } from './domain/tpm-device-correlation.mjs'
-import { isRetiredWork } from './work-service.mjs'
+import { isRetiredWork, authorizeWorkBinding } from './work-service.mjs'
 import { conversationSessionDependencies, currentConversationDependencies } from './conversation-dependencies.mjs'
 import { assertDshHome, readModelCredential, readRuntimeConfig } from './runtime-config.mjs'
 import { bootDshHost } from './dsh-host.mjs'
@@ -389,10 +389,27 @@ export function createCollaborationRunner({
       invocation.signal?.throwIfAborted()
       let result
       if (name === CONVERSATION_WORK_TOOLS.create) {
-        result = await service.createWork(member, { employeeId: employee.id, conversationId: conversation.id, skillId: args.skillId, ...(args.connectionId === undefined ? {} : { connectionId: args.connectionId }), goal: args.goal, input: args.input ?? {}, clientRequestId: requestId })
+        const body = { employeeId: employee.id, conversationId: conversation.id, skillId: args.skillId, ...(args.connectionId === undefined ? {} : { connectionId: args.connectionId }), goal: args.goal, clientRequestId: requestId }
+        if (args.workType === 'collaboration') {
+          if (args.input !== undefined || !Array.isArray(args.items) || !args.items.length || args.items.length > 4) throw runtimeError('INVALID_REQUEST', '请明确协作计划项')
+          for (const item of args.items) if (!item || typeof item !== 'object' || Array.isArray(item)
+            || Object.keys(item).some(key => !['id', 'employeeId', 'skillId', 'connectionId', 'goal', 'input', 'dependsOn', 'knowledgeQuery'].includes(key))) throw runtimeError('INVALID_REQUEST', '协作计划项含未声明字段')
+          result = await service.createCollaboration(member, { ...body, items: args.items })
+        } else {
+          if (args.workType !== undefined || args.items !== undefined) throw runtimeError('INVALID_REQUEST', '工作类型与计划不匹配')
+          result = await service.createWork(member, { ...body, input: args.input ?? {} })
+        }
       } else if (name === CONVERSATION_WORK_TOOLS.continue) {
-        result = await service.continueWork(member, selected.id, { input: args.input ?? {}, clientRequestId: requestId })
+        if (selected.collaboration) {
+          if (args.workType !== 'collaboration' || args.input !== undefined || args.inputs !== undefined && (!args.inputs || typeof args.inputs !== 'object' || Array.isArray(args.inputs)
+            || Object.keys(args.inputs).some(id => !selected.plan.items.some(item => item.id === id)))) throw runtimeError('INVALID_REQUEST', '请按明确的协作计划项补充输入')
+          result = await service.continueCollaboration(member, selected.id, { inputs: args.inputs ?? {}, clientRequestId: requestId })
+        } else {
+          if (args.workType !== undefined || args.inputs !== undefined) throw runtimeError('INVALID_REQUEST', '普通工作不接受协作输入')
+          result = await service.continueWork(member, selected.id, { input: args.input ?? {}, clientRequestId: requestId })
+        }
       } else if (name === CONVERSATION_WORK_TOOLS.followUp) {
+        if (selected.collaboration) throw runtimeError('INVALID_REQUEST', '协作工作请查看当前汇总或明确继续')
         result = await service.followUp(member, selected.id, args.text, { clientRequestId: requestId })
       } else if (name === CONVERSATION_WORK_TOOLS.stop) result = await service.cancel(member, selected.id)
       else if (name === CONVERSATION_WORK_TOOLS.status) result = await service.getWork(member, selected.id)
@@ -407,6 +424,7 @@ export function createCollaborationRunner({
         const turn = conversation?.turns.find(item => item.id === options.turnId && ACTIVE.has(item.status))
         const work = current.works.find(item => item.id === result.value?.id && item.ownerMemberId === conversation?.ownerMemberId && item.employeeId === conversation.employeeId && item.conversationId === conversation.id)
         if (!turn || !work) throw runtimeError('FORBIDDEN', '工作或当前回复归属已变化')
+        if (work.collaboration) authorizeWorkBinding(current, { id: conversation.ownerMemberId }, work, connectionCatalog)
         // Operations accept asynchronously. Read status explicitly later; never wait or poll here.
         const visible = result.value.results ?? [], connection = current.connections.find(item => item.id === work.connectionId)
         const workRefs = visible.map(item => ({ workId: work.id, resultId: item.id, connectionRevision: connection?.revision ?? null }))
@@ -418,6 +436,7 @@ export function createCollaborationRunner({
           knowledgeDependencyRefs: [...(turn.knowledgeDependencyRefs ?? []), ...knowledgeRefs.filter(ref => !(turn.knowledgeDependencyRefs ?? []).some(item => knowledgeRefKey(item) === knowledgeRefKey(ref)))],
         }
         output = { ok: true, work: { workId: work.id, conversationId: conversation.id, goal: work.goal, status: work.status, input: work.input, requiredInputs: work.requiredInputs ?? [],
+          ...(work.collaboration ? { workType: 'collaboration', plan: { revision: work.plan.revision, items: work.plan.items.map(item => ({ ...item, requiredInputs: current.works.find(child => child.id === item.childWorkId).requiredInputs })) } } : {}),
           results: visible.map(item => ({ resultId: item.id, kind: item.kind, payload: item.payload, ...(item.source === undefined ? {} : { source: item.source }), createdAt: item.createdAt, explanation: item.explanation })),
         }, ...(result.active ? { active: true, inputApplied: false } : {}), ...(result.accepted === undefined ? {} : { accepted: result.accepted }), deduplicated: result.deduplicated === true }
         return { ...current, conversations: current.conversations.map(item => item.id === conversation.id ? { ...item, turns: item.turns.map(item => item.id === turn.id ? next : item) } : item) }
@@ -1153,11 +1172,15 @@ function createConversationWorkTools(invoke, allowed) {
       archive: { type: 'string' }, status: { type: 'string' }, severity: { type: 'string' }, tab: { type: 'string' },
     } }, availableSeconds: { type: 'number' }, quantity: { type: 'number' },
   } }
+  const workType = { type: 'string', enum: ['collaboration'] }
+  const items = { type: 'array', description: 'One to four explicit collaboration plan items.', items: { type: 'object', additionalProperties: false,
+    properties: { id: { type: 'string' }, employeeId: { type: 'string', required: true }, skillId: { type: 'string', required: true },
+      connectionId: { type: 'string' }, goal: { type: 'string' }, input, knowledgeQuery: { type: 'string' }, dependsOn: { type: 'array', items: { type: 'string' } } } } }
   const specs = [
-    [CONVERSATION_WORK_TOOLS.create, 'Create one work only when the owner explicitly requests a new business query. Use an explicitly selected authorized skill and connection; ask when ambiguous. Missing business inputs are allowed and produce waiting_input, not a guessed query.', {
-      skillId: { type: 'string', required: true }, connectionId: { type: 'string' }, goal: { type: 'string' }, input,
+    [CONVERSATION_WORK_TOOLS.create, 'Create work only for an explicit owner request. For collaboration set workType=collaboration and provide 1-4 explicit items with authorized employees, skills and connections; the current conversation Agent is the leader. Missing business inputs produce waiting_input; never guess a business object.', {
+      skillId: { type: 'string', required: true }, connectionId: { type: 'string' }, goal: { type: 'string' }, input, workType, items,
     }],
-    [CONVERSATION_WORK_TOOLS.continue, 'Supply missing inputs or continue the exact work selected by the owner in this conversation. An active execution does not apply new inputs; ask the owner to resubmit after it ends.', { workId: { type: 'string', required: true }, input }],
+    [CONVERSATION_WORK_TOOLS.continue, 'Continue the exact work selected by the owner in this conversation. For a collaboration root set workType=collaboration and supply inputs keyed by existing plan item IDs. For ordinary work use input. An active execution does not apply new inputs; never select the latest work.', { workId: { type: 'string', required: true }, input, workType, inputs: { type: 'object', additionalProperties: true, description: 'Existing plan item ID to business input object. Each value uses only recordType, reference, filters, availableSeconds or quantity as required by that item.' } }],
     [CONVERSATION_WORK_TOOLS.followUp, 'Ask a factual follow-up on the exact completed work selected by the owner. This does not refresh business data. Work completion is asynchronous; do not poll or wait in a loop.', { workId: { type: 'string', required: true }, text: { type: 'string', required: true } }],
     [CONVERSATION_WORK_TOOLS.status, 'Read the current status and authorized persisted facts of an exact work in this conversation. Without workId, list candidates and ask the owner to choose; never choose the most recent work. Do not poll in a loop.', { workId: { type: 'string' } }],
     [CONVERSATION_WORK_TOOLS.stop, 'Stop only the exact work explicitly selected by the owner. Does not stop this reply or another work.', { workId: { type: 'string', required: true } }],
@@ -1179,7 +1202,7 @@ function createConversationWorkTools(invoke, allowed) {
 }
 function conversationWorkPrompt(state, conversation, connectionCatalog) {
   const employee = state.employees.find(item => item.id === conversation.employeeId)
-  const choices = state.skills.filter(skill => skill.enabled && employee?.skillIds.includes(skill.id) && getCapability(skill.capabilityId)?.retired === false).map(skill => {
+  const choicesFor = employee => state.skills.filter(skill => skill.enabled && employee?.skillIds.includes(skill.id) && getCapability(skill.capabilityId)?.retired === false).map(skill => {
     const capability = getCapability(skill.capabilityId)
     return { skillId: skill.id, capabilityId: capability.id, requiredInputs: capability.requiredInputs,
       connections: capability.requiresConnection ? state.connections.filter(connection => {
@@ -1188,7 +1211,11 @@ function conversationWorkPrompt(state, conversation, connectionCatalog) {
       }).map(connection => ({ connectionId: connection.id, name: connection.name, sourceSystem: connection.sourceSystem, sourceInstance: connection.sourceInstance })) : [],
     }
   })
-  return `\n只有本人明确交办业务或引用工作时才使用工作工具，普通问答不创建工作。工具只操作本人当前对话和当前Agent；不要要求或提交owner、employee、原生Session、秘密或URL。技能或连接有多个候选时询问本人，不猜第一个或最近工作。缺必要信息使用waiting_input并提示补充。工作独立异步执行；不等待或循环查询。返回事实必须保留来源、时间和状态，不把受理说成完成。TPM维修/保养/点检/异常/维护计划/设备分别用recordType repair/maintenance/inspection/exception/plan/device；读取reference为文本，计划/设备用明确UUID；列表使用recordType和filters。当前候选：${JSON.stringify(choices)}`
+  const member = state.members.find(item => item.id === conversation.ownerMemberId)
+  const collaborators = state.employees.filter(item => item.enabled && member?.employeeIds.includes(item.id)).flatMap(item => {
+    try { employeeModelRoute(state, item); return [{ employeeId: item.id, name: item.name, skills: choicesFor(item) }] } catch { return [] }
+  })
+  return `\n只有本人明确交办业务或引用工作时才使用工作工具，普通问答不创建工作。负责人固定为当前会话Agent，不提交owner、负责人employee、原生Session、秘密或URL。仅在本人明确要求协作时设置workType=collaboration，items只选下列获准员工/技能/连接；继续时用原workId和planItemId对应的inputs。技能或连接有多个候选时询问本人，不猜第一个或最近工作。缺业务对象使用waiting_input并提示补充；没有明确计划时先询问。工作独立异步执行；不等待或循环查询。返回事实必须保留来源、时间和状态，不把受理说成完成。TPM维修/保养/点检/异常/维护计划/设备分别用recordType repair/maintenance/inspection/exception/plan/device；读取reference为文本，计划/设备用明确UUID；列表使用recordType和filters。当前员工候选：${JSON.stringify(choicesFor(employee))}；获准协作候选：${JSON.stringify(collaborators)}`
 }
 function launchEnvironment(values) {
   return {

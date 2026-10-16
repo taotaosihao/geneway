@@ -270,6 +270,15 @@ export function createGenewayServer({ service, actionService, conversationServic
         const body = await protectedWrite(request, context.token, auth, trustedOrigin, allowed)
         if (operation !== 'reconcile' && (typeof body.clientRequestId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(body.clientRequestId))) throw httpError('INVALID_REQUEST', '请求标识无效')
         const action = operation ? await actionService[operation](actor, workId, decode(actionMatch[2]), body) : await actionService.createPreview(actor, workId, body)
+        if (channel && action.receipt && ['approve', 'reconcile'].includes(operation)) {
+          try {
+            const created = await channel.createWorkDelivery(actor, { workId, actionId: action.id, requestId: `action-receipt:${action.id}` })
+            if (created.delivery.status === 'pending') await channelRuntime?.sendDelivery(created.delivery.id)
+          } catch (error) {
+            // The durable business receipt remains successful when its notification fails.
+            if (!['NOT_FOUND', 'FORBIDDEN', 'DELIVERY_FORBIDDEN'].includes(error?.code)) console.error('维修回执渠道反馈未完成', /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code) ? error.code : 'UPSTREAM_ERROR')
+          }
+        }
         return sendJson(response, 200, action)
       }
 
@@ -589,7 +598,7 @@ function safeIdentity(item) {
     ...(item.weixin ? { runtimeState: item.weixin.runtimeState, runtimeError: item.weixin.error?.code } : {}), updatedAt: item.updatedAt }
 }
 function safeDelivery(item) {
-  return { id: item.id, channelAppId: item.channelAppId, workId: item.workId, resultId: item.resultId, sourceRef: item.sourceRef, targetIdentityId: item.targetIdentityId, targetConversationId: item.targetConversationId, status: item.status, attempts: item.attempts, error: item.error,
+  return { id: item.id, channelAppId: item.channelAppId, workId: item.workId, resultId: item.resultId, actionId: item.actionId, sourceRef: item.sourceRef, targetIdentityId: item.targetIdentityId, targetConversationId: item.targetConversationId, status: item.status, attempts: item.attempts, error: item.error,
     ...(item.sendProgress ? { progress: { acknowledgedParts: item.sendProgress.acknowledgedParts.length, totalParts: item.sendProgress.totalParts } } : {}), createdAt: item.createdAt, updatedAt: item.updatedAt }
 }
 function safeLink(item) {

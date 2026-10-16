@@ -1,5 +1,5 @@
 import { getCapability } from './capabilities.mjs'
-import { authorizeWorkBinding } from './work-service.mjs'
+import { authorizeWorkBinding, workConversationSource } from './work-service.mjs'
 import { currentKnowledgeReference, stableKnowledgeRefs } from './knowledge-service.mjs'
 
 // References only: model and delivery callers re-evaluate the existing work policy.
@@ -10,16 +10,26 @@ export function currentConversationDependencies(state, conversation, references,
     const employee = state.employees.find(item => item.id === conversation.employeeId && item.enabled === true)
     if (!member || !employee || !member.employeeIds.includes(employee.id)) return false
     for (const ref of references.workDependencyRefs ?? []) {
-      const work = state.works.find(item => item.id === ref.workId && item.ownerMemberId === member.id && item.employeeId === employee.id && item.conversationId === conversation.id)
+      const work = state.works.find(item => item.id === ref.workId && item.ownerMemberId === member.id)
       const result = work?.results.find(item => item.id === ref.resultId)
-      if (!result || getCapability(work.capabilityId)?.retired || result.knowledgeUnavailable) return false
+      if (!result || workConversationSource(state, work)?.conversation.id !== conversation.id || !factAllowed(work, result, ref.connectionRevision)) return false
+      if (result.kind === 'assistant.collaboration-summary') for (const resultId of result.payload.resultRefs) {
+        const child = state.works.find(item => item.rootWorkId === work.id && item.results.some(result => result.id === resultId))
+        const childResult = child?.results.find(item => item.id === resultId)
+        if (!childResult || workConversationSource(state, child)?.root.id !== work.id || !factAllowed(child, childResult)) return false
+      }
+    }
+    return (references.knowledgeDependencyRefs ?? []).every(ref => currentKnowledgeReference(state, ref, member.id, employee.id))
+
+    function factAllowed(work, result, revision) {
+      if (getCapability(work.capabilityId)?.retired || result.knowledgeUnavailable) return false
       const { binding } = authorizeWorkBinding(state, member, work, connectionCatalog)
-      if ((binding.connection?.revision ?? null) !== ref.connectionRevision) return false
+      if (revision !== undefined && (binding.connection?.revision ?? null) !== revision) return false
       if (binding.connection && result.source && ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode'].some(key => result.source[key] !== binding.connection[key])) return false
       if ((result.knowledgeDependencyRefs ?? []).some(item => !currentKnowledgeReference(state, item, member.id, result.employeeId ?? work.employeeId)
         || !currentKnowledgeReference(state, item, member.id, employee.id))) return false
+      return true
     }
-    return (references.knowledgeDependencyRefs ?? []).every(ref => currentKnowledgeReference(state, ref, member.id, employee.id))
   } catch { return false }
 }
 

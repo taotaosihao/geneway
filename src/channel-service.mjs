@@ -2,7 +2,10 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { currentKnowledgeReference } from './knowledge-service.mjs'
 import { newConversationRecord, requireConversationEmployee } from './conversation-service.mjs'
 import { currentConversationDependencies } from './conversation-dependencies.mjs'
-import { authorizeWorkBinding } from './work-service.mjs'
+import { authorizeWorkBinding, workConversationSource } from './work-service.mjs'
+import { assertRepairReceipt, KIVO_REPAIR_ACTION, repairTargetFromCorrelation } from './domain/kivo-repair.mjs'
+import { KIVO_TPM_DEVICE_CORRELATION_KIND } from './domain/tpm-device-correlation.mjs'
+import { isDeepStrictEqual } from 'node:util'
 
 const LINK_TTL_MS = 10 * 60 * 1000
 const LINK_FAILURE_LIMIT = 5
@@ -82,7 +85,7 @@ export function createChannelService({
       } else if (workService?.getWork && first.workId) {
         const work = initial.works.find(item => item.id === first.workId)
         const result = await workService.getWork({ id: work.ownerMemberId }, work.id)
-        if (result?.ok) text = formatWorkContent(first.contentKey, result.value, result.value.results.find(item => item.id === first.resultId))
+        if (result?.ok) text = formatWorkContent(first.contentKey, result.value, result.value.results.find(item => item.id === first.resultId), result.value.actions?.find(item => item.id === first.actionId))
       }
     } } catch { text = undefined }
     let output, transport, denied = false
@@ -615,11 +618,14 @@ export function createChannelService({
         const identity = state.channelIdentities.find(item => item.id === clean(input.targetIdentityId) && item.memberId === member.id && item.channelAppId === app?.id && item.status === 'active')
         const conversation = state.channelConversations.find(item => item.id === clean(input.targetConversationId) && item.memberId === member.id && item.channelAppId === app?.id && item.identityId === identity?.id && item.type === 'private' && item.status === 'active')
         const resultId = input.resultId === undefined ? undefined : clean(input.resultId)
+        const actionId = input.actionId === undefined ? undefined : requiredId(input.actionId, 'actionId')
         const channelMessageId = input.channelMessageId === undefined ? undefined : clean(input.channelMessageId)
         if (!app || !work || !identity || !conversation || (resultId && !work.results.some(item => item.id === resultId)) || (channelMessageId && !state.channelMessages.some(item => item.id === channelMessageId && item.channelAppId === app.id))) throw error('FORBIDDEN', '投递目标或内容引用无效')
+        const receipt = actionId && actionReceiptContext(state, work, actionId, connectionCatalog)
+        if (actionId && (!receipt || receipt.action.preview.resultId !== resultId || receipt.conversation.channelIdentityId !== identity.id)) throw error('FORBIDDEN', '回执或当前渠道授权无效')
         const timestamp = now(clock)
-        const contentKey = resultId ? 'result.gearjob' : 'work.accepted'
-        output = compact({ id: `delivery-${idFactory()}`, channelAppId: app.id, requestId, workId: work.id, resultId, channelMessageId, targetConversationId: conversation.id, targetIdentityId: identity.id, contentScope: requiredId(input.contentScope, 'contentScope'), contentKey, status: 'pending', attempts: 0, createdAt: timestamp, updatedAt: timestamp })
+        const contentKey = actionId ? 'action.receipt' : resultId ? 'result.gearjob' : 'work.accepted'
+        output = compact({ id: `delivery-${idFactory()}`, channelAppId: app.id, requestId, workId: work.id, resultId, actionId, channelMessageId, targetConversationId: conversation.id, targetIdentityId: identity.id, contentScope: requiredId(input.contentScope, 'contentScope'), contentKey, status: 'pending', attempts: 0, createdAt: timestamp, updatedAt: timestamp })
         return { ...state, deliveries: [...state.deliveries, output] }
       })
       return { delivery: deliveryDto(output), deduplicated }
@@ -664,13 +670,18 @@ export function createChannelService({
       return { deliveries: outputs.map(deliveryDto), deduplicated }
     },
 
-    async createWorkDelivery(actor, { workId, resultId, requestId } = {}) {
+    async createWorkDelivery(actor, { workId, resultId, actionId, requestId } = {}) {
       const state = await store.read(), member = requireMember(state, actor)
       const work = state.works.find(item => item.id === clean(workId) && item.ownerMemberId === member.id)
       const target = work && workChannelTarget(state, work)
       if (!target) throw error('NOT_FOUND', '工作没有可用的已验证私聊来源')
+      if (actionId !== undefined) {
+        const receipt = actionReceiptContext(state, work, actionId, connectionCatalog)
+        if (!receipt || resultId !== undefined && resultId !== receipt.action.preview.resultId) throw error('FORBIDDEN', '回执或当前内容授权无效')
+        resultId = receipt.action.preview.resultId
+      }
       const { origin, identity, conversation } = target
-      return this.createDelivery(actor, compact({ channelAppId: identity.channelAppId, requestId, workId: work.id, resultId, channelMessageId: origin?.id, targetIdentityId: identity.id, targetConversationId: conversation.id, contentScope: 'result' }))
+      return this.createDelivery(actor, compact({ channelAppId: identity.channelAppId, requestId, workId: work.id, resultId, actionId, channelMessageId: origin?.id, targetIdentityId: identity.id, targetConversationId: conversation.id, contentScope: 'result' }))
     },
 
     async createConversationDelivery(actor, input = {}) {
@@ -852,7 +863,7 @@ function replyParentMatches(state, message, conversation, context) {
     if (delivery.channelAppId !== message.channelAppId || delivery.status !== 'delivered' || delivery.providerMessageId !== message.replyToProviderMessageId) continue
     const origin = state.channelMessages.find(item => item.id === delivery.channelMessageId && item.status === 'accepted')
     const sourceConversationId = delivery.sourceRef?.kind === 'conversation-turn' ? delivery.sourceRef.conversationId
-      : delivery.workId ? state.works.find(item => item.id === delivery.workId)?.conversationId : origin?.memberConversationId
+      : delivery.workId ? workConversationSource(state, state.works.find(item => item.id === delivery.workId))?.conversation.id : origin?.memberConversationId
     parents.push({ identityId: delivery.targetIdentityId, endpointId: delivery.targetConversationId, conversationId: sourceConversationId })
   }
   const parent = parents[0]
@@ -961,12 +972,32 @@ function conversationReplyDelivery(state, actor, { identityId, conversationId, t
 }
 
 function workChannelTarget(state, work) {
-  const source = state.conversations.find(item => item.id === work.conversationId && item.ownerMemberId === work.ownerMemberId)
+  const source = workConversationSource(state, work)?.conversation
+  if (work.rootWorkId && !source) return undefined
   const origins = state.channelMessages.filter(item => item.workId === work.id && item.status === 'accepted' && item.command?.type === 'create')
   const origin = new Set(origins.map(item => `${item.channelAppId}\0${item.senderIdentityId}`)).size === 1 ? origins[0] : undefined
   const identity = state.channelIdentities.find(item => item.id === (source?.channelIdentityId ?? origin?.senderIdentityId) && item.memberId === work.ownerMemberId && item.status === 'active')
   const conversation = identity && uniquePrivateConversation(state, identity.channelAppId, identity.id)
   return identity && conversation ? { identity, conversation, origin } : undefined
+}
+
+function actionReceiptContext(state, work, actionId, connectionCatalog) {
+  try {
+    const source = workConversationSource(state, work)
+    if (!source || work.collaboration) return undefined
+    const { member, binding } = authorizeWorkBinding(state, { id: work.ownerMemberId }, work, connectionCatalog)
+    authorizeWorkBinding(state, member, source.root, connectionCatalog)
+    const action = work.actions.find(item => item.id === actionId && item.intent.kind === KIVO_REPAIR_ACTION && item.receipt)
+    const result = action && work.results.find(item => item.id === action.preview.resultId && item.kind === KIVO_TPM_DEVICE_CORRELATION_KIND)
+    if (!result || !binding.connection || !isDeepStrictEqual(action.preview.target, repairTargetFromCorrelation(result.payload))) return undefined
+    assertRepairReceipt(action.receipt, action)
+    const target = action.preview.target, connection = binding.connection
+    if (target.resource !== connection.baseUrl || target.sourceInstance !== connection.sourceInstance || target.clientId !== connection.clientId
+      || target.connectionId !== connection.id || target.sourceEnvironment !== connection.sourceEnvironment || target.dataMode !== connection.dataMode
+      || (result.knowledgeDependencyRefs ?? []).some(ref => !currentKnowledgeReference(state, ref, member.id, work.employeeId)
+        || !currentKnowledgeReference(state, ref, member.id, source.root.employeeId))) return undefined
+    return { ...source, action, result }
+  } catch { return undefined }
 }
 
 function currentInboundContext(state, message) {
@@ -1049,13 +1080,17 @@ function currentDeliveryAuthorization(state, delivery, { validateClaim = false, 
   const fixed = Object.hasOwn(FIXED_CONTENT, delivery.contentKey)
   const occurrence = automationOccurrence(state, delivery)
   const rule = occurrence && state.automationRules.find(item => item.id === occurrence.ruleId)
-  const workAuthorized = work && (occurrence?.query ? automationWorkAuthorized(state, member, work, connectionCatalog) : workBindingAuthorized(state, member, work))
+  const relation = work?.rootWorkId && workConversationSource(state, work)
+  const receipt = delivery.actionId && work && actionReceiptContext(state, work, delivery.actionId, connectionCatalog)
+  const workAuthorized = work && (occurrence?.query || work.collaboration || work.rootWorkId ? automationWorkAuthorized(state, member, work, connectionCatalog) : workBindingAuthorized(state, member, work))
   const sourceAuthorized = source && turn && source.channelIdentityId === identity?.id && source.ownerMemberId === member?.id && employee
     && currentConversationDependencies(state, source, turn, connectionCatalog)
   if (!app || !identity || !conversation || !member
     || identity.channelAppId !== app.id || conversation.channelAppId !== app.id || identity.memberId !== member.id
     || (conversation.type === 'private' && (conversation.memberId !== member.id || conversation.identityId !== identity.id))
     || (app.provider === 'weixin' && identity.weixin?.runtimeState !== 'connected')
+    || (work?.rootWorkId && (!relation || relation.conversation.channelIdentityId !== identity.id))
+    || (delivery.actionId && (!receipt || receipt.action.preview.resultId !== delivery.resultId || receipt.conversation.channelIdentityId !== identity.id))
     || (confirmation && identity.status === 'pending' && !state.linkCodes.some(link => link.status === 'matched' && link.matchedIdentityId === identity.id && link.matchedConversationId === conversation.id))
     || (occurrence && (conversation.type !== 'private' || rule?.ownerMemberId !== work?.ownerMemberId || rule.status !== 'active'
       || rule.revision !== occurrence.ruleRevision || rule.notificationIdentityId !== identity.id
@@ -1075,7 +1110,7 @@ function deliveryEnvelope(state, delivery, renderedText) {
   const conversation = state.channelConversations.find(item => item.id === delivery.targetConversationId)
   const work = delivery.workId && state.works.find(item => item.id === delivery.workId)
   const result = delivery.resultId && work?.results.find(item => item.id === delivery.resultId)
-  const text = renderedText ?? FIXED_CONTENT[delivery.contentKey] ?? formatWorkContent(delivery.contentKey, work, result)
+  const text = renderedText ?? FIXED_CONTENT[delivery.contentKey] ?? formatWorkContent(delivery.contentKey, work, result, work?.actions.find(item => item.id === delivery.actionId))
   if (!conversation || !text) throw error('DELIVERY_FORBIDDEN', '投递内容无法生成')
   return Object.freeze({
     deliveryId: delivery.id,
@@ -1087,9 +1122,14 @@ function deliveryEnvelope(state, delivery, renderedText) {
   })
 }
 
-function formatWorkContent(contentKey, work, result) {
+function formatWorkContent(contentKey, work, result, action) {
   if (!work) return undefined
   const path = `/works/${encodeURIComponent(work.id)}`
+  if (contentKey === 'action.receipt') {
+    if (!action?.receipt || action.preview.resultId !== result?.id) return undefined
+    const receipt = assertRepairReceipt(action.receipt, action)
+    return `维修单 ${receipt.orderNo} 已创建并回读确认。\n设备：${action.preview.target.deviceCode}\n当前回读状态：${receipt.status}\n回读时间：${receipt.queriedAt}\n详情：${path}`
+  }
   if (contentKey === 'work.accepted') return `工作 ${work.id} 已受理，当前状态：${work.status}。来源：渠道文本交办。详情：${path}`
   if (contentKey === 'automation.failed') return `自动工作 ${work.id} 未完成，状态：${({ failed: '失败', cancelled: '已停止', interrupted: '已中断' })[work.status] ?? '未完成'}。详情：${path}`
   if (!['result.gearjob', 'automation.completed'].includes(contentKey)) return undefined
@@ -1158,11 +1198,12 @@ function deliveryTuple(value) {
   return {
     workId: clean(value.workId),
     resultId: clean(value.resultId),
+    actionId: clean(value.actionId),
     channelMessageId: clean(value.channelMessageId),
     targetConversationId: clean(value.targetConversationId),
     targetIdentityId: clean(value.targetIdentityId),
     contentScope: clean(value.contentScope),
-    contentKey: clean(value.resultId) ? 'result.gearjob' : 'work.accepted',
+    contentKey: clean(value.actionId) ? 'action.receipt' : clean(value.resultId) ? 'result.gearjob' : 'work.accepted',
   }
 }
 

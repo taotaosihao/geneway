@@ -20,6 +20,7 @@ const root = await mkdtemp(join(tmpdir(), 'geneway-chat-tools-')), previous = pr
 process.env.DSH_HOME = root
 const store = createFileStore(join(root, 'state.json')), actor = { id: 'owner' }, now = '2026-10-15T00:00:00.000Z'
 const scenarios = [], sessions = new Map(), scopes = [], toolResponses = []
+const collaborationRuns = []
 const requireFromDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
 const requireFromTools = createRequire(import.meta.resolve('@deepseek-ai/dsh-tools'))
 const { Context } = await import(pathToFileURL(requireFromDsh.resolve('@deepseek-ai/cordis')).href)
@@ -47,7 +48,12 @@ try {
   service = createWorkService({ store, connectionCatalog: catalog, runner: { configured: true, async run(options) {
     executionCount += 1
     return { result: parseCapabilityToolResult(options.capabilityId, options.capabilityId === tpm ? { ok: true, observation: observation(options.input) } : calculateCycleTime(options.input), options.input), explanation: 'SYNTHETIC_CYCLE_FACT', dshSessionRef: `synthetic-work-native-${executionCount}`, contextConfirmationRefs: [] }
-  }, async close() {} }, collaborationRunner: runner })
+  }, async close() {} }, collaborationRunner: { ...runner, async run(id) {
+    collaborationRuns.push(id)
+    // The injected collaboration boundary reports waiting; native children are checked separately.
+    await store.update(state => ({ ...state, works: state.works.map(work => work.id === id && work.plan.items.every(item => item.status === 'waiting_input')
+      ? { ...work, status: 'waiting_input', collaboration: { ...work.collaboration, status: 'waiting_input' }, executions: work.executions.map(execution => ({ ...execution, status: 'completed', completedAt: now, closePending: false })) } : work) }))
+  } } })
   conversations = createConversationService({ store, runner, connectionCatalog: catalog })
   await conversations.ensureReady()
   await store.update(state => ({ ...state, conversations: [...state.conversations, newConversationRecord(state, actor, { id: 'channel-chat', employeeId: 'agent', source: 'feishu', channelIdentityId: 'identity' }, now)] }))
@@ -120,6 +126,41 @@ try {
   for (const change of refusals) { const denied = structuredClone(policyState); change(denied); assert.equal(currentConversationDependencies(denied, policyConversation, dependencies, catalog), false) }
   assert.equal(currentConversationDependencies(policyState, policyConversation, dependencies, []), false, 'current host catalog is authoritative')
 
+  await store.update(state => ({ ...state,
+    members: state.members.map(member => member.id === actor.id ? { ...member, employeeIds: [...member.employeeIds, 'reviewer'] } : member),
+    employees: [...state.employees, { ...state.employees[0], id: 'reviewer', name: 'Reviewer' }],
+  }))
+  const beforeCollaboration = (await store.read()).works.length, beforeExecutions = executionCount
+  let rootId
+  const delegation = { workType: 'collaboration', skillId: 'skill-cycle-time-calculate', goal: '明确交办协作节拍',
+    items: [{ id: 'calculation', employeeId: 'reviewer', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 60 } }] }
+  await turn('channel-chat', async ({ invoke }) => {
+    const value = await invoke(TOOLS.create, delegation, 'delegate-once')
+    assert.equal(value.ok, true); assert.equal(value.work.workType, 'collaboration')
+    assert.deepEqual(value.work.plan.items[0].requiredInputs, ['quantity'])
+    rootId = value.work.workId
+    assert.equal((await invoke(TOOLS.create, delegation, 'delegate-once')).work.workId, rootId)
+    assert.equal((await invoke(TOOLS.create, { ...delegation, employeeId: 'reviewer' })).error.code, 'INVALID_REQUEST')
+    const { workType: _workType, ...ordinaryWithItems } = delegation
+    assert.equal((await invoke(TOOLS.create, ordinaryWithItems)).error.code, 'INVALID_REQUEST')
+    await assert.rejects(invoke(TOOLS.create, { ...delegation, items: [{ ...delegation.items[0], model: 'forged' }] }), { code: 'INVALID_ARGS' })
+  })
+  await until(async () => (await store.read()).works.find(work => work.id === rootId).status === 'waiting_input')
+  assert.equal((await store.read()).works.length, beforeCollaboration + 2)
+  assert.equal(executionCount, beforeExecutions, 'a collaboration never dispatches through the ordinary runner')
+  await turn('channel-chat', async ({ invoke }) => {
+    assert.equal((await invoke(TOOLS.continue, { workId: rootId, inputs: { calculation: { quantity: 2 } } })).error.code, 'INVALID_REQUEST')
+    assert.equal((await invoke(TOOLS.continue, { workId: rootId, workType: 'collaboration', inputs: { missing: { quantity: 2 } } })).error.code, 'INVALID_REQUEST')
+    assert.equal((await invoke(TOOLS.continue, { workId, workType: 'collaboration' })).error.code, 'INVALID_REQUEST')
+    const value = await invoke(TOOLS.continue, { workId: rootId, workType: 'collaboration', inputs: { calculation: { quantity: 2 } } }, 'continue-once')
+    assert.equal(value.ok, true)
+    assert.equal((await invoke(TOOLS.continue, { workId: rootId, workType: 'collaboration', inputs: { calculation: { quantity: 2 } } }, 'continue-once')).work.workId, rootId)
+  })
+  const continued = await store.read(), collaboration = continued.works.find(work => work.id === rootId), child = continued.works.find(work => work.rootWorkId === rootId)
+  assert.equal(collaboration.collaboration.generation, 2); assert.equal(child.input.quantity, 2)
+  assert.deepEqual(collaborationRuns, [rootId, rootId])
+  assert.equal(child.conversationId, null, 'the child derives its channel through the root; it does not own another conversation')
+
   const knowledge = createKnowledgeService({ store })
   const material = await knowledge.createMaterial({ id: 'peer' }, { employeeIds: ['agent'], sharedMemberIds: ['owner'], sharedEmployeeIds: ['agent'], title: 'Synthetic standard', body: 'SHARED_STANDARD_CANARY', sourceLabel: 'synthetic fixture', authorizationBasis: 'local test' })
   const ref = { knowledgeId: material.id, revision: material.revision, segmentId: segmentKnowledgeBody('SHARED_STANDARD_CANARY')[0].segmentId }
@@ -156,7 +197,7 @@ try {
   assert.equal(revokedBeforeCommit, true)
   assert.equal(failed.error.code, 'FORBIDDEN')
   assert.deepEqual(failed.workDependencyRefs ?? [], [])
-  console.log('Conversation work tools checks passed: actual ToolRuntime scoped five tools/global masking/Web zero and strict result normalization, partial input/call deduplication, same-conversation owner binding, pre-return reference commit, TPM/current catalog/connection revision refusals, inherited context/shared-knowledge revocation, late fact commit refusal and owner history after unlink (injected Agent; DSH Host/model/network starts=0)')
+  console.log('Conversation work tools checks passed: actual ToolRuntime scoped five tools/global masking/Web zero and strict result normalization, explicit collaboration create/wait/plan-item continuation and ordinary-runner separation, partial input/call deduplication, same-conversation owner binding, pre-return reference commit, TPM/current catalog/connection revision refusals, inherited context/shared-knowledge revocation, late fact commit refusal and owner history after unlink (injected Agent; DSH Host/model/network starts=0)')
 } finally {
   await conversations?.close(); await service?.close()
   await toolHost.fiber.dispose()

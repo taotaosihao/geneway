@@ -630,6 +630,11 @@ function normalizeV6(value, { channels = false } = {}) {
       || (work && identity.memberId !== work.ownerMemberId) || (conversation.type === 'private' && (conversation.memberId !== identity.memberId || conversation.identityId !== identity.id))) throw new Error(`渠道投递 ${delivery.id} 引用不闭合`)
     if (delivery.sourceRef && (!source || source.ownerMemberId !== identity.memberId || source.channelIdentityId !== identity.id || source.source !== app.provider || turn?.status !== 'completed')) throw new Error(`渠道投递 ${delivery.id} 回复引用不闭合`)
     if (delivery.resultId && !work.results.some(item => item.id === delivery.resultId)) throw new Error(`渠道投递 ${delivery.id} 结果引用不存在`)
+    if (delivery.actionId) {
+      const action = work?.actions.find(item => item.id === delivery.actionId && item.intent.kind === KIVO_REPAIR_ACTION && item.receipt && item.preview.resultId === delivery.resultId)
+      if (!action) throw new Error(`渠道投递 ${delivery.id} 动作回执引用不闭合`)
+      assertRepairReceipt(action.receipt, action)
+    }
     if (delivery.channelMessageId) {
       const message = messageById.get(delivery.channelMessageId)
       if (!message || message.channelAppId !== app.id || (message.workId && message.workId !== work?.id)
@@ -803,7 +808,10 @@ function normalizeV10(value, options = {}) {
     for (const turn of conversation.turns) {
       for (const ref of turn.workDependencyRefs ?? []) {
         const work = common.works.find(item => item.id === ref.workId)
-        if (!work || work.ownerMemberId !== conversation.ownerMemberId || work.employeeId !== conversation.employeeId || work.conversationId !== conversation.id
+        const root = work?.rootWorkId ? common.works.find(item => item.id === work.rootWorkId && item.collaboration
+          && item.collaboration.childWorkIds.includes(work.id) && item.plan.items.some(item => item.childWorkId === work.id && item.employeeId === work.employeeId)) : work
+        if (!work || !root || work.ownerMemberId !== conversation.ownerMemberId || root.ownerMemberId !== conversation.ownerMemberId
+          || root.employeeId !== conversation.employeeId || root.conversationId !== conversation.id
           || !work.results.some(item => item.id === ref.resultId)) throw new Error('回复工作事实依赖归属不闭合')
         const capability = getCapability(work.capabilityId), connection = common.connections.find(item => item.id === work.connectionId)
         if (capability?.requiresConnection ? !connection || ref.connectionRevision === null || ref.connectionRevision > connection.revision : ref.connectionRevision !== null) throw new Error('回复工作依赖连接 revision 不闭合')
@@ -1138,7 +1146,7 @@ function assertChannelFactsImmutable(before, after) {
   }
   for (const delivery of before.deliveries) {
     const next = after.deliveries.find(item => item.id === delivery.id)
-    if (!next || ['channelAppId', 'requestId', 'workId', 'resultId', 'sourceRef', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'contentKey', 'createdAt'].some(key => !isDeepStrictEqual(delivery[key], next[key]))) throw new Error('渠道投递来源和接收方不可改写')
+    if (!next || ['channelAppId', 'requestId', 'workId', 'resultId', 'actionId', 'sourceRef', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'contentKey', 'createdAt'].some(key => !isDeepStrictEqual(delivery[key], next[key]))) throw new Error('渠道投递来源和接收方不可改写')
     if (delivery.status === 'unknown' && !['unknown', 'delivered', 'failed'].includes(next.status)) throw new Error('未知投递效果不可重新发送')
     if (['delivered', 'cancelled'].includes(delivery.status) && delivery.status !== next.status) throw new Error('已结束投递不可重新发送')
     if (delivery.sendProgress) {
@@ -1517,15 +1525,19 @@ function normalizeDelivery(source, channels = false) {
   if (!record(source)) throw new Error('渠道投递状态无效')
   const { provider: _provider, ...delivery } = source
   if (delivery.contentKey === undefined) delivery.contentKey = delivery.resultId ? 'result.gearjob' : 'work.accepted'
-  exactKeys(delivery, ['id', 'channelAppId', 'requestId', 'workId', 'resultId', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'contentKey', 'authorizationRevisions', 'status', 'attempts', 'providerMessageId', 'error', 'createdAt', 'updatedAt', ...(channels ? ['sourceRef', 'sendProgress'] : [])], '渠道投递')
+  exactKeys(delivery, ['id', 'channelAppId', 'requestId', 'workId', 'resultId', 'channelMessageId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'contentKey', 'authorizationRevisions', 'status', 'attempts', 'providerMessageId', 'error', 'createdAt', 'updatedAt', ...(channels ? ['sourceRef', 'sendProgress', 'actionId'] : [])], '渠道投递')
   const id = requiredText(delivery.id, '渠道投递 ID 无效')
   for (const key of ['channelAppId', 'requestId', 'targetConversationId', 'targetIdentityId', 'contentScope', 'contentKey', 'createdAt', 'updatedAt']) requiredText(delivery[key], `渠道投递 ${id} ${key} 无效`)
   if (delivery.workId !== undefined) requiredText(delivery.workId, `渠道投递 ${id} workId 无效`)
   const fixedKeys = ['group.accepted', 'help.unsupported', 'help.unavailable', ...(channels ? ['help.confirmation', 'help.busy', 'help.interrupted', 'help.reply-invalid', 'conversation.started', 'conversation.default-changed'] : [])]
   const fixed = fixedKeys.includes(delivery.contentKey), reply = channels && delivery.contentKey === 'conversation.reply'
   if ((!fixed && !reply && !delivery.workId) || (delivery.contentKey === 'result.gearjob' && !delivery.resultId)
-      || !['work.accepted', 'result.gearjob', 'automation.completed', 'automation.failed', ...fixedKeys, ...(channels ? ['conversation.reply'] : [])].includes(delivery.contentKey)
+      || !['work.accepted', 'result.gearjob', 'automation.completed', 'automation.failed', ...fixedKeys, ...(channels ? ['conversation.reply', 'action.receipt'] : [])].includes(delivery.contentKey)
       || (delivery.contentKey === 'automation.completed' && !delivery.resultId) || (delivery.contentKey === 'automation.failed' && delivery.resultId)) throw new Error(`渠道投递 ${id} 内容引用无效`)
+  if (delivery.contentKey === 'action.receipt') {
+    requiredText(delivery.actionId, `渠道投递 ${id} actionId 无效`)
+    requiredText(delivery.resultId, `渠道投递 ${id} 回执依据无效`)
+  } else if (delivery.actionId !== undefined) throw new Error('渠道投递动作引用类型无效')
   if (channels && (reply || delivery.sourceRef !== undefined)) {
     if (!reply || !record(delivery.sourceRef) || delivery.workId !== undefined || delivery.resultId !== undefined) throw new Error('渠道回复来源无效')
     exactKeys(delivery.sourceRef, ['kind', 'conversationId', 'turnId'], '渠道回复来源')

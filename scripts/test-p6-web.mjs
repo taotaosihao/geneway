@@ -330,4 +330,27 @@ const adminConfig = () => ({ members: [], employees: [], connections: [], skills
   page.response = async () => { await new Promise(done => { release = done }); return response(child) }; const opening = page.document.querySelector('[data-open-work="' + child.id + '"]').onclick(); page.run('show("works")'); release(); await opening; assert.equal(page.state.view, 'works'); assert.equal(page.state.currentWork.id, root.id); assert.equal(page.posts().length, 0)
   checks.push('collaboration-plan-child-action-parent-navigation-owner-scope-late-get-isolation')
 }
+{
+  const channelState = { workChannels: [{ workId: work.id, channelAppId: 'wx', conversationId: 'endpoint' }], conversations: [{ id: 'endpoint', identityId: 'identity', status: 'active' }], identities: [{ id: 'identity', status: 'active' }] }
+  const receipt = { id: 'receipt-delivery', channelAppId: 'wx', targetConversationId: 'endpoint', workId: work.id, resultId: preview.preview.resultId, actionId: preview.id, status: 'delivered', progress: { acknowledgedParts: 1, totalParts: 3 } }
+  assert.equal(receipt.resultId, result.id, 'receipt and analysis intentionally share the correlation result')
+  const page = ui(); Object.assign(page.state.channels, structuredClone(channelState)); page.state.channelApps = [{ id: 'wx', provider: 'weixin', runtimeStatus: 'ready' }]; page.state.channels.deliveries = [receipt]; page.render()
+  assert(page.document.querySelector('[data-create-delivery="' + work.id + '"]'), 'a repair receipt must not deduplicate the ordinary analysis reply')
+  for (const deliveries of [[{ ...receipt, id: 'analysis-delivery', actionId: undefined }], [receipt, { ...receipt, id: 'analysis-delivery', actionId: undefined }]]) {
+    page.state.channels.deliveries = deliveries; page.render(); assert.equal(page.document.querySelector('[data-create-delivery="' + work.id + '"]'), null, 'an ordinary result delivery still deduplicates analysis')
+  }
+  page.box.delivery = { ...receipt, actionId: undefined }; assert.doesNotMatch(page.run('deliveryCard(delivery)'), /维修创建回执/)
+  page.box.delivery.sourceRef = { kind: 'conversation-turn' }; assert.match(page.run('deliveryCard(delivery)'), /对话回复/)
+  for (const status of ['failed', 'blocked']) { page.box.delivery = { ...receipt, actionId: undefined, status }; const card = page.run('deliveryCard(delivery)'); assert(card.includes(status === 'failed' ? '重试未确认部分' : '核验权限并重试')); assert.doesNotMatch(card, /维修创建回执|重试回执/) }
+  assert.equal(page.calls.length, 0, 'rendering either content type sends nothing')
+  for (const status of ['failed', 'blocked']) {
+    const current = ui(); Object.assign(current.state.channels, structuredClone(channelState)); current.state.channels.deliveries = [{ ...receipt, status }]; current.state.channelApps = [{ id: 'wx', provider: 'weixin', runtimeStatus: 'ready' }]; current.render()
+    assert(current.node('work-detail').innerHTML.includes('维修创建回执'), 'receipt card must identify its content'); assert(current.node('work-detail').innerHTML.includes(status === 'failed' ? '重试回执未确认部分' : '核验权限并重试回执'), 'receipt retry must identify its content')
+    assert.equal(current.calls.length, 0); current.run('reloadAll=async()=>{}'); current.response = async call => call.method === 'POST' ? response({ ...receipt, status: 'delivered' }) : undefined
+    await current.document.querySelector('[data-retry-delivery="' + receipt.id + '"]').onclick(); assert.equal(current.posts().length, 1); assert.equal(current.posts()[0].path, '/api/channels/deliveries/' + receipt.id + '/retry'); assert.deepEqual(current.posts()[0].body, {})
+    current.state.channelApps[0].runtimeStatus = 'unavailable'; current.render(); assert.equal(current.document.querySelector('[data-retry-delivery="' + receipt.id + '"]').disabled, true)
+  }
+  page.state.channels.deliveries = [{ ...receipt, status: 'unknown' }]; page.render(); assert.match(page.node('work-detail').innerHTML, /维修创建回执/); assert.match(page.node('work-detail').innerHTML, /不会盲目重发/); assert.equal(page.document.querySelector('[data-retry-delivery="' + receipt.id + '"]'), null); assert.equal(page.calls.length, 0)
+  checks.push('repair-receipt-analysis-distinct-deliveries-labelled-id-only-retry-unknown-no-replay')
+}
 console.log(JSON.stringify({ ok: true, checks, networkCalls: 0, browserRuns: 0, nativeRuns: 0, modelCalls: 0, runtimeVerified: false }))

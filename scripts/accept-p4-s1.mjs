@@ -712,14 +712,14 @@ function recordingCoverage(recording, probe, observations) {
   return { duration, expectedCoverageSeconds, coverageToleranceSeconds }
 }
 
-function networkAudit(rows, { runId, candidate, guardSha256, hostPids, hostInterruptions = [] }) {
+function networkAudit(rows, { runId, candidate, guardSha256, hostPids, hostInterruptions = [], models = [model] }) {
   assert(rows.length && hostPids.length && hostPids.every(pid => Number.isInteger(pid) && pid > 0), 'network audit has no owned Host')
   for (const row of rows) {
     assert(row.runId === runId && row.candidate === candidate && row.guardSha256 === guardSha256, 'network audit binding differs')
     assert(Number.isInteger(row.pid) && row.pid > 0 && Number.isInteger(row.ppid) && row.ppid > 0, 'network audit PID is invalid')
     assert(['host', 'sdk'].includes(row.role), 'network audit role is invalid')
     assert(row.permitted !== false && !row.sessionLogAttached && !row.credentialInPayload, 'network audit recorded a blocked or unsafe request')
-    if (row.kind === 'fetch' && row.host === 'zenmux.ai') assert(row.model === model && row.permitted === true && !row.unexpectedBodyFields, 'model audit route or fields differ')
+    if (row.kind === 'fetch' && row.host === 'zenmux.ai') assert(models.includes(row.model) && row.permitted === true && !row.unexpectedBodyFields, 'model audit route or fields differ')
     if (row.role === 'host') assert(hostPids.includes(row.pid), 'network audit Host is not owned by this run')
   }
   const interruptions = new Map(), hosts = []

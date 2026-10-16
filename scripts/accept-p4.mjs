@@ -87,7 +87,7 @@ async function channelHost() {
         assert(platform.dispatcher instanceof Lark.EventDispatcher, 'actual official EventDispatcher is missing')
         value = await platform.dispatcher.invoke(message.input, { needCheck: false })
       } else if (message.method === 'feishu-send-response') { platform.queueSend(message.input); value = true }
-      else if (message.method === 'snapshot') value = { pid: process.pid, address: server.address(), sdkDispatcher: platform.dispatcher instanceof Lark.EventDispatcher, sent: platform.sent }
+      else if (message.method === 'snapshot') value = { pid: process.pid, address: server.address(), sdkDispatcher: platform.dispatcher instanceof Lark.EventDispatcher, sent: platform.sent, consumers: platform.consumers }
       else throw new Error('unknown acceptance IPC method')
       process.send({ kind: 'channel-acceptance', id: message.id, ok: true, value })
     } catch (error) { process.send({ kind: 'channel-acceptance', id: message.id, ok: false, error: safeFailure(error) }) }

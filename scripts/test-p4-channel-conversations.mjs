@@ -14,7 +14,7 @@ import { connection as receiptConnection, correlationFixture, createCompletedCor
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) await runChannelChecks()
 
 export function createFeishuSimulator() {
-  const replies = [], fixture = { dispatcher: undefined, sent: [], queueSend(...responses) { replies.push(...responses) } }
+  const replies = [], fixture = { dispatcher: undefined, sent: [], consumers: { starts: 0, closes: 0, active: 0, maxActive: 0 }, queueSend(...responses) { replies.push(...responses) } }
   fixture.Client = class {
     constructor() { this.im = { v1: { message: { create: async options => {
       fixture.sent.push(structuredClone(options))
@@ -26,8 +26,14 @@ export function createFeishuSimulator() {
   }
   fixture.WSClient = class {
     constructor(options) { this.options = options }
-    async start({ eventDispatcher }) { fixture.dispatcher = eventDispatcher; this.options.onReady() }
-    close() {}
+    async start({ eventDispatcher }) {
+      fixture.dispatcher = eventDispatcher
+      fixture.consumers.starts += 1
+      fixture.consumers.active += 1
+      fixture.consumers.maxActive = Math.max(fixture.consumers.maxActive, fixture.consumers.active)
+      this.options.onReady()
+    }
+    close() { if (this.closed) return; this.closed = true; fixture.consumers.closes += 1; fixture.consumers.active -= 1 }
   }
   return fixture
 }

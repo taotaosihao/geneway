@@ -41,10 +41,17 @@ export async function createILinkSimulator({ holdMs = 100 } = {}) {
       assert.equal(body?.base_info?.channel_version, '2.4.6')
       if (endpoint === '/ilink/bot/getupdates') {
         assert.equal(typeof body.get_updates_buf, 'string')
+        call.startedAt = Date.now()
         call.cursorDigest = digest(body.get_updates_buf)
         account.activePolls += 1
         account.maxActivePolls = Math.max(account.maxActivePolls, account.activePolls)
-        const finish = () => { account.activePolls -= 1 }
+        const finish = () => {
+          account.activePolls -= 1
+          call.endedAt = Date.now()
+          call.heldMs = call.endedAt - call.startedAt
+          call.completed = response.writableEnded
+          call.aborted = !call.completed
+        }
         response.once('close', finish)
         if (account.pollReplies.length) return reply(response, account.pollReplies.shift())
         const index = body.get_updates_buf === '' ? 0 : account.batches.findIndex(batch => batch.cursor === body.get_updates_buf) + 1

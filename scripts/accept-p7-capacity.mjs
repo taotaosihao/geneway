@@ -279,20 +279,83 @@ async function recordResourceWindow(monitor, evidence, label, priorError) {
 async function waitWork(store, id) { return until(async () => { const work = (await store.read()).works.find(item => item.id === id); if (work?.status === 'failed') throw new Error('work failed: ' + JSON.stringify(work.executions.at(-1)?.error)); return work?.status === 'completed' && work.executions.at(-1)?.closePending === false ? work : null }, 'work ' + id) }
 async function waitExecution(store, id) { return until(async () => { const execution = (await store.read()).works.find(item => item.id === id)?.executions.at(-1); if (execution?.status === 'failed') throw new Error('execution failed: ' + JSON.stringify(execution.error)); return execution?.status === 'completed' && execution.closePending === false ? execution : null }, 'execution ' + id) }
 
-async function sample(stage, rootPid = process.pid) {
-  const stats = []
-  for (const name of await readdir('/proc')) {
-    if (!/^\d+$/.test(name)) continue
-    try { const stat = await readFile('/proc/' + name + '/stat', 'utf8'), fields = stat.slice(stat.lastIndexOf(')') + 2).split(' '); stats.push({ pid: Number(name), ppid: Number(fields[1]), utime: Number(fields[11]), stime: Number(fields[12]) }) } catch {}
+function procStat(raw) {
+  const fields = raw.slice(raw.lastIndexOf(')') + 2).trim().split(/\s+/)
+  const ppid = Number(fields[1]), cpuTicks = Number(fields[11]) + Number(fields[12]), starttime = fields[19]
+  assert(Number.isSafeInteger(ppid) && Number.isSafeInteger(cpuTicks) && cpuTicks >= 0 && /^\d+$/.test(starttime ?? ''), 'invalid owned process stat')
+  return { state: fields[0], ppid, cpuTicks, starttime }
+}
+
+async function readOwnedSample(stage, rootPid, io = { readFile, readdir, mono: () => process.hrtime.bigint() }) {
+  const started = io.mono(), queue = [rootPid], seen = new Set(), values = [], missing = [], exitedDuringSample = []
+  while (queue.length) {
+    const pid = queue.shift()
+    if (seen.has(pid)) continue
+    seen.add(pid)
+    const statPath = '/proc/' + pid + '/stat'
+    let stat, statReadMonoNs, status, fds, failedPart = 'stat'
+    const recordExit = () => {
+      const rss = status && /VmRSS:\s*(\d+)/.exec(status)
+      exitedDuringSample.push({ pid, starttime: stat?.starttime ?? null, reason: 'EXITED',
+        cpuTicks: stat?.cpuTicks ?? null, rssKiB: rss ? Number(rss[1]) : null, fds: fds?.length ?? null })
+    }
+    try {
+      stat = procStat(await io.readFile(statPath, 'utf8')); statReadMonoNs = io.mono()
+      failedPart = 'task'
+      for (const tid of await io.readdir('/proc/' + pid + '/task')) {
+        failedPart = 'task/' + tid + '/children'
+        const children = await io.readFile('/proc/' + pid + '/task/' + tid + '/children', 'utf8')
+        for (const child of children.trim().split(/\s+/).filter(Boolean)) {
+          assert(/^\d+$/.test(child), 'invalid owned child PID')
+          queue.push(Number(child))
+        }
+      }
+      failedPart = 'status'; status = await io.readFile('/proc/' + pid + '/status', 'utf8')
+      failedPart = 'fd'; fds = await io.readdir('/proc/' + pid + '/fd')
+      failedPart = 'stat-recheck'
+      const final = procStat(await io.readFile(statPath, 'utf8'))
+      if (final.starttime !== stat.starttime) {
+        missing.push({ pid, part: 'identity', code: 'PID_REUSED' })
+        continue
+      }
+      if (['Z', 'X', 'x'].includes(final.state)) {
+        if (pid === rootPid) missing.push({ pid, part: 'stat-recheck', code: 'ROOT_EXITED' })
+        else recordExit()
+        continue
+      }
+      const rss = /VmRSS:\s*(\d+)/.exec(status)
+      if (!rss) { missing.push({ pid, part: 'VmRSS', code: 'NOT_PRESENT' }); continue }
+      values.push({ pid, ppid: stat.ppid, starttime: stat.starttime, statReadMonoNs: statReadMonoNs.toString(),
+        cpuTicks: stat.cpuTicks, rssKiB: Number(rss[1]), fds: fds.length })
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error
+      if (pid === rootPid) { missing.push({ pid, part: failedPart, code: error.code }); continue }
+      let stillThere
+      try { stillThere = procStat(await io.readFile(statPath, 'utf8')) }
+      catch (recheckError) { if (recheckError.code !== 'ENOENT' && recheckError.code !== 'ESRCH') throw recheckError }
+      if (stillThere && stat && stillThere.starttime !== stat.starttime) {
+        missing.push({ pid, part: 'identity', code: 'PID_REUSED' })
+      } else if (stillThere && ['Z', 'X', 'x'].includes(stillThere.state)) {
+        recordExit()
+      } else if (stillThere) {
+        missing.push({ pid, part: failedPart, code: error.code })
+      } else recordExit()
+    }
   }
-  const owned = new Set([rootPid])
-  for (let pass = 0; pass < stats.length; pass++) { const size = owned.size; for (const row of stats) if (owned.has(row.ppid)) owned.add(row.pid); if (owned.size === size) break }
-  const values = []
-  for (const row of stats.filter(item => owned.has(item.pid))) try {
-    const status = await readFile('/proc/' + row.pid + '/status', 'utf8'), fds = await readdir('/proc/' + row.pid + '/fd')
-    values.push({ pid: row.pid, ppid: row.ppid, cpuTicks: row.utime + row.stime, rssKiB: Number(/VmRSS:\s*(\d+)/.exec(status)?.[1] ?? 0), fds: fds.length })
-  } catch {}
-  return { stage, at: new Date().toISOString(), cpuCount: cpus().length, rootPid, parent: values.find(item => item.pid === rootPid), children: values.filter(item => item.pid !== rootPid), totalRssKiB: values.reduce((sum, item) => sum + item.rssKiB, 0), totalFds: values.reduce((sum, item) => sum + item.fds, 0), totalCpuTicks: values.reduce((sum, item) => sum + item.cpuTicks, 0) }
+  const finished = io.mono(), parent = values.find(item => item.pid === rootPid)
+  const complete = Boolean(parent) && missing.length === 0
+  const children = values.filter(item => item.pid !== rootPid).sort((a, b) => a.pid - b.pid)
+  return { stage, at: new Date().toISOString(), cpuCount: cpus().length, rootPid, parent, children,
+    complete, missing, exitedDuringSample, sampleMonoStartNs: started.toString(), sampleMonoEndNs: finished.toString(), sampleSpanMs: Number(finished - started) / 1e6,
+    totalRssKiB: complete ? values.reduce((sum, item) => sum + item.rssKiB, exitedDuringSample.reduce((sum, item) => sum + (item.rssKiB ?? 0), 0)) : null,
+    totalFds: complete ? values.reduce((sum, item) => sum + item.fds, exitedDuringSample.reduce((sum, item) => sum + (item.fds ?? 0), 0)) : null,
+    totalCpuTicks: complete ? values.reduce((sum, item) => sum + item.cpuTicks, exitedDuringSample.reduce((sum, item) => sum + (item.cpuTicks ?? 0), 0)) : null }
+}
+
+async function sample(stage, rootPid = process.pid, io) {
+  const result = await readOwnedSample(stage, rootPid, io)
+  assert(result.complete, stage + ' owned process tree incomplete: ' + JSON.stringify(result.missing))
+  return result
 }
 
 function monitorOwnedTree(stage, rootPid) {
@@ -300,8 +363,11 @@ function monitorOwnedTree(stage, rootPid) {
   const readings = []
   const task = (async () => { while (!stopped) { readings.push(await sample(stage, rootPid)); if (!stopped) await sleep(100) } })()
   task.catch(() => undefined)
-  return { async stop() { stopped = true; await task; assert(readings.length); return { stage, sampleCount: readings.length,
-    peakRssKiB: Math.max(...readings.map(item => item.totalRssKiB)), peakFds: Math.max(...readings.map(item => item.totalFds)), first: readings[0], last: readings.at(-1) } } }
+  return { async stop() { stopped = true; await task; assert(readings.length); assert(readings.every(item => item.complete), stage + ' owned process tree incomplete'); return { stage, sampleCount: readings.length,
+    peakRssKiB: Math.max(...readings.map(item => item.totalRssKiB)), peakFds: Math.max(...readings.map(item => item.totalFds)),
+    maxSampleSpanMs: Math.max(...readings.map(item => item.sampleSpanMs)),
+    exitedDuringSample: readings.flatMap((item, sampleIndex) => item.exitedDuringSample.map(exit => ({ sampleIndex, ...exit }))),
+    first: readings[0], last: readings.at(-1) } } }
 }
 
 async function makePatch(directory, port) {
@@ -354,6 +420,69 @@ async function harnessCheck() {
   assert.throws(() => args(['--harness-check', '--output', '/tmp/invalid']))
   assert.equal(args(['--run', '--output', '/tmp/p7', '--candidate', '/tmp/candidate', '--expected-head', 'a'.repeat(40), '--network-guard', '/tmp/guard', '--guard-sha256', 'b'.repeat(64)]).run, true)
   assert.equal(args(['--host-run', '--output', '/tmp/p7', '--candidate', '/tmp/candidate', '--expected-head', 'a'.repeat(40), '--network-guard', '/tmp/guard', '--guard-sha256', 'b'.repeat(64)])['host-run'], true)
+  const stat = (pid, ppid, starttime, ticks = 10, state = 'S') => {
+    const fields = Array(20).fill('0'); fields[0] = state; fields[1] = String(ppid); fields[11] = String(ticks); fields[19] = String(starttime)
+    return pid + ' (owned fixture) ' + fields.join(' ')
+  }
+  const files = new Map([
+    ['/proc/100/stat', stat(100, 1, 1000)], ['/proc/100/status', 'VmRSS:\t100 kB'],
+    ['/proc/100/task/100/children', ''], ['/proc/100/task/101/children', '200'],
+    ['/proc/200/stat', stat(200, 100, 2000)], ['/proc/200/status', 'VmRSS:\t200 kB'], ['/proc/200/task/200/children', '300'],
+    ['/proc/300/stat', stat(300, 200, 3000)], ['/proc/300/status', 'VmRSS:\t300 kB'], ['/proc/300/task/300/children', ''],
+  ])
+  const directories = new Map([
+    ['/proc/100/task', ['100', '101']], ['/proc/100/fd', ['0', '1']],
+    ['/proc/200/task', ['200']], ['/proc/200/fd', ['0']], ['/proc/300/task', ['300']], ['/proc/300/fd', ['0']],
+  ])
+  const gone = () => Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  let mockMono = 1_000_000_000n
+  const procIo = { readFile: async path => { if (!files.has(path)) throw gone(); return files.get(path) },
+    readdir: async path => { if (!directories.has(path)) throw gone(); return directories.get(path) }, mono: () => { mockMono += 1_000n; return mockMono } }
+  const tree = await sample('pure-owned-tree', 100, procIo)
+  assert(tree.complete && tree.missing.length === 0 && tree.exitedDuringSample.length === 0)
+  assert.deepEqual(tree.children.map(item => item.pid), [200, 300], 'non-leader thread and nested helper were not discovered')
+  assert.equal(tree.totalRssKiB, 600); assert.equal(tree.totalFds, 4)
+  assert(tree.children.every(item => item.starttime && item.statReadMonoNs))
+  const exitIo = { ...procIo, readFile: async path => {
+    if (path === '/proc/200/stat') return exitIo.childStatReads++ === 0 ? files.get(path) : Promise.reject(gone())
+    if (path === '/proc/200/task/200/children') return ''
+    return procIo.readFile(path)
+  }, readdir: async path => path === '/proc/200/fd' ? Promise.reject(gone()) : procIo.readdir(path), childStatReads: 0 }
+  const exited = await sample('pure-child-exit', 100, exitIo)
+  assert(exited.complete && exited.children.length === 0 && exited.exitedDuringSample[0]?.pid === 200)
+  assert.equal(exited.exitedDuringSample[0].rssKiB, 200); assert.equal(exited.totalRssKiB, 300)
+  const zombieIo = { ...procIo, childStatReads: 0, readFile: async path => {
+    if (path === '/proc/200/stat') return zombieIo.childStatReads++ === 0 ? files.get(path) : stat(200, 100, 2000, 10, 'Z')
+    if (path === '/proc/200/task/200/children') return ''
+    if (path === '/proc/200/status') return 'State:\tZ\n'
+    return procIo.readFile(path)
+  } }
+  const zombie = await sample('pure-child-zombie', 100, zombieIo)
+  assert(zombie.complete && zombie.children.length === 0 && zombie.exitedDuringSample[0]?.reason === 'EXITED')
+  assert.equal(zombie.exitedDuringSample[0].rssKiB, null)
+  const reusedIo = { ...procIo, childStatReads: 0, readFile: async path => {
+    if (path === '/proc/200/stat') return reusedIo.childStatReads++ === 0 ? files.get(path) : stat(200, 999, 2001)
+    if (path === '/proc/200/task/200/children') return ''
+    return procIo.readFile(path)
+  } }
+  const reused = await readOwnedSample('pure-pid-reused', 100, reusedIo)
+  assert(!reused.complete && reused.missing[0]?.code === 'PID_REUSED' && reused.children.length === 0)
+  await assert.rejects(sample('pure-root-missing', 100, { ...procIo, readFile: async path => path === '/proc/100/stat' ? Promise.reject(gone()) : procIo.readFile(path) }), /owned process tree incomplete/)
+  await assert.rejects(sample('pure-live-child-unreadable', 100, { ...procIo, readFile: async path => path === '/proc/200/status' ? Promise.reject(gone()) : procIo.readFile(path) }), /owned process tree incomplete/)
+  const denied = Object.assign(new Error('EACCES'), { code: 'EACCES' })
+  await assert.rejects(sample('pure-live-child-denied', 100, { ...procIo, readFile: async path => path === '/proc/200/status' ? Promise.reject(denied) : procIo.readFile(path) }), error => error === denied)
+  const frame = (at, parentTicks, childTicks, childStarttime = '2000', includeChild = true, exits = []) => ({
+    complete: true, sampleMonoStartNs: String(at), sampleMonoEndNs: String(at + 10_000n), sampleSpanMs: 0.01,
+    parent: { pid: 100, starttime: '1000', statReadMonoNs: String(at + 2_000n), cpuTicks: parentTicks },
+    children: includeChild ? [{ pid: 200, starttime: childStarttime, statReadMonoNs: String(at + 3_000n), cpuTicks: childTicks }] : [],
+    exitedDuringSample: exits, totalRssKiB: 300, totalFds: 3,
+  })
+  const beginning = frame(1_000_000_000n, 10, 5), ending = frame(2_000_000_000n, 20, 5)
+  assert.equal(idleReadings([beginning, ending], 100).idleCpuCores, 0.1)
+  assert.throws(() => idleReadings([beginning, frame(2_000_000_000n, 20, 5, '2000', false)], 100), /topology changed/)
+  assert.throws(() => idleReadings([beginning, frame(2_000_000_000n, 20, 5, 'reused')], 100), /topology changed/)
+  assert.throws(() => idleReadings([beginning, frame(2_000_000_000n, 9, 5)], 100), /ticks moved backward/)
+  assert.throws(() => idleReadings([beginning, frame(2_000_000_000n, 20, 5, '2000', false, exited.exitedDuringSample)], 100), /incomplete or changed/)
   const gateError = new Error('RESOURCE_GATE_FAILURE'), failedEvidence = { resourceWindows: [] }
   let localCloseCount = 0
   await assert.rejects(verifiedResourceHandoff({}, { stop: async () => { throw gateError } }, failedEvidence, async () => { localCloseCount++ }), error => error === gateError)
@@ -798,4 +927,38 @@ async function hostIpc(child, method) { const id = randomUUID(); assert(child.co
 async function hostRequest(origin, session, path, method = 'GET', body) { const response = await fetch(origin + path, { method, headers: { origin, ...(session ? { cookie: session.cookie, 'x-csrf-token': session.csrf } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }) }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000) }); const raw = await response.text(); return { status: response.status, body: raw ? JSON.parse(raw) : null, cookie: response.headers.get('set-cookie') } }
 async function stopHost(child) { if (!child?.pid) return; if (alive(child.pid)) process.kill(-child.pid, 'SIGTERM'); await until(() => !alive(child.pid), 'Host normal exit'); await until(() => !alive(-child.pid), 'Host process group exit') }
 function percentile(values, p) { assert(values.length); const sorted = [...values].sort((a, b) => a - b); return sorted[Math.ceil(sorted.length * p / 100) - 1] }
-async function idleTree(stage, pid, durationMs) { const readings = [], start = performance.now(); while (performance.now() - start < durationMs) { readings.push(await sample(stage, pid)); await sleep(100) } const first = readings[0], last = readings.at(-1); assert(first.parent && last.parent); const ticksPerSecond = Number((await command('getconf', ['CLK_TCK'])).trim()); const idleCpuCores = (last.totalCpuTicks - first.totalCpuTicks) / ticksPerSecond / ((Date.parse(last.at) - Date.parse(first.at)) / 1000); return { stage, sampleCount: readings.length, durationMs: Date.parse(last.at) - Date.parse(first.at), peakRssKiB: Math.max(...readings.map(item => item.totalRssKiB)), peakFds: Math.max(...readings.map(item => item.totalFds)), idleCpuCores, first, last } }
+function idleReadings(readings, ticksPerSecond) {
+  assert(readings.length >= 2 && Number.isSafeInteger(ticksPerSecond) && ticksPerSecond > 0, 'idle sampling is incomplete')
+  const first = readings[0], last = readings.at(-1), identities = value => [value.parent, ...value.children].map(item => item.pid + ':' + item.starttime).sort()
+  assert(first.complete && first.parent && first.exitedDuringSample.length === 0, 'idle owned process tree is incomplete or changed')
+  const expected = identities(first)
+  for (const reading of readings) {
+    assert(reading.complete && reading.parent && reading.exitedDuringSample.length === 0, 'idle owned process tree is incomplete or changed')
+    assert.deepEqual(identities(reading), expected, 'owned process topology changed during idle window')
+    const started = BigInt(reading.sampleMonoStartNs), finished = BigInt(reading.sampleMonoEndNs)
+    assert(finished >= started && reading.sampleSpanMs >= 0, 'owned sample clock moved backward')
+    for (const item of [reading.parent, ...reading.children]) {
+      const at = BigInt(item.statReadMonoNs)
+      assert(at >= started && at <= finished, 'owned stat read is outside sample span')
+    }
+  }
+  let idleCpuCores = 0
+  for (const id of expected) {
+    const nodes = readings.map(reading => [reading.parent, ...reading.children].find(item => item.pid + ':' + item.starttime === id))
+    for (let index = 1; index < nodes.length; index++) {
+      assert(nodes[index].cpuTicks >= nodes[index - 1].cpuTicks, 'owned CPU ticks moved backward')
+      assert(BigInt(nodes[index].statReadMonoNs) > BigInt(nodes[index - 1].statReadMonoNs), 'owned stat read clock did not advance')
+    }
+    const elapsed = Number(BigInt(nodes.at(-1).statReadMonoNs) - BigInt(nodes[0].statReadMonoNs)) / 1e9
+    idleCpuCores += (nodes.at(-1).cpuTicks - nodes[0].cpuTicks) / ticksPerSecond / elapsed
+  }
+  return { durationMs: Number(BigInt(last.sampleMonoEndNs) - BigInt(first.sampleMonoEndNs)) / 1e6,
+    peakRssKiB: Math.max(...readings.map(item => item.totalRssKiB)), peakFds: Math.max(...readings.map(item => item.totalFds)), idleCpuCores }
+}
+
+async function idleTree(stage, pid, durationMs) {
+  const readings = [], start = performance.now()
+  while (performance.now() - start < durationMs) { readings.push(await sample(stage, pid)); await sleep(100) }
+  const ticksPerSecond = Number((await command('getconf', ['CLK_TCK'])).trim())
+  return { stage, sampleCount: readings.length, ...idleReadings(readings, ticksPerSecond), first: readings[0], last: readings.at(-1) }
+}

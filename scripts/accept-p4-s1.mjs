@@ -644,7 +644,7 @@ async function connect(target, isRestarting) {
     async check(selector, checked) { if (await evaluate(`document.querySelector(${js(selector)}).checked`) !== checked) await page.click(selector); assert.equal(await evaluate(`document.querySelector(${js(selector)}).checked`), checked) },
     async select(selector, value) {
       const options = await evaluate(`[...document.querySelector(${js(selector)}).options].map(option=>({value:option.value,disabled:option.disabled}))`)
-      const index = options.findIndex(option => option.value === value && !option.disabled); assert(index >= 0, 'select option unavailable')
+      const index = options.filter(option => !option.disabled).findIndex(option => option.value === value); assert(index >= 0, 'select option unavailable')
       await page.click(selector)
       await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 })
       await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 })
@@ -946,7 +946,34 @@ async function harnessCheck() {
   networkChecks()
   await recordingChecks()
   await interruptCleanupChecks()
-  console.log(JSON.stringify({ ok: true, mode: 'harness-check', requiredSteps: steps.length, checks: ['explicit-run-boundary', 'environment-and-credential-reference', 'synthetic-context-observer', 'public-dto', 'native-reference-deduplication', 'offline-guide-escaping', 'cleanup-prose-follows-observed-state', 'recorder-early-and-abnormal-exit', 'recording-duration-and-last-screenshot-coverage', 'signal-cleanup-idempotence-and-escalation', 'auth-initializer-drain-and-cleanup-failure', 'Host-SDK-ready-fetch-exit-correlation-and-cancel-before-fetch', 'observed-hard-restart-and-bounded-SDK-parent-exit-gap'], nativeStarts: 0, modelRequests: 0, browserStarts: 0, serverStarts: 0, realSecretReads: 0 }, null, 2))
+  await selectChecks()
+  console.log(JSON.stringify({ ok: true, mode: 'harness-check', requiredSteps: steps.length, checks: ['explicit-run-boundary', 'environment-and-credential-reference', 'synthetic-context-observer', 'public-dto', 'native-reference-deduplication', 'offline-guide-escaping', 'cleanup-prose-follows-observed-state', 'recorder-early-and-abnormal-exit', 'recording-duration-and-last-screenshot-coverage', 'signal-cleanup-idempotence-and-escalation', 'auth-initializer-drain-and-cleanup-failure', 'Host-SDK-ready-fetch-exit-correlation-and-cancel-before-fetch', 'observed-hard-restart-and-bounded-SDK-parent-exit-gap', 'enabled-native-select-index-and-unavailable-target'], nativeStarts: 0, modelRequests: 0, browserStarts: 0, serverStarts: 0, realSecretReads: 0 }, null, 2))
+
+  async function selectChecks() {
+    const source = connect.toString(), start = source.indexOf('    async select('), end = source.indexOf('    async noOverflow(', start)
+    assert(start > 0 && end > start)
+    const enabled = value => ({ value, disabled: false }), disabled = value => ({ value, disabled: true })
+    for (const [options, value, downs] of [
+      [[disabled(''), enabled('deepseek'), enabled('glm')], 'deepseek', 0],
+      [[enabled('first'), disabled('blocked'), enabled('deepseek'), enabled('glm')], 'deepseek', 1],
+      [[enabled('first'), enabled('deepseek'), enabled('glm')], 'deepseek', 1],
+      [[enabled(''), enabled('deepseek')], '', 0],
+      [[enabled('deepseek'), disabled('blocked')], 'blocked', null],
+      [[enabled('deepseek')], 'missing', null],
+    ]) {
+      let selected = options.findIndex(option => !option.disabled), clicks = 0
+      const keys = [], page = { click: async () => { clicks += 1 }, wait: async () => assert.equal(options[selected]?.value, value, 'native keyboard selection readback') }
+      const send = async (method, event) => {
+        assert.equal(method, 'Input.dispatchKeyEvent'); if (event.type !== 'keyDown') return
+        keys.push(event.key)
+        if (event.key === 'Home') selected = options.findIndex(option => !option.disabled)
+        if (event.key === 'ArrowDown') { const next = options.findIndex((option, index) => index > selected && !option.disabled); if (next >= 0) selected = next }
+      }
+      const select = Function('evaluate', 'page', 'send', 'js', 'assert', 'return ({' + source.slice(start, end) + '}).select')(async () => options, page, send, js, assert)
+      if (downs === null) { await assert.rejects(select('#synthetic', value), /select option unavailable/); assert.equal(clicks, 0); assert.deepEqual(keys, []) }
+      else { await select('#synthetic', value); assert.equal(clicks, 1); assert.equal(keys.filter(key => key === 'ArrowDown').length, downs); assert.equal(keys[0], 'Home'); assert.equal(keys.at(-1), 'Enter') }
+    }
+  }
 
   function networkChecks() {
     const host = value => ({ ...binding, pid: 123, ppid: 100, role: 'host', ...value })

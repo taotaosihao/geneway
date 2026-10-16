@@ -73,6 +73,15 @@ async function deadline(promise, label, ms = 30_000) {
 async function until(fn, label) { for (let i = 0; i < 1500; i++) { const found = await fn(); if (found) return found; await sleep(20) } throw new Error(label + ' timed out') }
 function alive(pid) { try { process.kill(pid, 0); return true } catch (error) { if (error.code === 'ESRCH') return false; throw error } }
 
+function nativeCapacitySeed(state, now) {
+  return { ...state,
+    members: [{ id: 'owner', loginName: 'owner', displayName: 'Capacity owner', role: 'member', enabled: true, authRef: 'owner', sessionVersion: 1, employeeIds: ['agent'], createdAt: now, updatedAt: now }],
+    employees: [{ id: 'agent', name: 'Capacity agent', enabled: true, revision: 1, instructions: 'CONTROLLED_LOOPBACK_ONLY', modelRouteId: 'route', skillIds: ['skill-cycle-time-calculate'], connectionIds: [] }],
+    modelRoutes: [{ id: 'route', provider: 'zenmux', model, credentialRef: 'ZENMUX_API_KEY', parameters: { maxOutputTokens: 4096 }, enabled: true }],
+    skills: [{ id: 'skill-cycle-time-calculate', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true }],
+  }
+}
+
 async function run(options) {
   const manifest = await privateJson(options.candidate)
   await candidateCheck(options, manifest.value)
@@ -95,12 +104,7 @@ async function run(options) {
     const patchPath = await makePatch(options.output, capture.port)
     const store = createFileStore(process.env.GENEWAY_STATE)
     const now = new Date().toISOString()
-    await store.update(state => ({ ...state,
-      members: [{ id: 'owner', loginName: 'owner', displayName: 'Capacity owner', role: 'member', enabled: true, authRef: 'owner', sessionVersion: 1, employeeIds: ['agent'], createdAt: now, updatedAt: now }],
-      employees: [{ id: 'agent', name: 'Capacity agent', enabled: true, revision: 1, instructions: 'CONTROLLED_LOOPBACK_ONLY', modelRouteId: 'route', skillIds: ['skill-cycle'], connectionIds: [] }],
-      modelRoutes: [{ id: 'route', provider: 'zenmux', model, credentialRef: 'ZENMUX_API_KEY', parameters: { maxOutputTokens: 4096 }, enabled: true }],
-      skills: [{ id: 'skill-cycle', name: '节拍换算', capabilityId: 'cycle-time-calculate', enabled: true }],
-    }))
+    await store.update(state => nativeCapacitySeed(state, now))
     const actor = { id: 'owner' }, config = readRuntimeConfig(process.env, root)
     const harnesses = [], closedHarnesses = new Set()
     const runner = createDshRunner({ root, config, harnessFactory: input => {
@@ -117,9 +121,10 @@ async function run(options) {
     const workIds = []
     let beforeB, bPid
     const resourceMonitor = monitorOwnedTree('native-batches-and-active-race', process.pid)
+    let nativeFailure
     try {
     for (let i = 1; i <= 12; i++) {
-      const accepted = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle', input: { availableSeconds: 120 + i, quantity: 2 }, clientRequestId: 'capacity-' + i })
+      const accepted = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 120 + i, quantity: 2 }, clientRequestId: 'capacity-' + i })
       assert.equal(accepted.ok, true, JSON.stringify(accepted))
       workIds.push(accepted.value.id)
       await waitWork(store, accepted.value.id)
@@ -148,11 +153,11 @@ async function run(options) {
     const followA = await work.followUp(actor, a, 'P7_ACTIVE_IDLE_EVICTION_CANARY', { clientRequestId: 'active-follow-a' })
     assert.equal(followA.ok, true)
     await until(() => capture.pending.size === 1, 'active A provider request')
-    const createdE = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle', input: { availableSeconds: 200, quantity: 2 }, clientRequestId: 'active-e' })
+    const createdE = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 200, quantity: 2 }, clientRequestId: 'active-e' })
     assert.equal(createdE.ok, true)
     await waitWork(store, createdE.value.id)
     assert(!closedHarnesses.has(bHarness), 'E alone must not trigger B eviction')
-    const createdF = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle', input: { availableSeconds: 202, quantity: 2 }, clientRequestId: 'active-f' })
+    const createdF = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 202, quantity: 2 }, clientRequestId: 'active-f' })
     assert.equal(createdF.ok, true)
     await waitWork(store, createdF.value.id)
     assert(closedHarnesses.has(bHarness), 'F must retire B, the oldest eligible idle harness')
@@ -168,10 +173,8 @@ async function run(options) {
 
     await work.close()
     assert.equal((await sample('after-first-runner-close')).children.length, 0)
-    } finally {
-      const observed = await resourceMonitor.stop(); evidence.resourceWindows.push(observed)
-      assert(observed.sampleCount >= 2 && observed.peakRssKiB <= 4 * 1024 * 1024, 'native active or close sampled owned tree exceeded 4 GiB')
-    }
+    } catch (error) { nativeFailure = error; throw error }
+    finally { await recordResourceWindow(resourceMonitor, evidence, 'native active or close', nativeFailure) }
     const second = await collisionRun({ root, config, DeepSeekHarness, capture, options, store, actor, patchPath, evidence })
     resources.push(second)
   } catch (error) { failure = error; evidence.failure = { code: error.code ?? 'CAPACITY_FAILED', message: String(error.message).slice(0, 2048) } }
@@ -215,7 +218,7 @@ async function collisionRun({ root, config, DeepSeekHarness, capture, options, s
   const ids = []
   let firstPid
   for (let i = 1; i <= 4; i++) {
-    const accepted = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle', input: { availableSeconds: 300 + i, quantity: 2 }, clientRequestId: 'collision-' + i })
+    const accepted = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 300 + i, quantity: 2 }, clientRequestId: 'collision-' + i })
     assert.equal(accepted.ok, true)
     ids.push(accepted.value.id)
     await waitWork(store, accepted.value.id)
@@ -225,7 +228,7 @@ async function collisionRun({ root, config, DeepSeekHarness, capture, options, s
   evidence.samples.push(fourIdle)
   assert(Number.isSafeInteger(firstPid) && alive(firstPid))
   hold = true
-  const e = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle', input: { availableSeconds: 399, quantity: 2 }, clientRequestId: 'collision-e' })
+  const e = await work.createWork(actor, { employeeId: 'agent', skillId: 'skill-cycle-time-calculate', input: { availableSeconds: 399, quantity: 2 }, clientRequestId: 'collision-e' })
   assert.equal(e.ok, true)
   await enteredGate
   const successor = await work.followUp(actor, ids[0], 'P7_OLD_CLOSING_SUCCESSOR_CANARY', { clientRequestId: 'closing-follow-a' })
@@ -250,11 +253,26 @@ async function collisionRun({ root, config, DeepSeekHarness, capture, options, s
 async function verifiedResourceHandoff(resource, monitor, evidence, close) {
   try {
     const observed = await monitor.stop(); evidence.resourceWindows.push(observed)
-    assert(observed.sampleCount >= 2 && observed.peakRssKiB <= 4 * 1024 * 1024, 'native close/successor sampled owned tree exceeded 4 GiB')
+    assertResourceWindow(observed, 'native close/successor')
     return resource
   } catch (error) {
     try { await close() } catch (cleanupError) { evidence.cleanupFailure ??= []; evidence.cleanupFailure.push(String(cleanupError.message)) }
     throw error
+  }
+}
+
+function assertResourceWindow(observed, label) {
+  assert(observed.sampleCount >= 2, label + ' had insufficient owned-tree samples')
+  assert(observed.peakRssKiB <= 4 * 1024 * 1024, label + ' sampled owned-tree RSS exceeded 4 GiB')
+}
+
+async function recordResourceWindow(monitor, evidence, label, priorError) {
+  try {
+    const observed = await monitor.stop(); evidence.resourceWindows.push(observed)
+    assertResourceWindow(observed, label)
+  } catch (error) {
+    evidence.resourceGateFailure = { code: error.code ?? 'CAPACITY_RESOURCE_GATE_FAILED', message: String(error.message) }
+    if (!priorError) throw error
   }
 }
 
@@ -342,8 +360,35 @@ async function harnessCheck() {
   assert.equal(localCloseCount, 1, 'failed resource gate lost local close ownership')
   await assert.rejects(verifiedResourceHandoff({}, { stop: async () => ({ sampleCount: 2, peakRssKiB: 4 * 1024 * 1024 + 1 }) }, failedEvidence, async () => { localCloseCount++ }), /exceeded 4 GiB/)
   assert.equal(localCloseCount, 2, 'over-limit RSS did not close the local resource')
+  const originalFailure = new Error('work failed: INVALID_REQUEST'), sparseEvidence = { resourceWindows: [] }
+  await assert.rejects(async () => {
+    let priorError
+    try { throw originalFailure }
+    catch (error) { priorError = error; throw error }
+    finally { await recordResourceWindow({ stop: async () => ({ sampleCount: 1, peakRssKiB: 194908 }) }, sparseEvidence, 'native active or close', priorError) }
+  }, error => error === originalFailure)
+  assert.match(sparseEvidence.resourceGateFailure.message, /insufficient owned-tree samples/)
+  await assert.rejects(recordResourceWindow({ stop: async () => ({ sampleCount: 2, peakRssKiB: 4 * 1024 * 1024 + 1 }) }, { resourceWindows: [] }, 'native active or close'), /RSS exceeded 4 GiB/)
   const temporary = await mkdtemp(join(tmpdir(), 'p7-capacity-schema-'))
   try {
+    const nativeStateFile = join(temporary, 'native-state.json'), nativeSecretRoot = join(temporary, 'native-secrets')
+    await mkdir(nativeSecretRoot, { mode: 0o700 })
+    await writeFile(join(nativeSecretRoot, 'ZENMUX_API_KEY'), dummyKey, { mode: 0o600 })
+    const nativeStore = createFileStore(nativeStateFile)
+    await nativeStore.update(state => nativeCapacitySeed(state, new Date().toISOString()))
+    const nativeConfig = readRuntimeConfig({ ...process.env, DSH_HOME: join(temporary, 'native-dsh'), GENEWAY_DSH_HOME: join(temporary, 'native-dsh'),
+      GENEWAY_STATE: nativeStateFile, GENEWAY_SECRET_ROOT: nativeSecretRoot, GENEWAY_MODEL_CREDENTIAL_REF: 'ZENMUX_API_KEY' }, root)
+    let nativeHarnessCalls = 0
+    const nativeRunner = createDshRunner({ root, config: nativeConfig, harnessFactory: () => { nativeHarnessCalls++; throw new Error('CONTROLLED_FACTORY_STOP') } })
+    const nativeService = createWorkService({ store: nativeStore, runner: nativeRunner, policyPaths: { stateFile: nativeStateFile, dataRoot: temporary, secretRoot: nativeSecretRoot } })
+    try {
+      const accepted = await nativeService.createWork({ id: 'owner' }, { employeeId: 'agent', skillId: 'skill-cycle-time-calculate',
+        input: { availableSeconds: 121, quantity: 2 }, clientRequestId: 'capacity-1' })
+      assert.equal(accepted.ok, true)
+      const first = await until(async () => { const work = (await nativeStore.read()).works.find(item => item.id === accepted.value.id); return work?.status === 'failed' ? work : null }, 'pure native fixture boundary')
+      assert.equal(first.executions.at(-1).error.code, 'INTERNAL_ERROR')
+      assert.equal(nativeHarnessCalls, 1, 'first native fixture never reached the controlled harness boundary')
+    } finally { await nativeService.close() }
     const store = createFileStore(join(temporary, 'state.json')), now = new Date().toISOString()
     await store.update(state => ({ ...state,
       members: [{ id: 'capacity-member-1', loginName: 'capacity1', displayName: '容量成员', role: 'admin', enabled: true, authRef: 'capacity-auth-1', employeeIds: ['capacity-agent-1'], sessionVersion: 1, createdAt: now, updatedAt: now }],

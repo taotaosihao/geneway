@@ -413,11 +413,16 @@ async function runChannelChecks() {
   }
 
   async function restartInbox(h) {
-    const admissionFailed = deferred()
-    h.beforeTurnAdmission = async () => { admissionFailed.resolve(); throw new Error('SYNTHETIC_ADMISSION_COMMIT_FAILURE') }
+    let admissionFailed = false
+    h.beforeTurnAdmission = async () => { admissionFailed = true; throw new Error('SYNTHETIC_ADMISSION_COMMIT_FAILURE') }
     await h.startWeixin()
     const cursor = h.simulator.push(h.bot.id, [h.message('restart-inbox')])
-    await admissionFailed.promise
+    await until(() => {
+      if (admissionFailed) return true
+      const receipt = h.receipts.find(item => item.id === 'restart-inbox')?.value
+      assert(!receipt, `restart-inbox did not reach turn-admission hook: ${receipt?.status ?? 'unknown'}/${receipt?.code ?? 'no-code'}`)
+      return false
+    }, 'restart-inbox turn-admission hook was not reached')
     await h.weixinChannel.close()
     await h.conversation.close()
     const before = await h.disk(), reserved = before.channelMessages.find(item => item.providerMessageId === 'restart-inbox')
@@ -935,7 +940,7 @@ async function runChannelChecks() {
   function seed(state, { legacyNotification = false, weixinPrebound = false, receipt = false, bot } = {}) {
     const member = id => ({ id, loginName: id, displayName: id, role: id === 'admin' ? 'admin' : 'member', enabled: true, authRef: id, employeeIds: ['agent-a', 'agent-b'], sessionVersion: 1, createdAt: now, updatedAt: now })
     const app = (id, provider, credentialRef) => ({ id, provider, providerAppId: id === 'feishu' ? appId : 'ilink', providerTenantId: id === 'feishu' ? 'fixture-tenant' : 'personal', credentialRef, enabled: true, allowedScopes: ['result'], revision: 1, status: 'active', createdAt: now, updatedAt: now })
-    const value = { ...state, defaultChannelEmployeeId: 'agent-a', members: [member('a'), member('b'), member('admin')], modelRoutes: [{ id: 'fixture-model', enabled: true, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'NO_REAL_MODEL' }], employees: ['agent-a', 'agent-b'].map(id => ({ id, name: id, enabled: true, revision: 1, instructions: 'synthetic fixture', modelRouteId: 'fixture-model', skillIds: [], connectionIds: [] })),
+    const value = { ...state, defaultChannelEmployeeId: 'agent-a', members: [member('a'), member('b'), member('admin')], modelRoutes: [{ id: 'fixture-model', enabled: true, provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', credentialRef: 'ZENMUX_API_KEY' }], employees: ['agent-a', 'agent-b'].map(id => ({ id, name: id, enabled: true, revision: 1, instructions: 'synthetic fixture', modelRouteId: 'fixture-model', skillIds: [], connectionIds: [] })),
       channelApps: [app('feishu', 'feishu', 'FEISHU_FIXTURE'), ...(weixinPrebound ? [app(weixinAppId, 'weixin', null)] : [])],
       // Pre-bound synthetic identity is setup for inbox/send tests; Web binding is tested separately.
       channelIdentities: weixinPrebound ? [{ id: 'wx-fixture', memberId: 'a', channelAppId: weixinAppId, providerUserId: 'wx-owner', verificationMethod: 'weixin-qr', status: 'active', revision: 1,
@@ -943,7 +948,6 @@ async function runChannelChecks() {
       channelConversations: weixinPrebound ? [{ id: 'wx-endpoint', memberId: 'a', identityId: 'wx-fixture', channelAppId: weixinAppId, providerConversationId: 'wx-owner', type: 'private', allowedScopes: ['result'], verificationMethod: 'weixin-qr', status: 'active', revision: 1, createdAt: now, updatedAt: now }] : [],
     }
     if (receipt) {
-      value.modelRoutes[0].credentialRef = 'ZENMUX_API_KEY'
       value.skills = [{ id: 'skill-kivo-tpm-device-correlate', capabilityId: 'kivo-tpm-device-correlate', enabled: true }]
       value.connections = [receiptConnection]
       value.employees = value.employees.map(employee => ({ ...employee, skillIds: ['skill-kivo-tpm-device-correlate'], connectionIds: [receiptConnection.id] }))

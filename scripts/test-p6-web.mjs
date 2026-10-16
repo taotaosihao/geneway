@@ -253,4 +253,81 @@ const checks = []
   assert.match(html, /min-height:44px/); assert.match(html, /padding:23px 16px 136px/); assert.match(html, /repair-copy\{white-space:pre-wrap;overflow-wrap:anywhere\}/); assert.match(html, /for="repair-reason"/); assert.match(html, /id="repair-message" role="status" aria-live="polite"/)
   checks.push('late-response-work-selection-auth-receipt-mobile-markup')
 }
+const routes = [
+  { id: 'route-glm', provider: 'zenmux', model: 'z-ai/glm-5.3-flash', displayName: '显式 GLM', credentialRef: 'ZENMUX_API_KEY', parameters: { maxOutputTokens: 2048 }, enabled: true },
+  { id: 'route-deepseek', provider: 'zenmux', model: 'deepseek/deepseek-v4.1-flash', displayName: '默认 DeepSeek', credentialRef: 'ZENMUX_API_KEY', parameters: { maxOutputTokens: 4096 }, enabled: true }
+]
+const runtime = { modelRouteId: 'route-deepseek', provider: 'zenmux', model: routes[1].model, parameters: { maxOutputTokens: 4096 }, requestCount: 4, requestLimit: 4, startedAt: now, completedAt: now, durationMs: 0, usage: { inputTokens: 23, outputTokens: null, totalTokens: null, cacheReadTokens: 0, cacheWriteTokens: null, reasoningTokens: null }, terminationReason: 'BUDGET_EXHAUSTED' }
+const adminConfig = () => ({ members: [], employees: [], connections: [], skills: [], modelRoutes: structuredClone(routes), channelApps: [] })
+{
+  const page = ui(); page.state.admin = adminConfig(); page.box.route = routes[0]
+  const create = page.run('modelRouteForm()'), edit = page.run('modelRouteForm(route)')
+  page.box.reservedRoute = { ...routes[0], id: 'create' }; const combined = page.run('modelRouteForm(reservedRoute)') + create, ids = [...combined.matchAll(/\sid="([^"]+)"/g)].map(match => match[1])
+  assert.equal(new Set(ids).size, ids.length, 'existing route create and new form must have distinct HTML IDs'); assert.match(combined, /data-id="create"/, 'business ID remains unchanged')
+  for (const [, target] of combined.matchAll(/\sfor="([^"]+)"/g)) assert.equal(ids.filter(id => id === target).length, 1, 'each label resolves to exactly one control')
+  assert.match(create, /value="deepseek\/deepseek-v4\.1-flash" selected/); assert.match(create, /value="z-ai\/glm-5\.3-flash"/)
+  assert.match(create, /name="maxOutputTokens" type="number" min="1" max="4096" step="1" value="4096" required/)
+  assert.match(edit, /value="z-ai\/glm-5\.3-flash" selected/); assert.match(edit, /name="maxOutputTokens"[^>]*value="2048"/)
+  assert.match(page.run('employeeForm()'), /value="route-deepseek" selected/); assert.doesNotMatch(page.run('employeeForm()'), /value="route-glm" selected/)
+  page.box.employee = { id: 'agent', name: '关联员工', modelRouteId: 'route-glm' }; assert.match(page.run('employeeForm(employee)'), /value="route-glm" selected/)
+  page.state.admin.modelRoutes[0].enabled = false; assert.match(page.run('employeeForm(employee)'), /value="route-glm" selected disabled/)
+  page.state.admin.modelRoutes = [routes[1]]; assert.match(page.run('employeeForm(employee)'), /value="route-glm" selected disabled>原模型路由已不可用/)
+  page.run('loadAdmin=async()=>{};reloadAll=async()=>{}')
+  for (const [id, model, maxOutputTokens] of [['', routes[0].model, 1], ['route-glm', routes[0].model, 4096]]) {
+    page.box.form = { dataset: { kind: 'modelRoute', id }, elements: Object.fromEntries(Object.entries({ id: 'new-route', model, maxOutputTokens, displayName: '模型配置', provider: 'ignored', credentialRef: 'ignored' }).map(([key, value]) => [key, { value: String(value) }])) }; page.box.form.elements.enabled = { checked: true }
+    page.response = async call => call.method !== 'GET' ? response({}) : undefined
+    await page.run('saveAdminForm({preventDefault(){},currentTarget:form})')
+    const saved = page.calls.at(-1); assert.equal(saved.path, '/api/admin/model-routes' + (id ? '/' + id : '')); assert.equal(saved.method, id ? 'PATCH' : 'POST')
+    assert.deepEqual(saved.body, { provider: 'zenmux', model, displayName: '模型配置', enabled: true, credentialRef: 'ZENMUX_API_KEY', parameters: { maxOutputTokens }, ...(id ? {} : { id: 'new-route' }) })
+  }
+  const count = page.calls.length
+  for (const value of ['0', '4097', '1.5', '']) { page.box.form.elements.maxOutputTokens.value = value; await page.run('saveAdminForm({preventDefault(){},currentTarget:form})') }
+  page.box.form.elements.maxOutputTokens.value = '4096'; page.box.form.elements.model.value = 'unapproved/model'; await page.run('saveAdminForm({preventDefault(){},currentTarget:form})'); assert.equal(page.calls.length, count)
+  checks.push('fixed-two-model-route-create-edit-output-range-explicit-employee-selection')
+}
+{
+  const page = ui({ ...work, executions: [{ id: 'execution-a', operation: 'create', status: 'failed', runtime }, { id: 'legacy', operation: 'create', status: 'completed' }] })
+  page.state.bootstrap.employees[0].modelRouteId = routes[0].id; page.render()
+  const detail = page.node('work-detail').innerHTML
+  assert.match(detail, /deepseek\/deepseek-v4\.1-flash/); assert.doesNotMatch(detail, /z-ai\/glm-5\.3-flash/); assert.match(detail, /请求 4 \/ 4/); assert.match(detail, /已达到请求预算/)
+  assert.match(detail, /缓存读取 tokens<\/span><span>0<\/span>/); assert.match(detail, /耗时（毫秒）<\/span><span>0<\/span>/)
+  assert.match(detail, /输出 tokens<\/span><span>未知<\/span>/); assert.match(detail, /总 tokens<\/span><span>未知<\/span>/); assert.match(detail, /未提供可信计费数据/); assert.match(detail, /data-runtime-unknown/)
+  page.box.runtime = { ...runtime, requestCount: null, startedAt: null, completedAt: null, durationMs: null, terminationReason: null }; assert.match(page.run('runtimeFacts(runtime)'), /请求 未知 \/ 4/)
+  page.state.conversationDrafts = {}; page.state.view = 'conversations'; page.state.currentConversation = { id: 'conversation-a', title: '本人对话', employeeId: 'agent', employeeName: '关联员工', historyStatus: 'available', turns: [{ id: 'turn-a', status: 'completed', userText: '本人问题', assistantText: '本人回复', runtime: { ...runtime, modelRouteId: routes[0].id, model: routes[0].model, requestCount: 1, requestLimit: 6, terminationReason: null } }], relatedWorks: [] }
+  page.run('renderConversation()'); assert.match(page.node('conversation-turns').innerHTML, /z-ai\/glm-5\.3-flash/); assert.match(page.node('conversation-turns').innerHTML, /请求 1 \/ 6/)
+  page.state.currentConversation.turns[0].runtime = null; page.run('renderConversation()'); assert.match(page.node('conversation-turns').innerHTML, /data-runtime-unknown/); assert.equal(page.calls.length, 0)
+  checks.push('own-execution-and-turn-runtime-snapshots-null-unknown-known-zero-no-aggregation')
+}
+{
+  const metadata = { capacity: { active: 2, limit: 4 }, executions: [{ workId: 'other-work-id', executionId: 'exec-id', employeeId: 'agent', status: 'failed', errorCode: 'BUDGET_EXHAUSTED', runtime, goal: 'PRIVATE_BODY_CANARY', input: { reference: 'PRIVATE_BODY_CANARY' }, result: 'PRIVATE_BODY_CANARY' }], turns: [{ conversationId: 'other-conversation-id', turnId: 'turn-id', employeeId: 'agent', status: 'completed', runtime: null, userText: 'PRIVATE_BODY_CANARY', assistantText: 'PRIVATE_BODY_CANARY' }] }
+  const page = ui(); page.state.session.role = 'admin'; page.state.view = 'admin'; page.state.admin = adminConfig(); let release
+  page.response = async call => { assert.equal(call.path, '/api/admin/runtime'); await new Promise(done => { release = done }); return response(metadata) }
+  const pending = page.run('loadAdminRuntime()'); await page.run('loadAdminRuntime()'); assert.equal(page.calls.length, 1); assert.equal(page.node('refresh-admin-runtime').disabled, true)
+  release(); await pending; const panel = page.node('config-runtime').innerHTML
+  for (const value of ['2 / 4', 'other-work-id', 'exec-id', 'other-conversation-id', 'BUDGET_EXHAUSTED', runtime.model]) assert(panel.includes(value), value)
+  assert.doesNotMatch(panel, /PRIVATE_BODY_CANARY|data-open-work|data-conversation-work/); assert.equal(page.node('refresh-admin-runtime').disabled, false); assert.equal(page.posts().length, 0)
+  page.run('showLogin()'); assert.equal(page.node('config-runtime').innerHTML, '')
+  for (const change of ['view', 'admin-object', 'role', 'auth']) {
+    const current = ui(); current.state.session.role = 'admin'; current.state.view = 'admin'; const old = current.state.admin = adminConfig(); let finish
+    current.response = async () => { await new Promise(done => { finish = done }); return response(metadata) }; const reading = current.run('loadAdminRuntime()')
+    if (change === 'view') current.run('show("works")'); if (change === 'admin-object') current.state.admin = adminConfig(); if (change === 'role') current.state.session.role = 'member'; if (change === 'auth') current.run('showLogin()')
+    finish(); await reading; assert.equal(old.runtime, undefined); assert.equal(old.runtimePending, false); assert.equal(current.posts().length, 0)
+    if (change === 'view') { current.run('show("admin")'); assert.equal(current.node('refresh-admin-runtime').disabled, false) }
+  }
+  const member = ui(); member.state.admin = adminConfig(); member.state.view = 'admin'; await member.run('loadAdminRuntime()'); member.run('renderAdminRuntime()'); assert.equal(member.calls.length, 0); assert.equal(member.node('config-runtime').innerHTML, '')
+  checks.push('admin-dedicated-metadata-endpoint-whitelist-singleflight-auth-navigation-isolation')
+}
+{
+  const root = { ...work, id: 'root-a', workType: 'collaboration', results: [], actions: [], plan: { revision: 1, items: [{ id: 'step-a', goal: '核对设备', employeeId: 'agent', status: 'completed', childWorkId: work.id }] }, collaboration: { generation: 1, status: 'completed' }, executions: [{ id: 'root-exec', operation: 'collaboration-root', status: 'completed', runtime: { ...runtime, requestCount: 9, requestLimit: 12, terminationReason: null } }] }
+  const child = { ...work, rootWorkId: root.id, workType: 'collaboration-child', planItemId: 'step-a', actions: [preview], executions: [{ id: 'child-exec', operation: 'collaboration-child', status: 'completed', runtime: { ...runtime, requestCount: 2, requestLimit: 6, terminationReason: null } }] }
+  const page = ui(root); page.state.bootstrap.works = [root, child]; page.render(); assert.match(page.node('work-detail').innerHTML, /data-collaboration-item="step-a"/); assert.match(page.node('work-detail').innerHTML, /请求 9 \/ 12/); assert.doesNotMatch(page.node('work-detail').innerHTML, /id="repair-actions"/)
+  page.response = async call => response(call.path.endsWith('/' + child.id) ? child : root)
+  await page.document.querySelector('[data-open-work="' + child.id + '"]').onclick(); assert.equal(page.state.currentWork.id, child.id); assert.match(page.node('work-detail').innerHTML, /data-work-parent/); assert.match(page.node('work-detail').innerHTML, /id="repair-actions"/); assert.match(page.node('work-detail').innerHTML, /请求 2 \/ 6/)
+  await page.document.querySelector('[data-open-work="' + root.id + '"]').onclick(); assert.equal(page.state.currentWork.id, root.id); assert.deepEqual(page.calls.map(call => call.path), ['/api/works/' + child.id, '/api/works/' + root.id]); assert.equal(page.posts().length, 0)
+  for (const works of [[root], [root, { ...child, ownerMemberId: 'peer' }]]) { page.state.bootstrap.works = works; page.render(); assert.equal(page.document.querySelector('[data-open-work="' + child.id + '"]'), null) }
+  page.state.currentWork = child; page.state.bootstrap.works = [{ ...root, ownerMemberId: 'peer' }, child]; page.render(); assert.equal(page.document.querySelector('[data-open-work="' + root.id + '"]'), null)
+  page.state.currentWork = root; page.state.bootstrap.works = [root, child]; page.render(); let release
+  page.response = async () => { await new Promise(done => { release = done }); return response(child) }; const opening = page.document.querySelector('[data-open-work="' + child.id + '"]').onclick(); page.run('show("works")'); release(); await opening; assert.equal(page.state.view, 'works'); assert.equal(page.state.currentWork.id, root.id); assert.equal(page.posts().length, 0)
+  checks.push('collaboration-plan-child-action-parent-navigation-owner-scope-late-get-isolation')
+}
 console.log(JSON.stringify({ ok: true, checks, networkCalls: 0, browserRuns: 0, nativeRuns: 0, modelCalls: 0, runtimeVerified: false }))

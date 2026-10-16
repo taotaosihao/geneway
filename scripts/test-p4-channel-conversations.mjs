@@ -67,7 +67,7 @@ async function runChannelChecks() {
     return fetchLocal(input, { ...options, redirect: 'error' })
   }
 
-  const [{ createGenewayServer, createChannelRuntime }, { createFileStore }, { createConversationService }, { createChannelService }, { createWorkService }, { createAuthRuntime, initializeAuthFile }, { createChannelSecretStore }, { createFeishuRuntime }, weixin, { createWeixinApi }, { createILinkSimulator }, Lark] = await Promise.all([
+  const [{ createGenewayServer, createChannelRuntime }, { createFileStore, STATE_VERSION }, { createConversationService }, { createChannelService }, { createWorkService }, { createAuthRuntime, initializeAuthFile }, { createChannelSecretStore }, { createFeishuRuntime }, weixin, { createWeixinApi }, { createILinkSimulator }, Lark] = await Promise.all([
     import('../src/server.mjs'), import('../src/store/file-store.mjs'), import('../src/conversation-service.mjs'), import('../src/channel-service.mjs'),
     import('../src/work-service.mjs'), import('../src/auth.mjs'), import('../src/channel-secret-store.mjs'), import('../plugins/feishu.mjs'),
     import('../plugins/weixin.mjs'), import('../vendor/dsh-im/weixin/weixin-api.mjs'), import('./fixtures/ilink-server.mjs'), import('@larksuiteoapi/node-sdk'),
@@ -634,7 +634,7 @@ async function runChannelChecks() {
     }
     await writeFile(join(secretRoot, source.modelRoutes[0].credentialRef), 'SYNTHETIC_MODEL_CREDENTIAL', { mode: 0o600 })
     const backup = join(h.root, 'backup'), secretPackage = join(h.root, 'private-backup')
-    const run = args => runStateTransfer(args, { statePath: h.statePath, dshHome })
+    const run = args => runStateTransfer(args, { statePath: h.statePath, dshHome, modelCredentialRef: 'ZENMUX_API_KEY' })
     const backed = await run(['backup', '--output', backup, '--secret-output', secretPackage, '--secret-root', secretRoot])
     assert.equal(backed.code, 0, backed.stderr)
     const privateManifest = JSON.parse(await readFile(join(secretPackage, 'manifest.json'), 'utf8'))
@@ -705,7 +705,7 @@ async function runChannelChecks() {
       await writeFile(join(legacyRoot, 'manifest.json'), JSON.stringify(ordinaryManifest), { mode: 0o600 })
       const legacyResult = await h.run(['restore', '--input', legacyRoot, '--data-root', join(h.root, 'legacy-v9-restored')])
       assert.equal(legacyResult.code, 0, legacyResult.stderr)
-      assert.equal(JSON.parse(await readFile(join(h.root, 'legacy-v9-restored', 'state.json'), 'utf8')).version, 10)
+      assert.equal(JSON.parse(await readFile(join(h.root, 'legacy-v9-restored', 'state.json'), 'utf8')).version, STATE_VERSION)
     } finally { await h.close() }
   }
 
@@ -807,10 +807,10 @@ async function runChannelChecks() {
       async close() { await chmod(secretRoot, 0o700); await rm(root, { recursive: true, force: true }) },
     }
   }
-  function runStateTransfer(args, { statePath, dshHome, preload } = {}) {
+  function runStateTransfer(args, { statePath, dshHome, preload, modelCredentialRef } = {}) {
     transferProcesses += 1
     return new Promise((resolve, reject) => {
-      const child = spawnOwner(process.execPath, [...(preload ? ['--import', preload] : []), fileURLToPath(new URL('./state-transfer.mjs', import.meta.url)), ...args], { env: { ...process.env, GENEWAY_STATE: statePath, GENEWAY_DSH_HOME: dshHome, GENEWAY_SECRET_ROOT: join(dshHome, 'must-never-probe') }, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawnOwner(process.execPath, [...(preload ? ['--import', preload] : []), fileURLToPath(new URL('./state-transfer.mjs', import.meta.url)), ...args], { env: { ...process.env, GENEWAY_STATE: statePath, GENEWAY_DSH_HOME: dshHome, GENEWAY_SECRET_ROOT: join(dshHome, 'must-never-probe'), ...(modelCredentialRef === undefined ? {} : { GENEWAY_MODEL_CREDENTIAL_REF: modelCredentialRef }) }, stdio: ['ignore', 'pipe', 'pipe'] })
       let stdout = '', stderr = ''
       child.stdout.on('data', chunk => { stdout += chunk }); child.stderr.on('data', chunk => { stderr += chunk })
       child.once('error', reject); child.once('close', code => resolve({ code, stdout, stderr }))

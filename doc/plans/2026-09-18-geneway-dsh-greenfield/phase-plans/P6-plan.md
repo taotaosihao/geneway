@@ -2,7 +2,7 @@
 
 > 合同 v4.4 原位重规划，2026-10-16。本文替换旧 GearJob/Hive P6 方案；旧方案与运行证据保留在 Git 历史，不作为本阶段通过证据。当前合同、clarification-notes.md §10/11 及用户后续明确决定优先。
 
-状态：**Team Astra 规划与独立计划审查先于实施完成；T0–T5 技术实施及同候选真实验收已通过，T6 视频、离线材料和飞书发送回读已完成。当前等待用户 P6 最终验收，尚未启动 P7；不代表发布或现场验收。**
+状态：**Team Astra 规划与独立计划审查先于实施完成；T0–T5 技术实施及同候选真实验收已通过，T6 视频、离线材料和飞书发送回读已完成。用户在收到完整材料后明确“开始p7”（2026-10-16 15:55 UTC），据此解除 P6→P7 阶段门，进入 P7 Team Astra 规划；不代表发布或现场验收。**
 
 基线：Geneway `/home/gewu/.devspace/worktrees/geneway-f4222c66`，`rebuild/dsh-greenfield`，HEAD `6dd9db9abc216251c5869af7b16bf5e97c0ae405`（仅记录 P5 用户验收，产品源码同 `3794cbaca3181d9375eddc822dde179dd7772e15`）；Kivo 独立 clone `/home/gewu/.devspace/worktrees/kivo-geneway-mcp`，`codex/geneway-kivo-mcp`，HEAD `c429483ac0d423cc1092c1d9d6d517dc4c910e44`。P4 和 P5-K1 已由用户最终验收；2026-10-16 用户明确“P5 通过，开始 Team Astra 规划 P6”。
 
@@ -169,4 +169,4 @@ T0写边界先读实际schema/actor/事务；201/rollback诊断采用单个owned
 
 T6 交付目录为工作流产物 `p6-kivo-delivery-final16/`：视频 486.2 秒、51 张截图、离线 HTML 与 ZIP。视频完整解码、1 倍速离线播放至自然结束，无 seek/error/外部请求；播放前后字节相同，独立媒体审查通过。人工视觉检查为关键手机截图及抽帧，不宣称人工连续观看。首次离线浏览器启动失败的记录另行保留。视频、HTML、ZIP 和阶段说明已通过原 `geneway-product` 飞书入口发送，4 项 GET 回读均核对收件 chat、发送 app、类型、文件名/时长或正文；回执保存在交付目录 `receipts/summary.json`。材料明确标注“渠道为模拟验收”和 synthetic/external-test。
 
-P6完整材料交付后由用户最终验收，未验收不得启动P7。P7另行Team Astra规划；P6不顺带加入第二模型路由、部署或其他P7义务，也不宣称完整v4.4已经完成。
+用户在 P6 完整材料交付后明确“开始p7”，已允许进入下一阶段。P7 仍须另行 Team Astra 规划并通过独立审查后实施；第二模型路由等 P7 义务不计入 P6 结果，也不宣称完整 v4.4 已经完成。

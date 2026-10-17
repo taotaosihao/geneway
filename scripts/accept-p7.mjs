@@ -184,6 +184,13 @@ async function verifyP7RevokedRetry({ request, state, simulator, delivery, sendC
   return blocked
 }
 
+function validateP7DisabledRoute({ response, before, after, modelRequestsBefore, modelRequestsAfter }) {
+  assert.equal(response.status, 403); assert.equal(response.body?.error?.code, 'FORBIDDEN')
+  assert.deepEqual(after.works, before.works, 'disabled route changed work or execution facts')
+  assert.deepEqual(after.reservations, before.reservations, 'disabled route changed request reservations')
+  assert.equal(modelRequestsAfter, modelRequestsBefore, 'disabled route reached a model')
+}
+
 function operatorChannel(input, binding, signal) {
   let pending, failure
   const used = new Set()
@@ -973,13 +980,13 @@ async function acceptance(options) {
       const chain = validateP7Chain({ memberId: 'a', identity, endpoint, conversation, rootWork: stateNow.works.find(item => item.id === refs.rootId), children: stateNow.works.filter(item => item.rootWorkId === refs.rootId),
         fixture: fixture('a'), rule, occurrence, action, delivery: stateNow.deliveries.find(item => item.id === refs.delivery.id) })
       facts.push({ kind: 'j10-chain', ...chain, postRestoreReadWorkId: newWork.id, restoredRoot: refs.restoreRoot })
-      const callsBefore = (await readFile(auditFile, 'utf8')).split('\n').filter(line => line.includes('"host":"zenmux.ai"')).length
       await api('admin', '/api/admin/model-routes/p7-deepseek', 'PATCH', { enabled: false })
+      const disabledBefore = await state()
+      const callsBefore = (await readFile(auditFile, 'utf8')).split('\n').filter(line => line.includes('"host":"zenmux.ai"')).length
       const unavailable = await request('a', '/api/works', 'POST', { employeeId: 'p7-agent-a', skillId: 'skill-' + read, connectionId: fixture('a').connection.id,
         goal: '停用路由拒绝且不可隐式回退', input: { recordType: 'repair', reference: fixture('a').facts.record.reference }, clientRequestId: 'p7-disabled-route-' + binding.runId })
-      assert(unavailable.status >= 400 && unavailable.status < 500)
-      assert.equal(unavailable.body?.error?.code, 'MODEL_NOT_CONFIGURED')
-      assert.equal((await readFile(auditFile, 'utf8')).split('\n').filter(line => line.includes('"host":"zenmux.ai"')).length, callsBefore, 'disabled route reached a model')
+      validateP7DisabledRoute({ response: unavailable, before: disabledBefore, after: await state(), modelRequestsBefore: callsBefore,
+        modelRequestsAfter: (await readFile(auditFile, 'utf8')).split('\n').filter(line => line.includes('"host":"zenmux.ai"')).length })
       await api('admin', '/api/admin/model-routes/p7-deepseek', 'PATCH', { enabled: true })
       facts.push({ kind: 'disabled-route', status: unavailable.status, code: unavailable.body.error.code, modelRequests: 0, fallback: false })
     })
@@ -1086,12 +1093,12 @@ async function harnessCheck() {
   assert.throws(() => validateP7Polls({ ...polls, maxActivePolls: () => 2 }, ['a'], { minFullCycles: 3 }))
   assert.throws(() => validateP7Polls({ ...polls, calls: polls.calls.slice(1) }, ['a'], { minFullCycles: 3 }))
   for (const value of [{ accessToken: 'synthetic' }, { note: 'Bearer synthetic' }, { privateKey: 'not-a-key' }]) assert.throws(() => noSecrets(value))
-  console.log('P7 J10 harness checks passed (same-object records, retry HTTP/readback, actual protocol failure classification, argument guard, actual handoff permissions and revocation, main-run observer directory, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model/network/state-file writes=0)')
+  console.log('P7 J10 harness checks passed (same-object records, retry HTTP/readback, actual protocol failure classification, disabled-route refusal and unchanged business facts, argument guard, actual handoff permissions and revocation, main-run observer directory, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model/network/state-file writes=0)')
 }
 
 async function callerChecks(harness) {
-  const [{ normalizeTpmObservation }, { createChannelService }, weixinApi, { repairTargetFromCorrelation }, { parseCapabilityToolResult }, { connection, correlationFixture, now }] = await Promise.all([
-    import('../src/domain/tpm.mjs'), import('../src/channel-service.mjs'), import('../vendor/dsh-im/weixin/weixin-api.mjs'), import('../src/domain/kivo-repair.mjs'), import('../src/capabilities.mjs'), import('./fixtures/kivo-device-correlation.mjs'),
+  const [{ normalizeTpmObservation }, { createChannelService }, weixinApi, { repairTargetFromCorrelation }, { parseCapabilityToolResult }, { connection, correlationFixture, now }, { createWorkService, authorizeWorkBinding }] = await Promise.all([
+    import('../src/domain/tpm.mjs'), import('../src/channel-service.mjs'), import('../vendor/dsh-im/weixin/weixin-api.mjs'), import('../src/domain/kivo-repair.mjs'), import('../src/capabilities.mjs'), import('./fixtures/kivo-device-correlation.mjs'), import('../src/work-service.mjs'),
   ])
   const samples = ['a', 'b'].map((owner, index) => {
     const recordId = '00000000-0000-4000-8000-00000000010' + index, deviceId = '00000000-0000-4000-8000-00000000020' + index, reference = 'P7-PURE-' + owner
@@ -1200,5 +1207,34 @@ async function callerChecks(harness) {
     for (const key of ['id', 'workId', 'resultId', 'actionId', 'targetIdentityId', 'targetConversationId']) assert.equal(delivered[key], initial[key])
     assert.deepEqual(memory.works[0].actions, [action], 'delivery retries do not create or rewrite the business action')
   } finally { globalThis.fetch = originalFetch }
+  {
+    const binding = { ...connection, skillIds: ['skill-' + read] }, actor = { id: 'a' }
+    const body = { employeeId: 'p7-agent-a', skillId: 'skill-' + read, connectionId: binding.id, goal: 'P7 pure disabled route',
+      input: { recordType: 'repair', reference: 'P7-PURE-A' }, clientRequestId: 'pure-disabled-route' }
+    let memory = { members: [{ id: actor.id, enabled: true, employeeIds: [body.employeeId] }],
+      employees: [{ id: body.employeeId, enabled: true, modelRouteId: 'p7-deepseek', skillIds: [body.skillId], connectionIds: [binding.id] }],
+      modelRoutes: models.map((model, index) => ({ id: index ? 'p7-glm' : 'p7-deepseek', provider: 'zenmux', model, credentialRef: 'ZENMUX_API_KEY', enabled: index === 1 })),
+      skills: [{ id: body.skillId, capabilityId: read, enabled: true }], connections: [binding], works: [], reservations: {}, conversations: [] }
+    let runnerCalls = 0
+    const store = { async read() { return structuredClone(memory) }, async update(mutate) { memory = mutate(structuredClone(memory)) } }
+    const service = createWorkService({ store, clock: () => now, connectionCatalog: [binding], runner: { configured: true, async run() { runnerCalls++; assert.fail('disabled route reached runner') } } })
+    await service.ensureReady()
+    const before = await store.read(), enabled = structuredClone(before)
+    enabled.modelRoutes[0].enabled = true
+    const allowed = authorizeWorkBinding(enabled, actor, { ...body, ownerMemberId: actor.id, capabilityId: read }, [binding])
+    assert.deepEqual(allowed.input, body.input); assert.equal(allowed.binding.route.model, models[0])
+    assert.equal(before.modelRoutes[0].enabled, false); assert.equal(before.modelRoutes[1].enabled, true)
+    const result = await service.createWork(actor, body), after = await store.read()
+    const response = { status: result.error?.status ?? 200, body: result.ok ? result.value : { error: result.error } }
+    assert.deepEqual(after, before); assert.equal(runnerCalls, 0)
+    const check = { response, before, after, modelRequestsBefore: 0, modelRequestsAfter: 0 }
+    validateP7DisabledRoute(check)
+    for (const wrong of [{ status: 403, body: { error: { code: 'MODEL_NOT_CONFIGURED' } } }, { status: 503, body: response.body }, { status: 200, body: response.body },
+      ...[400, 401, 404, 409].map(status => ({ status, body: response.body }))]) assert.throws(() => validateP7DisabledRoute({ ...check, response: wrong }))
+    assert.throws(() => validateP7DisabledRoute({ ...check, after: { ...after, works: [{ id: 'unexpected-work', executions: [{ id: 'unexpected-execution' }] }] } }))
+    assert.throws(() => validateP7DisabledRoute({ ...check, after: { ...after, reservations: { unexpected: { workId: 'unexpected-work' } } } }))
+    assert.throws(() => validateP7DisabledRoute({ ...check, modelRequestsAfter: 1 }))
+    console.log(JSON.stringify({ check: 'disabled-route-caller', status: response.status, code: response.body.error.code, enabledCopyAuthorized: true, wholeMemoryStateUnchanged: true, runnerCalls }))
+  }
   console.log(JSON.stringify({ check: 'j10-caller-contracts', normalizedOwners: 2, observationNegatives: changes.length + 2, sendReplies: ['503:unknown', '200/ret403:failed', 'revoked:blocked/403', 'restored:delivered'], networkCalls: 0, stateFileWrites: 0 }))
 }

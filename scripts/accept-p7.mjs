@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createServer } from 'node:net'
 import { constants } from 'node:fs'
 import { access, lstat, mkdir, mkdtemp, open, readFile, readlink, rm, writeFile } from 'node:fs/promises'
@@ -203,11 +203,39 @@ function validateP7DisabledRoute({ response, before, after, modelRequestsBefore,
   assert.equal(modelRequestsAfter, modelRequestsBefore, 'disabled route reached a model')
 }
 
-function operatorChannel(input, binding, signal) {
-  let pending, failure
+function operatorTerminal(stream) {
+  const state = { applied: false, restored: false }
+  const stty = args => execFileSync('/usr/bin/stty', args, { stdio: [stream.fd, 'pipe', 'pipe'], encoding: 'utf8', timeout: 3000, env: systemEnvironment() }).trim()
+  const restore = () => {
+    if (state.restored) return
+    if (state.before) { stty([state.before]); state.after = stty(['-g']); assert.equal(state.after, state.before, 'operator terminal mode was not restored') }
+    state.restored = true
+  }
+  let error
+  if (stream?.isTTY === true) {
+    try {
+      state.before = stty(['-g']); assert(state.before, 'operator terminal mode is empty')
+      stty(['-icanon', '-echo', 'isig', 'min', '1', 'time', '0']); state.applied = true
+      state.active = stty(['-g'])
+    } catch (cause) {
+      error = cause
+      try { restore() } catch { state.restored = false }
+    }
+  }
+  return { state, restore, error }
+}
+
+export function operatorChannel(input, binding, signal, onFailure = () => {}) {
+  let pending, failure, disposed = false
   const used = new Set()
-  const fail = error => { failure ??= error; if (pending) { clearTimeout(pending.timer); pending.reject(error); pending = undefined } }
+  const fail = error => {
+    if (failure || disposed) return
+    failure = error
+    if (pending) { const current = pending; pending = undefined; clearTimeout(current.timer); current.reject(failure) }
+    onFailure(failure)
+  }
   const receive = line => {
+    if (failure || disposed) return
     try {
       assert(Buffer.byteLength(line) <= 128 * 1024)
       const value = JSON.parse(line)
@@ -216,13 +244,24 @@ function operatorChannel(input, binding, signal) {
       const current = pending; pending = undefined; clearTimeout(current.timer); current.resolve(value.receipt)
     } catch (error) { fail(error) }
   }
-  input.on('line', receive); input.on('close', () => fail(new Error('operator ended'))); input.on('error', fail)
-  signal.addEventListener('abort', () => fail(new Error('operator interrupted')), { once: true })
-  return { wait(id, operation, expected = {}) {
+  const ended = () => fail(new Error('operator ended')), interrupted = () => fail(signal.reason instanceof Error ? signal.reason : new Error('operator interrupted'))
+  input.on('line', receive); input.on('close', ended); input.on('error', fail)
+  signal.addEventListener('abort', interrupted, { once: true })
+  if (input.closed) ended()
+  else if (signal.aborted) interrupted()
+  const terminal = operatorTerminal(failure ? undefined : input.input)
+  if (terminal.error) fail(terminal.error)
+  return { terminal: terminal.state, wait(id, operation, expected = {}) {
     assert(!pending && !used.has(id)); used.add(id)
     if (failure) return Promise.reject(failure)
+    if (disposed) return Promise.reject(new Error('operator disposed'))
     return new Promise((resolveReceipt, reject) => { pending = { id, resolve: resolveReceipt, reject, timer: setTimeout(() => fail(new Error('operator timed out')), 300_000) }; console.error(JSON.stringify({ kind: 'p7-operator-request', ...binding, stepId: id, operation, expected })) })
-  }, dispose() { input.removeListener('line', receive); if (pending) fail(new Error('operator disposed')) } }
+  }, dispose() {
+    input.removeListener('line', receive); input.removeListener('close', ended); input.removeListener('error', fail); signal.removeEventListener('abort', interrupted)
+    if (pending) fail(new Error('operator disposed'))
+    try { terminal.restore() } catch (error) { fail(error) }
+    disposed = true
+  } }
 }
 
 export function validateP7Observer(candidate, input, options, fixtures) {
@@ -364,11 +403,13 @@ async function acceptance(options) {
   const passwords = Object.fromEntries(['admin', 'a', 'b'].map(id => [id, randomBytes(24).toString('base64url')]))
   const weixinAccount = { id: 'synthetic-p7-' + binding.runId, ownerUserId: 'synthetic-p7-owner-a', token: 'SYNTHETIC_TOKEN_' + randomBytes(24).toString('hex') }
   let weixinSequence = 0
-  const abort = new AbortController(), input = createInterface({ input: process.stdin, terminal: false, crlfDelay: Infinity }), operator = operatorChannel(input, binding, abort.signal)
+  const abort = new AbortController()
   let settle
   const operationSettled = new Promise(done => { settle = done })
   const cleanup = runCleanup({ children, browsers: pages, recording: () => recording, operationSettled, removeAuth: () => Promise.all(authFiles.map(path => rm(path, { force: true }))), onFailure: error => { failure ??= error }, stopChild: stopOwned })
+  const fail = error => { failure ??= error; abort.abort(failure) }
   const interrupts = interruptHandlers(process, (signal, force) => { failure ??= new Error('interrupted by ' + signal); abort.abort(signal); if (force) void cleanup.run(true) })
+  const input = createInterface({ input: process.stdin, terminal: false, crlfDelay: Infinity }), operator = operatorChannel(input, binding, abort.signal, error => { fail(error); void cleanup.run() })
   const state = async () => JSON.parse(await readFile(stateFile, 'utf8'))
   async function silentSnapshot() {
     const current = await state()
@@ -403,10 +444,13 @@ async function acceptance(options) {
     }
   }
   const fixture = instance => fixtures.find(item => item.instance === instance)
-  const fail = error => { failure ??= error; abort.abort(error) }
   try {
+    assert.deepEqual(await operator.wait('transport-ready', 'verify-transport'), { ready: true })
+    abort.signal.throwIfAborted()
     const [{ createFileStore }, { initializeAuthFile }, { createILinkSimulator }] = await Promise.all([import('../src/store/file-store.mjs'), import('../src/auth.mjs'), import('./fixtures/ilink-server.mjs')])
+    abort.signal.throwIfAborted()
     simulator = await createILinkSimulator({ holdMs: 100 })
+    abort.signal.throwIfAborted()
     simulator.addAccount(weixinAccount)
     refs.loopbackRoutes = JSON.stringify([
       ...fixtures.map(item => ({ purpose: 'kivo', origin: new URL(item.connection.baseUrl).origin })),
@@ -414,10 +458,14 @@ async function acceptance(options) {
     ])
     refs.loopbackRoutesSha256 = hash(Buffer.from(refs.loopbackRoutes, 'utf8'))
     await writeFile(hostConfig, JSON.stringify({ ilinkUrl: simulator.url }), { mode: 0o600, flag: 'wx' })
+    abort.signal.throwIfAborted()
     const channelRef = 'P7_' + hash(binding.runId).slice(0, 24).toUpperCase() + '_FEISHU'
     await writeFile(join(secretRoot, channelRef), JSON.stringify({ appId: app.providerAppId, appSecret: 'synthetic_' + randomBytes(24).toString('hex') }), { mode: 0o600, flag: 'wx' })
+    abort.signal.throwIfAborted()
     await writeFile(join(scratch, 'event-sources.json'), JSON.stringify({ version: 1, sources: fixtures.map(item => item.eventSource) }), { mode: 0o600, flag: 'wx' })
+    abort.signal.throwIfAborted()
     await createFileStore(stateFile).update(value => seedState(value, fixtures, channelRef))
+    abort.signal.throwIfAborted()
     await initializeAuthFile(authFile, passwords)
     host = await boot(true)
     if (!display) {
@@ -465,7 +513,7 @@ async function acceptance(options) {
       media = { video: 'p7-j10.mp4', ...coverage, sha256: hash(await readFile(video)), decoded: true, recording: recording.state }
     } catch (error) { failure ??= error }
     const report = { ok: !failure, phase: 'P7-J10', scope: '同一候选、两条真实ZenMux路由、synthetic/external-test Kivo；渠道为模拟验收。容量、空安装、DSH回退另需同候选证据。',
-      binding, preflight, postflight, audit, media, steps, facts, eventAcks, failure: failure ? { code: /^[A-Z][A-Z0-9_]{0,63}$/.test(failure.code ?? '') ? failure.code : 'ACCEPTANCE_FAILED', step: steps.find(item => item.status === 'failed')?.id ?? null } : null, cleanup: cleanup.state }
+      binding, preflight, postflight, audit, media, steps, facts, eventAcks, terminal: operator.terminal, failure: failure ? { code: /^[A-Z][A-Z0-9_]{0,63}$/.test(failure.code ?? '') ? failure.code : 'ACCEPTANCE_FAILED', step: steps.find(item => item.status === 'failed')?.id ?? null } : null, cleanup: cleanup.state }
     if (failure) await writeFile(join(privateRoot, 'first-failure.json'), JSON.stringify({ name: failure.name, code: failure.code ?? null, message: String(failure.message).slice(0, 8192), stack: String(failure.stack ?? '').slice(0, 16384), ...(failure.chrome ? { chrome: failure.chrome } : {}) }, null, 2) + '\n', { mode: 0o600, flag: 'wx' }).catch(() => {})
     try {
       await writeFile(join(options.output, 'index.html'), manual(report), { mode: 0o600 })
@@ -1083,6 +1131,7 @@ async function harnessCheck() {
     const missing = [...runtimeArgs], index = missing.indexOf('--' + key); missing.splice(index, 2); assert.throws(() => argumentsFor(missing), 'missing ' + key)
   }
   const harness = await readFile(script, 'utf8')
+  await operatorChecks(harness)
   {
     const { EventEmitter } = await import('node:events')
     const metadata = { isDirectory: () => true, isSymbolicLink: () => false, uid: process.getuid(), mode: 0o40700 }
@@ -1116,6 +1165,7 @@ async function harnessCheck() {
     assert.equal(p7ChromeDiagnostics(child).signalCode, 'SIGABRT'); assert.equal(p7ChromeDiagnostics(child).exitCode, null)
     child.spawnError = { code: 'SYNTHETIC_ENV_CANARY\nunsafe' }; assert.equal(p7ChromeDiagnostics(child).spawnErrorCode, 'SPAWN_FAILED')
     const report = harness.slice(harness.indexOf('    const report = { ok: !failure'), harness.indexOf('    if (failure) await writeFile'))
+    assert(report.includes('terminal: operator.terminal'), 'main report must retain terminal restoration state independently of the first error')
     assert(!/chrome|stderrText|stderrTail|spawnErrorCode/.test(report), 'Chrome diagnostics must stay private')
     assert(harness.includes("...(failure.chrome ? { chrome: failure.chrome } : {})"))
   }
@@ -1240,7 +1290,118 @@ async function harnessCheck() {
   assert.throws(() => validateP7Polls({ ...polls, maxActivePolls: () => 2 }, ['a'], { minFullCycles: 3 }))
   assert.throws(() => validateP7Polls({ ...polls, calls: polls.calls.slice(1) }, ['a'], { minFullCycles: 3 }))
   for (const value of [{ accessToken: 'synthetic' }, { note: 'Bearer synthetic' }, { privateKey: 'not-a-key' }]) assert.throws(() => noSecrets(value))
-  console.log('P7 J10 harness checks passed (private HOME/TMPDIR before side effects, bounded private Chrome stderr and exit/signal, same-object records, retry HTTP/readback, actual protocol failure classification, disabled-route refusal and unchanged business facts, argument guard, actual handoff permissions and revocation, main-run observer directory, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model/network/state-file writes=0)')
+  console.log('P7 J10 harness checks passed (operator ready before effects, immediate EOF/error/abort, private HOME/TMPDIR before side effects, bounded private Chrome stderr and exit/signal, same-object records, retry HTTP/readback, actual protocol failure classification, disabled-route refusal and unchanged business facts, argument guard, actual handoff permissions and revocation, main-run observer directory, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model/network/state-file writes=0)')
+}
+
+async function operatorChecks(source) {
+  const { EventEmitter, getEventListeners } = await import('node:events')
+  const binding = { runId: 'pure-transport', candidate: 'a'.repeat(64), guardSha256: 'b'.repeat(64) }
+  const make = ({ closed = false, aborted = false, terminal = operatorTerminal } = {}) => {
+    const input = new EventEmitter(), abort = new AbortController(), requests = [], timers = new Set(), failures = []
+    input.closed = closed
+    if (aborted) abort.abort(new Error('synthetic prior abort'))
+    const channel = Function('assert', 'noSecrets', 'setTimeout', 'clearTimeout', 'console', 'operatorTerminal', operatorChannel.toString() + ';return operatorChannel')(assert, noSecrets,
+      (callback, ms) => { assert.equal(ms, 300_000); const timer = { callback }; timers.add(timer); return timer }, timer => timers.delete(timer), { error: line => requests.push(JSON.parse(line)) }, terminal)(input, binding, abort.signal, error => { failures.push(error); abort.abort(error) })
+    const result = (id, receipt = { ready: true }, changes = {}) => JSON.stringify({ kind: 'p7-operator-result', ...binding, stepId: id, ok: true, receipt, ...changes })
+    return { input, abort, channel, requests, timers, failures, result, dispose() {
+      channel.dispose(); input.emit('close'); assert.equal(timers.size, 0)
+      for (const event of ['line', 'close', 'error']) assert.equal(input.listenerCount(event), 0)
+      assert.equal(getEventListeners(abort.signal, 'abort').length, 0)
+    } }
+  }
+  {
+    let mode = 'before', brokenApply = false, brokenRestore = false
+    const calls = [], error = new Error('synthetic stty failure')
+    const terminal = Function('assert', 'execFileSync', 'systemEnvironment', operatorTerminal.toString() + ';return operatorTerminal')(assert, (executable, args, options) => {
+      assert.equal(executable, '/usr/bin/stty'); assert.deepEqual(options.stdio, [27, 'pipe', 'pipe']); assert.equal(options.timeout, 3000)
+      calls.push(args)
+      if (args[0] === '-g') return mode + '\n'
+      if (args[0] === '-icanon') { assert.deepEqual(args, ['-icanon', '-echo', 'isig', 'min', '1', 'time', '0']); mode = 'active'; if (brokenApply) throw error }
+      else { assert.deepEqual(args, ['before']); if (brokenRestore) throw error; mode = 'before' }
+      return ''
+    }, () => ({ PATH: '/usr/bin' }))
+    const pipe = terminal({ isTTY: false }); pipe.restore(); assert.equal(calls.length, 0); assert(pipe.state.restored)
+    const tty = terminal({ isTTY: true, fd: 27 }); assert(tty.state.applied); assert.equal(tty.state.active, 'active')
+    tty.restore(); assert.equal(tty.state.after, 'before'); assert(tty.state.restored)
+    const count = calls.length; tty.restore(); assert.equal(calls.length, count)
+    brokenApply = true
+    const failed = terminal({ isTTY: true, fd: 27 }); assert.equal(failed.error, error); assert(failed.state.restored); assert.equal(mode, 'before')
+    const setup = make({ terminal: () => terminal({ isTTY: true, fd: 27 }) })
+    await assert.rejects(setup.channel.wait('ready', 'verify-transport'), cause => cause === error)
+    assert.equal(setup.failures.length, 1); assert.equal(setup.requests.length, 0); assert(setup.channel.terminal.restored); setup.dispose()
+    brokenApply = false; brokenRestore = true
+    const c = make({ terminal: () => terminal({ isTTY: true, fd: 27 }) })
+    c.channel.dispose(); assert.equal(c.failures[0], error); assert(c.abort.signal.aborted); assert(!c.channel.terminal.restored)
+    brokenRestore = false; c.dispose()
+    const eof = make({ terminal: () => terminal({ isTTY: true, fd: 27 }) }); eof.input.emit('close')
+    const first = eof.failures[0]; brokenRestore = true; eof.channel.dispose(); assert.equal(eof.failures[0], first); assert.equal(eof.failures.length, 1)
+    brokenRestore = false; eof.dispose()
+  }
+  for (const setup of [{ closed: true }, { aborted: true }]) {
+    const c = make(setup); await assert.rejects(c.channel.wait('ready', 'verify-transport')); assert.equal(c.requests.length, 0); assert.equal(c.failures.length, 1); c.dispose()
+  }
+  {
+    const c = make(), ready = c.channel.wait('transport-ready', 'verify-transport')
+    c.input.emit('line', c.result('transport-ready')); assert.deepEqual(await ready, { ready: true })
+    assert.equal(c.timers.size, 0); assert.throws(() => c.channel.wait('transport-ready', 'verify-transport'))
+    const pending = c.channel.wait('second', 'verify-transport'); c.input.emit('line', c.result('second', { ready: true }))
+    assert.deepEqual(await pending, { ready: true }); c.dispose(); assert.equal(c.failures.length, 0); assert(!c.abort.signal.aborted)
+  }
+  for (const pending of [false, true]) {
+    const c = make(), ready = c.channel.wait('ready', 'verify-transport'); c.input.emit('line', c.result('ready')); await ready
+    const next = pending ? c.channel.wait('next', 'verify-transport') : null
+    c.input.emit('close'); assert(c.abort.signal.aborted); assert.equal(c.failures.length, 1)
+    const first = c.failures[0]; c.input.emit('error', new Error('later error')); assert.equal(c.failures[0], first)
+    if (next) await assert.rejects(next, error => error === first)
+    await assert.rejects(c.channel.wait('after-close', 'verify-transport'), error => error === first)
+    assert.equal(c.requests.length, pending ? 2 : 1); c.dispose()
+  }
+  for (const cause of ['error', 'abort', 'timeout', 'dispose']) {
+    const c = make(), pending = c.channel.wait('ready', 'verify-transport')
+    if (cause === 'error') c.input.emit('error', new Error('synthetic read error'))
+    if (cause === 'abort') c.abort.abort(new Error('synthetic abort'))
+    if (cause === 'timeout') [...c.timers][0].callback()
+    if (cause === 'dispose') c.channel.dispose()
+    await assert.rejects(pending); assert.equal(c.failures.length, 1); assert(c.abort.signal.aborted); c.dispose()
+  }
+  for (const change of [{ runId: 'other' }, { candidate: 'c'.repeat(64) }, { guardSha256: 'c'.repeat(64) }, { stepId: 'early' }, { kind: 'other' }, { ok: false }, { receipt: { password: 'SYNTHETIC' } }]) {
+    const c = make(), pending = c.channel.wait('ready', 'verify-transport'); c.input.emit('line', c.result('ready', { ready: true }, change))
+    await assert.rejects(pending); assert(c.abort.signal.aborted); c.dispose()
+  }
+  {
+    const c = make(); c.input.emit('line', c.result('early')); assert(c.abort.signal.aborted)
+    await assert.rejects(c.channel.wait('ready', 'verify-transport')); assert.equal(c.requests.length, 0); c.dispose()
+  }
+  {
+    const c = make(), ready = c.channel.wait('ready', 'verify-transport'); c.input.emit('line', c.result('ready')); await ready
+    const next = c.channel.wait('next', 'verify-transport'); c.input.emit('line', c.result('ready'))
+    await assert.rejects(next); assert(c.abort.signal.aborted); c.dispose()
+  }
+  for (const size of [128 * 1024 - 1, 128 * 1024 + 1]) {
+    const c = make(), pending = c.channel.wait('long', 'verify-transport'), receipt = { payload: '' }
+    receipt.payload = 'x'.repeat(size - Buffer.byteLength(c.result('long', receipt)))
+    const line = c.result('long', receipt); assert.equal(Buffer.byteLength(line), size); c.input.emit('line', line)
+    if (size < 128 * 1024) assert.deepEqual(await pending, receipt)
+    else { await assert.rejects(pending); assert(c.abort.signal.aborted) }
+    c.dispose()
+  }
+  const main = source.slice(source.indexOf('async function acceptance(options)'), source.indexOf('\nfunction validateTimeline'))
+  const readyAt = main.indexOf("    assert.deepEqual(await operator.wait('transport-ready', 'verify-transport'), { ready: true })")
+  assert(readyAt > 0 && main.indexOf('  try {') < readyAt)
+  for (const effect of ["import('../src/store/file-store.mjs')", 'await createILinkSimulator(', "await writeFile(join(secretRoot, channelRef)", 'await createFileStore(stateFile).update(', 'await initializeAuthFile(', 'host = await boot(true)', 'pages[actor] = await browser(actor)']) assert(main.indexOf(effect) > readyAt, 'transport ready must precede ' + effect)
+  assert(main.includes('operatorChannel(input, binding, abort.signal, error => { fail(error); void cleanup.run() })'))
+  assert(main.includes('operator.dispose(); input.close()'))
+  {
+    const c = make(), ready = c.channel.wait('ready', 'verify-transport'); c.input.emit('line', c.result('ready')); await ready
+    let release, writes = 0, adds = 0, closes = 0
+    const creating = new Promise(done => { release = done })
+    const setup = main.slice(main.indexOf('    simulator = await createILinkSimulator('), main.indexOf("    const channelRef = 'P7_'"))
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
+    const initialize = new AsyncFunction('abort', 'createILinkSimulator', 'fixtures', 'refs', 'writeFile', 'hostConfig', 'weixinAccount', 'hash', 'let simulator; try {\n' + setup + '\n} finally { await simulator?.close() }')
+    const pending = initialize(c.abort, () => creating, [], {}, async () => { writes++ }, '/synthetic/config', {}, hash)
+    c.input.emit('close'); release({ addAccount() { adds++ }, async close() { closes++ } })
+    await assert.rejects(pending); assert.equal(adds, 0); assert.equal(writes, 0); assert.equal(closes, 1); c.dispose()
+  }
 }
 
 async function callerChecks(harness) {

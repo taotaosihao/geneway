@@ -524,6 +524,38 @@ API05已在原来源仍有效时由owner正常停：两launcher0、两child null
 
 顺序为本节独审→Sol窄修/真实producer回归/独立代码审查/本地提交→新准备包与08 SOURCE/PURE独审→C24完整来源→新schema/API/首次License及所有非fresh命令模板就绪→单次08→最新正式样本及A/B正式fixture→精确setup→动态catalog/observer/主输入、全来源与两MCP最新样本门→立即完整十步J10。窗口内不改源或规划；窗口不足、漂移、未知写入或安全负例失败即停依赖步骤，不自动追加窗口、重放或拼接。成功完整J10、有限窗口完成、运维适用矩阵、实录/离线交付、独立总审与用户最终验收仍分别成立；无push/部署/发布或新增业务权限。
 
+### 8.18 final08 环境准入、固定观察终态与单层承接（2026-10-17，独立过设通过，实施待验）
+
+本节由独立工程、产品两名 Astra 先分别读证，再正式交换形成 CONSENSUS；controller 原位汇总，第三名未参与规划者独审通过后才可执行下述新诊断与实施。适用范围仅为首次 Chrome 启动失败、05/08 launcher 退出证据缺口及新完整 J10 的准备承接；不改变业务目标、写动作、权限、全量交付或用户最终验收。08 已实际结束后才开始此次规划，非窗口内补写。
+
+**事实与历史保留。** C24 基线 `fa9e300463049b1ea00a8c94c282933d0cb405ae`、候选 SHA `9674d8b42108a9a4e6ea65f947a100e45bc5c0beb5f41f999e2a7ea611305ad0`。final08 主 session4638 exit1，首个 Chrome `owned Chrome failed`，steps/facts/eventAcks 均空；命令用了 `HOME=/nonexistent/p7-j10` 且缺 TMPDIR，P7 的 systemEnvironment 原样传递，Chrome stderr pipe 未消费。此前 owned HOME 成功及旧 headless 诊断支持环境假说，但本轮缺 stderr/exit metadata，根因仍未知。已存在本轮 synthetic Feishu ref、Host 状态和 observer baseline；attempts 为0字节、无 arm/claim/consumed、无 operator 业务请求，不能称没有副作用。原件、失败视频、秘密引用及准备记录均不覆盖。
+
+05 API child `2883547/2884608` 的 PID/PG 已不在，journal 为 `null/SIGTERM`；launcher 实际退出码未知。观察原件 `run05-api-ready/observed-exit.json` SHA `60c2c99e1cf1cc38ce72d0b7cbd2ff16b74698a3d6a64f630efa8c63b89292c4`，恢复的 ready 表示从退出记录重建且摘要与当时观察相等，不伪称原始复制。08 host2912305 早已消失、launcher exit 同样未知；inside102402 持续到05:29:37UTC后退出。root及独立Sol实核61样本354..414、122消息、完整DDATA摘要、1386→1508、ACK1508/pending0/ackPending0及全部相关进程退出。窗口 SHA `ba09a3cdb77b353013a167975728590e10c6b2baec1ba64ac83eeff112cd06b9`，末样本 SHA `5e10c660dcf4221104146c639e2397c6941b9c2fad195128889656a2b3c38139`；`hive-window08-observation01/observed.json` SHA `92cdbabc1f76f8e68f30194e40331097ac63750d697b77edfd8c7d2fb6e43ade` 明确保留 launcherExitCode=null/naturalLauncherExitProven=false。观察命令exit0不是旧launcher exit0，窗口完成不继承freshness。C24全来源在P7源码改动前再取证：实际checkSources session13909 exit0、2026-10-17T05:36:56.152Z、5496ms；随后旧候选仅作为已执行准备的固定历史身份，不能要求改动后的当前文件仍等于C24，也不能声称源码等价。
+
+**A：无业务 Chrome 准入，先做且有界。** 独立过设通过后，Sol 在排他 `p7-acceptance/j10-chrome-env-diagnostic02` 制作检查，使用实际Node/Chrome、P7的X11完整argv与Preferences、Xvfb、本机静态页面及既有CDP helper。不得用headless/dump-dom代替，不启动Geneway/Kivo、不读运行秘密、不调模型或真实渠道。基线badHOME且无TMPDIR；变体只换为本任务排他owned0700 HOME，TMPDIR仍缺失，其余环境/argv语义相同。每组独立profile，记录允许的环境项、argv、binary身份/版本、PID/startTicks/PG、实际exit/signal、私有stderr、CDP结果及cleanup；诊断就绪等待有界，不自动重试。正式环境另用owned HOME与TMPDIR=/tmp，验证三个独立profile同时存活、CDP正确DOM及读写、全部受控退出。若badHOME不复现，仅保留历史因果未知；正式环境可用、错误环境副作用前拒绝、失败诊断可取得、进程清理完整才是准入，不能把重现旧红变为永久阻断。正式环境或清理失败即停依赖动作。
+
+源码只在 `scripts/accept-p7.mjs` 既有验收入口及harness-check窄改：在初始化Host/synthetic secret或其他运行副作用前检查显式HOME非symlink、本人拥有、0700且可写，TMPDIR有效；复用既有privateDirectory/access等边界。Chrome就地沿accept-p4-s1的stderrText取尾3000惯例消费pipe，安全spawn error分类、exitCode/signalCode及有限stderr只进入已有0600 first-failure私有诊断，公共report/manual不加入调试信息。不改共享systemEnvironment、产品API、正常停机、网络guard或成员隔离；不建日志框架、preload拦截或通用launcher。诊断与正式J10消费同一份已审固定命令/环境定义，明确owned HOME及TMPDIR=/tmp，不再手抄env。验证环境提前拒绝且无产品副作用、尾部界限、exit/signal区分、敏感环境不入诊断；实际 `node --check scripts/accept-p7.mjs` 与 `node scripts/accept-p7.mjs --harness-check`，未实施者独立审查真实Chrome证据及diff。正常stopOwned/boot方法未改时保留method01适用性，不重复整套失锁诊断。
+
+**固定观察终态准入，替代方法而不回填历史。** 当前旧consumer要求launcherExitCode0，现状不满足；本节独审前不能启动新API/窗口。合同§2.6允许验收方法失效后的局部重规划，§2.5保留用户所有的业务与授权决定；§8.3已有旧失败保留、发布效果核清后固定新边界的先例。因此，本节通过后允许在新包中仅针对固定05/08引入明确的观察终态准入，旧代码和UNKNOWN原件不改，不静默删除原断言、不泛化接受任意失败。
+
+新准入必须实核固定路径/SHA及旧ready/exited不变量、child退出形态、精确PID/startTicks/PG和关联进程已不在、当前源与准备效果；读取错误/权限错误/缺pin/漂移不得当gone。08另外逐份核61样本和122正式消息摘要、无birth/重号/缺口、完整末边界与ACK、全部publisher退出。任何未解释业务写入、发布、权限变化、来源漂移或活进程都阻断依赖动作；换库不能绕过。旧launcher退出仍UNKNOWN，新门只证明特定历史效果及归属已核清。对有持久身份的进程核原件实际具备的PID/startTicks/PG；原API launcher未保存OS PID，仅按固定executable/启动脚本、output、launch-id的当前进程参数核无匹配残留，不推定原parent身份或退出码，不把tool sessionId当OS PID。
+
+不新增父wrapper、守护服务或重试平台：现有证据没有证明它能避开工具清理。root保持同一active turn直到本轮API/Hive/J10等owned长运行命令均终态；沿既有SIGTERM/stop流程，wait原launcher真实返回并立即保存，再核journal/PID/PG/完整来源。会话丢失与结束turn只有时间关联，不称已证根因。若再次失联，仍为UNKNOWN，不能用子journal、入口意向exitCode或观察命令exit0代替真实wait。
+
+**B：固定单层继承05准备，承接门通过后才就绪。** 原C24/原包直接重启被排除：API launch固定run05、已有journal排他、operator/observer/main/window精确绑定。比较的新fresh方案虽然没有base/current接缝，但需新增两PG、两Redis、两网络及schema/License/fixture/setup写，修改P7固定端口，且同样不能解决旧退出缺口。双planner条件首选复用现有05物理资源；主验收verifyApiStates已区分baseCandidate=fixture.candidate与candidate=当前候选，历史fixture的Hive创建依据与实际MCP新鲜度也已分开。保留这一现有职责，不增加通用resume、多层继承或任意候选等价。
+
+实际旧包只读门在进入数据库前失败：publicBindings 的555项 externalFiles 中仅当前 P7-plan.md 不匹配，旧pin为067b5c9c81760007d9df373fac7a08447c64b04692f5d1c7a0de09e28241bd69；新增本节即改变该文件，保持HEAD和产品源码不足以满足旧门。05:36的C24来源PASS仅保留为当时历史事实，原loadContext当前FAIL不得包装成PASS。两名Astra独立纠错并正式交换后，修正顺序为本节独审→A无业务环境准入及窄修→既已计划的单层新包SOURCE/PURE和C25当前完整闭包→新包第一次实际只读承接门；通过前禁止启动新API/worker、schema/License激活/fixture/setup写入、新窗口或业务。历史计划原字节从固定fa9e300463049b1ea00a8c94c282933d0cb405ae的精确路径读取，实核等于原067b摘要；当前批准计划另以当前闭包精确绑定。仅这一个历史计划路径按历史身份处理，其余外部输入及产品源码按base/current各自责任严格验证，不泛化忽略文档或来源漂移。不回写当前批准计划、不改旧包/原件、不建namespace/过渡loader；历史闭包不是当前工作区等价。新包在C25完整当前闭包下、启动API或业务前实核准备快照、当前License/权限及进程；门后到启动若发生相关状态变化必须复核，早先快照不是当前状态的替代证明。只读门须核A当前snapshot等于completed setup的after，B等于其原before/after；A三条setup已消费、其他生产者原样，B三条pending原样。snapshot实际覆盖13业务/配置/审计/通知表及outbox、worker instance、worker execution共16类，不能称05全227表。另核维修reported/revision0、无新增维修/dispatch/worker消费或未知delivery/attempt；当前License valid、精确模块、账号/密钥状态及权限；八旧库按既有全表指纹保护。原main无work/action/rule/业务消息、observer零attempt且无arm/claim/consumed、operator没有请求/一次性动作，须与实际原件一致。源身份、权限或效果不能核清时B不就绪，不能先写后查。
+
+固定新包 `p7-kivo-runtime-run05-continuation01/`，当前排他输出 `/tmp/geneway-p7-kivo-runtime-05-continuation01`，候选 `candidate-final25.json`；承接的业务runId仍为 `geneway-p7-20261017-05`，保持fixture/sourceInstance及34781/34782等原资源身份。新的API launchId为 `run05-current01`，日志在当前输出内 `api-a-run05-current01.json` / `api-b-run05-current01.json`；baseCandidate固定C24，candidate/current context独立绑定C25。主runId `geneway-p7-20261017-05-continuation01-j10-final09`，排他 `j10-final09`、新Host/auth/会话/observer control/secret-root及HOME；新路径实际入口重核不存在，不自动选号。
+
+仅允许一层“C24已执行准备→C25实际执行”：原schema run、两首次License、两fixture、completed setup、旧API journal保持字节不变；只验证承接，不再activate、POST fixture或consume setup。新包按既有职责窄处理resources/manifest、runtime-io/support、API当前launch、License历史消费、setup验证及operator/worker当前绑定，所有实际加载及传递来源进入当前完整闭包。不得复制更旧continuation链或用旧checker失败当源码豁免。旧fixture的sample354/355继续是历史创建依据，不改写为09、不继承freshness；当前实际MCP读取仍必须过120秒/5秒future与对象/cache门。旧准备记录只证明已发生效果，当前权限和执行来源另行核验。
+
+SOURCE/PURE独审覆盖历史计划错revision/hash、当前计划漂移、非计划external漂移、C24冒充current、坏历史pin、current错配、旧API冒充live、setup重消费、未知操作重入、observer串目录、闭包遗漏、观察终态缺字段及活进程等负例。若具体实施需要第二层继承、改写旧原件或新恢复框架，停止B；fresh为已比较备选，但须controller明确选择、固定身份/源/端口及独审后才能实施，不自动切换。所有原件及用户UI sketches继续保护。
+
+**一个有限09，非fresh门全部提前。** 工作区本节纠错独审→提交计划→A环境准入/窄修/独立代码审查及本地提交→新包与09 SOURCE/PURE独审→C25当前完整来源及新包首次实际只读承接状态/权限/进程门→新API及实际当前License核验→catalog/observer/operator/精确命令等所有非fresh输入就绪→单次09→两实例真实MCP最新样本门→立即完整十步J10。复用05不重fixture/setup、不从final08恢复、不拼旧步骤/录像。
+
+09只允许415..475共61样本、30秒、最大1860秒、122消息、birth=false、1508→1630，同tenant/device，严格消费08真实完成/观察原件及全量边界；不得要求或伪造旧launcher自然exit0。窗口内不改源、不规划、不延长、不自动追加10；任何未知写入保持禁止重放。成功J10、当前业务配对恢复、安装/容量/升级回退对当前候选的适用矩阵、G/J/AC全部要求、MP4解码/1倍速离线播放/独立媒体审查/飞书交付回读及用户最终验收仍分别必达。历史AC-22时序限制不补签，不部署、不发布、不合入。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

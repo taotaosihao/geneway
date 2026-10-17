@@ -70,6 +70,18 @@ function gone(pid) { try { process.kill(pid, 0); return false } catch (error) { 
 async function privateJson(path) { const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { const stat = await fd.stat(); assert(stat.isFile() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600); const bytes = await fd.readFile(); return { value: JSON.parse(bytes), sha256: hash(bytes) } } finally { await fd.close() } }
 async function privateBytes(path) { const fd = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW); try { const stat = await fd.stat(); assert(stat.isFile() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600); return fd.readFile() } finally { await fd.close() } }
 async function privateDirectory(path) { const stat = await lstat(path); assert(stat.isDirectory() && !stat.isSymbolicLink() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o700) }
+export async function validateP7Environment(env = process.env) {
+  assert(isAbsolute(env.HOME ?? ''), 'explicit private HOME required')
+  await privateDirectory(env.HOME)
+  await access(env.HOME, constants.W_OK | constants.X_OK)
+  assert(isAbsolute(env.TMPDIR ?? ''), 'explicit writable TMPDIR required')
+  assert((await lstat(env.TMPDIR)).isDirectory(), 'TMPDIR must be a directory')
+  await access(env.TMPDIR, constants.W_OK | constants.X_OK)
+}
+export function p7ChromeDiagnostics(child) {
+  return { spawnErrorCode: child.spawnError ? (/^[A-Z][A-Z0-9_]{0,63}$/.test(child.spawnError.code ?? '') ? child.spawnError.code : 'SPAWN_FAILED') : null,
+    exitCode: child.exitCode, signalCode: child.signalCode, stderrTail: (child.stderrText ?? '').slice(-3000) }
+}
 async function secretMetadata(directory, ref) { assert(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(ref)); const stat = await lstat(join(directory, ref)); assert(stat.isFile() && !stat.isSymbolicLink() && stat.uid === process.getuid() && (stat.mode & 0o777) === 0o600) }
 async function assertWebhookPortFree() {
   const listener = createServer()
@@ -326,6 +338,7 @@ function seedState(state, fixtures, channelRef) {
 }
 
 async function acceptance(options) {
+  await validateP7Environment()
   const inputKeys = ['fixture-a', 'fixture-b', 'api-state-a', 'api-state-b', 'catalog', 'candidate', 'observer-config']
   const inputs = Object.fromEntries(await Promise.all(inputKeys.map(async key => [key, await privateJson(options[key])])))
   const fixtures = validateP7Fixtures(inputs['fixture-a'].value, inputs['fixture-b'].value, inputs.catalog.value)
@@ -453,7 +466,7 @@ async function acceptance(options) {
     } catch (error) { failure ??= error }
     const report = { ok: !failure, phase: 'P7-J10', scope: '同一候选、两条真实ZenMux路由、synthetic/external-test Kivo；渠道为模拟验收。容量、空安装、DSH回退另需同候选证据。',
       binding, preflight, postflight, audit, media, steps, facts, eventAcks, failure: failure ? { code: /^[A-Z][A-Z0-9_]{0,63}$/.test(failure.code ?? '') ? failure.code : 'ACCEPTANCE_FAILED', step: steps.find(item => item.status === 'failed')?.id ?? null } : null, cleanup: cleanup.state }
-    if (failure) await writeFile(join(privateRoot, 'first-failure.json'), JSON.stringify({ name: failure.name, code: failure.code ?? null, message: String(failure.message).slice(0, 8192), stack: String(failure.stack ?? '').slice(0, 16384) }, null, 2) + '\n', { mode: 0o600, flag: 'wx' }).catch(() => {})
+    if (failure) await writeFile(join(privateRoot, 'first-failure.json'), JSON.stringify({ name: failure.name, code: failure.code ?? null, message: String(failure.message).slice(0, 8192), stack: String(failure.stack ?? '').slice(0, 16384), ...(failure.chrome ? { chrome: failure.chrome } : {}) }, null, 2) + '\n', { mode: 0o600, flag: 'wx' }).catch(() => {})
     try {
       await writeFile(join(options.output, 'index.html'), manual(report), { mode: 0o600 })
       await writeFile(join(options.output, 'observations.json'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
@@ -524,8 +537,13 @@ async function acceptance(options) {
     await writeFile(join(profile, 'Default/Preferences'), JSON.stringify({ credentials_enable_service: false, profile: { password_manager_enabled: false }, translate: { enabled: false } }), { mode: 0o600 })
     const args = ['--no-sandbox', '--no-first-run', '--new-window', '--no-default-browser-check', '--ozone-platform=x11', '--disable-gpu', '--disable-background-networking', '--disable-component-update', '--hide-crash-restore-bubble', '--disable-save-password-bubble', '--disable-features=PasswordManagerOnboarding,PasswordLeakDetection,Translate,TranslateUI,OptimizationHints', '--password-store=basic', '--user-data-dir=' + profile, '--remote-debugging-port=' + port, '--remote-debugging-address=127.0.0.1', '--window-size=1440,930', '--window-position=0,0', '--app=' + refs.origin]
     const child = launch('/usr/bin/google-chrome', args, { env: { ...systemEnvironment(), DISPLAY: display } })
-    const target = await poll(async () => { if (child.spawnError || child.exitCode !== null || child.signalCode !== null) throw new Error('owned Chrome failed'); try { return (await (await fetch('http://127.0.0.1:' + port + '/json/list')).json()).find(item => item.type === 'page' && item.url.startsWith(refs.origin)) } catch { return false } }, 'isolated Chrome')
-    const page = await connect(target, () => false), front = page.front; page.actor = actor; page.child = child
+    child.stderrText = ''; child.stderr?.on('data', chunk => { child.stderrText = (child.stderrText + chunk).slice(-3000) })
+    let page
+    try {
+      const target = await poll(async () => { if (child.spawnError || child.exitCode !== null || child.signalCode !== null) throw new Error('owned Chrome failed'); try { return (await (await fetch('http://127.0.0.1:' + port + '/json/list', { signal: AbortSignal.timeout(3000) })).json()).find(item => item.type === 'page' && item.url.startsWith(refs.origin)) } catch { return false } }, 'isolated Chrome')
+      page = await connect(target, () => false)
+    } catch (error) { error.chrome = p7ChromeDiagnostics(child); throw error }
+    const front = page.front; page.actor = actor; page.child = child
     page.front = async () => {
       for (const other of Object.values(pages).filter(item => item !== page)) { const window = await other.send('Browser.getWindowForTarget'); await other.send('Browser.setWindowBounds', { windowId: window.windowId, bounds: { windowState: 'normal', left: 1600, top: 0 } }) }
       const { width, height } = page.size(), window = await page.send('Browser.getWindowForTarget')
@@ -1065,6 +1083,42 @@ async function harnessCheck() {
     const missing = [...runtimeArgs], index = missing.indexOf('--' + key); missing.splice(index, 2); assert.throws(() => argumentsFor(missing), 'missing ' + key)
   }
   const harness = await readFile(script, 'utf8')
+  {
+    const { EventEmitter } = await import('node:events')
+    const metadata = { isDirectory: () => true, isSymbolicLink: () => false, uid: process.getuid(), mode: 0o40700 }
+    const files = new Map([['/owned', metadata], ['/tmp', { ...metadata, mode: 0o41777 }]])
+    const lstat = async path => { assert(files.has(path), 'missing directory'); return files.get(path) }
+    const checked = [], access = async (path, mode) => { checked.push(path); assert.equal(mode, constants.W_OK | constants.X_OK); assert.notEqual(path, '/denied', 'not writable') }
+    const directory = Function('assert', 'lstat', 'process', privateDirectory.toString() + ';return privateDirectory')(assert, lstat, process)
+    const validate = Function('assert', 'isAbsolute', 'privateDirectory', 'lstat', 'access', 'constants', validateP7Environment.toString() + ';return validateP7Environment')(assert, isAbsolute, directory, lstat, access, constants)
+    await validate({ HOME: '/owned', TMPDIR: '/tmp' }); assert.deepEqual(checked, ['/owned', '/tmp'])
+    for (const env of [{}, { HOME: 'relative', TMPDIR: '/tmp' }, { HOME: '/missing', TMPDIR: '/tmp' }, { HOME: '/owned' }, { HOME: '/owned', TMPDIR: 'relative' }, { HOME: '/owned', TMPDIR: '/missing' }]) await assert.rejects(validate(env))
+    for (const change of [{ isSymbolicLink: () => true }, { isDirectory: () => false }, { uid: process.getuid() + 1 }, { mode: 0o40755 }]) {
+      files.set('/bad', { ...metadata, ...change }); await assert.rejects(validate({ HOME: '/bad', TMPDIR: '/tmp' }))
+    }
+    files.set('/denied', metadata); await assert.rejects(validate({ HOME: '/denied', TMPDIR: '/tmp' }))
+    files.set('/not-directory', { ...metadata, isDirectory: () => false }); await assert.rejects(validate({ HOME: '/owned', TMPDIR: '/not-directory' }))
+    await assert.rejects(validate({ HOME: '/owned', TMPDIR: '/denied' }))
+    assert(harness.includes('async function acceptance(options) {\n  await validateP7Environment()'))
+    let reads = 0
+    const rejection = new Error('synthetic invalid environment')
+    const guarded = Function('validateP7Environment', 'privateJson', acceptance.toString() + ';return acceptance')(async () => { throw rejection }, async () => { reads += 1 })
+    await assert.rejects(guarded({}), error => error === rejection); assert.equal(reads, 0)
+    const listener = harness.match(/child\.stderrText = ''; child\.stderr\?\.on\('data', chunk => \{[^\n]+\}\)/)?.[0]
+    assert(listener)
+    const child = { stderr: new EventEmitter(), exitCode: 7, signalCode: null, env: { ZENMUX_API_KEY: 'SYNTHETIC_ENV_CANARY' }, spawnError: { code: 'ENOENT', message: 'SYNTHETIC_ENV_CANARY' } }
+    Function('child', listener)(child)
+    child.stderr.emit('data', 'a'.repeat(4000)); child.stderr.emit('data', Buffer.from('tail'))
+    assert.equal(child.stderrText, 'a'.repeat(2996) + 'tail')
+    assert.deepEqual(p7ChromeDiagnostics(child), { spawnErrorCode: 'ENOENT', exitCode: 7, signalCode: null, stderrTail: child.stderrText })
+    assert(!JSON.stringify(p7ChromeDiagnostics(child)).includes('SYNTHETIC_ENV_CANARY'))
+    Object.assign(child, { exitCode: null, signalCode: 'SIGABRT', spawnError: null })
+    assert.equal(p7ChromeDiagnostics(child).signalCode, 'SIGABRT'); assert.equal(p7ChromeDiagnostics(child).exitCode, null)
+    child.spawnError = { code: 'SYNTHETIC_ENV_CANARY\nunsafe' }; assert.equal(p7ChromeDiagnostics(child).spawnErrorCode, 'SPAWN_FAILED')
+    const report = harness.slice(harness.indexOf('    const report = { ok: !failure'), harness.indexOf('    if (failure) await writeFile'))
+    assert(!/chrome|stderrText|stderrTail|spawnErrorCode/.test(report), 'Chrome diagnostics must stay private')
+    assert(harness.includes("...(failure.chrome ? { chrome: failure.chrome } : {})"))
+  }
   await callerChecks(harness)
   {
     const { createChannelService } = await import('../src/channel-service.mjs')
@@ -1186,7 +1240,7 @@ async function harnessCheck() {
   assert.throws(() => validateP7Polls({ ...polls, maxActivePolls: () => 2 }, ['a'], { minFullCycles: 3 }))
   assert.throws(() => validateP7Polls({ ...polls, calls: polls.calls.slice(1) }, ['a'], { minFullCycles: 3 }))
   for (const value of [{ accessToken: 'synthetic' }, { note: 'Bearer synthetic' }, { privateKey: 'not-a-key' }]) assert.throws(() => noSecrets(value))
-  console.log('P7 J10 harness checks passed (same-object records, retry HTTP/readback, actual protocol failure classification, disabled-route refusal and unchanged business facts, argument guard, actual handoff permissions and revocation, main-run observer directory, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model/network/state-file writes=0)')
+  console.log('P7 J10 harness checks passed (private HOME/TMPDIR before side effects, bounded private Chrome stderr and exit/signal, same-object records, retry HTTP/readback, actual protocol failure classification, disabled-route refusal and unchanged business facts, argument guard, actual handoff permissions and revocation, main-run observer directory, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model/network/state-file writes=0)')
 }
 
 async function callerChecks(harness) {

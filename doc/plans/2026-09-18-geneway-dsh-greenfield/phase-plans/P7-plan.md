@@ -354,6 +354,16 @@ Hive04保持既定110–170、transport898→1020、61x30/最大1860/最多122�
 
 A/B支持门均须证明required→valid、restricted=false、精确modules/ID/有效期，新request唯一consume、唯一预期state与activate audit绑定admin/session/trace；旧request/audit不变，业务fixture/machine/webhook/rule/delivery/worker此时仍零，旧四库不变，前后完整来源检查通过。后续fixture消费成功receipt和当前valid状态，不重复request/签名/activate；过期或漂移停止，不自动续期。License支持门通过后才按§8.6顺序单次启动冻结Hive05，在120秒新鲜度与既定有限窗内完成fixture/setup/动态输入和完整J10。纯parser或License局部成功均不能替代十步旅程、媒体交付、独立阶段审查和用户验收。
 
+### 8.9 T5 停用模型路由的创建拒绝断言（2026-10-17，实施前）
+
+两名Astra分别只读核实际调用链后正式交换CONSENSUS；本节在实现前汇总，仍先独立过设、再SOURCE实施和未实施者独审。当前HEAD `334cdfcfd3ec3528ea9c647ba9ca3ccf40095136`，accept-p7 SHA `70f6a81ce6a57bb13603b624f85581b69fd4436073c15cd34bd8ee9dffb0c05c`。后半旅程独立静态预查仅发现此确定caller冲突，其余路径的静态一致不称runtime通过。
+
+**事实与最小修正。** accept-p7:977–981停用p7-deepseek后要求4xx及MODEL_NOT_CONFIGURED。正式modelRouteSnapshot会拒绝disabled路由，但work-service.authorizedBinding将该异常转为FORBIDDEN；createWork在生成work/execution/reservation前返回失败原state，server直接映射403。故只修同文件本步骤专用小断言为精确HTTP403/FORBIDDEN，runtime与harness共用；不改产品错误分类、模型路由或隐式回退行为。停用PATCH完成后再取得works/reservations基线，POST后深比较业务事实不变并保持模型审计请求零增；PATCH自身已有pending approval失效语义不得错误计入POST。保留原复权操作、事实记录、十步顺序和其他验收门。文件store可能同值重写，因此仅称无新work/execution/reservation/model效果，不称磁盘零写。
+
+**最小纯回归。** 同文件harness使用ensureReady后的内存store与实际createWorkService；完整合法TPM请求先在仅route.enabled=true的副本上由实际authorizeWorkBinding证明成员/员工/skill/connection/input可用。再将所选DeepSeek设disabled、保持另一路GLM可用，以真实createWork验证403/FORBIDDEN、整个内存state不变和runner调用0；共享caller断言拒绝旧MODEL_NOT_CONFIGURED、503、200、其他4xx及新增业务事实。禁真实网络、模型、数据库、子进程与文件写入，执行语法/完整harness和独立SOURCE审查。该纯证据不能替代最终J10真实恢复后停用路由拒绝与无模型回退证据。
+
+仅授权`scripts/accept-p7.mjs`此局部及同文件纯检查；§8.8包可继续已审外置SOURCE，最终资源/manifest/candidate须等待本修正实际提交HEAD及SHA，不能先按334cdfc冻结。Geneway142项集合不变，仅accept再更新，其余141项和Kivo源码/runtime仍相对C17不变；历史候选与失败证据不改签。如发现需要产品行为变化或新增范围，停止对应动作重新决策。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

@@ -84,7 +84,7 @@ export function validateP7Fixtures(a, b, catalog) {
     const instance = ['a', 'b'][index], c = fixture.connection, f = fixture.facts
     assert.equal(fixture.instance, instance); assert.equal(fixture.phase, 'fixture-ready')
     assert.equal(fixture.dataMode, 'synthetic'); assert.equal(fixture.sourceEnvironment, 'external-test')
-    assert.equal(c.kind, 'kivo-mcp'); assert.equal(c.baseUrl, `http://127.0.0.1:${34581 + index}/api/v1/mes/mcp`)
+    assert.equal(c.kind, 'kivo-mcp'); assert.equal(c.baseUrl, `http://127.0.0.1:${34681 + index}/api/v1/mes/mcp`)
     assert.equal(c.issuer, new URL(c.baseUrl).origin); assert.equal(c.sourceInstance, fixture.runId + '-' + instance)
     assert.equal(c.sourceSystem, 'KivoMES'); assert.equal(c.sourceEnvironment, 'external-test'); assert.equal(c.dataMode, 'synthetic'); assert.equal(c.evidenceMode, 'actual-mcp')
     assert.equal(c.credentialRef, 'MCP_PRIVATE_' + instance.toUpperCase()); assert.deepEqual(c.allowedObjectIds, [])
@@ -276,13 +276,35 @@ async function ipc(child, method, input) {
     child.send({ kind: 'channel-acceptance', id, method, input }, error => { if (error) { finish(); reject(error) } })
   })
 }
-async function stopOwned(child, signal = 'SIGTERM') {
+export async function stopOwned(child, signal = 'SIGTERM') {
   if (!child?.pid) return
+  if (child.auditRole === 'host' && signal === 'SIGTERM') {
+    let timer, onExit
+    let graceful = child.exitCode !== null || child.signalCode !== null
+    if (!graceful) {
+      const exited = new Promise(done => { onExit = () => done(true); child.once('exit', onExit) })
+      try {
+        try { process.kill(child.pid, 'SIGTERM') } catch (error) { if (error.code !== 'ESRCH') throw error }
+        graceful = await Promise.race([exited, new Promise(done => { timer = setTimeout(() => done(false), 10_000) })])
+      } finally { clearTimeout(timer); child.removeListener('exit', onExit) }
+    }
+    const deadline = Date.now() + 10_000
+    while (graceful && child.exitCode === 0 && child.signalCode === null && !gone(-child.pid) && Date.now() < deadline) await new Promise(done => setTimeout(done, 25))
+    if (!graceful || child.exitCode !== 0 || child.signalCode !== null || !gone(-child.pid)) {
+      try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') throw error }
+      const deadline = Date.now() + 10_000
+      while (!gone(-child.pid) && Date.now() < deadline) await new Promise(done => setTimeout(done, 25))
+      assert(gone(-child.pid), 'owned Host group remained after failed graceful stop')
+      throw new Error('owned Host did not stop gracefully; owned group cleanup was required')
+    }
+    return
+  }
   await stop(child, signal)
   const deadline = Date.now() + 10_000
   while (!gone(-child.pid) && Date.now() < deadline) await new Promise(done => setTimeout(done, 25))
   assert(gone(-child.pid), 'owned process group remained after graceful stop')
 }
+
 function workPath(id) { return '/api/works/' + encodeURIComponent(id) }
 function actionPath(workId, actionId, operation) { return workPath(workId) + '/actions/' + encodeURIComponent(actionId) + '/' + operation }
 function target(action) { return { actionId: action.id, orderNo: action.preview.payload.orderNo, deviceId: action.preview.target.deviceId, clientId: action.preview.target.clientId, traceId: action.id, resource: action.preview.target.resource } }
@@ -420,7 +442,7 @@ async function acceptance(options) {
       const rows = (await readFile(auditFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line))
       assert(rows.every(row => row.loopbackRoutesSha256 === refs.loopbackRoutesSha256), 'guard loopback routes changed during J10')
       audit = { ...networkAudit(rows, { ...binding, hostPids: children.filter(child => child.auditRole === 'host').map(child => child.pid), models }), models: validateP7ModelAudit(rows), polls: validateP7Polls(simulator, [weixinAccount.id]) }
-      for (const port of [34581, 34582]) assert(rows.some(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === port && row.path === '/api/v1/mes/mcp'), 'actual Kivo MCP traffic missing')
+      for (const port of [34681, 34682]) assert(rows.some(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === port && row.path === '/api/v1/mes/mcp'), 'actual Kivo MCP traffic missing')
     } catch (error) { failure ??= error }
     try {
       const probe = JSON.parse(await command('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', video]))
@@ -465,10 +487,23 @@ async function acceptance(options) {
       GENEWAY_CHANNEL_ACCEPT_HOST: '1', GENEWAY_CHANNEL_HOST_CONFIG: hostConfig }
     const child = launch(process.execPath, [join(root, 'scripts/accept-p4.mjs'), '--host'], { env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
     child.auditRole = 'host'
+    child.auditFile = auditFile; child.auditBinding = binding
     await poll(async () => { if (child.spawnError || child.exitCode !== null || child.signalCode !== null) throw new Error('owned Host failed'); try { return (await fetch(origin)).status === 200 } catch { return false } }, 'owned P7 Host', 30_000)
     const value = await ipc(child, 'snapshot'); assert.equal(value.pid, child.pid); assert.equal(value.address.port, port); assert.equal(value.sdkDispatcher, channelsExpected)
     assert(value.consumers.maxActive <= 1, 'multiple Feishu SDK consumers')
     return child
+  }
+  async function waitWeixinRestart() {
+    await poll(async () => {
+      const identity = (await state()).channelIdentities.find(item => item.id === refs.weixinIdentity.id)
+      assert(identity, 'original Weixin identity disappeared after restart')
+      for (const key of ['id', 'memberId', 'channelAppId']) assert.equal(identity[key], refs.weixinIdentity[key], 'Weixin identity changed after restart')
+      assert.equal(identity.weixin?.botId, weixinAccount.id); assert.equal(identity.status, 'active')
+      assert(identity.weixin.runtimeState !== 'unavailable' && identity.weixin.error?.code !== 'WEIXIN_LOCK_LOST', 'Weixin became unavailable after restart')
+      const active = simulator.activePolls(identity.weixin.botId), max = simulator.maxActivePolls(identity.weixin.botId)
+      assert(max <= 1 && active <= 1, 'multiple Weixin pollers after restart')
+      return identity.weixin.runtimeState === 'connected' && active === 1
+    }, 'same Weixin identity connected after normal restart', 30_000)
   }
   async function login(actor) {
     const result = await request(actor, '/api/session', 'POST', { loginName: actor, password: passwords[actor] })
@@ -700,6 +735,7 @@ async function acceptance(options) {
       assert.equal(rootBefore.status, 'waiting_input')
       await stopOwned(host); host = await boot(true)
       for (const actor of ['admin', 'a', 'b']) await login(actor)
+      await waitWeixinRestart()
       assert.equal((await work('a', refs.rootId)).status, 'waiting_input')
       for (let generation = 0; generation < rootBefore.plan.items.length; generation++) {
         await openWork('a', refs.rootId)
@@ -746,7 +782,7 @@ async function acceptance(options) {
       await capture(pages.a, '协作根导航到真实关联子工作与来源')
       const auditBefore = (await readFile(auditFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line))
       const baseline = Object.fromEntries(models.map(model => [model, auditBefore.filter(row => row.kind === 'fetch' && row.host === 'zenmux.ai' && row.model === model).length]))
-      const bMcpBefore = auditBefore.filter(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === 34582 && row.path === '/api/v1/mes/mcp').length
+      const bMcpBefore = auditBefore.filter(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === 34682 && row.path === '/api/v1/mes/mcp').length
       const pair = await Promise.all([
         { actor: 'a', employeeId: 'p7-agent-a', instance: 'a', model: models[0], label: 'W1' },
         { actor: 'b', employeeId: 'p7-agent-b', instance: 'b', model: models[1], label: 'W2' },
@@ -777,7 +813,7 @@ async function acceptance(options) {
       assert.notEqual(observed.records[0].id, fixture('a').facts.record.recordId); assert.notEqual(observed.linkedDevice.id, fixture('a').facts.deviceId)
       assert.equal((await request('a', workPath(surviving.id))).status, 404); assert.equal((await request('b', workPath(stopped.id))).status, 404)
       const parallelAudit = (await readFile(auditFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line))
-      assert(parallelAudit.filter(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === 34582 && row.path === '/api/v1/mes/mcp').length > bMcpBefore, 'W2 never reached B actual MCP resource')
+      assert(parallelAudit.filter(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === 34682 && row.path === '/api/v1/mes/mcp').length > bMcpBefore, 'W2 never reached B actual MCP resource')
       await openWork('b', surviving.id)
       await pages.b.click('#work-detail [data-runtime-facts] > summary')
       const ownRuntime = await pages.b.evaluate('document.querySelector("#work-detail [data-runtime-facts]")?.innerText')
@@ -827,7 +863,7 @@ async function acceptance(options) {
       const observed = await poll(async () => { const item = await work('a', refs.occurrence.workId); return ['accepted', 'running'].includes(item.status) ? false : item }, 'same-object native follow-up', 180_000)
       validateP7EventObservation(observed, fixture('a'), 'a')
       await reload(pages.a, 'works')
-      await pages.a.click('[data-open-automation="' + refs.rule.id + '"]')
+      await pages.a.click('#automation-list [data-open-automation="' + refs.rule.id + '"]')
       await pages.a.wait('state.automationDetail?.rule?.id === ' + js(refs.rule.id) + ' && Boolean(document.querySelector(' + js('[data-automation-occurrence="' + refs.occurrence.id + '"] [data-open-work="' + observed.id + '"]') + '))')
       await pages.a.click('[data-automation-occurrence="' + refs.occurrence.id + '"] [data-open-work="' + observed.id + '"]')
       await pages.a.wait('state.currentWork?.id === ' + js(observed.id)); await capture(pages.a, '人类来源变化后的规则发生和新观察')
@@ -910,6 +946,7 @@ async function acceptance(options) {
       assert(action.receipt)
       await stopOwned(host); host = await boot(true)
       for (const actor of ['admin', 'a', 'b']) await login(actor)
+      await waitWeixinRestart()
       const after = await state()
       assert.deepEqual(after.works.find(item => item.id === refs.rootId).plan, before.works.find(item => item.id === refs.rootId).plan)
       assert.deepEqual(after.works.find(item => item.id === refs.correlationChild.id).actions, before.works.find(item => item.id === refs.correlationChild.id).actions)
@@ -1072,7 +1109,7 @@ async function harnessCheck() {
   }
   {
     const options = { ...argumentsFor(runtimeArgs), candidateSha256: 'd'.repeat(64) }
-    const fixtures = ['a', 'b'].map((instance, index) => ({ instance, runId: 'p7-producer', candidate: 'e'.repeat(64), connection: { baseUrl: `http://127.0.0.1:${34581 + index}/api/v1/mes/mcp`, clientId: String(index) }, facts: { deviceId: 'device-' + instance } }))
+    const fixtures = ['a', 'b'].map((instance, index) => ({ instance, runId: 'p7-producer', candidate: 'e'.repeat(64), connection: { baseUrl: `http://127.0.0.1:${34681 + index}/api/v1/mes/mcp`, clientId: String(index) }, facts: { deviceId: 'device-' + instance } }))
     const candidate = { p6Runtime: { root: '/synthetic/runtime', files: ['operator.mjs', 'repair-create-observer.mjs', 'selfcheck-operator.mjs'].map(path => ({ path, sha256: 'f'.repeat(64) })) } }
     const config = { schemaVersion: 1, runId: options['run-id'], producerRunId: fixtures[0].runId, candidate: options.candidateSha256, candidatePath: options.candidate,
       baseCandidate: fixtures[0].candidate, setupOutput: dirname(options['fixture-a']), controlDirectory: join(dirname(options['fixture-a']), 'private', 'create-observer-' + options['run-id']),

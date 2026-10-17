@@ -506,6 +506,24 @@ API05已在原来源仍有效时由owner正常停：两launcher0、两child null
 
 运行既有harness-check、test-p4-weixin、test-channel-state与必要语法检查；未实施者独立审源码/PURE后root才执行一次有界真实方法验收。原02false、方法验收、全J10分别报告。源码/方法验收通过并本地提交后才按§8.15制作新fresh包和07来源、冻结C23、执行新完整十步旅程；新旅程仍须证明通知/维修回执真实渠道结果，不能用早门或方法验收替代。旧因果缺口保留至最终报告，不削弱完整验收或用户最终验收。
 
+### 8.17 T5 重启早门的真实身份投影与新完整旅程（2026-10-17，实施前）
+
+工程与产品Astra分别读取final07实际失败及producer/consumer源码，随后正式exchange形成CONSENSUS；本节独立过设PASS前不实施。全量合同、正常停机校准、fresh/no-resume、旧原件保护及用户最终验收边界不变。
+
+**已证失败与替代文字。** C23/fresh04完整来源、schema、License、fixture/setup均通过；final07 session89705 exit1，仅前两步通过，第三步restart-and-supplement在accept-p7:500得到actual `a` / expected `undefined`。refs来自已认证a的GET /api/channels，经memberChannelState→identityDto→safeChannelState/safeIdentity；HTTP投影有意不含memberId，内部state则保留。真实producer→consumer纯复现失败，method01手造带memberId的refs通过，确认该测试缺口。此结论不是本次失锁证据；旧final06 LOCK_LOST原因未知仍保留。final07尚未source-human dispatch，但04已经有fixture/setup等真实准备效果，不能称无副作用。主auth已清除、owned进程及两API全部退出，原两步/录像不得拼成成功旅程。
+
+本节明确纠正§8.16“memberId与原refs一致”的证据层混用：公开id/channelAppId与真实GET所得refs一致；内部memberId严格等于创建该refs的已认证操作者`a`；内部botId严格等于本轮weixinAccount.id。只在accept-p7既有waitWeixinRestart中分开这些断言，不给产品API增加字段、不伪造refs字段、不从被测identity自取expected，不删除归属约束。两处正常restart继续共用该门；active、unavailable/LOCK_LOST立即失败、同bot单poll、最终connected/activePolls=1等判据保持，empty-restore不套该门。
+
+**最小但覆盖真实producer的回归。** 沿既有harness检查/必要外置定向检查，实际执行memberChannelState({ id: 'a' })过滤（使用真实认证actor对象；旧gate负例必须到达比较，不能把UNAUTHORIZED当前置失败证明）→identityDto→safeChannelState/safeIdentity生成refs，再执行实际waitWeixinRestart；明确断言公开refs不含memberId、私有weixin/bot材料。旧gate对同输入失败、新gate通过。owner漂移或缺失负例须先生成合法refs再改被测内部identity，以避免expected跟随错误变化；保错id/app/bot、inactive、unavailable/LOCK_LOST、并发poll>1、connecting/active0等待到connected以及有界超时。核两restart调用位置与失败阻断后续动作，不复制gate算法、不为测试新增产品export/API或通用映射层。运行实际accept-p7 --harness-check及必要语法/受影响检查，未实施者独立审查。method01真实正常释放、runCleanup、真实断锁和硬停证据，在stopOwned、boot审计及相关生产/Node依赖未改时按精确diff/pin沿用，不重跑整套诊断；其手造refs纯检查不再作为本接缝证据。
+
+**fresh05选择及固定边界。** fresh/no-resume本身不逻辑强迫更换物理Kivo库，但04的run/fixture/setup/API/operator均精确绑定C23。复用04将要求新增跨候选历史准备消费机制，不是此次小修复的最低维护成本，因此选择已有fresh单候选机制的新run05，复用稳定compiled runtime、镜像和工具，不回滚04、不重放旧效果。固定runId `geneway-p7-20261017-05`，包`p7-kivo-runtime-run05/`，output `/tmp/geneway-p7-kivo-runtime-05`，候选`candidate-final24.json`，主runId `geneway-p7-20261017-05-j10-final08`及排他`j10-final08`。API34781/34782、PG55981/55982、Redis56981/56982、10.253.77.0/29(gateway .1)与10.253.77.8/29(gateway .9)，webhook34481不变。root预检六端口可用、三目标路径不存在、48网络无重叠；实际入口重核，禁止自动选号。accept-p7五处严格API绑定及对应检查同步窄改，不泛化目标。
+
+新包只沿已审run04现有fresh机制更新固定身份、端口与旧库保护，保正式八字段License/parser、类型化时区、异步日志、worker早ENV、实际API退出和精确setup消费。run01..04八旧库在API停后取当前完整逻辑指纹保护，特别包含04已有准备及03已dispatch效果；不得复用其变化前基线。新首次License/机器秘密由本任务独立生成，获准模型项沿本任务server secret路径，不扫描旧项目。142G必要accept-p7差异、301K及56751compiled runtime和新包当前完整闭包实际逐项校验，独审后才能创建资源；C24与原C23各自不可覆写，不携带continuation/sourcePreparation继承。
+
+**单个有限08及执行次序。** 07已自然完成session15860 exit0，61样本293..353、122发布、1264→1386、ACK1386/pending0/ackPending0；root实际host2188913 PID/PG及inside99057退出，独立61样本含完整DDATA摘要核验PASS。前驱`hive-window07-completion01/receipt.json` SHA `4f8d908924684d889a601469badb84ded9dc6ca808d37c1080c27c598d750895`，processes SHA `67573551ec809c79b0ed8fab97452aca617dfe84ed43993c949185b183f354b8`，原window-safe SHA `0a210fe4406c4bf1a70da58a874cd1ca5082e38ff8da636c4644483c167b26d1`。允许在本节独审及全部前置门后制作一个08，固定354..414共61样本、30秒、最大1860秒、122条、birth=false、1386→1508；tenant/device不变。SOURCE消费真实07原件，实际启动仍核ACK边界与旧publisher退出；完成不继承freshness，不新增live receipt或放宽120秒/5秒future规则。
+
+顺序为本节独审→Sol窄修/真实producer回归/独立代码审查/本地提交→新准备包与08 SOURCE/PURE独审→C24完整来源→新schema/API/首次License及所有非fresh命令模板就绪→单次08→最新正式样本及A/B正式fixture→精确setup→动态catalog/observer/主输入、全来源与两MCP最新样本门→立即完整十步J10。窗口内不改源或规划；窗口不足、漂移、未知写入或安全负例失败即停依赖步骤，不自动追加窗口、重放或拼接。成功完整J10、有限窗口完成、运维适用矩阵、实录/离线交付、独立总审与用户最终验收仍分别成立；无push/部署/发布或新增业务权限。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

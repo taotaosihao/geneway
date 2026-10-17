@@ -650,6 +650,40 @@ api_log以C26 proof的完整after集合逐ID/raw SHA保护，新增精确解释 
 
 完整J10、同候选当前业务配对恢复、G/J/AC适用矩阵、独立技术/媒体审查、中文MP4完整解码与1倍速离线播放、离线HTML“渠道为模拟验收”、飞书发送/GET回读及用户最终验收仍分别完成。旧前五步不可拼接为新旅程成功；AC-22历史时序限制不补签。本方案没有新用户业务决定，不授权部署/发布/第三仓/真实成员消息；触及既定目标、写动作或授权变更时停依赖并请求用户决定。
 
+### 8.22 final12 CLI 接缝与 run06 直接复用（2026-10-17，实施前）
+
+本节在 window12 原工具自然结束并完成独立全样本审计后形成。工程、产品两名 Astra 分别独立读源码及原件，再正式双向 exchange，均回签 CONSENSUS、无未决设计分歧。第三名未参与本节规划的审查者通过本计划后，才实施新包、执行只读准入探针或启动资源。目标仍为完整 J10 及既定交付；本节不将复用假设写为 runtime PASS，不改变业务写动作、权限或用户最终验收权。
+
+**事实与失败边界。** G HEAD `a85f01ab5d6e7488ac6ab3d15251faff935bb04f`、K HEAD `ae27a4e97ddfa5248d4461bd563d9e907489b81c`，C28 SHA `07e2bf498c6802124d5eb81d39e54f9fac17ec2bf0dc0799470e714cc55c5883`。final12 原 main95952/chunk2a5954 exit1，首步 fresh-configuration failed。固定 commands.md 的 operator 带 `--output`，而 operator.mjs:264 自建 parseArgs 未定义它；原 CLI244174 exit1，在 run() 之前抛 ERR_PARSE_ARGS_UNKNOWN_OPTION。scoped transfer 保留 CLI_NONZERO/transferred=false，未发送成功回执、未重放。main 保存了模型、员工、连接等 Web 配置，不能称完全无效果；works/conversations/channelMessages/automation/deliveries 为零，12 次保存 fetch 仅 loopback MCP/OAuth、模型请求0。无 operator journal，observer 仅 baseline 与0字节 attempts、无 arm。
+
+原 run06 schema、A/B fixture、首次 License 和 setup 均完成；A 精确三条初始化 evaluate 已消费，B 三条 pending 且未跑 worker。两 API 原10612/bb0b48、95094/7b704b真实 exit0，child null/SIGTERM；main/operator/API/Host/Chrome/ffmpeg 已独立核 PID/PGgone。post-main-exit.json SHA `fe9c882d93cb0b0d23003df4b2ee6bf4f21f35e9aff3f50f69d898318216fa18`保存 SOURCE3f69a6与十旧库c8bc02真实 exit0。原件位于 p7-acceptance/j10-inputs-run06 与 j10-final12，均保留。没有当前06数据库完整终态准入，不能从参数解析失败推出全库未变。
+
+**A：新入口的最小 CLI 修复及同源接缝。** 比较过删除文档多余参数与复用既有 argumentsFor 两案，二者都能用实际 parser 测试。选择仅在新 current01 的 operator 复用现有 argumentsFor，立即断言 output 等于固定 resources.output、拒绝无意义的 instance，再进入 context/数据库/网络。旧06/C28不改，故不破坏旧无output调用；不新增任意目标选择器、不关闭严格未知参数拒绝，不为形式统一修改其他无关入口。必要窄解析函数由实际CLI与现有selfcheck共用，不复制第二份参数名单。
+
+用原文档完整 argv 复现旧 parser 对 --output 的拒绝，新文档实际 argv 经同一新入口解析通过；错误 output、instance、未知参数、缺失或错配 binding 必须拒绝。开窗前逐项核本轮实际使用的准入/SOURCE、A/B API、当前License GET、秘密准备、final inputs、fresh-monitor、main、operator、两类业务worker、window及收尾接口；shell作语法/固定引用检查，实际进程身份仍由actual证明。不能仅regex扫描文档或绕过parser直接调用run。
+
+原 selfcheck:221–225只有switch成功、source未知失败及拒绝重放，故补一条现有内存adapter的七步完整成功链，经过validateRequest/createOperator、operation/order/expected、结果结构及既有channel接收契约；保留必要错序/错目标/错候选负例。workerChild实际生成argv交真实worker parser，receipt当前候选正例和历史候选拒绝负例同测。复用现有selfcheck/harness，不建通用CLI框架、runtime dry-run、自动driver或重试服务，不重复真实stdio诊断。原transfer字节、300秒及全部finally保护不改；仅新main/candidate/guard/step scope，首次CLI前拒任何已有状态，同调用才更新，原键/请求/launcher不覆盖。
+
+**B：有条件复用06，直接准备来源与当前执行分离。** 优先复用原 schema、PG/Redis、端口、网络、角色、组织/设备/机器账号、fixture、endpoint/rules/Hive绑定、首次License及setup。不是自动run07；不得reset、删除、重跑schema/bootstrap、首次activation、fixture publish或再次消费setup来制造初始状态。当前读回若有未知业务、权限、outbox或无法归属效果，停止复用依赖，不以新库掩盖。
+
+新固定执行包 `p7-kivo-runtime-run06-current01`，输出 `/tmp/geneway-p7-kivo-runtime-06-current01`，候选 `candidate-final29.json`，API launchId `run06-current01`，新输出下 `api-a-run06-current01.json` / `api-b-run06-current01.json`。producer仍为 `geneway-p7-20261017-06`；新main为 `geneway-p7-20261017-06-current01-j10-final13`，inputs `j10-inputs-run06-current01`、main output `j10-final13`、`observer29.json`。observer setupOutput保持原06目录，controlDirectory按现有accept合同为原目录下 `private/create-observer-geneway-p7-20261017-06-current01-j10-final13`，不覆盖旧control。路径有占用或身份不符即停，不自动选号/清理。
+
+新包直接pin原06/C28的包、run/fixture/License/setup/failedmain/API退出原件与当前C29闭包；可移植既有窄baseState+current实现，不调用05-current03或其他current loader，不形成递归准备链，不伪造重新准备的run.json，不改旧candidateSha。原fixture、首次License、setup及已消费setup worker继续归C28；新API journal、observer和两个业务worker的journal/receipt/parent readback/release proof归C29，明确baseCandidate。run-worker/workerChild现取producer candidate，而accept-p7:943/1001要求当前binding，必须在新包同一责任边界修齐并测，不把缺口留到完整J10。全部实际代码/observer/命令及旧来源列入C29闭包，不能只换配置。
+
+secretRoot固定 `/tmp/geneway-p7-j10-secrets-13`，按既有owner/mode/nofollow/排他及字节相等规则，仅复制已获准secret12中的五个明确ref：ZENMUX_API_KEY、MCP_PRIVATE_A/B、WEBHOOK_A/B，不输出值、不扫描、不复制旧合成渠道ref。新目录有实际必要：accept-p7:481–482会写入本轮合成飞书ref，复用secret12会追加修改失败材料。
+
+**C：先证实复用，再实际启动。** 在新包SOURCE/PURE及独审后执行窄只读准入，保留原命令、原工具终态与600回执。核原run/C28/manifest、A/B fixture、首次License、setup gate与worker原件固定摘要，全部操作settled；不得用当前DB任取expected。用已有snapshot逐项要求A严格等于原gate.a.after、B严格等于原gate.b.before，覆盖源单reported/revision0、原配置/业务表、全部outbox和worker instance/execution；A仅原setup三evaluate及对应停止worker/三execution，B三pending/no worker，无派单/create/delivery或未知执行。
+
+License、四授权表、机器主体/credential及认证session/API日志，按原License、fixture、current-status、fresh-monitor与main配置访问的已知生产者证据逐项归属；API已真实退出后核异步落盘，不能整表无条件豁免或把当前值改成期望。十旧库沿原actual02固定保护，不重取基线消化差异。未解释的额外、缺失、权限变化、未结操作或原件缺失均阻断依赖。此门当前尚未执行。
+
+实际API启动和当前License GET valid在开窗前完成；不因候选编号变化重做activation。原到期A 19:50:15.580Z/B19:51:04.114Z只作历史，执行前核当前有效与执行余量。全部静态fixture/catalog/observer/五ref、每步固定命令、单请求转交与收尾手段提前备齐；启动API不代表CLI接缝或业务已通过。
+
+**唯一window13及顺序。** window12原29658/a67814自然exit0，completion SHA `0a8baaad97069b1f8bff5fab13191fb0607217bbc726a2a79d9f4eb1de86d302`；独立f9ca54完整61对598..658/122消息/ACK/完整DDATA/唯一/1800.030s核验和f4a5f4 host827480/inside131491退出通过。window-safe `fb81f1b8d7989da1db65caf289dc5e4c0cbbe49df8ee7033d3a6d89b545e5ffa`、sample658 `6a95e264c7d3da0f74c4b69f5916f025535d3a65f5cbd4fa77d29900853e1db2`、host-request `e0cb56691a4b43af99045f6efc9ff9bf5a0200bd98e3c500890f2687d12c0eae`、122文件聚合 `e830acbc25aa1c8b7411de808f084f4668eee26b666b1f569023a6a31c451d40`。completion历史pending字段不改，以独立真实审计补充，不伪装在线重读NATS。
+
+仅制作一个hive-window13，现有Hive run根下输出 `p7-j10-20261017-01-window13`，固定659..719共61×30秒、122条、1996→2118、birth=false、同tenant/device，inside最大1860秒/host1920秒。沿原启动前进程/容器/ACK检查，前驱原件和源pins不变，不能继承freshness。原fixture sample598/599只证明创建来源，不因它们过期重发绑定；当前fresh-monitor必须读取window13实际新样本，经双实例完整MCP关联证明≤120秒/future≤5秒。
+
+严格顺序：本计划第三审→新current01/窗口/scoped片段SOURCE/PURE及文档CLI接缝独审→C29完整冻结→当前06只读复用准入和十旧库保护→新API/当前License/所有非fresh材料就绪→单window13→双实例最新MCP门→从第一步完整J10。所有长工具保存session/PID/startTicks/PG并持有到真实终态；窗口内不改源/重规划/延长，不自动追加14，失败/unknown不重放。完整J10、当前业务配对恢复、G/J/AC适用矩阵、独立技术/媒体总审、中文MP4解码及1倍速离线播放、HTML“渠道为模拟验收”、飞书发送/GET和用户最终验收仍分别完成。旧片段不拼通过，AC22历史时序限制不补签；新业务目标/写动作/权限或授权变化仍请求用户决定。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

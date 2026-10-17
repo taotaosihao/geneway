@@ -84,7 +84,7 @@ export function validateP7Fixtures(a, b, catalog) {
     const instance = ['a', 'b'][index], c = fixture.connection, f = fixture.facts
     assert.equal(fixture.instance, instance); assert.equal(fixture.phase, 'fixture-ready')
     assert.equal(fixture.dataMode, 'synthetic'); assert.equal(fixture.sourceEnvironment, 'external-test')
-    assert.equal(c.kind, 'kivo-mcp'); assert.equal(c.baseUrl, `http://127.0.0.1:${34681 + index}/api/v1/mes/mcp`)
+    assert.equal(c.kind, 'kivo-mcp'); assert.equal(c.baseUrl, `http://127.0.0.1:${34781 + index}/api/v1/mes/mcp`)
     assert.equal(c.issuer, new URL(c.baseUrl).origin); assert.equal(c.sourceInstance, fixture.runId + '-' + instance)
     assert.equal(c.sourceSystem, 'KivoMES'); assert.equal(c.sourceEnvironment, 'external-test'); assert.equal(c.dataMode, 'synthetic'); assert.equal(c.evidenceMode, 'actual-mcp')
     assert.equal(c.credentialRef, 'MCP_PRIVATE_' + instance.toUpperCase()); assert.deepEqual(c.allowedObjectIds, [])
@@ -442,7 +442,7 @@ async function acceptance(options) {
       const rows = (await readFile(auditFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line))
       assert(rows.every(row => row.loopbackRoutesSha256 === refs.loopbackRoutesSha256), 'guard loopback routes changed during J10')
       audit = { ...networkAudit(rows, { ...binding, hostPids: children.filter(child => child.auditRole === 'host').map(child => child.pid), models }), models: validateP7ModelAudit(rows), polls: validateP7Polls(simulator, [weixinAccount.id]) }
-      for (const port of [34681, 34682]) assert(rows.some(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === port && row.path === '/api/v1/mes/mcp'), 'actual Kivo MCP traffic missing')
+      for (const port of [34781, 34782]) assert(rows.some(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === port && row.path === '/api/v1/mes/mcp'), 'actual Kivo MCP traffic missing')
     } catch (error) { failure ??= error }
     try {
       const probe = JSON.parse(await command('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', video]))
@@ -497,7 +497,8 @@ async function acceptance(options) {
     await poll(async () => {
       const identity = (await state()).channelIdentities.find(item => item.id === refs.weixinIdentity.id)
       assert(identity, 'original Weixin identity disappeared after restart')
-      for (const key of ['id', 'memberId', 'channelAppId']) assert.equal(identity[key], refs.weixinIdentity[key], 'Weixin identity changed after restart')
+      for (const key of ['id', 'channelAppId']) assert.equal(identity[key], refs.weixinIdentity[key], 'Weixin identity changed after restart')
+      assert.equal(identity.memberId, 'a', 'Weixin owner changed after restart')
       assert.equal(identity.weixin?.botId, weixinAccount.id); assert.equal(identity.status, 'active')
       assert(identity.weixin.runtimeState !== 'unavailable' && identity.weixin.error?.code !== 'WEIXIN_LOCK_LOST', 'Weixin became unavailable after restart')
       const active = simulator.activePolls(identity.weixin.botId), max = simulator.maxActivePolls(identity.weixin.botId)
@@ -782,7 +783,7 @@ async function acceptance(options) {
       await capture(pages.a, '协作根导航到真实关联子工作与来源')
       const auditBefore = (await readFile(auditFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line))
       const baseline = Object.fromEntries(models.map(model => [model, auditBefore.filter(row => row.kind === 'fetch' && row.host === 'zenmux.ai' && row.model === model).length]))
-      const bMcpBefore = auditBefore.filter(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === 34682 && row.path === '/api/v1/mes/mcp').length
+      const bMcpBefore = auditBefore.filter(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === 34782 && row.path === '/api/v1/mes/mcp').length
       const pair = await Promise.all([
         { actor: 'a', employeeId: 'p7-agent-a', instance: 'a', model: models[0], label: 'W1' },
         { actor: 'b', employeeId: 'p7-agent-b', instance: 'b', model: models[1], label: 'W2' },
@@ -813,7 +814,7 @@ async function acceptance(options) {
       assert.notEqual(observed.records[0].id, fixture('a').facts.record.recordId); assert.notEqual(observed.linkedDevice.id, fixture('a').facts.deviceId)
       assert.equal((await request('a', workPath(surviving.id))).status, 404); assert.equal((await request('b', workPath(stopped.id))).status, 404)
       const parallelAudit = (await readFile(auditFile, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line))
-      assert(parallelAudit.filter(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === 34682 && row.path === '/api/v1/mes/mcp').length > bMcpBefore, 'W2 never reached B actual MCP resource')
+      assert(parallelAudit.filter(row => row.kind === 'fetch' && row.host === '127.0.0.1' && row.port === 34782 && row.path === '/api/v1/mes/mcp').length > bMcpBefore, 'W2 never reached B actual MCP resource')
       await openWork('b', surviving.id)
       await pages.b.click('#work-detail [data-runtime-facts] > summary')
       const ownRuntime = await pages.b.evaluate('document.querySelector("#work-detail [data-runtime-facts]")?.innerText')
@@ -1066,6 +1067,61 @@ async function harnessCheck() {
   const harness = await readFile(script, 'utf8')
   await callerChecks(harness)
   {
+    const { createChannelService } = await import('../src/channel-service.mjs')
+    const server = await readFile(join(root, 'src/server.mjs'), 'utf8'), helper = await readFile(join(root, 'scripts/accept-p4-s1.mjs'), 'utf8')
+    const projectionStart = server.indexOf('function safeIdentity(item)'), projectionEnd = server.indexOf('export function createChannelRuntime', projectionStart)
+    const gateStart = harness.indexOf('  async function waitWeixinRestart()'), gateEnd = harness.indexOf('  async function login(actor)', gateStart)
+    const pollStart = helper.indexOf('async function poll(check,'), pollEnd = helper.indexOf('async function jsonLines(', pollStart)
+    assert(projectionStart > 0 && projectionEnd > projectionStart && gateStart > 0 && gateEnd > gateStart && pollStart > 0 && pollEnd > pollStart)
+    const project = new Function(server.slice(projectionStart, projectionEnd) + '\nreturn safeChannelState')
+    const original = { id: 'restart-identity', memberId: 'a', channelAppId: 'channel-app-weixin', status: 'active', providerUserId: 'synthetic-owner',
+      weixin: { botId: 'restart-bot', runtimeState: 'connected', tokenRef: 'synthetic-private-ref' } }
+    const memory = { members: ['a', 'b'].map(id => ({ id, enabled: true })), channelIdentities: [original, { ...structuredClone(original), id: 'other-identity', memberId: 'b' }],
+      works: [], channelMessages: [], channelConversations: [], deliveries: [], linkCodes: [] }
+    let producerReads = 0, producerWrites = 0
+    const service = createChannelService({ store: { read: async () => { producerReads++; return structuredClone(memory) }, update: async () => { producerWrites++; assert.fail('projection must not write') } } })
+    const member = await service.memberChannelState({ id: 'a' })
+    assert.equal(producerReads, 1); assert.equal(producerWrites, 0); assert.deepEqual(member.identities.map(item => item.id), [original.id])
+    assert.equal(member.identities[0].memberId, 'a'); assert.equal(member.identities[0].weixin.botId, undefined)
+    const refs = { weixinIdentity: project()(member).identities[0] }
+    assert.equal(refs.weixinIdentity.id, original.id); assert.equal(refs.weixinIdentity.channelAppId, original.channelAppId)
+    assert(!Object.hasOwn(refs.weixinIdentity, 'memberId')); assert(!Object.hasOwn(refs.weixinIdentity, 'weixin'))
+    const gateSource = harness.slice(gateStart, gateEnd)
+    const oldSource = gateSource.replace("for (const key of ['id', 'channelAppId'])", "for (const key of ['id', 'memberId', 'channelAppId'])")
+      .replace("      assert.equal(identity.memberId, 'a', 'Weixin owner changed after restart')\n", '')
+    assert.notEqual(oldSource, gateSource)
+    const exercise = async (source, { identities = [original], active = () => 1, max = 1 } = {}) => {
+      let clock = 0, reads = 0, pollReads = 0, continued = 0
+      const controlledPoll = new Function('Date', 'pause', helper.slice(pollStart, pollEnd) + '\nreturn poll')({ now: () => clock }, async ms => { clock += ms })
+      const gate = new Function('assert', 'poll', 'state', 'refs', 'weixinAccount', 'simulator', source + '\nreturn waitWeixinRestart')(assert, controlledPoll,
+        async () => { const identity = identities[Math.min(reads++, identities.length - 1)]; return { channelIdentities: identity ? [structuredClone(identity)] : [] } },
+        refs, { id: 'restart-bot' }, { activePolls: id => { assert.equal(id, 'restart-bot'); pollReads++; return active(reads) }, maxActivePolls: id => { assert.equal(id, 'restart-bot'); pollReads++; return max } })
+      try { await gate(); continued++ } catch (error) { assert.equal(continued, 0); throw Object.assign(error, { restartProof: { reads, pollReads, clock, continued } }) }
+      return { reads, pollReads, clock, continued }
+    }
+    await assert.rejects(exercise(oldSource), error => error.code === 'ERR_ASSERTION' && error.actual === 'a' && error.expected === undefined
+      && error.message.includes('Weixin identity changed after restart') && error.restartProof.pollReads === 0 && error.restartProof.reads === 1)
+    assert.deepEqual(await exercise(gateSource), { reads: 1, pollReads: 2, clock: 0, continued: 1 })
+    for (const mutate of [v => { v.memberId = 'b' }, v => { delete v.memberId }, v => { v.id = 'wrong' }, v => { v.channelAppId = 'wrong' },
+      v => { v.weixin.botId = 'wrong' }, v => { v.status = 'inactive' }, v => { v.weixin.runtimeState = 'unavailable' },
+      v => { v.weixin.error = { code: 'WEIXIN_LOCK_LOST' } }, v => { delete v.weixin }]) {
+      const wrong = structuredClone(original); mutate(wrong)
+      await assert.rejects(exercise(gateSource, { identities: [wrong] }), error => error.code === 'ERR_ASSERTION' && error.restartProof.reads === 1 && error.restartProof.continued === 0)
+    }
+    for (const options of [{ identities: [undefined] }, { active: () => 2 }, { max: 2 }]) await assert.rejects(exercise(gateSource, options), error => error.code === 'ERR_ASSERTION' && error.restartProof.reads === 1)
+    const connecting = structuredClone(original); connecting.weixin.runtimeState = 'connecting'
+    assert.deepEqual(await exercise(gateSource, { identities: [connecting, original], active: reads => reads === 1 ? 0 : 1 }), { reads: 2, pollReads: 4, clock: 100, continued: 1 })
+    await assert.rejects(exercise(gateSource, { identities: [connecting], active: () => 0 }), error => error.message === 'wait timed out: same Weixin identity connected after normal restart'
+      && error.restartProof.clock === 30_000 && error.restartProof.reads === 300 && error.restartProof.continued === 0)
+    assert.equal(harness.slice(0, harness.indexOf('async function harnessCheck()')).split('await waitWeixinRestart()').length - 1, 2)
+    for (const [start, end] of [["    await step('restart-and-supplement'", "    await step('two-model-collaboration'"], ["    await step('normal-restart'", "    await step('empty-restore'"]]) {
+      const section = harness.slice(harness.indexOf(start), harness.indexOf(end)), gateAt = section.indexOf('await waitWeixinRestart()')
+      assert(gateAt > section.indexOf('await login(actor)')); assert(gateAt < section.indexOf("await work('a', refs.rootId)") || gateAt < section.indexOf('const after = await state()'))
+    }
+    assert(!harness.slice(harness.indexOf("    await step('empty-restore'"), harness.indexOf("    await step('post-restore-read'")).includes('waitWeixinRestart'))
+    console.log('P7 restart projection checks passed (actual member filter/HTTP projection; old comparison red=1, new green=1; owner/id/app/bot/lock/poll negatives, connecting wait and 30s controlled timeout; writes/network=0)')
+  }
+  {
     const [{ getCapability, parseCapabilityToolResult, sanitizeFollowUpContext }, { connectionInputAllowed, connectionSnapshot }, { assertTrustedConnection }, { createKnowledgeService, currentKnowledgeReference }, { connection, correlationFixture, now }] = await Promise.all([
       import('../src/capabilities.mjs'), import('../src/execution-grant.mjs'), import('../src/connection-catalog.mjs'), import('../src/knowledge-service.mjs'), import('./fixtures/kivo-device-correlation.mjs'),
     ])
@@ -1109,7 +1165,7 @@ async function harnessCheck() {
   }
   {
     const options = { ...argumentsFor(runtimeArgs), candidateSha256: 'd'.repeat(64) }
-    const fixtures = ['a', 'b'].map((instance, index) => ({ instance, runId: 'p7-producer', candidate: 'e'.repeat(64), connection: { baseUrl: `http://127.0.0.1:${34681 + index}/api/v1/mes/mcp`, clientId: String(index) }, facts: { deviceId: 'device-' + instance } }))
+    const fixtures = ['a', 'b'].map((instance, index) => ({ instance, runId: 'p7-producer', candidate: 'e'.repeat(64), connection: { baseUrl: `http://127.0.0.1:${34781 + index}/api/v1/mes/mcp`, clientId: String(index) }, facts: { deviceId: 'device-' + instance } }))
     const candidate = { p6Runtime: { root: '/synthetic/runtime', files: ['operator.mjs', 'repair-create-observer.mjs', 'selfcheck-operator.mjs'].map(path => ({ path, sha256: 'f'.repeat(64) })) } }
     const config = { schemaVersion: 1, runId: options['run-id'], producerRunId: fixtures[0].runId, candidate: options.candidateSha256, candidatePath: options.candidate,
       baseCandidate: fixtures[0].candidate, setupOutput: dirname(options['fixture-a']), controlDirectory: join(dirname(options['fixture-a']), 'private', 'create-observer-' + options['run-id']),

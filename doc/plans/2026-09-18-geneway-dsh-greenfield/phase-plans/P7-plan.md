@@ -622,6 +622,34 @@ api_log以C26 proof的完整after集合逐ID/raw SHA保护，新增精确解释 
 
 成功完整J10、同候选当前业务配对恢复、G/J/AC适用矩阵、独立技术/媒体审查、中文MP4完整解码与1倍速离线播放、离线HTML“渠道为模拟验收”、飞书发送/GET回读及用户最终验收仍分别完成。失败片段不得拼成成功旅程，旧AC-22时序限制不补签。无新用户业务决定；若必须改变既定业务/写入/权限/第三仓/真实消息/部署范围，则停对应依赖并请求用户决定。
 
+### 8.21 final11 子工作导航与全新隔离旅程（2026-10-17，实施前）
+
+本节在 window11 原工具自然结束及完整独审后，由工程、产品两名 Astra 分别独立读证，再正式双向 exchange 形成 CONSENSUS。第三名未参与规划的过设审查通过并提交本计划后，才开始本节修复、浏览器回归、新资源准备或窗口。目标仅为排除完整 J10 的导航阻断并安全准备下一次完整运行；业务目标、批准写动作、权限及最终交付不变。
+
+**已知事实。** G HEAD `8f9fba1c7cab639e81bb6081647f85207a2eff22`、K HEAD `ae27a4e97ddfa5248d4461bd563d9e907489b81c`。C27 SHA `02bd33dcad421fe790c68bf5c9e545251a3be49b49d46211d756fbb4b8f31811`，final11 原 main8138/chunk52946f真实exit1。前五步passed；第六步10:08:36.937Z→38.567Z报 `expected one visible control: 0`，栈为openWork621→preview675→967。第963–965行已经从根的真实按钮进入目标child，preview随后再次调用只从全部列表取卡片的openWork；web263统一排除collaboration-child。这不是移动端特有过滤；保存state中的child存在且owner=a/completed，截图支持停在全部列表，但没有完整DOM dump。first-failure SHA `77c0e5caf0a409ebfdb6c0b01ba5afe4efe2f5a7f9a850e3ad033320e2b2bafd`，observations SHA `f09633712c2fd3d970c1d81942b39b366ba530419cf7a0b2dc6f54a3faecfe64`。
+
+两次单请求transfer真实CLI exit0后立即stdin，主旅程实际推进；本轮无需重写已审转交算法。source-human-update已将原synthetic维修单reported→dispatched并指定executor，worker evaluate/business-event/deliver三个作业processed、失败/死信0、exit0，Host202 ACK36ms并产生后续工作。六个work actions均0、observer未arm/attempt0，尚未进入维修preview/reject/approve；这不抵消此前真实派单效果。主/两个Host/三个SDK已退出，TTY恢复，两个API原A16394/d673ec及B44062/f587f3真实wait0，child null/SIGTERM且PID/PGgone；API退出原件SHA `dad69e777a0f4f15d9fd875ef3aadd54df298e493e49ee5f808eaceb2353cb97`。sourceafter18434/9a82e9真实0。旧业务状态不回滚，失败录像不冒充完整成功录像。
+
+**A：同一导航helper的最小修复与真实前置回归。** 仅修accept-p7的导航及必要窄测试。通过当前actor正式可读工作DTO识别普通工作、协作根或child；普通/root仍点全部列表的精确卡片，child先经可见root卡进入根，再点与root/planItem/child对应的精确按钮。等待active详情及currentWork.id正确才返回。关联不符、root不可读、控件缺失/多匹配或目标错误即失败；不读全局状态绕过owner，不猜最近项、不模糊选择、不直接调用网页内部导航函数或改URL替代真实点击。产品child不入全部列表、root→child/返回root以及服务端权限保持。
+
+逐一核openWork/preview和手动root→child调用：至少覆盖preview675及967/974两次调用、1008回执步骤直接开child、844/963/1021附近已有根子跳转、其他root及B普通工作、重启/恢复后入口；不只删除首次preview重开。必要时导出一个窄helper供同源测试使用，不建通用导航框架，不扩改P6无关普通工作路径。
+
+开新业务资源前，在独立临时fixture上复用正式HTTP/server/auth/store/web、现有Chrome/CDP及受控协作树，执行同一修正helper。1440×900与390×844验证ordinary/root/child，child仍不在全部列表；根进child后再次进入覆盖preview调用形态，reload/其他详情后直接进入child覆盖回执调用形态，返回root及重新登录后目标正确。维修表单打开→取消→再开，actions/执行数不增加；不新增receipt fixture，不重复维修保存/拒绝/批准业务。peer/admin不能获得A的正文入口，root/child错误关联拒绝；无页面错误/横向溢出，模型/Kivo/Hive/worker/渠道外呼0，owned server/Chrome真实退出。用同一fixture确认旧selector匹配0与新helper成功，旧final11保留实际失败证据，无须再跑旧完整J10取红色。执行`node scripts/accept-p7.mjs --harness-check`及窄`node scripts/test-p7-work-navigation.mjs`，独立复核修复/全部调用与真实回归后提交。此回归仅证明导航，不替代完整业务链。
+
+**B：新的直接fresh准备，保留旧资源。** 旧05已不满足reported/revision0初始语义；有限复用会额外引入旧事件、outbox、规则及绑定的混合消费例外，故采用run06独立A/B，producer runId `geneway-p7-20261017-06`。固定包`p7-kivo-runtime-run06`、输出`/tmp/geneway-p7-kivo-runtime-06`、候选`candidate-final28.json`、API launchId `run06`、mainRunId `geneway-p7-20261017-06-j10-final12`、inputs `j10-inputs-run06`、main output `j10-final12`、`observer28.json`及独立observer control、secretRoot `/tmp/geneway-p7-j10-secrets-12`。PG56081/56082、Redis57081/57082，网络10.253.78.0/29及10.253.78.8/29、gateway .1/.9；API34781/34782、sourceId kivo-p7-a/b、webhook34481及原Hive tenant/device保持。新容器/volume/network/角色/库/fixture身份均由run06明确绑定；审后按已有方式实查占用，冲突即停、不自动选号、不清理或接管。
+
+复用已审Kivo runtime/镜像/迁移/schema/bootstrap、首次License、fixture/setup worker/operator及env实现，必要修改仅新身份、来源绑定和本节保护。run05模板仍有旧window08/C23/final08字段，新包须完整直接绑定C28/window12/final12的资源、producer、observer、operator、worker、catalog及secret refs，不能仅copy后换runId，也不调用current03 loader形成新继承层。旧代码及原件可作为固定来源，但新的准备是直接事实源。
+
+新资源前先有界只读对齐旧05已知终态：源单及dispatch audit/trace、三个processed worker/outbox/delivery与事件、B三条setup仍pending且无worker、final11 actions/observer零create及owned进程终态。发现额外/缺失/未知业务或权限效果即阻断依赖，不靠新库抹去。对齐后将旧05 A/B加入既有run01–04八库保护，形成十旧库完整只读指纹；新基线只证明从当前观察起未受新运行改变，不倒推旧05历史全表未变。只扩已有明确列表/计数，不新建认证框架或继承解析器。保留旧PG/Redis、pending、会话、秘密引用与失败原件，不reset、删除、回滚、消费旧pending或续改旧环境。新认证沿已审正式License、机器主体/credential、四授权表及受保护登录流程；不得从当前DB任取expected绕过准入。新凭据按既有准备来源与server-only存储处理，不扫描旧项目秘密。
+
+**C：一次性转交记录隔离。** 原transfer.js SHA `ae6007193ff06a75c765772195507f4f120465ce3f1eb656c3650efbf6c7c296`不改。仅本轮调用处把其固定逻辑key映射为mainRunId/candidate/guard/step完整绑定的物理key，核逻辑key属于当前step。CLI启动前拒绝已有的新物理key；同一次执行只更新自己的记录，旧`p7-operator-orchestration01:*`原件/键不覆盖。requested/failed/unknown/completed都不清除或再次启动，恢复时无法确认已启动状态按unknown处理。新磁盘request/result/launcher排他创建，store不替代journal。以同一调用片段PURE验证新旧run隔离、完整binding同step二次启动前拒绝、旧记录不变及失败不重启；复用原真实三轮转交和final11两个成功业务转交，不另建driver或重复无关实际诊断。仍人工逐请求决定、同cell固定CLI→同session终态→完整唯一绑定结果→立即stdin，300秒/所有尾部保护不变。
+
+**前驱、唯一window12及执行顺序。** window11原37570/chunk3e7566真实exit0；completion `hive-window11-completion01/completion.json` SHA `f3894dbe9c77cd1bc70c77fd0b0e2495df8311f62b349272509553c424e4903a`保持创建时pending。随后独审3a17ff exit0/failures[]核61对537..597、122条1753..1874、完整DDATA/ACK/唯一值/state、1800.030s及host3325041/inside123700退出。window-safe SHA `cc7352563d80f1d50ec03f05fe410feeea8457a12bccb13e8c162eb3ec990107`、sample597 SHA `e01892ae57d002bf8fd8a173cfd6a13bd909a85e65b4ede87df60bf5a9a6b919`、host-request SHA `2a4caad52a2fc7eebb0daab3db710e1495aca9702e196a221900e263e7fd6df7`、122样本聚合 `152a8b27852d6a486dcdc5e15c3b50883ede5a15211761342be9ec8a7f174b27`。新窗口只一个，固定598..658/61×30秒/122条/1874→1996/birth=false，同tenant/device，inside最大1860秒及原host执行上界；启动前复核精确进程和ACK，不继承freshness、不新增库存单调/retention调查。
+
+新fresh fixture在开始和publish前均要求样本≤120秒、future≤5秒，所以不能照搬current03的fixture全备好再开窗次序。严格依赖如下：A修复和真实回归独审→旧05对齐/十旧库保护定义→新包、window12、scoped调用片段SOURCE/PURE独审及完整C28来源冻结→实际占用/身份与旧库保护检查→新PG/Redis/schema/bootstrap/API/首次合法License→全部不依赖新样本的材料、精确命令和收尾手段就绪→单次window12→A/B各自在执行前选取最新实际样本，经正式mapping/validate/publish创建新fixture→正式setup核A精确消费三初始化evaluate且零webhook/occurrence/delivery、B三条pending且未跑worker及其他域保护→在已审结构中填实际fixture/sample/证据路径形成catalog/observer等最终输入→当前License、完整来源和双实例最新MCP门→立即从第一步执行完整J10。运行期只填已审数据结构，源码变更必须停止依赖、重新冻结及审查。所有长工具保存session/PID/startTicks/PG并持有至真实终态，原件600；失败不重放未知效果。窗口内不改源/重规划/延长，不自动追加13，时效不足保留失败并收束。
+
+完整J10、同候选当前业务配对恢复、G/J/AC适用矩阵、独立技术/媒体审查、中文MP4完整解码与1倍速离线播放、离线HTML“渠道为模拟验收”、飞书发送/GET回读及用户最终验收仍分别完成。旧前五步不可拼接为新旅程成功；AC-22历史时序限制不补签。本方案没有新用户业务决定，不授权部署/发布/第三仓/真实成员消息；触及既定目标、写动作或授权变更时停依赖并请求用户决定。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

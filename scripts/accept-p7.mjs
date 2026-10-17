@@ -821,7 +821,7 @@ async function acceptance(options) {
       refs.rule = await poll(async () => { const value = (await state()).automationRules.find(item => item.id === refs.rule.id); return value?.status === 'active' ? value : false }, 'owner Web enabled rule')
       const expected = { recordId: fixture('a').facts.record.recordId, reference: fixture('a').facts.record.reference, deviceId: fixture('a').facts.deviceId, resource: fixture('a').connection.baseUrl, statusBefore: 'reported', statusAfter: 'dispatched' }
       const proof = await operator.wait('source-human-update', 'human-update-source-and-release', expected)
-      validateP6StatusAdvance(proof); validateP6Worker(proof, fixture('a'), proof.event.eventId)
+      validateP6StatusAdvance(proof); validateP6Worker(proof, fixture('a'), proof.event.eventId, binding.candidate)
       refs.occurrence = await poll(async () => { const details = await api('a', '/api/automations/' + refs.rule.id); return details.occurrences.find(item => item.event?.eventId === proof.event.eventId && item.workId) }, 'same-object producer occurrence', 120_000)
       await verifyDurableAcks(proof, 'human-source-update')
       const observed = await poll(async () => { const item = await work('a', refs.occurrence.workId); return ['accepted', 'running'].includes(item.status) ? false : item }, 'same-object native follow-up', 180_000)
@@ -881,7 +881,7 @@ async function acceptance(options) {
       validateP6Creation(refs.created, fixture('a'), proof.record)
       assert.equal(proof.matchingBusinessRows, 1); assert.equal(proof.matchingCreateRequests, 1)
       const echo = await operator.wait('created-event', 'release-created-event', target(refs.created))
-      validateP6Worker(echo, fixture('a'), echo.event.eventId)
+      validateP6Worker(echo, fixture('a'), echo.event.eventId, binding.candidate)
       assert.equal(echo.event.action, 'create'); assert.equal(echo.event.actorKind, 'machine')
       await poll(async () => (await state()).automationInbox.some(item => item.event.eventId === echo.event.eventId && item.actionRef?.actionId === refs.action.id), 'creation echo correlation', 90_000)
       await verifyDurableAcks(echo, 'created-repair-event')

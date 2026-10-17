@@ -201,11 +201,11 @@ export function validateP6Creation(action, fixture, record) {
   assert(Number.isSafeInteger(record.revision) && record.revision >= 0); assert.equal(String(record.revision), action.receipt.currentRevision)
 }
 
-export function validateP6Worker(receipt, fixture, eventId) {
+export function validateP6Worker(receipt, fixture, eventId, expectedCandidate = fixture.candidate) {
   const release = receipt.release, identity = release?.identity
   assert.equal(release?.workerStopped, true); assert.equal(release?.ownedRecordsVerified, true)
   assert.equal(identity?.runId, fixture.runId); assert.equal(identity.superuser, false); assert.equal(identity.entry, 'apps/mes-worker/src/notifications/index.ts')
-  assert.equal(identity.candidate, fixture.candidate); assert.equal(identity.instance, fixture.instance)
+  assert.equal(identity.candidate, expectedCandidate); assert.equal(identity.instance, fixture.instance)
   assert.deepEqual([...identity.allowlist].sort(), ['mes.notification.business-event.v1', 'mes.notification.deliver.v1', 'mes.notification.evaluate.v1'])
   assert.equal(receipt.event.eventId, eventId); assert.equal(receipt.event.recordType, 'repair')
   uuid(receipt.event.outboxId)
@@ -1013,6 +1013,15 @@ async function harnessCheck() {
   for (const mutate of [v => { v.release.identity.superuser = true }, v => { v.release.identity.candidate = 'd'.repeat(64) }, v => { v.release.executions = [] }, v => { v.deliveries[0].attempts[0].httpStatus = 503 }, v => { v.deliveries[0].attempts[0].completedAt = '2026-10-16T10:00:10.000Z' }, v => { v.deliveries[0].attemptCount = 2 }]) {
     const changed = structuredClone(worker); mutate(changed); assert.throws(() => validateP6Worker(changed, a, eventId))
   }
+  const preparedFixture = structuredClone(a), currentWorker = structuredClone(worker)
+  currentWorker.release.identity.candidate = candidate
+  validateP6Worker(currentWorker, a, eventId, candidate)
+  assert.throws(() => validateP6Worker(currentWorker, a, eventId))
+  for (const wrongCandidate of [baseCandidate, 'd'.repeat(64)]) {
+    const changed = structuredClone(currentWorker); changed.release.identity.candidate = wrongCandidate
+    assert.throws(() => validateP6Worker(changed, a, eventId, candidate))
+  }
+  assert.deepEqual(a, preparedFixture); assert.equal(currentWorker.release.identity.candidate, candidate)
   const { EventEmitter } = await import('node:events'), input = new EventEmitter(), binding = { runId: 'pure', candidate: 'a'.repeat(64) }, previousError = console.error
   for (const phase of ['before-restart', 'final-cleanup', 'preserve-first-error', 'normal-stop', 'signal-exit']) {
     const child = Object.assign(new EventEmitter(), { pid: 123456, exitCode: null, signalCode: null }), controller = new AbortController(), writes = [], initial = phase === 'preserve-first-error' ? new Error('original failure') : null

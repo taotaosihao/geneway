@@ -400,6 +400,32 @@ A/B支持门均须证明required→valid、restricted=false、精确modules/ID/�
 
 **固定第三续行。** 采用唯一新`p7-kivo-runtime-run03-continuation03/`、`current-context-03.json`、新candidate、API launch `run03-continuation03`、`api-a/b-run03-continuation03.json`及`license-a/b-continuation03.json`。baseSchema仍C17；保留C17/C18/C19、前两个续行包/context、所有unknown、readback03及exit proof原字节，A此次新增session/log纳入完整旧基线。当前142 Geneway、301 Kivo和冻结runtime字节保持，新HEAD仅计划变化；五字段context仍在candidate之后排他生成，API/fixture/setup/operator/worker/observer/cleanup统一新绑定。实际只读接缝门通过后，A/B各最多一次新regular login（本次分别3→4、1→2）及一次新request/activate；历史token不恢复，旧request不借用。成功License门之后仍按原排序单次Hive05、fixture/setup、动态输入、完整J10。无新业务动作、延窗、部署或发布授权。
 
+### 8.12 T5 worker 初始化顺序诊断与既有准备材料续行（2026-10-17，实施前）
+
+工程/产品两Astra分别独立核源后正式交换CONSENSUS，root确认范围为当前技术阻断：外置worker初始化与固定续行绑定，以及`accept-p6-kivo.mjs`共享worker验证器和`accept-p7.mjs`两个实际调用点。不增加业务动作、账号权限或产品源码改动。本节先于诊断SOURCE/probe和条件实施；独立过设通过前不得开工。
+
+**当前证据。** HEAD `fac7aaea85aa39bfb7402fedcd1adbec1f3aa697`，C20 SHA `2fe6a318da9232b9e2ae42610d2f7bc6a4a1408b6cea933b59ce470cbb240ded`，ctx03 SHA `a25394534db5305437af05649f45b991d3e42bfa6841cc04a4766aec44affe17`。§8.11实际时间接缝已通过，A/B License03各一次初始化完成，回执SHA分别`4d348efb47b4df16c85e7d38a2b1ae8a9274aeff95f73793fd47ae08aab1cf68`、`e1ab117d9c4eaee1235fa70302c0650d85967b1250bf391f8e2e29c8b0d137f1`；fixture A/B成功原件SHA分别`c6d3a9269d835960fcea6e9fa08a906dc500e4150a83765713d86805dc0b08fd`、`70904b3d86e4d40f1f067f0c8e05881f2db844124c3e394ca577437b0e74ece9`。这些是已发生的C20准备材料，不重新签名或改候选。
+
+随后setup实际session80458 exit1：`setup-notification-gate.json` SHA `dd7529c9fa5abf4d8cd0e91789fe43da3d54024b91dd76a3d77257e4cfdc908b`保留consume-a-setup unknown；`worker-a-p7-setup-evaluate-452afca431dc.json` SHA `09ab83062e01a4fc881b8d5fb4f5bfe9d32039c80a05db8d7114f78624f20a33`为operations空、runtime缺失、httpRequests0，worker4138218/start14945132 exit1/null。安全诊断只有PREPARATION_FAILED/Error/frames[]，不能反推原异常。实际app-role RR READ ONLY的`setup-readback01/receipt.json` SHA `1152b74d297c908cc3137ba0a55e3c4e16546453aed11f19b2b29157ffbbabd3`逐深比A/B gate.before完整snapshot相同：13业务/通知表指纹、维修reported/rev0、全部14outbox完整行、workerinstance/execution均0；各3通知evaluate仍pending/gen0。License及旧四库/unknown保持，worker PID/PG gone。API03各exit0且四PID/PG gone，退出proof SHA `5873f0bdde1f49924960708640c5773b6bdd3d7c15377f3358d461132d1464c5`。Hive05仍为固定171..231采样窗口，完整J10未开始。
+
+**待证假设。** 当前run-worker在设置worker环境前，经old-fingerprint和LicenseReceipt require fms-db；platform-db导入创建并缓存默认Prisma，Prisma5.22异步instantiateLibrary/loadEngine随后以当时process.env创建engine。旧成功run02实际属于C12 `e416…`的fresh/run-worker SHA `f67cddd1421fbb27e0c729fe6f917717b584f5b0c358ac3f53f3295ed6d86d09`，首次Prisma require在workerENV后；不能拿后来03的SHA `147fcc28369510fb4c006df5a5bc5b2df16484c68adeab9df28081ea922effb0`冒充旧成功源。早导入是候选机制，不是已证实根因。
+
+**先诊断，保持C20有效。** root先写本计划并按固定hash取得独立过设PASS，暂不commit、不改142个Geneway源，HEAD仍fac7；当前checkSources不读取计划正文。仅诊断SOURCE/PURE及独审通过后，才能在原C20/ctx03完整来源门下执行两个独立净进程。二者同Node/runtime/输入/原guard/真实imports；baseline保原顺序，variant唯一改变为loadContext完成后、assertOldUnchanged之前调用同apiEnvironment(worker)、清env赋值和chdir。apiEnvironment自身不导入fms-db。启动时仅在内存判原DATABASE_URL缺失或目标属于批准PG；未知目标即停、不连接、不输出值。
+
+两进程均按真实顺序导入tsx/cjs、fms-db、runtime-identity、notification与outbox模块，止于READ ONLY身份SELECT；保database/workerRole/non-superuser精确断言。禁止registerMesWorkerRuntime、heartbeat、createMesNotificationWorker、runMesOutboxWorkerOnce、once/release、Redis/Hive/HTTP。SOURCE/PURE检查不调用真实模块产生外部效果；实际诊断允许这些固定导入必需的owned编译子进程及任务临时缓存，必须核进程退出，不扩到业务worker执行。失败输出只用固定stage、允许name/code/errorCode分类和安全结果，不输出message、stack、URL、ENV、凭据；如用message识别已知缺失DATABASE_URL错误，只输出固定布尔分类。新诊断原件不得覆盖旧journal。
+
+两个进程前后都要独立app-role完整读回A/B setup/outbox/worker、License、完整用户/session/api_log等保护项和旧四库，证明零差，记录实际退出。只有baseline在对应初始化/identity阶段复现、earlyENV variant取得正确worker身份且全部零差，才支持修复。未复现、variant失败、错误落在别处、任何状态差异或越界访问均停止依赖步骤，返回有界分析，不通过业务release继续猜测。根因证据不足时不得开始下述条件实施。
+
+**原因成立后的唯一首选修复。** 把既有worker环境构造/清env赋值/chdir移至loadContext后、首个可能runtime require前，继续既有默认Prisma及正式参数链，保所有原guard、角色检查和cleanup。不同时增加第二client、清模块缓存或修改产品；显式newClient只作为此方案被实证否定后的另案，需重新规划。
+
+**固定续行04，分开历史准备与当前执行。** 新包`p7-kivo-runtime-run03-continuation04/`、新C21、五字段ctx04在候选之后排他创建；baseSchema仍C17。沿用已有continuation机制，resources以固定`sourcePreparation`路径/SHA绑定C20/ctx03/原03包、两成功License03和fixtures，以及失败setup/worker、实际零效果回执、API03退出proof。历史材料继续验证其C20/context/bundle，新API/setup/worker/operator/observer及主验收执行绑定C21/ctx04，不伪造历史context、不调用旧checkSources要求当前HEAD等于旧HEAD。新的API/observer baseCandidate=C20、candidate=C21；当前完整闭包仍严格验证C21。
+
+需同时贯通support.validateFixtureContext、LicenseReceipt、start-api、setup gate/completion、两层operator、observer安装和worker返回校验中实际强制两候选相等的接缝。只允许固定历史原件，不泛化任意候选继承。使用固定新API launch/journals、新setup gate路径及新release ID，原setup/worker unknown一字不改；不重schema、不新License、不重fixture、不恢复或重用历史token。SOURCE自检须覆盖错历史pin/context/candidate、把unknown当成功、旧candidate充当前及旧journal路径复用负例。
+
+**主验收真实consumer。** `validateP6Worker(receipt,fixture,eventId,expectedCandidate=fixture.candidate)`增加明确执行候选参数；P7两个调用点传来自已验证inputs的`binding.candidate`，不取proof自报值。原P6三参数严格语义保持。PURE调用真实consumer验证C20准备/C21worker通过，当前C21而worker报C20或第三候选拒绝，以及原P6默认正负例；不得内存改fixture或把新worker身份投影成C20。候选只允许`accept-p6-kivo.mjs`和`accept-p7.mjs`两个源SHA改变，其余140G、301K及runtime逐字保持，外置candidateIdentity与HEAD diff采用精确路径/摘要，不作任意来源豁免。
+
+诊断支持后才实施、独立SOURCE/PURE审查并commit，再冻结新候选/context及完整来源。新setup前重新核全部原准备状态与三个pending；使用新release单次精确消费原3条，证明A各processed/gen1、一个已停止workerinstance/三executions、其余11outbox与业务表不变、HTTP0，B全快照不变且无worker。成功后接既定J10。Hive05不延长、不重启、不减freshness；若准备后窗口不足，停止依赖实时样本步骤，由controller处理新的外部条件。License过期或任一unknown/身份漂移仍停止对应分支，不能自动续签/重建或补签PASS。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

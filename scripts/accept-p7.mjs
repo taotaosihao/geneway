@@ -154,6 +154,36 @@ export function validateP7Chain({ memberId, identity, endpoint, conversation, ro
     tpmRecordId: fixture.facts.record.recordId, deviceId: fixture.facts.deviceId, ruleId: rule.id, occurrenceId: occurrence.id, actionId: action.id, upstreamRecordId: action.receipt.upstreamRecordId, deliveryId: delivery.id }
 }
 
+function validateP7EventObservation(work, fixture, ownerMemberId) {
+  assert.equal(work.status, 'completed'); assert.equal(work.ownerMemberId, ownerMemberId)
+  assert.equal(work.capabilityId, read); assert.equal(work.skillId, 'skill-' + read)
+  assert.equal(work.connectionId, fixture.connection.id)
+  const expected = fixture.facts.record
+  assert.deepEqual(work.input, { recordType: 'repair', reference: expected.reference })
+  const observation = work.results.findLast(item => item.kind === 'kivo.tpm.observation'), payload = observation?.payload
+  assert.equal(observation?.kind, 'kivo.tpm.observation')
+  assert.equal(payload.status, 'ok'); assert.equal(payload.mode, 'record'); assert.equal(payload.recordType, 'repair')
+  assert(Array.isArray(payload.records)); assert.equal(payload.records.length, 1)
+  assert.equal(payload.records[0].id, expected.recordId); assert.equal(payload.records[0].reference, expected.reference)
+  assert.equal(payload.records[0].deviceId, fixture.facts.deviceId); assert.equal(payload.linkedDevice?.id, fixture.facts.deviceId)
+  for (const source of [payload.source, observation.source]) {
+    for (const key of ['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode']) assert.equal(source?.[key], fixture.connection[key])
+    assert.equal(source?.sourceRecordId, 'repair:' + expected.reference)
+  }
+  return observation
+}
+
+async function verifyP7RevokedRetry({ request, state, simulator, delivery, sendCount }) {
+  const response = await request('a', '/api/channels/deliveries/' + delivery.id + '/retry', 'POST', {})
+  assert.equal(response.status, 403); assert.equal(response.body?.error?.code, 'DELIVERY_FORBIDDEN')
+  const blocked = (await state()).deliveries.find(item => item.id === delivery.id)
+  assert(blocked, 'revoked retry delivery was not persisted')
+  for (const key of ['id', 'workId', 'resultId', 'actionId', 'targetIdentityId', 'targetConversationId']) assert.equal(blocked[key], delivery[key])
+  assert.equal(blocked.status, 'blocked'); assert.equal(blocked.error?.code, 'DELIVERY_FORBIDDEN')
+  assert.equal(simulator.calls.filter(call => call.endpoint === '/ilink/bot/sendmessage').length, sendCount)
+  return blocked
+}
+
 function operatorChannel(input, binding, signal) {
   let pending, failure
   const used = new Set()
@@ -788,8 +818,7 @@ async function acceptance(options) {
       refs.occurrence = await poll(async () => { const details = await api('a', '/api/automations/' + refs.rule.id); return details.occurrences.find(item => item.event?.eventId === proof.event.eventId && item.workId) }, 'same-object producer occurrence', 120_000)
       await verifyDurableAcks(proof, 'human-source-update')
       const observed = await poll(async () => { const item = await work('a', refs.occurrence.workId); return ['accepted', 'running'].includes(item.status) ? false : item }, 'same-object native follow-up', 180_000)
-      assert.equal(observed.status, 'completed'); assert.equal(observed.input.reference, expected.reference)
-      assert(observed.results.some(item => item.payload?.tpm?.id === expected.recordId || item.payload?.record?.id === expected.recordId), 'new observation has wrong TPM record')
+      validateP7EventObservation(observed, fixture('a'), 'a')
       await reload(pages.a, 'works')
       await pages.a.click('[data-open-automation="' + refs.rule.id + '"]')
       await pages.a.wait('state.automationDetail?.rule?.id === ' + js(refs.rule.id) + ' && Boolean(document.querySelector(' + js('[data-automation-occurrence="' + refs.occurrence.id + '"] [data-open-work="' + observed.id + '"]') + '))')
@@ -836,7 +865,7 @@ async function acceptance(options) {
       const noWrite = await operator.wait('pre-approval-no-write', 'read-created-repair', target(refs.action))
       assert.equal(noWrite.matchingBusinessRows, 0); assert.equal(noWrite.matchingCreateRequests, 0)
       const beforeSend = simulator.calls.filter(call => call.endpoint === '/ilink/bot/sendmessage').length
-      simulator.queueSend(weixinAccount.id, { httpStatus: 503, body: { ret: -1 } })
+      simulator.queueSend(weixinAccount.id, { httpStatus: 200, body: { ret: 403 } })
       await doubleClickControl(pages.a, '[data-repair-id="' + refs.action.id + '"][data-repair-operation="approve"]')
       refs.created = await poll(async () => { const item = (await work('a', refs.correlationChild.id)).actions.find(value => value.id === refs.action.id); return item?.receipt ? item : false }, 'actual machine creation and independent readback', 150_000)
       await actionDom(pages.a, refs.created, 'created')
@@ -855,12 +884,12 @@ async function acceptance(options) {
 
     await step('same-channel-receipt', async () => {
       refs.delivery = await poll(async () => (await state()).deliveries.find(item => item.actionId === refs.action.id && item.workId === refs.correlationChild.id && item.status === 'failed'), 'durable failed receipt delivery')
+      assert.equal(refs.delivery.error?.code, 'WEIXIN_SEND_REJECTED')
       assert.equal(refs.delivery.targetIdentityId, refs.weixinIdentity.id)
       const before = simulator.calls.filter(call => call.endpoint === '/ilink/bot/sendmessage').length
       const source = (await state()).members.find(item => item.id === 'a').employeeIds
       await api('admin', '/api/admin/members/a', 'PATCH', { employeeIds: source.filter(id => id !== 'p7-agent-a'), expectedEmployeeIds: source })
-      const blocked = await api('a', '/api/channels/deliveries/' + refs.delivery.id + '/retry', 'POST', {})
-      assert.equal(blocked.status, 'blocked'); assert.equal(simulator.calls.filter(call => call.endpoint === '/ilink/bot/sendmessage').length, before)
+      await verifyP7RevokedRetry({ request, state, simulator, delivery: refs.delivery, sendCount: before })
       await api('admin', '/api/admin/members/a', 'PATCH', { employeeIds: source, expectedEmployeeIds: source.filter(id => id !== 'p7-agent-a') })
       const sent = await api('a', '/api/channels/deliveries/' + refs.delivery.id + '/retry', 'POST', {})
       assert.equal(sent.status, 'delivered'); assert.equal(sent.id, refs.delivery.id)
@@ -991,6 +1020,7 @@ async function harnessCheck() {
     const missing = [...runtimeArgs], index = missing.indexOf('--' + key); missing.splice(index, 2); assert.throws(() => argumentsFor(missing), 'missing ' + key)
   }
   const harness = await readFile(script, 'utf8')
+  await callerChecks(harness)
   {
     const [{ getCapability, parseCapabilityToolResult, sanitizeFollowUpContext }, { connectionInputAllowed, connectionSnapshot }, { assertTrustedConnection }, { createKnowledgeService, currentKnowledgeReference }, { connection, correlationFixture, now }] = await Promise.all([
       import('../src/capabilities.mjs'), import('../src/execution-grant.mjs'), import('../src/connection-catalog.mjs'), import('../src/knowledge-service.mjs'), import('./fixtures/kivo-device-correlation.mjs'),
@@ -1056,5 +1086,119 @@ async function harnessCheck() {
   assert.throws(() => validateP7Polls({ ...polls, maxActivePolls: () => 2 }, ['a'], { minFullCycles: 3 }))
   assert.throws(() => validateP7Polls({ ...polls, calls: polls.calls.slice(1) }, ['a'], { minFullCycles: 3 }))
   for (const value of [{ accessToken: 'synthetic' }, { note: 'Bearer synthetic' }, { privateKey: 'not-a-key' }]) assert.throws(() => noSecrets(value))
-  console.log('P7 J10 harness checks passed (argument guard, actual handoff permissions and revocation, main-run observer directory, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model calls=0)')
+  console.log('P7 J10 harness checks passed (same-object records, retry HTTP/readback, actual protocol failure classification, argument guard, actual handoff permissions and revocation, main-run observer directory, dual actual-model audit, poll cycles and secret rejection; native/browser/Kivo/model/network/state-file writes=0)')
+}
+
+async function callerChecks(harness) {
+  const [{ normalizeTpmObservation }, { createChannelService }, weixinApi, { repairTargetFromCorrelation }, { parseCapabilityToolResult }, { connection, correlationFixture, now }] = await Promise.all([
+    import('../src/domain/tpm.mjs'), import('../src/channel-service.mjs'), import('../vendor/dsh-im/weixin/weixin-api.mjs'), import('../src/domain/kivo-repair.mjs'), import('../src/capabilities.mjs'), import('./fixtures/kivo-device-correlation.mjs'),
+  ])
+  const samples = ['a', 'b'].map((owner, index) => {
+    const recordId = '00000000-0000-4000-8000-00000000010' + index, deviceId = '00000000-0000-4000-8000-00000000020' + index, reference = 'P7-PURE-' + owner
+    const fixture = { connection: { ...connection, id: 'pure-' + owner, sourceInstance: 'pure-' + owner }, facts: { record: { recordId, reference }, deviceId } }
+    const response = (path, value) => ({ status: 'ok', source: { system: 'kivo', path, queriedAt: now, traceId: 'pure-' + owner }, value })
+    const input = { recordType: 'repair', reference }
+    const payload = normalizeTpmObservation({ mode: 'record', input, connection: fixture.connection,
+      result: response('/api/v1/mes/tpm/repairs/' + reference, { id: recordId, orderNo: reference, deviceId, status: 'reported' }),
+      deviceResult: response('/api/v1/mes/equipment/ledger/devices/' + deviceId, { id: deviceId, lifecycleStatus: 'active' }) })
+    const result = { ...parseCapabilityToolResult(read, { ok: true, observation: payload }, input), id: 'pure-' + owner + '-observation' }
+    return { owner, fixture, work: { status: 'completed', ownerMemberId: owner, capabilityId: read, skillId: 'skill-' + read, connectionId: fixture.connection.id, input, results: [result] } }
+  })
+  for (const { owner, fixture, work } of samples) assert.equal(validateP7EventObservation(work, fixture, owner).id, work.results[0].id)
+  assert.throws(() => validateP7EventObservation(samples[1].work, samples[0].fixture, 'a'))
+  const sample = samples[0], changes = [
+    work => { work.status = 'failed' }, work => { work.ownerMemberId = 'b' }, work => { work.capabilityId = correlation }, work => { work.skillId = 'skill-' + correlation },
+    work => { work.connectionId = 'other' }, work => { work.input.reference = 'other' }, work => { work.input.recordType = 'maintenance' },
+    work => { work.results[0].kind = 'kivo.tpm.device-correlation' }, work => { work.results[0].payload.status = 'scope_empty' },
+    work => { work.results[0].payload.mode = 'list' }, work => { work.results[0].payload.recordType = 'maintenance' },
+    work => { work.results[0].payload.records = [] }, work => { work.results[0].payload.records.push(structuredClone(work.results[0].payload.records[0])) },
+    work => { work.results[0].payload.records[0].id = samples[1].fixture.facts.record.recordId }, work => { work.results[0].payload.records[0].reference = 'other' },
+    work => { work.results[0].payload.records[0].deviceId = samples[1].fixture.facts.deviceId }, work => { work.results[0].payload.linkedDevice.id = samples[1].fixture.facts.deviceId },
+    ...['tpm', 'record'].map(key => work => { work.results[0].payload = { [key]: { id: sample.fixture.facts.record.recordId } } }),
+    ...['sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'sourceRecordId'].flatMap(key => [
+      work => { work.results[0].payload.source[key] = 'other' }, work => { work.results[0].source[key] = 'other' },
+    ]),
+  ]
+  for (const change of changes) { const wrong = structuredClone(sample.work); change(wrong); assert.throws(() => validateP7EventObservation(wrong, sample.fixture, sample.owner)) }
+  const latest = structuredClone(sample.work)
+  latest.results.push({ ...structuredClone(latest.results[0]), id: 'latest-observation' })
+  assert.equal(validateP7EventObservation(latest, sample.fixture, sample.owner).id, 'latest-observation')
+  latest.results.at(-1).payload.records[0].id = samples[1].fixture.facts.record.recordId
+  assert.throws(() => validateP7EventObservation(latest, sample.fixture, sample.owner), 'an old correct observation cannot hide the latest wrong observation')
+
+  const plugin = await readFile(join(root, 'plugins/weixin.mjs'), 'utf8'), sendStart = plugin.indexOf('  async function send(input) {'), sendEnd = plugin.indexOf('\n  return {', sendStart)
+  const codeStart = plugin.indexOf('function protocolCode(error) {'), codeEnd = plugin.indexOf('\nfunction runtimeError(', codeStart)
+  const runtimeError = plugin.split('\n').find(line => line.startsWith('function runtimeError('))
+  assert(sendStart >= 0 && sendEnd > sendStart && codeStart >= 0 && codeEnd > codeStart && runtimeError)
+  // Exercise the unchanged send body without starting its polling/OS-lock lifecycle.
+  const sendFactory = new Function('deps', 'const { account, secrets, api, beforeSend, recordSendProgress, splitWeixinText, officialId, WeixinApiError, sha256, attest } = deps;\n' +
+    'const closed = false, available = true, controller = new AbortController(), maxMessageChars = 1800;\n' + runtimeError + '\n' + plugin.slice(codeStart, codeEnd) + '\n' + plugin.slice(sendStart, sendEnd) + '\nreturn send')
+  let configuredReply
+  const queueLine = harness.split('\n').find(line => line.trim().startsWith('simulator.queueSend(weixinAccount.id, '))
+  assert(queueLine)
+  new Function('simulator', 'weixinAccount', queueLine)({ queueSend(id, value) { assert.equal(id, 'pure-bot'); configuredReply = value } }, { id: 'pure-bot' })
+  assert.deepEqual(configuredReply, { httpStatus: 200, body: { ret: 403 } })
+  const correlationPayload = correlationFixture(), correlated = { ...parseCapabilityToolResult(correlation, { ok: true, observation: correlationPayload }, correlationPayload.input), id: 'pure-result' }
+  const target = repairTargetFromCorrelation(correlated.payload), action = { id: 'pure-action', intent: { kind: 'kivo.tpm.repair.create' }, preview: { digest: 'd'.repeat(64), resultId: correlated.id, target,
+    payload: { orderNo: 'GW-P7-PURE', deviceId: target.deviceId, reason: '纯回归', description: '不执行业务写入' } } }
+  action.receipt = { previewDigest: action.preview.digest, upstreamRecordId: '00000000-0000-4000-8000-000000000999', recordedAt: now, orderNo: action.preview.payload.orderNo, deviceId: target.deviceId,
+    status: 'reported', creation: { actorKind: 'machine', machineAccountId: target.clientId, traceId: action.id, revision: '1' }, currentRevision: '1', replayed: false, queriedAt: now }
+  const initial = { id: 'pure-delivery', workId: 'pure-work', resultId: correlated.id, actionId: action.id, channelAppId: 'pure-app', targetIdentityId: 'pure-identity', targetConversationId: 'pure-endpoint',
+    contentKey: 'action.receipt', contentScope: 'result', status: 'pending', attempts: 0, createdAt: now, updatedAt: now }
+  let memory = { members: [{ id: 'a', enabled: true, employeeIds: ['pure-agent'] }],
+    employees: [{ id: 'pure-agent', enabled: true, modelRouteId: 'pure-route', skillIds: ['skill-' + correlation], connectionIds: [connection.id] }],
+    modelRoutes: [{ id: 'pure-route', provider: 'zenmux', model: models[0], credentialRef: 'ZENMUX_API_KEY', enabled: true }],
+    skills: [{ id: 'skill-' + correlation, capabilityId: correlation, enabled: true }], connections: [connection], knowledgeMaterials: [], automationRules: [], automationOccurrences: [],
+    works: [{ id: initial.workId, ownerMemberId: 'a', employeeId: 'pure-agent', skillId: 'skill-' + correlation, capabilityId: correlation, connectionId: connection.id, conversationId: 'pure-conversation', status: 'completed', input: correlationPayload.input, results: [correlated], actions: [action] }],
+    conversations: [{ id: 'pure-conversation', ownerMemberId: 'a', employeeId: 'pure-agent', channelIdentityId: initial.targetIdentityId }],
+    channelApps: [{ id: initial.channelAppId, provider: 'weixin', enabled: true, status: 'active', revision: 1, allowedScopes: ['result'] }],
+    channelIdentities: [{ id: initial.targetIdentityId, channelAppId: initial.channelAppId, memberId: 'a', status: 'active', revision: 1, weixin: { runtimeState: 'connected' } }],
+    channelConversations: [{ id: initial.targetConversationId, channelAppId: initial.channelAppId, identityId: initial.targetIdentityId, memberId: 'a', type: 'private', providerConversationId: 'pure-owner', status: 'active', revision: 1, allowedScopes: ['result'] }], deliveries: [structuredClone(initial)] }
+  const channel = createChannelService({ store: { async read() { return structuredClone(memory) }, async update(mutate) { memory = mutate(structuredClone(memory)) } }, clock: () => now, connectionCatalog: [connection],
+    workService: { async getWork() { return { ok: true, value: structuredClone(memory.works[0]) } } } })
+  const calls = [], originalFetch = globalThis.fetch
+  let reply = { httpStatus: 503, body: { ret: -1 } }
+  globalThis.fetch = async url => { assert.equal(new URL(url).href, 'http://127.0.0.1:1/ilink/bot/sendmessage'); calls.push({ endpoint: '/ilink/bot/sendmessage' }); return new Response(JSON.stringify(reply.body), { status: reply.httpStatus }) }
+  try {
+    const send = sendFactory({ account: { baseUrl: 'http://127.0.0.1:1/', ownerUserId: 'pure-owner', tokenRef: 'pure-token', contextRef: 'pure-context' }, secrets: { async read(ref) { assert(['pure-token', 'pure-context'].includes(ref)); return ref === 'pure-token' ? 'controlled-token' : { token: 'controlled-context' } } },
+      api: weixinApi.createWeixinApi({ testMode: true, testBaseUrl: 'http://127.0.0.1:1/' }), ...weixinApi, sha256: hash, attest: async () => assert.fail('no stale-token response in this check'),
+      beforeSend: async input => { await channel.validateSendClaim(input); return true }, recordSendProgress: input => channel.recordSendProgress(input) })
+    const dispatch = async retry => {
+      await channel.authorizeDelivery({ deliveryId: initial.id, retry })
+      const envelope = await channel.validateSendClaim({ deliveryId: initial.id })
+      await send({ deliveryId: initial.id, attemptId: envelope.uuid, text: envelope.text, acknowledgedParts: envelope.acknowledgedParts, previousStatus: retry ? 'failed' : 'pending' })
+      return structuredClone(memory.deliveries[0])
+    }
+    // The real adapter and send body classify HTTP 503 as unknown, never retryable failed.
+    const unknown = await dispatch(false)
+    assert.equal(unknown.status, 'unknown'); assert.equal(unknown.error.code, 'WEIXIN_HTTP_ERROR')
+    const unknownCount = calls.length
+    await assert.rejects(channel.retryDelivery({ deliveryId: initial.id }), { code: 'INVALID_STATE' })
+    assert.equal(calls.length, unknownCount); assert.equal(memory.deliveries[0].status, 'unknown')
+    memory.deliveries = [structuredClone(initial)]; reply = configuredReply
+    const failed = await dispatch(false)
+    assert.equal(failed.status, 'failed'); assert.equal(failed.error.code, 'WEIXIN_SEND_REJECTED')
+    const before = calls.length
+    memory.members[0].employeeIds = []
+    const request = async (actor, path, method, body) => {
+      assert.equal(actor, 'a'); assert.equal(path, '/api/channels/deliveries/' + initial.id + '/retry'); assert.equal(method, 'POST'); assert.deepEqual(body, {})
+      try { return { status: 200, body: await dispatch(true) } } catch (error) { assert.equal(error.code, 'DELIVERY_FORBIDDEN'); return { status: 403, body: { error: { code: error.code } } } }
+    }
+    const blocked = await verifyP7RevokedRetry({ request, state: async () => memory, simulator: { calls }, delivery: failed, sendCount: before })
+    const response = { status: 403, body: { error: { code: 'DELIVERY_FORBIDDEN' } } }, base = { request: async () => response, state: async () => ({ deliveries: [blocked] }), simulator: { calls }, delivery: failed, sendCount: before }
+    for (const wrong of [{ status: 200, body: response.body }, { status: 403, body: { error: { code: 'FORBIDDEN' } } }, { status: 403, body: null }]) await assert.rejects(verifyP7RevokedRetry({ ...base, request: async () => wrong }))
+    for (const key of ['id', 'workId', 'resultId', 'actionId', 'targetIdentityId', 'targetConversationId', 'status']) await assert.rejects(verifyP7RevokedRetry({ ...base, state: async () => ({ deliveries: [{ ...blocked, [key]: 'wrong' }] }) }))
+    await assert.rejects(verifyP7RevokedRetry({ ...base, state: async () => ({ deliveries: [] }) }))
+    await assert.rejects(verifyP7RevokedRetry({ ...base, state: async () => ({ deliveries: [{ ...blocked, error: { code: 'FORBIDDEN' } }] }) }))
+    await assert.rejects(verifyP7RevokedRetry({ ...base, simulator: { calls: [...calls, { endpoint: '/ilink/bot/sendmessage' }] } }))
+    memory.members[0].employeeIds = ['pure-agent']; reply = { httpStatus: 200, body: { ret: 0 } }
+    const apiLine = harness.split('\n').find(line => line.trim().startsWith('async function api(actor, path,'))
+    assert(apiLine)
+    const api = new Function('request', 'assert', apiLine + '\nreturn api')(request, assert)
+    const delivered = await api('a', '/api/channels/deliveries/' + initial.id + '/retry', 'POST', {})
+    assert.equal(delivered.status, 'delivered'); assert.equal(calls.length, before + 1)
+    for (const key of ['id', 'workId', 'resultId', 'actionId', 'targetIdentityId', 'targetConversationId']) assert.equal(delivered[key], initial[key])
+    assert.deepEqual(memory.works[0].actions, [action], 'delivery retries do not create or rewrite the business action')
+  } finally { globalThis.fetch = originalFetch }
+  console.log(JSON.stringify({ check: 'j10-caller-contracts', normalizedOwners: 2, observationNegatives: changes.length + 2, sendReplies: ['503:unknown', '200/ret403:failed', 'revoked:blocked/403', 'restored:delivered'], networkCalls: 0, stateFileWrites: 0 }))
 }

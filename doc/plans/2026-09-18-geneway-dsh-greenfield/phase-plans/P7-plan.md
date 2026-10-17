@@ -462,6 +462,34 @@ PURE保有效05前驱及错hash/状态/范围/序列/进程/tenant/device、重�
 
 **执行顺序与停止。** 计划独审/本地提交→05 SOURCE/PURE及独审→C22/ctx05完整来源门→新API A/B及原License/fixture验证→沿§8.12修复后的完整历史snapshot比较与单次新setup→全部非fresh输入就绪→原冻结Hive06最后启动→正常monitor与完整J10。当前不存在的04 journal若出现、旧原件或unknown改变、当前来源不符、License失效、旧进程仍活/读取错误、05/C22/ctx05碰撞，均停止依赖步骤；不覆盖、不重License/schema/fixture、不重放未知动作、不延长Hive06或降freshness。不修改产品、共享仓库、现场，不推送部署发布。
 
+### 8.15 T5 正常重启锁持有者对照与新隔离完整旅程（2026-10-17，实施前）
+
+工程 `c04_exit_engineering_astra` 与产品 `c04_exit_product_astra` 独立读取真实失败、产品与验收调用链后正式交换，达成CONSENSUS。本节是诊断实施计划及有条件的验收修复/新fresh旅程计划；独立过设PASS前不写诊断SOURCE，诊断支持前不改仓库验收源码或启动新旅程。继续使用唯一验证记录，不建通用resume、候选等价豁免、退出框架或证据平台。
+
+**当前实际结果。** 05/C22完整来源前后门均exit0，API A/B和setup真实通过；精确3条setup消费、A其余11outbox/13表不变、B完整不变、worker已停。final06 session82085 exit1，前四步通过，第五步same-object-event在accept-p7:830点击时全局selector匹配2而拒绝。observations SHA `8d6b63be4c57c5d8166d763857c4ace0bafed1ce35a2ad99ba3ef2f01f522de2`，录像258.45秒，SHA `ec054291fc7c932595f4e3dff79d132b1388550445a4291d957257fe01bb5fc6`；这是失败旅程。此前synthetic人类dispatch已成功，源单dispatched/rev1，事件 `da597804-b837-4c86-8992-0023d6406faf`，worker退出0、Kivo通知单次202/38ms、Geneway后续观察completed，不能重放。原C22/ctx05、包、状态、视频与效果保留。
+
+API05已在原来源仍有效时由owner正常停：两launcher0、两child null/SIGTERM，四PID/PGgone，proof `run03-continuation05-api-ready/exit.json` SHA `5f6bf79cb6d3ca1ad65b5cf90c60525e58d1def10dec594132eb06481243a731`；主authRemoved且owned进程退出，root实际scratch进程扫描空。Hive06仍按原上限自然结束，不延窗、不重启。
+
+**两个明确接缝。** UI有规则列表 `#automation-list` 与提醒 `#automation-attention` 的合法同规则入口；click helper先检查querySelectorAll数量再检查可见性，所以只证明2个DOM匹配，不证明2个可见控件。首选沿P5现有模式，把830限定为`#automation-list [data-open-automation="…"]`，保唯一性和真实点击，不隐藏产品提醒、不用first。
+
+此外，微信身份在重启开始后13ms记录unavailable/WEIXIN_LOCK_LOST；自动通知后续blocked/attempts0，非same-channel-receipt的预期撤权负例。channel-service发送守卫要求connected；后续维修回执同样依赖它。源码链为P7 stopOwned→共享P4 stop向-HostPID组SIGTERM，微信holder普通spawn继承HostPG；Host异步shutdown等待automation.stop再channel.close，holder可能在release置releasing前被组信号终止，触发生产lost路径。旧日志有Host退出0但没有holder PID/exit signal，当前仅为支持假设，不补称旧actual已捕获因果，也不放宽产品failclosed。
+
+**先做同条件真实对照。** 独立外置`p7-acceptance/weixin-host-stop-diagnostic01/`固定诊断源码及PURE独审后，使用当前精确Node与实际`scripts/accept-p4.mjs --host`入口（channelHost→正式start/server.shutdownServer），当前生产acquireWeixinBot/createWeixinRuntime，真实OS holder及本机iLink模拟器。两个独立净进程均在新owned临时根以synthetic身份/凭据启动至connected，Host detached PGleader、holder继承PG；唯一行为变量为baseline向-HostPID发SIGTERM、variant向HostPID发SIGTERM。不复用旧J10 auth/秘密，不调用模型、Kivo或业务，不访问外网，不人为sleep拉长竞态。
+
+两组共用一个诊断专用透明`--import` preload：包装child_process.spawn并syncBuiltinESMExports，仅观察源码中固定/bin/sh锁holder调用，原函数、参数、返回及退出逻辑保持；通过安全FD/IPC记录PID/parent/startTicks/PGID和exit code/signal/时间，不记录完整args/env/凭据。父进程记录Host信号请求/退出和实际PID/PG消失；读取临时state的身份状态与simulator active/max poll，证明正常释放和同一临时身份重启connected/唯一owner/单poller。网络守卫只允许本机owned Host/模拟器，记录模型/业务调用为0；PURE不产生文件写、网络、进程、信号或秘密读取。
+
+只有baseline实际复现holder提前退出→LOCK_LOST/unavailable，且variant正常产品close/release、无失锁、Host/PG退出并重启connected，才支持下面条件修复。保真实holder SIGKILL失锁负例，仍须停止poll、unavailable、禁止发送；复用现有test-p4-weixin与test-channel-state的真实断锁、sticky、撤权零发送语义。baseline未复现、variant失败、靠强杀兜底才退出或越界均停依赖实施，继续有界归因；旧实际holder证据缺口仍如实保留。
+
+**条件修复仅限验收入口。** 原因支持后只改`scripts/accept-p7.mjs`：上述selector；stopOwned仅在`child.auditRole === 'host' && signal === 'SIGTERM'`先向正HostPID发送SIGTERM，先注册退出监听、等正式cleanup与Host退出，再核整个owned PG消失。超时/残留用原owned PG SIGKILL兜底并核退出，但必须将该次记失败，不能伪报graceful成功。其他children及显式SIGKILL沿原组语义，共享P4 stop及产品锁/发送守卫不改。可导出既有stopOwned供定向回归直接调用，不建wrapper。覆盖三处正常Host停止、最终runCleanup同回调及硬中断边界；用真实helper复验变体，不只测仿制函数。两入口同时存在时定向证明列表selector唯一打开该规则/已有occurrence，旧全局selector拒绝；不重放业务。执行现有harness-check、test-p4-weixin、test-channel-state和必要语法/独审；不把无poll的harness-check当真实重启证明。
+
+**新run04是完整验收路径。** §8.6的fresh/no-resume继续有效。accept-p7属于候选闭包，一行变更也不能沿C22身份；旧run03已dispatch且临时认证清除，尾段接续仅能是局部证据，不能拼成完整J10。本节明确仅为新的同类本机synthetic旅程建立run04，不重建run03，不改变业务动作。固定runId `geneway-p7-20261017-04`、output `/tmp/geneway-p7-kivo-runtime-04`、包`p7-kivo-runtime-run04/`、新主runId `geneway-p7-20261017-04-j10-final07`及排他`j10-final07`输出。拟API34681/34682、PG55881/55882、Redis56881/56882，网段10.253.76.0/29(gateway .1)及10.253.76.8/29(gateway .9)，webhook34481保持。root只读预检六端口空、两路径不存在、46网络无重叠；实际入口必须重核，不运行时自动选号。新API端口需同步accept-p7五处严格端口/对应PURE，保精确绑定，不泛化任意目标。
+
+新准备回到已有fresh单候选C23/run.json机制，不携带continuation ctx或sourcePreparation长继承。整合已证实的八字段License签名/正式parser、异步API日志和类型化时区保护、worker早ENV、API退出归属及现有通知精确消费；不得直接复制旧fresh包复活缺陷，也不把05历史License强行改为新库。新库首次独立License和fixture是新run必要准备；秘密只来自本任务新生成/获准模型项，旧业务原件不改。SOURCE逐项列已保留实现与必要fresh绑定差异。run01/02/03六旧库通过既有oldReadOnly机制以API停机后的当前逻辑指纹保护，包含run03已成功dispatch/outbox/delivery/attempt/worker，不沿用其变化前基准。142G中仅当前accept-p7必要变化，301K及compiled runtime保持；当前完整闭包必须以新HEAD/包/C23逐项校验，独审后才创建真实资源。
+
+**固定Hive07与真实依赖。** Hive06自然完成后，先核window-safe/末sample292、transport与ACK1264、pending/ackPending0、host/inside进程退出及固定原件，才能制作并审查07 publisher SOURCE；不猜完成SHA。07复用现有机制，固定293..353共61样本、30秒、最大1860秒、122条、birth=false、1264→1386，原tenant/device/externalDeviceId及凭据不变。SOURCE/PURE含真实06前驱和原负例，publisher关键机制保持，不增加live receipt或放宽120秒freshness/5秒future/cache语义。
+
+新fixture确需新鲜Hive样本，因此不能机械沿用旧fixture已完成的“publisher最后”次序：条件修复/定向实际证明→新准备与07 SOURCE独审/提交→C23完整闭包→新run04 schema/API/License及所有不依赖fresh准备就绪→单次07→首正式样本与最新值核验→A/B正式fixture→一次精确setup→动态catalog/observer/主参数及全来源门→立即完整十步J10。不在窗口内继续改源或规划；窗口不足、License失效、旧保护漂移、来源/身份碰撞、任何未知写入或真实断锁负例失效均停止依赖步骤，不重放、不延窗、不降标准。完整旅程、新窗完成、P7交付与用户最终验收仍分开报告；没有push/部署/发布或新业务权限。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

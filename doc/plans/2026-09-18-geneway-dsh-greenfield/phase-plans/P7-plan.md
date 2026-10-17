@@ -364,6 +364,28 @@ A/B支持门均须证明required→valid、restricted=false、精确modules/ID/�
 
 仅授权`scripts/accept-p7.mjs`此局部及同文件纯检查；§8.8包可继续已审外置SOURCE，最终资源/manifest/candidate须等待本修正实际提交HEAD及SHA，不能先按334cdfc冻结。Geneway142项集合不变，仅accept再更新，其余141项和Kivo源码/runtime仍相对C17不变；历史候选与失败证据不改签。如发现需要产品行为变化或新增范围，停止对应动作重新决策。
 
+### 8.10 T5 正式 API 异步日志的精确保护（2026-10-17，实施前）
+
+工程与产品两名Astra独立核查后正式交换CONSENSUS，本节先于新包SOURCE、探针和runtime。仅修已证实的外置保护门遗漏，不改Geneway/Kivo产品、业务写动作、License协议或十步旅程。新包仍须独立过设、未实施者SOURCE审查及单独runtime门。
+
+**实际事实。** C18 SHA `0ef88db9811eb15ba4fa0099f7920079707994f945ab38e7b8d7dc2fcc0b991d`、ctx01 SHA `7c3ae439a8c2647e4aee35c1414b9d30e65cc20c3793e8357f18c0565d2edb68`下，仅A支持门调用一次login，HTTP201后在verifyLoginWindow失败。`license-a-continuation01.json` SHA `e320e89e1622b6d8b61d26daca2c4c5fdb20b63733059124748a028f55e9fecd`保留unknown，没有request/activate；B未开始。实际只读`license-readback02/receipt.json` SHA `9bd4e699775a5a9a2592dfd764cbf4e85c934b7b9b31c1e1382c813712b00ed9`证明metadata和旧request/audit不变，protectedTables唯一差异为api_log 3→4；排除精确trace `p7-setup-b9008e28-71c3-48c6-9108-d241ddfaa8c3`后完整旧行指纹相同。新行是POST /api/v1/auth/login/201、userId=null、system/service/mes-api-log。A当前2session、B1session；各旧request1、state0，没有新业务fixture。两个API已正常退出，`run03-continuation01-api-ready/exit.json` SHA `b50a3a06b4bbd9b6668e71163066ffc4ebfc931a05251c54826adb4ea81f03e5`记录launcher exit0及全部PID/PG消失；PG/Redis保留。
+
+正式全局AuditLoggingInterceptor及冻结编译runtime均以`void record`异步写api_log，非GET/HEAD/OPTIONS成功请求和错误响应均可能记日志。HTTP或work完成不证明该日志已提交，日志失败也不阻止响应。旧loginSnapshot和License整体snapshot将api_log放入全表不变比较，故与正式行为冲突。不得删掉整个表保护、按p7前缀放行、拿sleep充当drain证明或将原unknown改成成功。
+
+**固定续行身份。** 唯一新包`p7-kivo-runtime-run03-continuation02/`，新ctx为`/tmp/geneway-p7-kivo-runtime-03/current-context-02.json`，新candidate冻结后再生成ctx，避免哈希循环；新API launch `run03-continuation02`、ready `api-a/b-run03-continuation02.json`、License journal `license-a/b-continuation02.json`。沿用run03 schema和资源及尚未执行的main final06、Hive05。C17/C18、旧两个包、ctx01、所有unknown、只读回执和退出证据作为固定历史原件，新增A session和日志亦成为不可变旧基线；GO前只读冻结当前所有session完整行摘要及不可变User投影，不能把readback02选定字段回读扩称完整身份已验证；不得恢复旧token或借旧request。A/B各至多一次新的regular login/request/activate，预期session分别2→3和1→2；实际前置读回不符即停。Geneway142、Kivo301与冻结runtime保持当前C18字节，新HEAD仅计划变化；全链入口、子进程、observer及cleanup统一绑定新候选/ctx，历史baseSchema继续独立保留。
+
+**最小实现与完整旧行保护。** 优先不新增实现文件：共享日志snapshot、精确delta和有限轮询放现有auth-protection，license-support复用，fixture/operator仅接固定前驱和当前HTTP元数据，selfcheck扩实际生产者回归。api_log从笼统tables相等移入同一snapshot内的专用完整行验证，不能不检查。以固定排序的完整行摘要保护全部旧api_log；新行只能由当前操作的精确trace集合解释，数量、唯一ID、method/path/status、userId、系统metadata actor、创建/更新时间窗及正式字段形状逐项校验；未变字段不得投影丢弃。只在已有metadata机制加入api_log trigger，核其身份、启用、事件、参数及既有冻结函数正文SHA（0519b203…），同时绑定正式挂载迁移20261009195150_api_log_record_metadata；与User/session沿用同一套检查。
+
+每次login窗口恰一条本次POST /api/v1/auth/login/201日志、userId=null，原User三列和恰一regular session检查全部保留。License整体恰三条，另两条对应本次request/activate的固定正式method/path、精确200及实际journal HTTP状态和认证admin；登录日志不得重复计入允许增量。整个支持门保留旧License完整行、audit、业务零、旧四库及前后source门。日志receipt仅保存安全元数据、完整行摘要及来源绑定，不输出UA/IP原文、秘密、token、requestCode、License blob或正文。后续消费License receipt只核已记录三行仍完整存在及License不变，不将成功时整个api_log摘要冻结为未来业务永不新增的全局条件。
+
+**异步与并发边界。** 一次HTTP只发送一次；响应返回后仅为尚缺的精确预期日志有限READ ONLY轮询，固定10秒/250毫秒/最多40轮，每轮新RepeatableRead事务读取专用完整日志及数据库clock，日志到齐后再取得全部保护项与clock的一致最终快照并重验，避免反复扫描无关全表；SQL/事务时间受剩余deadline约束。重复、错误或额外trace、旧行变化及其他保护差异立即失败，不能等到超时再忽略；只有尚缺预期日志可继续等。超时保留unknown并停止，不重发HTTP或登录。
+
+进入后续login窗口前，仅对已绑定固定前驱journal中已applied、同实例且精确可识别的POST日志做同样有限到齐：fixture依赖对应成功License三trace；operator依赖对应固定fixture及自身已完成formal-http前驱。不扫描任意journal，不新增跨Host日志drain协议。建立baseline后，旧日志逐行受保护；窗口内未绑定的迟到MCP/业务/错误GET日志一律停止，不能追加白名单。前序work/HTTP完成不是日志到齐证明；未绑定异步日志可能使运行停止是保留的安全边界。原有业务写仍在其独立操作窗口内按既定计划执行。
+
+**生产者回归与运行顺序。** selfcheck读取已冻结compiled AuditLoggingInterceptor原字节，用标准CJS wrapper和白名单真实Nest/rxjs加载，唯fms-db替为deferred内存事务sink；不加载实际Prisma、bootstrap或秘密。实际interceptor驱动login、request、activate形状，证明响应先完成而日志后提交；同一实际产物使旧全表不变门红、新精确delta绿。覆盖永不落库、错trace/path/method/status/user/actor/time、重复/额外行、旧行任一字段改变、迟到未绑定trace、后续消费历史日志不冻结全表、两个合法连续login，以及原八字段实际parser回归；禁真实网络/DB/进程/文件写入。所有实际消费文件及传递依赖进入新闭包，SOURCE独审不得只看自造日志对象。
+
+方案独立审查通过后才实施新包；源码冻结、纯门和未实施者独审通过后由root创建新candidate/ctx并核完整闭包。新API就绪后先分别完成一次实际License支持门、HTTP与DB读回、原件保护和退出/cleanup可用性，两个门均成功才单次开启已冻结Hive05，按§8.6顺序fixture/setup/动态输入和完整J10。任一unknown保留并停止该分支；局部License成功、纯生产者回归及已有历史四步均不代表J10/P7完成。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

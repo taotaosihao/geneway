@@ -336,6 +336,24 @@ Hive04保持既定110–170、transport898→1020、61x30/最大1860/最多122�
 
 本节显式替代§8.6的142源码全部不变要求：集合仍142项，仅已审accept-p7.mjs允许旧SHA `dfd5ed144bb74ddef268173883b57ef69f2cbfe12da8d992d56e71235822d872`→实际新SHA，其他141项及Kivo源码/runtime保持原绑定。run03包可继续既有独立SOURCE工作，最终manifest/candidate冻结必须等待此修正的实际新HEAD、SHA、定向回归和独立SOURCE审查，不填预计值、不改签candidate16或历史证据。如需修改产品、扩大source范围或放宽unknown/权限门，停止对应分支返回规划。
 
+### 8.8 T5 run03 License 准备续行（2026-10-17，实施前）
+
+工程与产品两名Astra独立规划后正式交换，选择固定run03续行并形成CONSENSUS；本节汇总先于新包实施，独立过度设计审查、SOURCE与runtime门仍分别执行。不新建run04，不改Geneway/Kivo产品或License协议，不重试原activate，不扩大写动作及Hive05窗口。
+
+**已发生事实。** C17 SHA `8a39411e8350e08b010554fea40dbab00a984f84be46e3edbc7a2b9fc4e1d9d4`下18项schema已完成，`run.json` SHA `83d9c0167f9322aa2f1be4472eb8ded0da5a0cc36393a83918a1f3ba796efb6f`。A/B各一次login/request成功、activate unknown；原journal SHA分别`8c146ba639a8fd4a0fbc750ee37c85d50036b32587f51d5a393b00b85a31dfab`、`cefb9ea2992ba714279c0132ce2e0da7165f403995bf540511ea166a77d21acd`。两名Sol分别用实际冻结signer和正式verifyLicenseFile复现九字段拒绝、仅去除excluded并重签后接受。原HTTP status/body未保存，不能声称实际400。只读proof `p7-acceptance/license-readback01/receipt.json` SHA `e82575f3a6b33fafbdd566a80bf70a6c3522a3097a74d2200c013bec462ab2ed`确认旧request各一条未消费/替换，license state与activate audit为零，业务fixture/worker相关表为零，旧四库不变。原API正常退出证明`run03-api-ready/exit.json` SHA `8dbe3a5f70477ce2c8137ce121b896ed2d3a6332df6fdb51549543c7c245af7b`；PG/Redis保留。原unknown和全部历史证据不改写。
+
+**唯一新包和执行身份。** 新外置包为`p7-kivo-runtime-run03-continuation01/`，固定复用run03 producer/output/资源及main `geneway-p7-20261017-03-j10-final06`，主output仍为未使用的`p7-acceptance/j10-final06`。保留C17、原包、原run.json/schema journal和API历史原件；新包显式固定这些历史引用及上述proof，不在内存或磁盘将旧schema candidate替换为新值。Geneway 142项源码、Kivo 301项源码及编译runtime相对C17不变；新候选绑定实际计划HEAD与新包完整消费闭包。
+
+候选冻结后排他创建`/tmp/geneway-p7-kivo-runtime-03/current-context-01.json`，分列`baseSchema`历史来源与`activeCandidate`当前执行；该运行输入的SHA由CLI/launcher/receipt绑定，不反向收入它引用的candidate manifest。API、License、fixture、gate/setup、worker、operator、observer、主验收及其子进程/清理/前后检查统一使用当前候选。API和observer的baseCandidate等于fixture.candidate；C17单列baseSchema。全部实际加载文件、正式parser与传递依赖纳入闭包，不暗调要求旧HEAD等于当前HEAD的旧checkSources。新API launch固定`run03-continuation01`，新ready为`api-a/b-run03-continuation01.json`，原ready只作已退出历史；必须重新核真实PID/PG、端口、数据库和来源。当前上下文缺失、混用或漂移在副作用前拒绝，不增加通用恢复框架。
+
+**签名和纯门。** 只修外置签名payload为正式八字段及顺序：schemaVersion/licenseId/product/requestCode/issuedAt/notBefore/expiresAt/modules。发送前将原blob交给冻结runtime实际verifyLicenseFile，并另外核product=mes、本次requestCode、精确mes.monitor/mes.tpm、既定八小时有效期与当前生效；不把parser未承诺的业务约束算作已校验。HTTP失败仅保留允许的status/code，不落body、token、requestCode、签名或私钥。临时内存key回归实际旧九字段拒绝、新八字段接受，覆盖错key/signature/product/requestCode/modules/顺序/时间；上下文负例覆盖历史SHA错误、当前候选错配、消费闭包漂移、旧API冒充live和旧unknown重用。纯检查无真实秘密、API、DB和新进程效果；未实施者独立SOURCE通过后方可给运行GO。
+
+**一次真实License支持门。** 先重新读回完整旧request行与旧成功request audit指纹、无license/activate效果及保护状态，核run03实际schema的User写入trigger/function与冻结源码一致。每实例最多一次新regular login、新session、新request、新license ID和新trace，排他新journal为`license-a/b-continuation01.json`。旧token/requestCode未保存且正式authority绑定session，故禁止借用旧request。顺序固定login→request→sign→实际parser及字段检查→单次activate→HTTP与DB读回；任一unknown立即停止，不自动第三个request或再次登录激活。
+
+每次正式login的前后窗口内，User仅允许last_login_at、updated_at、updated_by变化：分别绑定新session.issued_at、正式事务时间和human/core-user/admin主体；created_at/created_by及其他身份、权限、凭据、role/org关系不变，regular分支只新增恰一条session，不新增terminal关联。此约束按每次操作窗口成立；后续原批准fixture/operator正式登录仍按各自journal核同一允许差异，不能把License历史receipt的lastLoginAt当作整个J10永不变化的当前值，也不能全局只准一条session。旧request完整行、旧audit和unknown持续不变。
+
+A/B支持门均须证明required→valid、restricted=false、精确modules/ID/有效期，新request唯一consume、唯一预期state与activate audit绑定admin/session/trace；旧request/audit不变，业务fixture/machine/webhook/rule/delivery/worker此时仍零，旧四库不变，前后完整来源检查通过。后续fixture消费成功receipt和当前valid状态，不重复request/签名/activate；过期或漂移停止，不自动续期。License支持门通过后才按§8.6顺序单次启动冻结Hive05，在120秒新鲜度与既定有限窗内完成fixture/setup/动态输入和完整J10。纯parser或License局部成功均不能替代十步旅程、媒体交付、独立阶段审查和用户验收。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

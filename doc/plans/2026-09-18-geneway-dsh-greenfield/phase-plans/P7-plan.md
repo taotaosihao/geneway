@@ -386,6 +386,20 @@ A/B支持门均须证明required→valid、restricted=false、精确modules/ID/�
 
 方案独立审查通过后才实施新包；源码冻结、纯门和未实施者独审通过后由root创建新candidate/ctx并核完整闭包。新API就绪后先分别完成一次实际License支持门、HTTP与DB读回、原件保护和退出/cleanup可用性，两个门均成功才单次开启已冻结Hive05，按§8.6顺序fixture/setup/动态输入和完整J10。任一unknown保留并停止该分支；局部License成功、纯生产者回归及已有历史四步均不代表J10/P7完成。
 
+### 8.11 T5 无时区日志时间的类型边界（2026-10-17，实施前）
+
+两名Astra独立核查后正式交换CONSENSUS，本节先于新SOURCE/probe，仍须独立过设和未实施者源码审查。范围仅为外置日志时间读取、直接相关回归及固定续行身份；§8.10的精确1/3日志增量、完整旧行、User三列/session、前驱边界、10秒期限及unknown不重试规则不变。
+
+**实证。** C19 SHA `f1eab9e6c31742869d6184e67332d2278a60ac2f5b638f09c7d49eeae7329931`、ctx02 SHA `55bca4e2d5fbdff55a53bcce19e32356153926359d1bf5ba2035eeeae7a9d8ee`下，仅A再次登录HTTP201后在checkLog:114时间窗断言失败。`license-a-continuation02.json` SHA `5c4e2e52870dd96beaaeaae17845dd212bc15dbb62667c4cf9896a97ed09d487`保留唯一login unknown，未request/activate，B未开始。实际`license-readback03/receipt.json` SHA `162100e3d8ba7aa12850216d932a28ca057b675e1000bd9583e629d8eb69942c`证明：同净环境Node为Asia/Shanghai，DB为Etc/UTC；api_log两时间列实际为timestamp without time zone、精度3。原SQL JSON两值为`2026-10-17T01:24:30.732`，旧newDate解析成`2026-10-16T17:24:30.732Z`，同一行Prisma typed投影均为`2026-10-17T01:24:30.732Z`，偏移八小时。A新增log ID `065e231a-2cd8-41dc-bbc4-680be1cecd72`，trace `p7-setup-42152d32-5d80-4330-bdd6-d340ef34999a`；全5行摘要 `17dd85062d5fae172dfd3b0388694aa4d38f645914e298d8115da974cd14490f`。扣本次trace后原4行完整摘要、旧2完整session、immutableUser、旧request/audit、metadata、余表及四旧库均不变。A当前3session，B1，双方原request各1/state0。API02均exit0且四PID/PG gone，退出proof `run03-continuation02-api-ready/exit.json` SHA `5201ebb26f7fdd4ec2119f1eab0029565b1e90445a732eca720f5eab545951ad`。
+
+**最小类型修正。** 仅在既有apiLogSnapshot同一个SELECT中保留原`to_jsonb(t)::text`和原ORDER/COLLATE C，旁取同一t行id、trace及`created_at AT TIME ZONE 'UTC'`、`updated_at AT TIME ZONE 'UTC'`类型化时间。raw字符串、排序和完整行SHA一字不改；typed侧列与raw行双向一一对应，核ID/trace、唯一性、UTC日历值一致、有效绝对时间。checkLog仅用该typed时间比较，其他字段仍来自原完整raw行。A/B各自在实际snapshot门确认固定DB UTC语义和两列timestamp without time zone(3)，不凭A推断B；不盲加Z、不更改全局TZ/clock/数据库数据，不放宽既有1ms容差。snapshot及相关log检查、纯sink在原文件内调整，不新增通用时间库、适配层或产品依赖。所有实际消费依赖重新冻结。
+
+**先纯检查，再对已有行做实际只读接缝门。** 同一个selfcheck由controller分别以TZ=UTC和TZ=Asia/Shanghai运行，不在测试内新增spawn。纯sink同时模拟PG无Z raw与同一行typed时间；冻结旧02时间解释在UTC绿、上海红，新路径两边均绿；缺失/重复/跨行typed绑定、raw与typed日历不符、无效时间及真实时间越界均拒绝，raw排序和SHA不变。保留真实compiled interceptor、1/3日志、deadline、HTTP零重试及其余既有回归。readback03仅公开选定字段，纯样本不可冒称完整历史raw重放。
+
+新包SOURCE通过、新candidate/ctx03冻结并核完整来源后，**任何新login之前**执行一次app-role单RR READ ONLY实际接缝检查，复用正式apiLogSnapshot及新validator、冻结旧02 validator，禁止旧loadContext/checkSources。取得A实际完整5行raw和同行typed，核全SHA17dd…、固定未知journal.before.apiLogBaseline原4行、精确trace/ID和beforeClock；当前上海环境旧validator必须仅在原时间断言红，新validator绿，完整原件及旧四库保持。B同次只读核自己的DB UTC和列类型。记录安全时间/绑定/摘要及实际命令，不保存UA/IP或秘密。该门只证明已发生行的读取解释，不把原unknown改applied，不补称原login或License完整成功；失败停在新登录前，不以纯绿继续碰运气。
+
+**固定第三续行。** 采用唯一新`p7-kivo-runtime-run03-continuation03/`、`current-context-03.json`、新candidate、API launch `run03-continuation03`、`api-a/b-run03-continuation03.json`及`license-a/b-continuation03.json`。baseSchema仍C17；保留C17/C18/C19、前两个续行包/context、所有unknown、readback03及exit proof原字节，A此次新增session/log纳入完整旧基线。当前142 Geneway、301 Kivo和冻结runtime字节保持，新HEAD仅计划变化；五字段context仍在candidate之后排他生成，API/fixture/setup/operator/worker/observer/cleanup统一新绑定。实际只读接缝门通过后，A/B各最多一次新regular login（本次分别3→4、1→2）及一次新request/activate；历史token不恢复，旧request不借用。成功License门之后仍按原排序单次Hive05、fixture/setup、动态输入、完整J10。无新业务动作、延窗、部署或发布授权。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

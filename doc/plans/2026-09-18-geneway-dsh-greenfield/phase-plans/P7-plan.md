@@ -446,6 +446,22 @@ PURE保有效05前驱及错hash/状态/范围/序列/进程/tenant/device、重�
 
 边界不符、并发publisher、License失效、准备原件变更、发布unknown或freshness失败时停止对应依赖步骤，保原件先回读；不重建schema/License/fixture/setup、不换序号起点、不重放。窗口按上限结束，不延长06、不自动启动07、不降低J10门槛。此规划只恢复原验收所需有限新鲜样本，不增加业务目标、写动作、外部接收方或部署发布授权。
 
+### 8.14 T5 API 启动器与子进程退出归属修正（2026-10-17，实施前）
+
+工程 `c04_exit_engineering_astra` 与产品 `c04_exit_product_astra` 独立核实源码、固定真实退出原件及当前冻结身份后正式交换，达成CONSENSUS。本节只解决04新增退出断言与真实历史冲突，以及保留冻结失败候选的固定续行；不增加业务行为、权限、运行框架或证据平台。独立过设PASS前不得修改后继SOURCE或实际启动。
+
+**真实失败与归属。** 04 SOURCE/PURE独审后，C21 SHA `0e351a80caa323e46553b1be98f22c980ef0e60cc4b170642f45f3e4bbb834b2`、ctx04 SHA `9b76aed0c4e3e7e3273601fbb5dce4e54bbc52486a83e4c3b709c488c4d88f59`排他创建，当前完整contextFor实际session24626 exit0。04 manifest `39279ea5892d20f800eca65aeb99e119b7986247770c458f97e2bf749f6d4865`、bundle `495194f16aa9cf0ef9f45b895dadcbd18c718d9bfb100622f27508f6fe048300`保持。随后A04 session73091 exit1停在start-api.previousApiLaunches:54：新增断言要求第三旧API child为0/null。固定03退出proof `5873f0bdde1f49924960708640c5773b6bdd3d7c15377f3358d461132d1464c5`准确记载两launcherExitCode=0，而两child都是`{code:null,signal:'SIGTERM'}`；A/B journal SHA分别`c2f538a6d6b794769bcc338db4f62d6790576b028f3f5a6ea4627d5b2331bf70`、`21eeec905c3cf87fd1c01e6f7767426b02ff2d74046a407109ce886f3db4163f`，均与proof相同。§8.12“API03各exit0”指启动器正常收尾，不是child自然退出；本节明确更正归属，不改历史原件。此前PURE把真实ready投影成child0/null掩盖冲突，其绿不能证明此接缝通过。
+
+新A/B04 API journal均不存在；失败在databaseIdentity、journal创建和spawn前，assertOldUnchanged已执行只读。B04、setup、Hive06、主J10均未启动；现有唯一验证记录保73091命令、停止点及退出码，不另造failure receipt。04缺journal继续保持缺失，不编造exited，也不列入成功前驱API名单。
+
+**最小修复。** 在现有previousApiLaunches内部读取已pin的sourcePreparation.apiExit，按固定实例核launcherExitCode=0、pidsAndGroupsGone=true、journal精确路径/原字节SHA、childPid及child exit与真实03 journal一致，删除强制thirdExit child0/null的两断言。保既有phase、immutable身份、完整历史journal名单、允许的0/null或null/SIGTERM退出组合，以及当前PID/startTicks不存在核查；EACCES或身份不明仍拒绝。不增加通用exit validator，不把正常SIGTERM改写成0，不接受任意signal。
+
+**固定后继05。** 保04包、C21、ctx04及所有旧unknown原字节；排他新建`p7-kivo-runtime-run03-continuation05/`，只修上述接缝和PURE并完成必要05路径/身份替换。sourcePreparation仍固定成功准备的C20/ctx03/03包，baseSchema仍C17；04/C21不是成功准备。使用既有manifest.externalFiles精确固定04的19源码+manifest、C21及ctx04，SOURCE审查核它们内部对应关系；不增加history字段、祖先候选豁免或新状态机制，不对旧候选执行要求当前HEAD相等的checkSources。当前142G源、301K及runtime保持字节，HEAD仅因本计划提交更新；当前完整闭包按新HEAD及05来源执行。05独审冻结后root排他创建C22和五字段`current-context-05.json`，新API launch/gate/release成套使用05，拒绝04输入冒充current。mainRunId及尚未创建的final06主输出沿用现有名字。
+
+**实际原件验证。** PURE直接读取A/B固定03退出journal原字节和真实proof，向实际previousApiLaunches只注入无进程的依赖；不覆写exit。保旧断言对真实样本拒绝、新consumer接受的最小前后对照。负例只克隆输入，覆盖错proof/hash/instance/journal/path/childPID/child exit、launcher非0、gone=false、SIGKILL/code1/unknown、同pid/startTicks仍活、EACCES与额外04journal。固定原件正例及纯效果计数0须由未实施者独立复跑，不能以摘要匹配代替语义消费。
+
+**执行顺序与停止。** 计划独审/本地提交→05 SOURCE/PURE及独审→C22/ctx05完整来源门→新API A/B及原License/fixture验证→沿§8.12修复后的完整历史snapshot比较与单次新setup→全部非fresh输入就绪→原冻结Hive06最后启动→正常monitor与完整J10。当前不存在的04 journal若出现、旧原件或unknown改变、当前来源不符、License失效、旧进程仍活/读取错误、05/C22/ctx05碰撞，均停止依赖步骤；不覆盖、不重License/schema/fixture、不重放未知动作、不延长Hive06或降freshness。不修改产品、共享仓库、现场，不推送部署发布。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

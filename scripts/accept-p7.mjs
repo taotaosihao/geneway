@@ -356,6 +356,25 @@ export async function stopOwned(child, signal = 'SIGTERM') {
   assert(gone(-child.pid), 'owned process group remained after graceful stop')
 }
 
+export async function openP7Work(page, id, { readWork, reload }) {
+  const target = await readWork(id)
+  assert.equal(target.id, id)
+  let rootWork = target
+  if (target.workType === 'collaboration-child') {
+    rootWork = await readWork(target.rootWorkId)
+    assert.equal(rootWork.id, target.rootWorkId); assert.equal(rootWork.workType, 'collaboration')
+    assert.equal(target.parentWorkId, rootWork.id); assert.equal(rootWork.ownerMemberId, target.ownerMemberId)
+    const items = rootWork.plan.items.filter(item => item.childWorkId === target.id)
+    assert.equal(items.length, 1); assert.equal(items[0].id, target.planItemId)
+  } else assert(!target.rootWorkId, 'unexpected child work shape')
+  await reload(page)
+  await page.click('#all-work-cards [data-open-work=' + js(rootWork.id) + ']')
+  await page.wait('document.querySelector("#view-work")?.classList.contains("active") && state.currentWork?.id === ' + js(rootWork.id))
+  if (target !== rootWork) await page.click('#view-work.active [data-collaboration-item=' + js(target.planItemId) + '] [data-open-work=' + js(target.id) + ']')
+  await page.wait('document.querySelector("#view-work")?.classList.contains("active") && state.currentWork?.id === ' + js(id))
+  return readWork(id)
+}
+
 function workPath(id) { return '/api/works/' + encodeURIComponent(id) }
 function actionPath(workId, actionId, operation) { return workPath(workId) + '/actions/' + encodeURIComponent(actionId) + '/' + operation }
 function target(action) { return { actionId: action.id, orderNo: action.preview.payload.orderNo, deviceId: action.preview.target.deviceId, clientId: action.preview.target.clientId, traceId: action.id, resource: action.preview.target.resource } }
@@ -618,9 +637,7 @@ async function acceptance(options) {
     await page.wait('!document.querySelector("#app")?.classList.contains("hidden") && document.querySelector("#runtime-state")?.innerText.includes("已登录")')
   }
   async function openWork(actor, id, page = pages[actor]) {
-    await reload(page); await page.click('#all-work-cards [data-open-work="' + id + '"]')
-    await page.wait('document.querySelector("#view-work")?.classList.contains("active") && state.currentWork?.id === ' + js(id))
-    return work(actor, id)
+    return openP7Work(page, id, { readWork: targetId => work(actor, targetId), reload })
   }
   async function workContentFits(page) {
     const layout = await page.evaluate(`(() => { const work = document.querySelector('#view-work.active'); if (!work) return null;
@@ -841,8 +858,7 @@ async function acceptance(options) {
       const result = validateP6Correlation(refs.correlationChild, fixture('a'))
       assert(result.knowledgeDependencyRefs?.some(ref => ref.knowledgeId === refs.knowledgeId), 'correlation child did not save its authorized maintenance knowledge dependency')
       assert(refs.reviewChild.results.some(item => item.knowledgeDependencyRefs?.some(ref => ref.knowledgeId === refs.knowledgeId)), 'review did not use authorized knowledge')
-      await openWork('a', refs.rootId); await pages.a.click('[data-collaboration-item] [data-open-work="' + refs.correlationChild.id + '"]')
-      await pages.a.wait('state.currentWork?.id === ' + js(refs.correlationChild.id))
+      await openWork('a', refs.correlationChild.id)
       const card = '[data-correlation-result="' + result.id + '"]'
       await pages.a.wait('Boolean(document.querySelector(' + js(card) + '))')
       if (!await pages.a.evaluate('document.querySelector(' + js(card + ' details') + ')?.open')) await pages.a.click(card + ' details > summary')
@@ -960,9 +976,7 @@ async function acceptance(options) {
 
     await step('mobile-reject-and-approve', async () => {
       await pages.a.viewport(390, 844)
-      await openWork('a', refs.rootId)
-      await pages.a.click('[data-collaboration-item] [data-open-work="' + refs.correlationChild.id + '"]')
-      await pages.a.wait('state.currentWork?.id === ' + js(refs.correlationChild.id))
+      await openWork('a', refs.correlationChild.id)
       const beforeReject = await silentSnapshot()
       const rejected = await preview(refs.correlationChild.id, '先拒绝')
       await pages.a.click('[data-repair-id="' + rejected.id + '"][data-repair-operation="reject"]')
@@ -1019,7 +1033,7 @@ async function acceptance(options) {
       assert.deepEqual(after.works.find(item => item.id === refs.correlationChild.id).actions, before.works.find(item => item.id === refs.correlationChild.id).actions)
       assert.equal(after.deliveries.find(item => item.id === refs.delivery.id).status, 'delivered')
       await openWork('a', refs.rootId); await capture(pages.a, '正常重启后根与子工作仍可进入')
-      await pages.a.click('[data-collaboration-item] [data-open-work="' + refs.correlationChild.id + '"]')
+      await openWork('a', refs.correlationChild.id)
       await actionDom(pages.a, action, 'created')
       const proof = await operator.wait('restart-no-write', 'read-action-traces', { traces: [refs.action.id] }); assert.equal(proof.newCreateRequests, 0)
     })

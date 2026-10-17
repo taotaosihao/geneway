@@ -684,6 +684,42 @@ License、四授权表、机器主体/credential及认证session/API日志，按
 
 严格顺序：本计划第三审→新current01/窗口/scoped片段SOURCE/PURE及文档CLI接缝独审→C29完整冻结→当前06只读复用准入和十旧库保护→新API/当前License/所有非fresh材料就绪→单window13→双实例最新MCP门→从第一步完整J10。所有长工具保存session/PID/startTicks/PG并持有到真实终态；窗口内不改源/重规划/延长，不自动追加14，失败/unknown不重放。完整J10、当前业务配对恢复、G/J/AC适用矩阵、独立技术/媒体总审、中文MP4解码及1倍速离线播放、HTML“渠道为模拟验收”、飞书发送/GET和用户最终验收仍分别完成。旧片段不拼通过，AC22历史时序限制不补签；新业务目标/写动作/权限或授权变化仍请求用户决定。
 
+### 8.23 final13 手工握手与 run06 再次直接复用（2026-10-17，实施前）
+
+本节形成于 window13 原工具自然结束和独立完整审计之后。工程、产品两名 Astra 分别独立读证，再正式双向 exchange，各自回签 CONSENSUS，无未决分歧。第三名未参与本节规划的过设审查通过、计划本地提交后，才实施本节调用材料、新包、准入探针或新窗口。全量合同和用户最终验收权保持，不能把控制端操作错误改写为产品缺陷。
+
+**事实与失败范围。** G HEAD `d2d6df80d8aa351aac439f1b25cb33ef5fa82c84`、K HEAD `ae27a4e97ddfa5248d4461bd563d9e907489b81c`。当前 C29 SHA `3b17b9789db6b8c0e1d5d9d30906d5594cff3e5bd570c4e70b6aa6d2af17f7f2`，包 manifest `03dbdeaa4c72a950ace049d9e45e19c3207c7d61666f5bb61be78456a1af6c1d`，bundle `4b82adf72f65ca7d87418e97b869b3ce121919edaa071b0398914ed4942c7711`。Date 对象毫秒比较已用 getTime 最小修复，168 PURE、SOURCE及独审通过；旧失败候选01c6及全部源保存在 `run06-current01-admission-failure01`，不覆盖。第二次实际准入48064/c884d9 exit0，13:29:06.750Z，A.after/B.before、权限/License/认证及十旧库通过，unknownDifferences为空；这仅是当时观察。
+
+final13 原 main69177/f519e1 exit1、steps/facts/eventAcks均为空。root 对正确的 transport-ready 请求手工发送 `ok:true,result:{transportReady:true}`；实际 channel 读取 receipt，因此返回 undefined，accept-p7:467 与 `{ready:true}` 比较失败。两层字段均错误；独立e79a58验证原错误、仅改外层仍拒绝、`receipt:{ready:true}`才通过。失败早于 store/simulator/合成渠道ref/state/auth/Host/Chrome/observer boot，不代表所有文件操作和准备/API/fresh效果为零。I=`p7-acceptance/j10-inputs-run06-current01`；execution-main-failed SHA `6d0364b5b99d579ffe75413c6a027f2049e6a0dd0c899e7ed69d0393cdd80e4e`，observations `d256b205b5f9cd3de52ab9d84d1a0e0822f83dc3b7f200a5ab9b6bdd87efcc78`。原终态对象的精确转录来源标注保持，不伪称直接捕获。主/API父子均已独立核退出，post SOURCE85011f、十旧库3eb778 exit0；post-main-exit SHA `6d41e5d2673d545dc4c456e63eee7e4c45b1105e9a5dadcb1617a4dca16f5518`。
+
+**A：实际手工调用片段及既有七步接缝。** 产品 operatorChannel 与467断言不改、不兼容错误字段。受审调用材料增加一个窄 transport-ready 片段：root看到真实请求后仍人工决定调用；片段核 kind/runId/candidate/guardSha256 与冻结绑定一致、stepId=transport-ready、operation=verify-transport、expected={}，从已核请求构造 `kind:p7-operator-result`、完整绑定、`ok:true,receipt:{ready:true}`并追加一个换行。发送前保存原request、确切发送串及一次性标记；检查原main session和未发送绑定，只调用一次write_stdin并直接保存真实工具对象。失败/unknown/timeout不补发或重启。握手不伪造业务CLI、不自动选择下一步、不建自动driver/重试框架。
+
+root实际使用与PURE必须为同一片段。用真实channel和467同样的deepEqual检查旧错误、只改外层仍错、新片段通过；错run/candidate/guard/step/operation/expected及已有发送记录均在发送前拒绝。原selfcheck已覆盖七步createOperator→channel，缺口是direct emit绕过transfer：只把既有七步内存链接到原transfer、本轮scoped、fake exec/stdio和真实channel，保留实际operator parser/请求/worker候选检查，不复制第二套七步harness。原transfer字节、300秒、128KiB、同CLI session/完整唯一结果/exit0/finally保护不变，不重复无关真实stdio诊断。新scope04按完整main/candidate/guard/step隔离，所有已有状态都拒重放，旧scope与journal不覆盖。
+
+**B：直接C28基底、新current02身份。** 新包 `p7-kivo-runtime-run06-current02`、输出 `/tmp/geneway-p7-kivo-runtime-06-current02`、`candidate-final30.json`、API launchId `run06-current02`、main `geneway-p7-20261017-06-current02-j10-final14`、inputs `j10-inputs-run06-current02`、main output `j10-final14`、observer30。producer仍 `geneway-p7-20261017-06`，setupOutput仍原06，control为原06/private下新main专属目录。端口、网络、原fixture和设备身份保持。新身份用于排他输出和当前执行闭包，不重新准备业务环境；路径占用即停。
+
+current02直接读取原06/C28 run/fixture/首次License/setup；C29 current01准入、status/fresh、API退出和final13失败仅作为固定历史数据，不调用current01父loader，不增加递归历史框架。新API/observer/两个业务worker及parent readback/release proof归C30；旧setup worker归C28，baseCandidate明确，Date.getTime修复保持。G/K产品源码与C29保持一致；计划、新调用材料、当前包认证增量和身份、窗口作为实际变化纳C30冻结，不称产品修复。
+
+两个真实原件接缝必须在SOURCE/PURE和独审时覆盖：post-main-exit中API是apiA/apiB.exit_code，SOURCE和oldGate则分别是source.terminal.exit_code、oldGate.terminal.exit_code，不沿用旧flat字段。window13 completion.launcher为kind=window13-live-launcher、pid/startTicks/pgid、exe/cwd/argv，实际exe=/usr/bin/python3.12、argv为python3 -B及固定window13参数，无command或executableAfterExec。直接验证真实原件和错误结构/身份负例，不规范化回写历史、不建泛化兼容层。进程门覆盖current01两个API parent/child、main2315222/start19170234以及原准备进程，不能只检查原06。
+
+**C：再次实际只读准入及认证连续性。** 原业务预期仍严格A=gate.a.after、B=gate.b.before，覆盖reported/revision0、全部业务/配置/outbox/worker；A仅原三初始化evaluate、B三pending无worker。机器主体/credential/四授权表/正式License和十旧库fixed actual02保护不变。不reset、重跑schema/bootstrap/activation/fixture publish/setup，不从当前DB任取expected。
+
+认证新增且只新增两个已知生产者。C29 admission SHA `6d35dd80a320ca6eef0cc918af3852a15bdd4b7e83dca0215cadc022e63191a6`记录每侧26日志、6audit、2assertion及既有限制。current-license-status SHA `6f89ba5010aca25092605f93c3c5d8b72c1b96c4e940268c8c267d54b9494e10`的每侧一次受保护login保存beforeIdentity、trace、users/sessions after与日志26→27；验证固定历史proof与原准入连续，当前用户/session必须匹配其after摘要，不将历史proof伪装为本次fresh内存证明。fresh-monitor SHA `64e5eee0805b27d6dada7bc39c871e4c5f5ca2ddf33e10ddd1d373f0667157db`的p7-c29-fresh-a/b及三读取query window/结果，按实际API退出落盘上界验证完整日志多重集、OAuth issue、三MCP read和assertion正式消费。旧C28 fresh/main12组和旧raw行ID/SHA保留；final13未启动Host，不添加main13连接测试组。
+
+每侧34日志、10machine audit是源码/原件推导的待实查预期，尚非当前DB结果。GET status是否产生额外日志按正式interceptor/已存生产者判定，不因只读就豁免。assertion过期删除仅按实际token issue的正式逻辑解释，保留historicalDeletedAssertions无raw基线限制，不因时间流逝任意允许记录消失。未知额外/缺失/权限变化/不完整操作均停止复用依赖，不能新baseline或新DB掩盖。本门在新SOURCE/PURE及独审后才实际执行。
+
+**D：有条件复用五ref，全部非fresh材料先就绪。** 两方案正式比较后，采用 `/tmp/geneway-p7-j10-secrets-13`，不新建secret14、不重放prepare-secrets。理由是final13在467失败，尚未执行482的合成ref创建；现行输入检查及source闭包不要求整个目录不可追加。规划时只读名称/metadata为五个既有ref，不证明字节正确或未来无竞态。实际就绪须按原获准方法核原复制receipt、ZENMUX_API_KEY/MCP_PRIVATE_A/B/WEBHOOK_A/B的固定来源、字节相等、owner/mode/nofollow、新main合成ref不存在及无并发writer，不输出值、不扫描其他秘密。不改五个文件，只允许新main既有逻辑排他新增自己的唯一合成ref；额外ref/来源不明/属性变化立即停，不自动改目录绕开异常。
+
+实际API启动和当前License正式GET valid及足够余量在开窗前完成，不因candidate变化再次activate；原历史到期A19:50:15.580Z/B19:51:04.114Z不能代替当前结果。catalog/observer、五ref就绪、main、准确手工ready片段、全部七步固定CLI→原transfer→原main stdin片段和收尾手段先备齐，开窗后不重新手写字段。真实文档argv交实际parser，环境/DOCKER_CONFIG、固定路径、worker当前binding、退出原件和窗口前驱形状都纳前置检查；PURE不代替实际身份与效果。
+
+**唯一window14与执行顺序。** window13原74447/91c1aa自然exit0；completion `3b1e82561be71511dc927efb57609fc4d686ee2104788f440b56e28277cb6d20`，独立01cde2/0472dd exit0核61对659..719/122消息1997..2118/DDATA/ACK/唯一/1800.032s与host2304450、inside138221退出。window-safe `66038797232f071a480a7463aad5ee0bfc6add8269bc8b01a538cbf94389cb38`、sample719 `54b1a9577df9d72f0b674c44e8986477473dfc783dc4137083297e6cff37432a`、host-request `1f075f04bc4038417d1df9295822264668c5f1cdc06eb5eff7ddbf45358c7b7c`、122聚合 `7e6f85c116c5d7a83be0c673028735445922c46cdfa44b5778a2f314bb573a90`；completion历史pending不回写，不冒充在线NATS重读。
+
+仅允许制作一个window14，固定720..780/61×30秒/122条/2118→2240/birth=false，同tenant/device，inside1860秒/host1920秒，启动前沿原进程/容器/ACK核验，不自动15。原fixture598/599只保创建来源，不重新publish；新fresh-monitor读取window14实际样本，经双实例完整MCP证明≤120秒/future≤5秒。
+
+严格顺序：第三审及计划提交→新调用片段/current02/窗口SOURCE PURE与独审→C30完整冻结→实际06复用准入和十旧库→新API/当前License/全部非fresh材料及收尾就绪→唯一window14→双MCP fresh门→从第一步执行新main，使用已审ready片段完成握手→完整十步J10。全部长工具保存session/PID/startTicks/PG并持有真实终态；源码变化或未知/失败即停止依赖收束，窗口内不改源/重规划/延长，不补发或重放。
+
+完整J10之后仍完成同候选业务配对恢复、G/J/AC适用矩阵、独立技术/媒体审查、中文MP4完整解码及1倍速离线播放、HTML“渠道为模拟验收”、飞书发送/GET和用户最终验收。局部/历史片段不拼通过，AC22历史缺口不补签。没有新增业务目标/写动作/权限/第三仓/push/部署/发布授权；触及用户既定决定时停对应依赖请求决定。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

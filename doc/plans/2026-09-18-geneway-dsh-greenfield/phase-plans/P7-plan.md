@@ -426,6 +426,26 @@ A/B支持门均须证明required→valid、restricted=false、精确modules/ID/�
 
 诊断支持后才实施、独立SOURCE/PURE审查并commit，再冻结新候选/context及完整来源。新setup前重新核全部原准备状态与三个pending；使用新release单次精确消费原3条，证明A各processed/gen1、一个已停止workerinstance/三executions、其余11outbox与业务表不变、HTTP0，B全快照不变且无worker。成功后接既定J10。Hive05不延长、不重启、不减freshness；若准备后窗口不足，停止依赖实时样本步骤，由controller处理新的外部条件。License过期或任一unknown/身份漂移仍停止对应分支，不能自动续签/重建或补签PASS。
 
+### 8.13 T5 有限 Hive06 窗口与启动顺序（2026-10-17，实施前）
+
+工程与产品两Astra独立核查、正式交换达成CONSENSUS。§8.12实际只读对照已完成：session15585 exit0，总回执`worker-initialization-diagnostic01/receipt.json` SHA `b05df6acd363e073ee84573b4ee27000c091b970ffb6ebf73214cebbce3916e8`，baseline在identity阶段缺DATABASE_URL/P1012、earlyENV正确worker身份；两变体完整保护前后同摘要`e7ba2138b7fb53f470c03707d989a2feb96f3cb3c4627eba723b127751860a51`，无业务调用，实际进程已退出。独立只读复核支持§8.12局部条件修复；不补写旧worker generic错误为已捕获P1012。§8.12原计划字节b8ac已由本地提交`15a4874d32f82271d3f5f24031c2e92f372aa8f7`保留；诊断旧manifest不再用于新当前来源校验。
+
+**已完成前驱。** Hive05 actual session8277自然exit0，`hive-window05-completion01/receipt.json` SHA `285d1cb4fdeec34d73a1762da58973cc8af1563d37a3df45a3d8826e5a5bfdcb`，processes SHA `2fe890de0f7e044900c888611123f46a51e0226e35b1d811d7ceea76e78e6738`。window-safe SHA `2458489f18120a36ee80d4b1bbf3d9e6d4fa2959d6ff00d43f520458af2c1fc2`，末sample231 SHA `294989fc9388708fa1eec5ff8122ba73b27f94248efa579788da425457e3f8cf`，observedAt2026-10-17T02:16:42.858Z。61样本171..231、122发布、transport1020→1142/ACK1142/pending0/ackPending0；root实际核host4110776及PG、inside88925均gone且无同UID其他stdin Python。完整J10未开始，完成历史不提供未来freshness。
+
+**固定新06，不扩为通用续窗。** 新`hive-window06/`源码和固定`p7-j10-20261017-01-window06/`输出沿用05机制，仅改前驱原件/进程/路径/名称/范围和对应PURE向量。固定232..292共61样本、30秒周期、最大1860秒、122条DHEARTBEAT+DDATA、birth=false；起点1142，首两条1143/1144，末两条1263/1264，结束ACK1264/0/0。仍为原tenant、device、externalDeviceId、容器/mount及秘密引用，不增凭据或业务绑定。冻结Hive source `64fc6d2a54ce38183449d2ff445c2c3054821598659459ce98f86c5a8d756bc3`、original publish `ad9e6f1a58f5fe4db70fb25d1b00999fef92451ef16424cf57cf9660da8591cc`、local publish `9345b8b8362898d3c6021fda0534fdf2e1b0cefea3577494fee155bccd889dbc`保持字节。
+
+predecessor精确核05 completion和五个引用原件SHA、session8277自然exit0、完成范围、末sample231的1140→1142及1141/1142两消息、完整normalized data和进程退出证明，只导出下一边界232/1142。实际启动还要重新核host4110776/inside88925不存在、无其他publisher、固定容器和实际transport/ACK恰1142/0/0；历史proof不能代替这些实时检查。保fresh排他落盘、原消息/时间/ACK校验与无自动mutation retry。
+
+**历史准备与当前发布分别绑定。** fixture A/B仍固定05 sample171/172原路径/SHA，原字节不改。`accept-p7`仅核其历史SHA，当前监控仍按既有published binding的externalDeviceId调用`mes.monitor.current`；不再调用prepareFixture或Hive binding validate/publish。catalog无Hive样本字段、observer无05路径，不增加activeHiveWindow字段、live-window receipt格式或新consumer。04复用现有resources.hiveWindow/hiveWindowDirectory/manifest绑定06 source、05前驱与固定范围；sourcePreparation严格保留C20/ctx03/05创建历史。root只在现有唯一验证记录和主验收输入归属中关联C21/ctx04、新setup及06现有host-request、首verified sample和最终window-safe。
+
+**SOURCE先准备，publisher最后启动。** 本节独立过设PASS后才能制作06 SOURCE/PURE；其独审及04固定绑定在C21冻结前完成。实际顺序为：§8.12条件修复/全部SOURCE独审→C21/ctx04完整闭包→新API/原成功License与fixture验证→新setup单次精确消费原3pending并证明worker停止/B不启动→catalog/observer/主参数/输入摘要/输出/执行owner及所有非fresh前置全部就绪→单次启动06→首样本原有正式消息/ACK/最新值验证→立即既有fresh只读检查和J10。setup两rule为repair/business_event，原evaluate路径不读取实时Hive并保持HTTP0，故不用先开窗口。不得在窗口内继续计划或修改source。
+
+publisher新样本不等于Kivo已返回新样本。首次正常monitor实读须对应06已验证样本并仍过120秒freshness/未来最多5秒；现有current cache默认5秒，允许现有有界读等待正常刷新，不清cache、不改TTL或样本时间。完整J10、publisher自然完成和P7最终验收分别报告，互不替代。
+
+PURE保有效05前驱及错hash/状态/范围/序列/进程/tenant/device、重复request、DBIRTH、缺失/重复/额外消息、错时间、越界/超时拒绝；文件写入、网络、子进程、信号、秘密读取五计数0。独立SOURCE审查需核publish与关键机制原字节及真实consumer历史/当前关系。当前§8.12仍仅两个G验收脚本允许变化，其余140G/301K/runtime不改。实际窗口之后保原window-safe、末样本和host/inside/session退出证据。
+
+边界不符、并发publisher、License失效、准备原件变更、发布unknown或freshness失败时停止对应依赖步骤，保原件先回读；不重建schema/License/fixture/setup、不换序号起点、不重放。窗口按上限结束，不延长06、不自动启动07、不降低J10门槛。此规划只恢复原验收所需有限新鲜样本，不增加业务目标、写动作、外部接收方或部署发布授权。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

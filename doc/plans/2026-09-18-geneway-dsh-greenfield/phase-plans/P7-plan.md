@@ -490,6 +490,22 @@ API05已在原来源仍有效时由owner正常停：两launcher0、两child null
 
 新fixture确需新鲜Hive样本，因此不能机械沿用旧fixture已完成的“publisher最后”次序：条件修复/定向实际证明→新准备与07 SOURCE独审/提交→C23完整闭包→新run04 schema/API/License及所有不依赖fresh准备就绪→单次07→首正式样本与最新值核验→A/B正式fixture→一次精确setup→动态catalog/observer/主参数及全来源门→立即完整十步J10。不在窗口内继续改源或规划；窗口不足、License失效、旧保护漂移、来源/身份碰撞、任何未知写入或真实断锁负例失效均停止依赖步骤，不重放、不延窗、不降标准。完整旅程、新窗完成、P7交付与用户最终验收仍分开报告；没有push/部署/发布或新业务权限。
 
+### 8.16 T5 正常停机刺激校准与重启早门（2026-10-17，实施前）
+
+工程与产品Astra先独立读取02实际原件及源码，后正式exchange形成CONSENSUS。本节显式替代§8.15中“baseline必须复现LOCK_LOST后才能修改P7/开始新旅程”的实施前提，改为独立的正常停机方法校准；其余权限、完整fresh旅程、旧原件保护、资源、来源闭包、Hive07前驱和发布顺序保持。独立过设PASS前不改源码；真实helper方法验收前不启动新旅程。
+
+**失败结论不改写。** 诊断01在准备模拟器时被自身dns guard拒绝：固定Node对字面量127.0.0.1监听仍调用dns.lookup。02仅透传该精确字面量的原生处理，独立SOURCE/PURE209项及五效果0后actual session32151 exit1，总receipt SHA `86a246ede7a878d3c6bebd48da417bb15ae0fb2bcaebc5ef56b3740933a573d1`，supported=false。两scenario均exit0不等于对照通过。baseline微信stdin-finish早于exit回调，虽实际以SIGTERM退出，但state stopped/restart connected，未复现LOCK_LOST。variant两个holder均stdin-finish后0/null，stopped→connected且单poller；真正holderSIGKILL负例仍unavailable/LOCK_LOST、poll0、拒绝发送。原01/02源码及actual永久保留，历史final06原因仍未确认；stdin-finish/exit回调不等于捕获releasing赋值或OS死亡时刻。停止同条件自动复跑，不用sleep、延迟release或篡改产品制造竞态。
+
+**独立修正理由及新验收目标。** 正常重启应通知Host并让正式shutdown释放自身owner，而不直接向holder发送终止信号。02已直接证明旧组SIGTERM同时终止automation与微信holder，automation还没有stdin-finish；单PID变体则让两个owner正式自然释放。因此允许修正P7的正常停止刺激，但不能宣称已经修好旧LOCK_LOST。新成功条件是实际导出的P7 stopOwned正常停止能完成正式释放、无信号杀holder、无兜底、Host/PG消失并同身份重启connected/单poll；不是把旧baseline改绿。若真实helper验收失败则停止依赖旅程，保原件继续有界分析。
+
+**唯一源码责任。** 仍只改accept-p7：§8.15列表selector及五处新API固定端口；导出现有stopOwned，只有auditRole=host且SIGTERM走先注册exit监听、正HostPID通知、等待正式退出及PG消失。超时/残留仍清理owned PG并核退出，但该次必须失败；显式SIGKILL及其他children沿原组语义，共享P4 stop不改。P7 boot目前仅赋auditRole，而共享stop的host SIGKILL路径在发信号前读取auditFile/auditBinding；按P4已有模式把本轮已有auditFile与binding赋给child两字段，保硬停审计可达，不删除role或用假数据绕过。不改产品失锁、sticky、权限或发送守卫。
+
+**复用现有访问增加两个早门。** 仅在restart-and-supplement和normal-restart的boot+login后，使用既有poll/state/simulator检查原refs.weixinIdentity.id的身份：id/memberId/channelAppId/weixin.botId与原refs及本轮weixinAccount.id精确一致、active、runtime connected，simulator.activePolls/maxActivePolls以已核botId为参数分别为1/≤1。正常connecting可用既有有界poll等候；一旦unavailable或WEIXIN_LOCK_LOST立即失败，不等其转绿、不手改状态/重绑/重放。前一门必须位于补充协作和来源dispatch之前。empty-restore继续预期appdisabled/rebind-required，不套connected条件。不新增通用poller或观测框架；两个相同检查可置于当前acceptance内部小函数，复用现有依赖。
+
+**实施与真实方法验收。** 本节独审后Sol实现最小P7差异及定向测试，并在新外置weixin-host-stop-method01准备方法验收SOURCE/PURE；复用02的真实Host/生产锁/本机sim/透明观察与网络边界，调用真正导出的stopOwned，不复制其逻辑，不重跑baseline求红。使用新临时state/auth/身份，实际验证正常stop→同状态重启→最终runCleanup回调的正常停止，两个holder释放/0null、PID/PGgone/单poll且无强杀。保真正holderSIGKILL后的failclosed负例；独立owned Host显式SIGKILL及其他child组信号语义按既有审计回归。必要超时/残留分支采用最小受控owned fixture或纯依赖模拟验证失败和清理语义，不能让强杀变正常PASS；不引入产品mock或未知进程信号。列表与attention两个入口的定向测试保旧全局selector拒绝、新列表selector唯一打开已有规则/occurrence，不产生业务重放。早门覆盖错归属、多poll、unavailable立即失败与恢复预期不受影响。
+
+运行既有harness-check、test-p4-weixin、test-channel-state与必要语法检查；未实施者独立审源码/PURE后root才执行一次有界真实方法验收。原02false、方法验收、全J10分别报告。源码/方法验收通过并本地提交后才按§8.15制作新fresh包和07来源、冻结C23、执行新完整十步旅程；新旅程仍须证明通知/维修回执真实渠道结果，不能用早门或方法验收替代。旧因果缺口保留至最终报告，不削弱完整验收或用户最终验收。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

@@ -556,6 +556,48 @@ SOURCE/PURE独审覆盖历史计划错revision/hash、当前计划漂移、非�
 
 09只允许415..475共61样本、30秒、最大1860秒、122消息、birth=false、1508→1630，同tenant/device，严格消费08真实完成/观察原件及全量边界；不得要求或伪造旧launcher自然exit0。窗口内不改源、不规划、不延长、不自动追加10；任何未知写入保持禁止重放。成功J10、当前业务配对恢复、安装/容量/升级回退对当前候选的适用矩阵、G/J/AC全部要求、MP4解码/1倍速离线播放/独立媒体审查/飞书交付回读及用户最终验收仍分别必达。历史AC-22时序限制不补签，不部署、不发布、不合入。
 
+### 8.19 final09 输入通道准入与固定 current02 执行（2026-10-17，独立过设通过，实施待验）
+
+本节在09发布实际自然退出、宿主和容器进程均已核清后才形成。工程与产品两名Astra先独立读证，再正式交换；controller只汇总共同决定，第三未参与规划者独审通过后才能开始新探针或实施。范围仅为真实stdin/operator生命周期、final09已发生效果及下一次固定执行准备；全量合同、业务动作、权限、模型、交付和用户最终验收不变。
+
+**事实与原件。** 当前Geneway为`ac95149cec58f32847951cbaf736e96040a9bf4e`，Kivo为`ae27a4e97ddfa5248d4461bd563d9e907489b81c`，C25为`07e071ef95462b9f57beb455d1c2404a4f3452ef700d4c99211a9015827b3537`。§8.18的Chrome准入、C25实际只读承接、两API/current License、09两实例fresh门均已通过。final09主工具91276实际exit1；first-failure SHA`eaad1fd946330560b818f87523bd36fe962293b0a110ead0433a7f5edd8d45fe`证明`ReadStream.onend → Interface.close → operator ended`。root实际调用省略`tty:true`、使用默认pipes；原件没有fd/isTTY生命周期，不能把工具关闭stdin的具体机制写成已独立证实。现有operatorChannel把EOF缓存，到首次wait才reject，且发生在emit request之前；不是业务operator运行后失败。
+
+final09已保存2条路由、2个Skill、2条测试ready的Kivo连接、3名员工和成员开放；Host work/knowledge/channel identities/messages/rules等仍空，facts/eventAcks空。已有本轮synthetic Feishu ref、Host state和observer baseline；observer attempt为0且无arm/claim/consumed，未运行operator/worker。网络12条fetch、2条connect包含两实例metadata/token/MCP discovery；没有ZenMux调用。OAuth及工具读取可能写认证/审计记录，不能称外部零效果。observations SHA`cb6eb5581208f6278f8670459a7cbf6598002640182411bd861b83f31c0a7ac8`、state SHA`4a05c44e192ef57a3b600e4cd901f2cbd03c8dadb3c161540a0e860f7e7c11fa`、network SHA`648dfc92f6ba9de8d61b044ca2df9546e2f711d7a5b9e50ac40e8cf1a5ea7c48`均保持。14.8秒录像只作失败原件，不拼入成功旅程。
+
+两个current01 API经已保存launcher身份发SIGTERM，原工具69986/60897均真实wait exit0；child为null/SIGTERM，相关PID/PG均gone。`j10-inputs-run05-continuation01/api-exit.json` SHA`c40d8f20f3613eef2ad79166e35acca2fcb5bd4802cfa0eef3887a6765abaf24`保留launcher与child区别。主入口前后完整来源门分别实际14599/19490 exit0。09原工具26701、wait chunk e649b1实际exit0；`hive-window09-completion01/completion.json` SHA`2cd6146b48548b7c7876183445a8f8e23c5e227f132a53b14c0d2cda2328c6fd`立即保存，内pending字段是保存时状态，后续独审追加到验证记录，不改原件。独立审计61样本415..475、122条DHEARTBEAT/DDATA、1508→1630、完整DDATA和ACK/pending边界通过；06:59:37.315Z→07:29:37.347Z，1800.032秒。window SHA`c18960c255dc4eb66309d240c8e793e0cfc3a85af99b0ade392e5bc84697fdb1`，末样本SHA`581f31818b088b08c2afbf963bc7dc5ea2cc21eca25e3b30f51d33e1be99525c`，122份样本文件名→SHA规范JSON聚合`47b84d97340bd4b4743a97e796bc763e7f026b2514728a30f07778c10ea024af`。host551475/startTicks16811604/PG551475、inside110835均已退出，精确容器身份及无其他同UID stdin Python另行实核。旧05/08 launcher UNKNOWN仍UNKNOWN。
+
+**A：复用真实operator通道，在产品副作用前验证本次读写。** 最小改动落在`scripts/accept-p7.mjs`已有operatorChannel、acceptance初始化和harness-check。保留JSONline、128KiB上限、runId/candidate/guard/step绑定、一次性step、noSecrets、300秒业务等待和全部既有业务operator门。主入口在既有try内、simulator/Host/Chrome/secret/auth/state初始化之前，用同一operator.wait发一条固定`stepId=transport-ready`、`operation=verify-transport`请求并严格校验`{ready:true}`应答。只允许排他诊断输出准备和既有只读来源/输入检查先发生；ready不调用Kivo operator、不构造业务receipt、不计入十步业务通过。唯一mainRunId及既有绑定已足够，删除随机challenge方案。
+
+只靠固定启动options或独立smoke不能证明本次实际主进程stdin仍可读写，因此保留主入口ready；与新增父wrapper、自动driver或FIFO服务相比，仅增加原通道的一次等待。EOF/error第一次即向已有failure/abort传播，保留第一个错误；idle与pending都不能等到下一业务门才发现。具名close/error/abort监听及timer在dispose移除，正常finally已有的dispose→input.close顺序不得触发新失败；pending dispose仍拒绝并收束，不把已发送业务标成未发生、不重试未知写入、不改正常停机或guard。不得把`isTTY=true`变成产品必需条件，有效双向pipe仍合法。
+
+新增外Git、固定`p7-acceptance/j10-operator-transport01`无业务小检查，直接消费导出的真实operatorChannel/readline，使用与正式入口相同的Node、已审environment模块、mapfile/exec以及明确的工具启动选项；不复制第二个parser或启动器。先yield再由root经真实write_stdin回固定应答，至少两次分时请求/应答并实际wait退出；额外验证接近128KiB的合法JSONline完整传输，不能把parser上限当PTY传输容量证明。默认pipes EOF负例须在任何产品副作用前失败；PURE覆盖ready前EOF、ready后idle/pending EOF、错绑定/重复或提前应答、超长行、abort/timeout及正常dispose/close，业务/模型stub调用为0或abort后不新增。秘密不进入诊断，fd/isTTY仅非秘密辅助元数据。
+
+正式执行可固定工具`tty:true`，但准入依据是实际往返结果。若真实长行检查证明所选PTY会截断或改写，只允许就该owned PTY作必要的标准非canonical、无echo且保留信号字符的窄终端模式调整，并在finally恢复原模式，再用同一真实检查复核；不建通用stdio框架、不改全局终端/用户配置。若仍无法可靠保持通道，停依赖运行，不先开窗。source/PURE独审通过后才实际smoke；正式J10仍再次ready，smoke不替代本次主进程验证。A完成后本地提交，源码及真实效果独审通过才冻结下一候选。
+
+**B：直接承接原05准备，精确核对本轮认证效果。** 现包固定mainRunId/launchId/output且current01 journal已存在，不原地重启、改写C25或复用final09已配置state。新包固定`p7-kivo-runtime-run05-current02/`，输出`/tmp/geneway-p7-kivo-runtime-05-current02`，候选`candidate-final26.json`；业务runId仍`geneway-p7-20261017-05`，base直接是原C24的schema/License/fixture/completed setup，不以C25为第二层准备父级，不回调旧loadContext链。C25仅是最近失败尝试、真实API退出、认证和已审代码来源的固定历史证据；所有旧包/原件保持字节。当前计划与当前源码单独固定，历史计划仍按原精确Git对象核，不恢复旧工作区计划。
+
+新API launchId=`run05-current02`，journal为新输出的`api-a-run05-current02.json`和`api-b-run05-current02.json`。主runId=`geneway-p7-20261017-05-current02-j10-final10`，主输出`p7-acceptance/j10-final10`，输入`p7-acceptance/j10-inputs-run05-current02`（catalog、observer26及来源/退出记录），secret-root=`/tmp/geneway-p7-j10-secrets-10`。observer control沿实际consumer放在原setup05的`private/create-observer-{mainRunId}`。HOME继续使用已实际通过的`j10-chrome-env-diagnostic02/environment.mjs`（SHA`180d2bf5ab0ca4996421c1ce0b1c133d25da321f8e804ccb6dada96964c593c2`）；Chrome profile、DSH、auth、state、日志全部在新输出内独立。原物理PG/Redis/端口不变，不自动新建库绕过未知效果。
+
+新SOURCE/PURE和完整当前闭包独审后，首次实际READ ONLY承接仍核原16类准备快照（A=setup after、B=before）、四授权表、正式License签名/到期/模块、机器主体/密钥/管理员权限、8旧库全表指纹及全部相关进程。另加`user`、`fms_auth_session`、`api_log`、`audit_log`、`machine_client_assertion`五类专项，不把业务只读等同认证无写。Kivo正式producer的consumeAssertion会删除已过期断言并插入digest，写`machine_account/oauth.token.issue`；recordAccess写`mcp.http.read`，API interceptor记录非GET/失败。现有verifyPredecessorLogs只证明expected存在，不足以拒绝额外日志，不能单独据此称增量全部解释。
+
+用户和Session在首次承接、该实例尚无本轮受保护login proof时，以C25 `license-status.json`（SHA`14bf61144a024ed8ac7743c55e249d55dbd33a18bffadd39c734c683b67cf562`）每实例loginProofs的usersAfterSha256/sessionsAfterSha256核当前集合；该初始期望不能永久用于新登录后的检查。verifyPreparedState显式消费本轮受保护journal/proof，只有既有loginGuard已证明真实before/after、唯一新增session及合法admin lastLoginAt变化，且该实例login operation=applied、proof绑定及保护检查全部有效，才能选用该proof的after摘要。逐实例选择，A已登录不改变B尚未登录的期望；未验证或错实例proof不能成为authority。license-status后门运行时整个journal仍可能requested，不能以全journal completed作为必要前提，也不能删除后门、从当前DB自取expected或泛化为新状态机。
+
+推进proof前还须保护真实before：current02为loginGuard增加窄的显式expected/before-validator，在原settlePredecessors取得before后、invoke之前，将before.users/sessions及完整日志集合与该实例已接受的历史或此前受保护期望匹配。保留原operation.httpStatus/instance检查与settledSnapshot异步日志等待，不用现测试snapshot注入替代（该分支会跳过上述真实保护）。仅before→after合法不足以证明起点可信，初次gate后、login前偷增session等漂移必须拒绝，不能被新proof洗成expected。
+
+C25的apiLogs.after是已有全日志基线。插件同一次连接会让多个metadata/token/MCP请求共享trace；旧verifyApiLogDelta按单请求登录要求trace唯一、每trace至多一行，因此不能直接用于MCP增量，也不修改其原登录语义。只在current02承接入口按真实trace组核增量：先逐ID/raw SHA保护基线，再按已知producer的method/path/status/userId/metadata/writer多重集及条数严格匹配同组多POST，拒绝额外、缺失或歧义；不退化为只验证expected存在。专项必须同时覆盖fresh-monitor的`p7-c25-fresh-a/b`、主final09真实metadata/token/discovery与全部既有准备journal；检查完整当前集合的正式producer形状、账号/凭据、产品资源、path/status/trace/时序和写入身份，拒绝额外未知业务/权限写入或不匹配行。无历史audit/assertion完整raw基线本身不是永久阻断：可以据既有原件和正式producer证明当前剩余集合与已知效果一致，但不得捏造历史没有已删除行、全表不变或从当前取expected。断言过期删除按正式producer解释，不假设旧行永存，不补发token取证。实际无法解释的行/数量/身份/时间或权限漂移才阻断B；精确报告缺口，不泛化忽略auth/log，也不换新库掩盖。
+
+专项归属精度固定如下：api_log保护基线完整ID/raw SHA，新增仅正式consumer可达的MCP POST初次401 challenge、OAuth POST200与后续MCP POST200，逐行核userId、类型化时间、metadata trigger和`mes-api-log` writer；成功GET metadata/status不产生新增。audit_log本轮oauth.token.issue要求module=`machine_account`、entity=`MachineAccount`、entityId=fixture.clientId，after精确machine actorId/credentialId、writer=`machine-oauth`；fresh-monitor的三个mcp.http.read additionally固定productNamespace=`mes`、原resource、repair/ledger/monitor三个正式源path、status200、writer=`machine-http-access`。原machine_account.create等准备行仍须固定journal/actor/trace对应，不能只列动作白名单。断言集合只含唯一合法SHA256 digest、精确machineAccountId/credentialId和expiresAt；expiry按正式issueToken.validTimes约束（请求服务器时刻最多+330秒，有已有SDK精确证据则用更窄值），不捏造未保存的jti原像。
+
+fresh-monitor trace精确在原件。main09 guard没有保存trace/method/status，允许的仅是唯一、无歧义的多源归属：数据库内部一致trace组，与两实例精确client/credential、已知connection-test时间窗、每实例原六次fetch路径序列（三MCP/一token）、testKivoTpmConnection正式connect/listTools行为及api_log/oauth audit同trace交叉匹配。不能把该匹配称原wire trace证据，不能只靠时间/数量；多个同样可匹配组、额外成功issue、其他account/credential、额外read/write路径、状态或expiry不符均阻断。这个范围允许解释已知认证 effects，不扩大业务写入许可。
+
+最小新增负例还须证明正常MCP同trace多POST可通过而多余/缺失行拒绝，A已有合法login proof而B未登录时仍分别使用正确期望，伪造/错绑定proof拒绝；整个journal未completed但该login操作及保护已完成的真实后门顺序可通过。
+
+新包对当前API退出/日志、final09非业务状态及零attempt、原准备直接base、当前计划/候选、10窗口前驱做SOURCE/PURE负例；历史原件不能冒充新API ready。operator/worker延用既有一次性动作和当前HTTP License消费，不重activate、fixture、setup或已发生动作。observer在Host guard内仍只调用无spawn的publicBindings；完整Git/base/runtime/checkSources仍由root在主入口前、全部Host退出后调用，并绑定同一候选/main/output/实际退出。承接后新API各自产生可归属launcher身份，当前License HTTP valid后才准入；实际当前认证窗口也按保护门记录。
+
+**顺序与单次10。** 本节形成并通过第三独审→提交计划→A源码/PURE独审→实际双向stdio小检查及最窄必要调整/复核→A本地提交→新包和10 SOURCE/PURE独审→C26完整来源及首次实际只读承接→新API/current HTTP License→全部非fresh输入、精确主命令及逐步operator请求处理方式就绪→单次10→两实例真实MCP最新样本门→立即完整十步J10。10固定476..536共61样本、30秒、最大1860秒、122消息、birth=false、1630→1752，同tenant/device；严格消费09真实wait0、完成原件、61样本完整消息/ACK和进程终态。旧fixture sample354/355仍只作历史创建依据，当前样本120秒/5秒future及唯一对应门不变。
+
+root执行每条长运行命令时保存真实工具session及OS PID/startTicks/PG，维持同一active turn直到所有owned长进程真实wait终态；operator业务请求只能交既有固定CLI实际执行，再把真实结果回stdin，不补造receipt。主运行前先备好完整operator命令和stdin发送方式，不等窗口开始后拼接。窗口内不改源、不规划、不延长、不自动追加11；新未知写入禁止重放。失败仍按实际原件记录，不能因首步UI成功或窗口成功降低完整旅程门。成功J10、当前业务配对恢复、G/J/AC适用矩阵、独立总审、中文MP4/离线HTML及飞书回读、用户最终验收继续分别必达；旧AC-22时序限制不补签。
+
 ## 9. 验证矩阵与证据复用
 
 | 覆盖 | 本阶段结果与检查选择 |

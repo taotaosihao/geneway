@@ -243,7 +243,7 @@ async function checkLateMetadata() {
   let latest = running
   const state = { authEpoch: 1, view: 'conversations', currentConversation: structuredClone(idle), conversations: [structuredClone(idle)], selectedConversationId: 'A', conversationReadRequest: 0, conversationSelection: 1, poll: null }
   const draft = { text: 'hello', request: null, renaming: false, archiving: false, sending: false }
-  const box = createContext({ state, conversationDraft: () => draft, requestId: () => 'request-one', renderConversation() {}, setMessage() {}, byId: (items, id) => items?.find(item => item.id === id), rememberConversation: item => { state.conversations = [item] }, stopPolling() { timers.clear(); state.poll = null }, setInterval() { timers.add(1); return 1 }, api: async (path, options = {}) => {
+  const box = createContext({ state, el: () => ({ scrollTop: 0, scrollHeight: 0 }), conversationDraft: () => draft, requestId: () => 'request-one', renderConversation() {}, setMessage() {}, byId: (items, id) => items?.find(item => item.id === id), rememberConversation: item => { state.conversations = [item] }, stopPolling() { timers.clear(); state.poll = null }, setInterval() { timers.add(1); return 1 }, api: async (path, options = {}) => {
     if (options.method === 'PATCH') return rename.promise
     if (path.endsWith('/cancel')) {
       cancels.push(path)

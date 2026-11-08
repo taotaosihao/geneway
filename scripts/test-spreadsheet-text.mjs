@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import ExcelJS from 'exceljs'
+import { generateCollaborationSpreadsheet } from '../src/spreadsheet-collaboration-generation.mjs'
+import { verifyCollaborationSpreadsheet } from '../src/spreadsheet-collaboration-verification.mjs'
+import { validateEvidenceBytes } from '../packages/agent-contracts/evidence.mjs'
+import { digest, canonical } from '../packages/agent-contracts/index.mjs'
+const directory=await mkdtemp('/home/gewu/.codex/task-checkpoints/geneway-evidence/spreadsheet-text-'),before=process.argv.includes('--expect-before'),prepared=JSON.parse(await readFile('/home/gewu/.codex/task-checkpoints/geneway-evidence/spreadsheet-collaboration-0NbBqY/prepared.json')),cases=[]
+for(const [name,value]of[['literal-escape','a_x0041_b'],['overlapping-literals','_x0041_x0042_'],['literal-underscore','_x005F_x0041_'],['control','a\u0001b'],['DEL','a\u007Fb'],['carriage-return','a\rb'],['noncharacter-FFFE','a\uFFFEb'],['noncharacter-FFFF','a\uFFFFb'],['unpaired-surrogate','a\uD800b'],['emoji-and-literal','😀_x0041_😀'],['TAB','a\tb'],['LF','a\nb'],['CRLF','a\r\nb'],['C0-range','a'+String.fromCharCode(...Array.from({length:32},(_,index)=>index))+'b'],['C1-range','a'+String.fromCharCode(...Array.from({length:32},(_,index)=>128+index))+'b'],['combining-and-ZWJ','e\u0301👨‍👩‍👧‍👦'],['adjacent-control-literals','_x0041_\u0001_x005F_x0042_']]){
+ const input=structuredClone(prepared.input),source=input.sources.find(row=>row.payload.format==='geneway.incident-history');source.payload.entries[0].description=value;validateEvidenceBytes(Buffer.from(JSON.stringify(source.payload)),'history');input.analysis.summary=value;input.analysis.findings[0].statement=value;input.analysis.limitations[0]=value;input.sourceManifest.analysis.senderBinding.node_id=value;input.sourceManifestDigest=digest(input.sourceManifest);let row
+ try{const bytes=await generateCollaborationSpreadsheet(input),book=new ExcelJS.Workbook();await book.xlsx.load(bytes);const actual=book.worksheets[0].getCell(2,3).value,summary=book.worksheets[2].getCell(2,3).value,manifest=book.worksheets[3].getColumn(2).values.slice(2).join(''),exact=actual===value&&summary===value&&manifest===JSON.stringify(canonical(input.sourceManifest));row={name,value,actual,summary,exact};if(!before)await verifyCollaborationSpreadsheet(bytes,input)}catch(cause){if(!before)throw cause;row={name,value,exact:false,loadError:cause.message}}
+ const expectedLoss=!['TAB','LF','C1-range','combining-and-ZWJ'].includes(name);if(before)assert.equal(row.exact,!expectedLoss,name);else assert(row.exact,name);cases.push(row)
+}
+const result={result:before?'reproduced':'passed',directory,cases,boundary:'formatter-only copies of actual v2 prepared input; actual history DTO validation and ExcelJS generation/write/load/verifier, no cloud provenance/Job/Receipt admitted, no native/provider'};await writeFile(join(directory,'result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2))

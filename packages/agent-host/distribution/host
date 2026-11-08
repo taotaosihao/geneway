@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+unset NODE_PATH NODE_OPTIONS
+PACKAGE_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec node "$PACKAGE_ROOT/packages/agent-host/distribution.mjs" "$@"

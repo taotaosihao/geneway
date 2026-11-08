@@ -1,0 +1,19 @@
+{
+  "origin": "http://127.0.0.1:3471",
+  "credentialFile": "/srv/geneway/secrets/supervision-observe",
+  "root": "/srv/geneway/supervision",
+  "intervalMs": 1000,
+  "timeoutMs": 500,
+  "stageDeadlineMs": 60000,
+  "jobDeadlineMs": 300000,
+  "commandDeadlineMs": 2000,
+  "repeatedErrorCount": 3,
+  "budgetWithoutProgressRequests": 3,
+  "scope": {
+    "workId": null,
+    "attemptId": null,
+    "nodeId": "cloud",
+    "nodeInstanceId": null
+  },
+  "processes": []
+}

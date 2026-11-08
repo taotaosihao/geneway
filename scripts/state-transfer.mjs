@@ -1,3 +1,5 @@
+import { assertNoFutureSiteRule } from '../src/site-rule-state.mjs'
+import { emptySupervisionDiagnosisState } from '../src/supervision-diagnosis-state.mjs'
 import { createHash } from 'node:crypto'
 import { constants, createWriteStream } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, rename, rm, rmdir, writeFile } from 'node:fs/promises'
@@ -5,6 +7,8 @@ import { basename, dirname, join, posix, relative, resolve, sep } from 'node:pat
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import { migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
+import { assertNoFutureA2a, emptyA2aState } from '../src/a2a-state.mjs'
+import { isDeepStrictEqual } from 'node:util'
 import { recoverActionFacts } from '../src/work-service.mjs'
 import { resolveCredentialFile } from '../src/execution-grant.mjs'
 import { KIVO_EVENT_SOURCES_FILE, KIVO_EVENT_TRIGGER, readKivoEventSources } from '../src/kivo-events.mjs'
@@ -139,7 +143,7 @@ async function restore(inputArg, dataRootArg, options = {}) {
     if (!seen.has(STATE_PATH)) throw new Error('备份缺少 state.json')
     const stateFile = files.find(item => item.path === STATE_PATH)
     const sourceStateBuffer = await readFileFromStart(stateFile.file.handle)
-    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, 8, 9, 10, 11, STATE_VERSION], migrate: false })
+    const sourceState = parseState(sourceStateBuffer, { versions: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 26, 27, 28, 29, 30, STATE_VERSION], migrate: false })
     const eventSources = await readKivoEventSources(input)
     if (eventSources.sha256 !== (files.find(file => file.path === KIVO_EVENT_SOURCES_FILE)?.sha256 ?? null)) throw new Error('备份事件来源未列入 manifest 或摘要不匹配')
     requireEventSources(sourceState, eventSources.sources)
@@ -198,9 +202,25 @@ function parseState(buffer, { versions, migrate = true } = {}) {
   let state
   try { state = JSON.parse(buffer.toString('utf8')) } catch { throw new Error('产品状态 JSON 无效') }
   if (!record(state) || !versions?.includes(state.version)) throw new Error(`产品状态版本不受支持：${state?.version ?? 'unknown'}`)
+  assertNoFutureSiteRule(state)
+  if (state.routingBatches !== undefined && (!Array.isArray(state.routingBatches) || state.routingBatches.length) || state.routingRequests?.some(row => row.routingVersion !== undefined) || state.modelRequests?.some(row => row.purpose === 'routing' && row.routingVersion !== 1)) throw new Error('批量路由事实尚不支持备份或恢复')
+  if (Object.keys(emptySupervisionDiagnosisState()).some(name => state[name] !== undefined && (!Array.isArray(state[name]) || state[name].length)) || state.modelRequests?.some(row => row.purpose === 'supervision_diagnosis')) throw new Error('监督诊断事实尚不支持备份或恢复')
+  assertTransferSupported(state)
   const normalized = migrateState(structuredClone(state))
   assertNoSecretKeys(state)
   return migrate ? normalized : state
+}
+
+function assertTransferSupported(state) {
+  assertNoFutureA2a(state)
+  if (state.a2aProtocol !== undefined && !isDeepStrictEqual(state.a2aProtocol, emptyA2aState().a2aProtocol)) throw new Error('当前备份/恢复工具尚不支持 A2A 协议事实，禁止丢弃关联和收件校准')
+  if (state.workMemberRemovals !== undefined && (!Array.isArray(state.workMemberRemovals) || state.workMemberRemovals.length)) throw new Error('当前备份/恢复工具尚不支持工作成员撤销事实，禁止丢弃访问否决')
+  if (state.artifacts?.length) throw new Error('当前备份/恢复工具尚不支持成果字节，无法保证完整恢复；请保留原数据目录')
+  if (state.modelRequests?.length || state.modelImageVariants?.length) throw new Error('当前备份/恢复工具尚不支持模型代理执行事实，无法保证完整恢复；请保留原数据目录')
+  if (state.attachments?.length) throw new Error('当前备份/恢复工具尚不支持附件字节，无法保证完整恢复；请保留原数据目录')
+  if (['nodes', 'nodePairings', 'nodeCommands', 'resources', 'executionIssuances'].some(field => state[field]?.length) || state.works?.some(work => work.workType === 'multisite') || Object.values(state.multisite ?? {}).some(rows => Array.isArray(rows) && rows.length)) {
+    throw new Error('当前备份/恢复工具尚不支持多地点协作事实及 Host 日志，无法保证完整恢复；请保留原数据目录')
+  }
 }
 
 function interruptActiveForBackup(state, interruptedAt) {
@@ -243,6 +263,7 @@ function interruptActiveForBackup(state, interruptedAt) {
 }
 
 export function prepareRestoredState(sourceState, timestamp = new Date().toISOString()) {
+  assertTransferSupported(sourceState)
   const state = sourceState.version === STATE_VERSION ? structuredClone(sourceState) : migrateState(structuredClone(sourceState))
   const closingLinks = new Set(state.linkCodes.filter(link => ['active', 'matched'].includes(link.status)).map(link => link.id))
   const identityIds = new Set(state.linkCodes.filter(link => closingLinks.has(link.id)).map(link => link.matchedIdentityId).filter(Boolean))
@@ -440,6 +461,7 @@ function assertNoSecretKeys(state) {
         && Object.values(value).every(item => Number.isSafeInteger(item) && item > 0)) return
       throw new Error(`产品状态包含秘密字段：${key}`)
     }
+    if (compact === 'supervisiondiagnosisgrants' && Array.isArray(value) && value.length === 0) return
     if (!compact || ['authref', 'credentialref', 'secretref', 'authorizationbasis'].includes(compact)) return
     if (/password|verifier|secret|token$|cookie|grant|apikey|apisecret|hmac|claude|credential|^auth/.test(compact)) throw new Error(`产品状态包含秘密字段：${key}`)
   })

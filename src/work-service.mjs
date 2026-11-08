@@ -1,3 +1,11 @@
+import { cloudCapacityStatus } from './cloud-capacity.mjs'
+import { workMemberRemoval, workMembersProjection } from './work-member-removal.mjs'
+import { manualControlsProjection } from './manual-control.mjs'
+import { authorizeExecutionCommand } from '../packages/agent-orchestration/execution-dispatch.mjs'
+import { authorizeMultisiteExecution } from './multisite-authorization.mjs'
+import { multisitePolicy } from '../packages/agent-contracts/delegation.mjs'
+import { createMultisiteService } from '../packages/agent-orchestration/service.mjs'
+import { placement as validatePlacement } from '../packages/agent-contracts/index.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { MODEL_IDS, MODEL_PROVIDER, modelRouteSnapshot, employeeModelRoute, assertModelRoute } from './model-route.mjs'
 import { TOP_LEVEL_LIMIT, activeTopLevelCount, newExecutionRuntime, finishExecutionRuntime } from './execution-runtime.mjs'
@@ -16,10 +24,10 @@ export const ERROR_STATUS = {
   INVALID_AVAILABLE_SECONDS_TYPE: 400, INVALID_QUANTITY_TYPE: 400, NON_FINITE_AVAILABLE_SECONDS: 400,
   NON_FINITE_QUANTITY: 400, NEGATIVE_AVAILABLE_SECONDS: 400, NON_POSITIVE_QUANTITY: 400,
   NON_FINITE_RESULT: 400, CAPABILITY_NOT_FOUND: 400, UNAUTHORIZED: 401, FORBIDDEN: 403,
-  NOT_FOUND: 404, BUSY: 409, SOURCE_NOT_CONFIGURED: 503, MODEL_NOT_CONFIGURED: 503,
+  COMMAND_TOO_LARGE: 413, COMMAND_UNAVAILABLE: 409, MANUALLY_PAUSED: 409, MANUAL_RELEASE_PENDING: 409, MANUAL_RESUME_PENDING: 409, CONTEXT_READ_UNAVAILABLE: 403, CONTEXT_READ_LIMIT: 409, CONTEXT_READ_VERSION_CHANGED: 409, CONTEXT_READ_WINDOW_PENDING: 409, INVALID_CURSOR: 409, NOT_FOUND: 404, BUSY: 409, SOURCE_NOT_CONFIGURED: 503, MODEL_NOT_CONFIGURED: 503,
   UPSTREAM_TIMEOUT: 504, UPSTREAM_ERROR: 502, INVALID_SOURCE: 502,
   REVISION_CONFLICT: 409, CAPACITY_EXCEEDED: 400, BUDGET_EXHAUSTED: 409, CAPABILITY_RETIRED: 409,
-  ACTION_CONFLICT: 409,
+  ACTION_CONFLICT: 409, IDEMPOTENCY_CONFLICT: 409, INVALID_STATE: 409, STORE_UNAVAILABLE: 503,
   KNOWLEDGE_PLUGIN_DISABLED: 503, KNOWLEDGE_REFERENCE_INVALID: 409,
 }
 
@@ -69,13 +77,49 @@ export function recoverActionFacts(state, at) {
   return changed ? { ...state, works } : state
 }
 
-export function createWorkService({ store, runner = null, collaborationRunner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [], idFactory = randomUUID, onAutomationTerminal } = {}) {
+export function projectBootstrap(state, actor, connectionCatalog = []) {
+  const member = requireMember(state, actor)
+  const employeeIds = new Set(member.employeeIds)
+  const employees = state.employees.filter(item => employeeIds.has(item.id))
+  const skillIds = new Set(employees.flatMap(item => item.skillIds ?? []))
+  const connectionIds = new Set(employees.flatMap(item => item.connectionIds ?? []))
+  return {
+    member: publicMember(member),
+    employees,
+    connections: state.connections.filter(item => connectionIds.has(item.id)).map(item => publicConnection(item, connectionCatalog)),
+    skills: state.skills.filter(item => skillIds.has(item.id)),
+    capabilities: listCapabilities().filter(item => member.role === 'admin' || state.skills.some(skill => skillIds.has(skill.id) && skill.enabled === true && skill.capabilityId === item.id)).map(publicCapability),
+    works: state.works.filter(item => item.ownerMemberId === member.id).map(item => publicWork(state, member, item)),
+  }
+}
+
+export function createWorkService({ store, runner = null, collaborationRunner = null, clock = () => new Date().toISOString(), policyPaths = {}, connectionTester = null, connectionCatalog = [], idFactory = randomUUID, multisiteOptions = {}, onAutomationTerminal, workMemberProtocolStatus } = {}) {
   if (!store) throw new Error('store is required')
+  if (workMemberProtocolStatus !== undefined && typeof workMemberProtocolStatus !== 'function') throw new Error('workMemberProtocolStatus must be a function')
+  const multisite = createMultisiteService({ store, clock, ...multisiteOptions })
   const active = new Map()
   let recovered = false
   let recoveryPromise
 
   return {
+    multisite,
+
+    setWorkMemberProtocolStatus(provider) {
+      if(provider!==undefined&&typeof provider!=='function')throw new Error('workMemberProtocolStatus must be a function')
+      workMemberProtocolStatus=provider
+    },
+
+    async createMultisite(actor, body) {
+      await recover()
+      const reply = await multisite.apply(actor, 'create', body)
+      return { ok: true, value: (await store.read()).works.find(work => work.id === reply.workId) }
+    },
+
+    async applyA2aTask(scope, request) {
+      await recover()
+      return multisite.applyA2a(scope, request)
+    },
+
     async ensureReady() {
       await recover()
     },
@@ -117,7 +161,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       await recover()
       const state = await store.read(), member = requireMember(state, actor)
       if (member.role !== 'admin') throw serviceError('FORBIDDEN', '仅管理员可查看运行元数据')
-      return { capacity: { active: activeTopLevelCount(state), limit: TOP_LEVEL_LIMIT },
+      return { capacity: { active: activeTopLevelCount(state), limit: TOP_LEVEL_LIMIT }, cloudCapacity: cloudCapacityStatus(state),
         executions: state.works.flatMap(work => work.executions.map(execution => ({ workId: work.id, executionId: execution.id, employeeId: work.employeeId, status: execution.status, errorCode: execution.error?.code ?? null, runtime: execution.runtime ?? null }))),
         turns: (state.conversations ?? []).flatMap(conversation => conversation.turns.map(turn => ({ conversationId: conversation.id, turnId: turn.id, employeeId: conversation.employeeId, status: turn.status, errorCode: turn.error?.code ?? null, runtime: turn.runtime ?? null }))) }
     },
@@ -125,22 +169,11 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     async bootstrap(actor) {
       await recover()
       const state = await store.read()
-      const member = requireMember(state, actor)
-      const employeeIds = new Set(member.employeeIds)
-      const employees = state.employees.filter(item => employeeIds.has(item.id))
-      const skillIds = new Set(employees.flatMap(item => item.skillIds ?? []))
-      const connectionIds = new Set(employees.flatMap(item => item.connectionIds ?? []))
-      return {
-        member: publicMember(member),
-        employees,
-        connections: state.connections.filter(item => connectionIds.has(item.id)).map(item => publicConnection(item, connectionCatalog)),
-        skills: state.skills.filter(item => skillIds.has(item.id)),
-        capabilities: listCapabilities().filter(item => member.role === 'admin' || state.skills.some(skill => skillIds.has(skill.id) && skill.enabled === true && skill.capabilityId === item.id)).map(publicCapability),
-        works: state.works.filter(item => item.ownerMemberId === member.id).map(item => publicWork(state, member, item)),
-      }
+      return projectBootstrap(state, actor, connectionCatalog)
     },
 
     async createWork(actor, body = {}) {
+      if (body.workType === 'multisite') return this.createMultisite(actor, body)
       await recover()
       const requestId = clean(body.clientRequestId) ?? `request-${randomUUID()}`
       let reservation
@@ -304,10 +337,12 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     async getWork(actor, id) {
       await recover()
       const work = await ownedWork(actor, id)
-      return work ? { ok: true, value: await projectOwned(actor, work) } : failure('NOT_FOUND', '工作不存在')
+      return work ? { ok: true, value: await projectOwned(actor, work, { protocolStatus: true }) } : failure('NOT_FOUND', '工作不存在')
     },
 
     async continueWork(actor, id, body = {}) {
+      const candidate = (await store.read()).works.find(work => work.id === id && work.workType === 'multisite')
+      if (candidate) throw serviceError('INVALID_REQUEST', '多地点工作请使用协作命令入口')
       await recover()
       const requestId = clean(body.clientRequestId) ?? `continue-${randomUUID()}`
       let reservation
@@ -371,9 +406,13 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
       return success(await projectOwned(actor, work), reservation)
     },
 
-    async refreshWork(actor, id, body = {}) { return reserveExisting(actor, id, 'refresh', body, { requireResult: true }) },
+    async refreshWork(actor, id, body = {}) {
+      const candidate = (await store.read()).works.find(work => work.id === id && work.workType === 'multisite')
+      if (candidate) throw serviceError('INVALID_REQUEST', '多地点工作请使用协作命令入口')
+      return reserveExisting(actor, id, 'refresh', body, { requireResult: true }) },
 
     async followUp(actor, id, textValue, body = {}) {
+      if ((await ownedWork(actor, id))?.workType === 'multisite') throw serviceError('INVALID_REQUEST', '多地点工作请使用协作命令入口')
       const question = clean(textValue)
       if (!question || question.length > 4000) return failure('INVALID_REQUEST', '追问内容为空或过长')
       return reserveExisting(actor, id, 'follow-up', body, { question, requireResult: true })
@@ -382,6 +421,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     async cancel(actor, id) {
       await recover()
       const candidate = await ownedWork(actor, id)
+      if (candidate?.workType === 'multisite') throw serviceError('INVALID_REQUEST', '多地点工作请使用协作停止入口')
       if (candidate?.collaboration) {
         const accepted = await collaborationRunner?.cancel(id, 'user')
         const value = await ownedWork(actor, id)
@@ -625,6 +665,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     },
 
     async close() {
+      await multisite.close()
       const tasks = [...active.values()]
       const taskIds = new Set(tasks.map(item => item.executionId))
       await store.update(state => {
@@ -981,6 +1022,7 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
           let changed = false
           const now = clock()
           const works = state.works.map(work => {
+            if (work.workType === 'multisite') return work
             if (!ACTIVE_EXECUTION.has(work.status) && !work.executions.some(item => ACTIVE_EXECUTION.has(item.status) || item.closePending)) return work
             changed = true
             if (!ACTIVE_EXECUTION.has(work.status) && !work.executions.some(item => ACTIVE_EXECUTION.has(item.status))) return { ...work, executions: work.executions.map(execution => ({ ...execution, closePending: false })) }
@@ -1004,7 +1046,26 @@ export function createWorkService({ store, runner = null, collaborationRunner = 
     return findOwned(state, member, id)
   }
 
-  async function projectOwned(actor, work) {
+  async function projectOwned(actor, work, { protocolStatus = false } = {}) {
+    if (work.workType === 'multisite') {
+      const state = await store.read(), { user, work: current } = multisite.authorizeRead(state, actor, work.id)
+      const projected = publicWork(state, user, current)
+      if (!protocolStatus || !workMemberProtocolStatus) return projected
+      const results = await Promise.all(projected.multisite.workMembers.map(async member => {
+        const request = { workspaceId: current.workspaceId, workId: current.id, employeeId: member.employeeId, removalCommandId: workMemberRemoval(state, current.id, member.employeeId)?.commandId ?? null }
+        try { return { request, response: await workMemberProtocolStatus(structuredClone(request)) } } catch { return { request, response: null } }
+      }))
+      // The sidecar can describe protocol convergence, never business access.
+      // Re-read after its I/O so a new removal cannot inherit an old confirmation.
+      const latest = await store.read(), access = multisite.authorizeRead(latest, actor, work.id), value = publicWork(latest, access.user, access.work)
+      for (const member of value.multisite.workMembers) {
+        const item = results.find(row => row.request.employeeId === member.employeeId), response = item?.response
+        const removalCommandId = workMemberRemoval(latest, work.id, member.employeeId)?.commandId ?? null
+        const matches = response && response.workspaceId === access.work.workspaceId && response.workId === work.id && response.employeeId === member.employeeId && response.removalCommandId === removalCommandId && item.request.removalCommandId === removalCommandId
+        member.protocolGroup = matches && response.configured === false ? 'not_applicable' : matches && response.configured === true && ['pending', 'unknown', 'confirmed'].includes(response.status) ? response.status : 'unknown'
+      }
+      return value
+    }
     if (!work.collaboration && !work.rootWorkId && !work.actions?.some(action => action.intent.kind === 'kivo.tpm.repair.create')
       && !work.results.some(result => result.knowledgeDependencyRefs?.length) && !work.handoffs?.some(handoff => handoff.knowledgeRefs?.length)) return publicWork({ works: [work] }, { id: actor?.id }, work)
     const state = await store.read()
@@ -1188,7 +1249,9 @@ function employeeConfig(state, body, current) {
     instructions: body.instructions === undefined ? current?.instructions ?? '' : typeof body.instructions === 'string' ? body.instructions.trim() : null,
     revision: current ? (current.revision ?? 1) + 1 : 1,
     enabled: body.enabled ?? current?.enabled ?? true, modelRouteId: body.modelRouteId ?? current?.modelRouteId ?? null,
-    connectionIds: body.connectionIds ?? current?.connectionIds ?? [], skillIds: body.skillIds ?? current?.skillIds ?? [] }
+    connectionIds: body.connectionIds ?? current?.connectionIds ?? [], skillIds: body.skillIds ?? current?.skillIds ?? [],
+    ...(body.multisitePolicy !== undefined || current?.multisitePolicy !== undefined ? { multisitePolicy: multisitePolicy(body.multisitePolicy ?? current.multisitePolicy) } : {}),
+    ...(body.placement !== undefined || current?.placement !== undefined ? { placement: validatePlacement(body.placement ?? current.placement) } : {}) }
   if (!result.id || !result.name || typeof result.instructions !== 'string' || result.instructions.length > 16_000 || typeof result.enabled !== 'boolean' || !stringIds(result.connectionIds) || !stringIds(result.skillIds)) throw serviceError('INVALID_REQUEST', '员工配置无效')
   if (!state.modelRoutes.some(item => item.id === result.modelRouteId)) throw serviceError('INVALID_REQUEST', '员工模型路由不存在')
   if (result.connectionIds.some(id => !state.connections.some(item => item.id === id)) || result.skillIds.some(id => !state.skills.some(item => item.id === id))) throw serviceError('INVALID_REQUEST', '员工绑定引用不存在')
@@ -1249,6 +1312,20 @@ function publicWork(state, member, work) {
   const value = structuredClone(work)
   value.actions = value.actions.map(action => action.intent.kind === 'kivo.tpm.repair.create' ? { ...action, echoEvents: (state.automationInbox ?? []).filter(entry => entry.actionRef?.workId === work.id && entry.actionRef.actionId === action.id)
     .map(entry => ({ eventId: entry.event.eventId, sourceRevision: entry.event.sourceRevision, occurredAt: entry.event.occurredAt, acceptedAt: entry.acceptedAt })) } : action)
+  if (work.workType === 'multisite') value.multisite = {
+    workMembers: workMembersProjection(state, work, member),
+    manualControls: manualControlsProjection(state, work, member, authorizeMultisiteExecution, authorizeExecutionCommand),
+    ...(work.modelRequestBudget?.version === 2 ? { budget: (() => {
+      const requests = (state.modelRequests ?? []).filter(row => row.work_id === work.id), sum = values => { const total = values.reduce((value, item) => value + BigInt(item), 0n); return total <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(total) : null }, knownCost = requests.filter(row => row.usageCostMicros !== null), usage = Object.fromEntries(['prompt_tokens', 'completion_tokens', 'total_tokens'].map(field => [field, requests.length && requests.every(row => row.usage?.[field] !== undefined) ? sum(requests.map(row => row.usage[field])) : null]))
+      return { usage, usageKnownRequests: requests.filter(row => row.usage !== null).length, usageUnknownRequests: requests.filter(row => row.usage === null).length, usagePricedCostMicros: knownCost.length ? sum(knownCost.map(row => row.usageCostMicros)) : null, usagePricedRequests: knownCost.length, costUnknownRequests: requests.length - knownCost.length, unknownOutcomeRequests: requests.filter(row => row.outcome === 'unknown').length, overReservation: requests.some(row => row.overReservation), waitingForIdle: (state.budgetHolds ?? []).some(row => row.work_id === work.id && row.state === 'waiting' && !row.idleAt), adjustments: (state.budgetAdjustments ?? []).filter(row => row.workId === work.id).slice(-20).map(row => ({ budgetRevision: row.budgetRevision, reason: row.reason, actorName: state.members.find(member => member.id === row.actorId)?.displayName ?? '管理员', acceptedAt: row.acceptedAt, before: row.before, after: row.after })) }
+    })() } : {}),
+    spreadsheetRequest: work.spreadsheetRequest ?? null,
+    conversationHistory: (state.multisite?.messages ?? []).filter(row => row.workId === work.id && ['observation', 'question', 'answer', 'question_closed'].includes(row.kind)).slice(-100).map(row => ({ id: row.id, kind: row.kind, fromEmployeeId: row.senderBinding.agent_id, toEmployeeId: state.multisite.attempts.find(attempt => attempt.attempt_id === row.targetAttemptId)?.agent_id ?? null, text: row.text, revision: row.instructionRevision, at: row.createdAt, historical: row.historical === true || row.instructionRevision !== work.instructionRevision, questionState: row.replyTo ? state.multisite.questions.find(question => question.id === row.replyTo)?.state ?? null : null, evidenceCount: row.evidenceRefs?.length ?? 0, controlReceived: !!row.controlConsumedAt })),
+    jobs: (state.multisite?.jobs ?? []).filter(job => job.work_id === work.id).map(job => ({ id: job.id, state: job.state, instructionRevision: job.instructionRevision, reason: job.reason })),
+    artifacts: (state.artifacts ?? []).filter(row => row.workId === work.id).map(row => ({ id: row.id, version: row.version, sha256: row.sha256, name: row.name, sizeBytes: row.sizeBytes, status: row.status, instructionRevision: row.instructionRevision, verification: row.verification, rejectionReason: row.rejectionReason })),
+    reports: (state.multisite?.attempts ?? []).filter(attempt => attempt.work_id === work.id).map(attempt => ({ employeeId: attempt.agent_id, status: attempt.status, report: attempt.report ?? null, unavailableReason: attempt.unavailableReason ?? null, jobStopEvidence: state.multisite.receipts.filter(receipt => !receipt.historical && receipt.event.kind === 'stopped' && receipt.event.attempt_id === attempt.attempt_id && receipt.event.session_id === attempt.session_id).flatMap(receipt => receipt.event.job_stop_evidence ?? []) })),
+    inputs: (state.multisite?.inputs ?? []).filter(input => input.workId === work.id).map(input => ({ id: input.id, text: input.text, revision: input.revision, at: input.at, attachments: (input.attachmentRefs ?? []).map(ref => { const file = state.attachments.find(file => file.id === ref.attachmentId); return { ref, name: file.name, mediaType: file.mediaType, sizeBytes: file.sizeBytes } }) })),
+  }
   value.results = results
   if (results.some(result => result.knowledgeUnavailable)) delete value.knowledgeQuery
   if (value.handoffs) value.handoffs = value.handoffs.map(handoff => {

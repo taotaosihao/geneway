@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict'
+import {mkdtemp,readFile,writeFile,cp} from 'node:fs/promises'
+import {join} from 'node:path'
+import {createHash} from 'node:crypto'
+import {startBridgeService} from './fixtures/multisite/bridge-service.mjs'
+const directory=await mkdtemp('/home/gewu/.codex/task-checkpoints/geneway-evidence/ready-artifact-authority-'),source='/home/gewu/.codex/task-checkpoints/geneway-evidence/spreadsheet-collaboration-native-os4rmP/api',observations=[]
+let fixture
+try{
+ const original=JSON.parse(await readFile(join(source,'state.json'),'utf8')),work=original.works.find(work=>work.status==='completed'),artifact=original.artifacts.find(row=>row.workId===work.id&&row.status==='ready')
+ fixture=await startBridgeService({directory:join(directory,'api'),seedState:state=>Object.assign(state,structuredClone(original))});await cp(join(source,'artifacts'),join(directory,'api/artifacts'),{recursive:true})
+ const login=await fetch(fixture.origin+'/api/session',{method:'POST',headers:{origin:fixture.origin,'content-type':'application/json'},body:JSON.stringify({loginName:'owner',password:'synthetic owner password'})}),session={...await login.json(),cookie:login.headers.get('set-cookie').split(';')[0]}
+ async function admin(path,body,method='POST'){const r=await fetch(fixture.origin+path,{method,headers:{origin:fixture.origin,cookie:session.cookie,'x-csrf-token':session.csrfToken,'content-type':'application/json'},body:JSON.stringify(body)});const value=await r.json();assert.equal(r.status,200,JSON.stringify(value));return value}
+ async function download(stage,status){const r=await fetch(fixture.origin+`/api/works/${work.id}/artifacts/${artifact.id}/content`,{headers:{cookie:session.cookie}});assert.equal(r.status,status);if(status===200){const bytes=Buffer.from(await r.arrayBuffer()),sha=createHash('sha256').update(bytes).digest('hex');assert.equal(sha,artifact.sha256);await writeFile(join(directory,stage+'.xlsx'),bytes);observations.push({stage,status,sizeBytes:bytes.length,sha256:sha})}else observations.push({stage,status,body:await r.json()})}
+ await download('original',200)
+ const nodeA=original.nodes.find(row=>row.id==='pc-a');await admin('/api/admin/nodes/pc-a/revoke',{clientRequestId:'revoke-source-a',expectedRevision:nodeA.revision});await download('after-source-node-revoke',200)
+ const resource=original.resources.find(row=>row.id==='fixture:site'),{id,revision,...configuration}=resource;await admin('/api/admin/resources/'+encodeURIComponent(id),{...configuration,evidenceReaderAgentIds:[],clientRequestId:'revoke-source-g-readers',expectedRevision:revision},'PUT');await download('after-source-reader-revoke',200)
+ const nodeB=original.nodes.find(row=>row.id==='pc-b');await admin('/api/admin/nodes/pc-b/revoke',{clientRequestId:'revoke-output-b',expectedRevision:nodeB.revision});await download('after-output-node-revoke',403)
+ const final=await fixture.store.read();assert.deepEqual(final.modelRequests,original.modelRequests);assert.deepEqual(final.evidence,original.evidence);assert.deepEqual(final.evidenceAccessReceipts,original.evidenceAccessReceipts);assert.deepEqual(final.multisite.results,original.multisite.results);assert.deepEqual(final.artifacts,original.artifacts);assert.deepEqual(final.works,original.works)
+ await writeFile(join(directory,'state-final.json'),JSON.stringify(final,null,2));const result={result:'passed',directory,workId:work.id,artifactId:artifact.id,observations,originalSourceFactsUnchanged:true,noModelOrNewWork:true,boundary:'actual authenticated HTTP on a copy of actual completed v2 five-role Work/artifact; real Node/Resource admin transactions, original current ready data/ref/hash gates; no provider/worker/native rerun'};await writeFile(join(directory,'result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2))
+}catch(cause){await writeFile(join(directory,'failure.json'),JSON.stringify({message:cause.message,stack:cause.stack,observations},null,2));console.error('Ready policy evidence:',directory);throw cause}finally{await fixture?.close()}

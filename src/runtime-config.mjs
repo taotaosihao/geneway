@@ -16,6 +16,8 @@ export function readRuntimeConfig(env = process.env, root = process.cwd()) {
   const dshHome = resolve(root, nonEmpty(env.GENEWAY_DSH_HOME) ?? 'var/dsh')
   const stateFile = resolve(nonEmpty(env.GENEWAY_STATE) ?? join(root, 'var', 'state.json'))
   const connectionCatalogFile = nonEmpty(env.GENEWAY_CONNECTION_CATALOG)
+  const multisiteHostMode = nonEmpty(env.GENEWAY_MULTISITE_HOST_MODE) ?? 'local'
+  if (!['local', 'remote'].includes(multisiteHostMode)) throw new Error('GENEWAY_MULTISITE_HOST_MODE 必须为 local 或 remote')
   const dataRoot = dirname(stateFile)
   const model = ZENMUX_MODEL
   const zenmuxBaseUrl = ZENMUX_BASE_URL
@@ -73,6 +75,7 @@ export function readRuntimeConfig(env = process.env, root = process.cwd()) {
     dshHome,
     stateFile,
     dataRoot,
+    multisiteHostMode,
     secretRoot,
     connectionCatalogFile,
   }

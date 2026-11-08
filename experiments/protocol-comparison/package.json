@@ -1,0 +1,25 @@
+{
+  "name": "geneway-protocol-comparison",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "26.5.0"
+  },
+  "scripts": {
+    "preflight": "node preflight.mjs",
+    "preflight:a2a": "node preflight-bidirectional.mjs",
+    "preflight:anp": "node preflight-anp.mjs",
+    "normal:baseline": "node normal-flow.mjs baseline",
+    "normal:a2a": "node normal-flow.mjs a2a",
+    "normal:anp": "node normal-flow.mjs anp",
+    "business:a2a": "node business-flow.mjs a2a",
+    "business:anp": "node business-flow.mjs anp"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "1.3.0",
+    "@awiki/anp-typescript-sdk": "0.9.5",
+    "bs58": "6.0.0",
+    "express": "5.1.0",
+    "jose": "6.2.3"
+  }
+}

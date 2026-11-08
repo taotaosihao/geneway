@@ -1,3 +1,23 @@
+import { createSiteRuleService } from './site-rule-service.mjs'
+import { createSupervisionDiagnosisService } from './supervision-diagnosis-service.mjs'
+import { createSupervisionService } from './supervision-service.mjs'
+import { readA2aConfig } from './a2a-config.mjs'
+import { createA2aService } from './a2a-service.mjs'
+import { createA2aWorkGroups } from './a2a-work-groups.mjs'
+import { requireA2aOwner } from './a2a-state.mjs'
+import { readSupervisionIdentities } from './supervision-config.mjs'
+import { createContextReadService } from './context-read-service.mjs'
+import { createInteractionService } from './interaction-service.mjs'
+import { normalizeTrustedOrigin } from './trusted-origin.mjs'
+import { createNodeService } from './node-service.mjs'
+import { createNodeBridge } from './node-bridge.mjs'
+import { createBudgetService } from './budget-service.mjs'
+import { createEvidenceService } from './evidence-service.mjs'
+import { createSpreadsheetArtifacts } from './spreadsheet-artifacts.mjs'
+import { createSpreadsheetService } from './spreadsheet-service.mjs'
+import { createModelGateway } from './model-gateway.mjs'
+import { createArtifactService } from './artifact-service.mjs'
+import { createLocalAgentHost } from '../packages/agent-host/local.mjs'
 import { createServer } from 'node:http'
 import QRCode from 'qrcode'
 import { readFile } from 'node:fs/promises'
@@ -25,12 +45,13 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const COOKIE = 'geneway_session'
 const JSON_TYPE = 'application/json'
 const WORK_FIELDS = ['employeeId', 'skillId', 'capabilityId', 'connectionId', 'conversationId', 'goal', 'input', 'workOrderId', 'availableSeconds', 'quantity', 'clientRequestId']
+const MULTISITE_FIELDS = ['workType', 'employeeId', 'goal', 'targets', 'clientRequestId', 'attachmentRefs', 'spreadsheetRequest', 'budgetPolicyId']
 const COLLABORATION_ROOT_FIELDS = ['workType', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'conversationId', 'goal', 'clientRequestId', 'items']
 const COLLABORATION_ITEM_FIELDS = ['id', 'employeeId', 'skillId', 'capabilityId', 'connectionId', 'goal', 'input', 'workOrderId', 'availableSeconds', 'quantity', 'knowledgeQuery', 'dependsOn']
 const BUSINESS_INPUT_FIELDS = ['workOrderId', 'availableSeconds', 'quantity']
 const WORK_INPUT_FIELDS = [...BUSINESS_INPUT_FIELDS, 'recordType', 'reference', 'filters']
 
-export async function start({ feishuSdk, weixinApi } = {}) {
+export async function start({ feishuSdk, weixinApi, modelGatewayOptions = {} } = {}) {
   const port = positivePort(process.env.GENEWAY_PORT ?? 3471)
   const host = process.env.GENEWAY_HOST ?? '127.0.0.1'
   const statePath = resolve(process.env.GENEWAY_STATE ?? join(root, 'var', 'state.json'))
@@ -40,20 +61,29 @@ export async function start({ feishuSdk, weixinApi } = {}) {
   const authRelative = relative(root, authPath)
   if (authRelative !== '..' && !authRelative.startsWith(`..${sep}`)) throw new Error('GENEWAY_AUTH_FILE 必须位于仓库外')
   if (!['127.0.0.1', '::1', 'localhost'].includes(host)) throw new Error('P2 仅允许 loopback 监听')
-  const trustedOrigin = process.env.GENEWAY_TRUSTED_ORIGIN ?? `http://${host === '::1' ? '[::1]' : host}:${port}`
-  const origin = new URL(trustedOrigin)
-  if (origin.protocol !== 'http:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('GENEWAY_TRUSTED_ORIGIN 必须匹配 P2 明文 loopback HTTP 服务')
+  const trustedOrigin = normalizeTrustedOrigin(process.env.GENEWAY_TRUSTED_ORIGIN ?? `http://${host === '::1' ? '[::1]' : host}:${port}`)
 
   const runtimeConfig = readRuntimeConfig({ ...process.env, GENEWAY_STATE: statePath }, root)
+  const supervisionIdentities = await readSupervisionIdentities(process.env.GENEWAY_SUPERVISION_CONFIG)
+  const a2aConfig = await readA2aConfig(process.env.GENEWAY_A2A_CONFIG)
   process.env.DSH_HOME = runtimeConfig.dshHome
   const store = createFileStore(statePath)
+  if(a2aConfig?.receiver){const {token,...scope}=a2aConfig.receiver;requireA2aOwner(await store.read(),scope)}
+  const attachments = createArtifactService({ store, root: join(runtimeConfig.dataRoot, 'attachments') })
+  const modelGateway = createModelGateway({ ...modelGatewayOptions, store, attachments, config: runtimeConfig })
+  const modelGatewayOrigin = `http://${host === '::1' ? '[::1]' : host}:${port}`
   const connectionCatalog = await readConnectionCatalog(runtimeConfig.connectionCatalogFile, root)
   const runner = createDshRunner({ root, config: runtimeConfig })
   const collaborationRunner = createCollaborationRunner({ store, root, dshHome: runtimeConfig.dshHome, secretRoot: runtimeConfig.secretRoot, connectionCatalog, getWorkService: () => service })
   const knowledge = collaborationRunner.getKnowledgeService()
-  let channelRuntime, automationRuntime, channel, weixinRuntime
+  let channelRuntime, automationRuntime, channel, weixinRuntime, nodeBridge
+  const nodeService = runtimeConfig.multisiteHostMode === 'remote' ? createNodeService({ store, onRevoke: nodeId => nodeBridge?.revoke(nodeId) }) : undefined
+  const evidence = nodeService ? createEvidenceService({ store, nodes: nodeService, root: join(runtimeConfig.dataRoot, 'evidence') }) : undefined
+  const spreadsheetService = createSpreadsheetService({ store, attachments, gateway: modelGateway, evidence })
+  const spreadsheetArtifacts = createSpreadsheetArtifacts({ store, attachments, gateway: modelGateway, evidence, root: join(runtimeConfig.dataRoot, 'artifacts') })
   const service = createWorkService({
     store, runner, collaborationRunner,
+    multisiteOptions: { attachments, evidence, spreadsheetArtifacts, requireRemoteNodes: runtimeConfig.multisiteHostMode === 'remote', hosts: runtimeConfig.multisiteHostMode === 'remote' ? [] : [createLocalAgentHost({ store, root, config: runtimeConfig, gateway: modelGateway, spreadsheetService, spreadsheetArtifacts, gatewayOrigin: () => modelGatewayOrigin })], onError: error => console.error('协作投递待重试', error?.code ?? 'INTERNAL_ERROR') },
     connectionCatalog,
     policyPaths: { stateFile: runtimeConfig.stateFile, dataRoot: runtimeConfig.dataRoot, secretRoot: runtimeConfig.secretRoot },
     connectionTester: async (connection, { authorize }) => {
@@ -103,28 +133,64 @@ export async function start({ feishuSdk, weixinApi } = {}) {
     await automationRuntime.close().catch(() => undefined)
     throw error
   }
-  const server = createGenewayServer({ service, actionService, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog, store, auth, index, trustedOrigin, readEventSources, secretRoot: runtimeConfig.secretRoot })
+  if (nodeService) { nodeBridge = createNodeBridge({ store, nodes: nodeService, gateway: modelGateway, spreadsheetService, spreadsheetArtifacts, getMultisite: () => service.multisite }); nodeBridge.start() }
+  const server = createGenewayServer({ a2aConfig, supervisionIdentities, supervisionDiagnosisOptions: { root: join(runtimeConfig.dataRoot, 'supervision-diagnoses'), gatewayOrigin: modelGatewayOrigin }, service, nodeService, nodeBridge, evidence, budgetService: createBudgetService({ store, onAdjusted: async workId => { await Promise.all([modelGateway.budgetChanged(workId), spreadsheetArtifacts.budgetChanged(workId), evidence?.budgetChanged(workId)]); await service.multisite.resumeBudget() } }), attachments, modelGateway, spreadsheetArtifacts, actionService, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog, store, auth, index, trustedOrigin, readEventSources, secretRoot: runtimeConfig.secretRoot })
   server.listen(port, host, () => console.log(`Geneway listening on ${trustedOrigin}`))
 
   let shuttingDown = false
   const shutdown = async code => {
     if (shuttingDown) return
     shuttingDown = true
-    await shutdownServer(server, service, channelRuntime, automationRuntime, undefined, conversationService)
+    nodeBridge?.close()
+    const interactionsClosing = server.closeInteractions()
+    const closing = shutdownServer(server, service, channelRuntime, automationRuntime, undefined, conversationService)
+    if (runtimeConfig.multisiteHostMode === 'remote') server.closeAllConnections()
+    await Promise.all([closing, interactionsClosing])
     process.exit(code)
   }
   process.once('SIGTERM', () => shutdown(0))
   process.once('SIGINT', () => shutdown(0))
+  service.multisite.start()
   return server
 }
 
-export function createGenewayServer({ service, actionService, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog = [], store, auth, index = '', trustedOrigin, readEventSources = async () => ({ sources: [] }), secretRoot }) {
+export function createGenewayServer({ a2aConfig, supervisionIdentities = [], supervisionDiagnosisOptions = {}, interactionRuntimeEnabled = true, service, nodeService, nodeBridge, evidence, budgetService, attachments, modelGateway, spreadsheetArtifacts, actionService, conversationService, knowledge, collaborationRunner, channel, channelRuntime, weixinRuntime, automation, automationRuntime, connectionCatalog = [], store, auth, index = '', trustedOrigin, readEventSources = async () => ({ sources: [] }), secretRoot }) {
+  budgetService ??= createBudgetService({ store, onAdjusted: async workId => { await Promise.all([modelGateway?.budgetChanged(workId), spreadsheetArtifacts?.budgetChanged(workId), evidence?.budgetChanged(workId)]); await service.multisite?.resumeBudget() } })
   if (!service || !store || !auth || !trustedOrigin) throw new Error('server dependencies are required')
+  trustedOrigin = normalizeTrustedOrigin(trustedOrigin)
+  const a2aGroups=a2aConfig?.workGroups?createA2aWorkGroups({store,nodes:nodeService}):undefined
+  if(a2aGroups)service.setWorkMemberProtocolStatus(tuple=>a2aGroups.status(tuple))
+  const a2a=a2aConfig?createA2aService({config:a2aConfig,store,service,nodes:nodeService,groups:a2aGroups,spreadsheetArtifacts,origin:trustedOrigin}):undefined
+  const groupScan=a2aGroups?setInterval(()=>{a2aGroups.scan().catch(()=>{})},250):undefined;groupScan?.unref()
+  const diagnosis = createSupervisionDiagnosisService({ store, identities: supervisionIdentities, nodeBridge, modelGateway, ...supervisionDiagnosisOptions })
+  const supervision = supervisionIdentities.length ? createSupervisionService({ store, nodeBridge, identities: supervisionIdentities, diagnosis }) : undefined
+  const siteRule = nodeService && service.multisite ? createSiteRuleService({ store, nodes: nodeService, multisite: service.multisite }) : undefined
+  const siteRuleScan = siteRule && setInterval(() => { void siteRule.scan() }, 1000)
+  siteRuleScan?.unref()
+  const secureSession = new URL(trustedOrigin).protocol === 'https:'
+  const contextReader = modelGateway && spreadsheetArtifacts ? createContextReadService({ store, gateway: modelGateway, evidence, spreadsheetArtifacts }) : undefined
+  if (contextReader) modelGateway.setContextReader(contextReader)
+  const interactions = createInteractionService({ store, multisite: service.multisite, gateway: modelGateway, spreadsheetArtifacts, contextReader })
+  if (typeof interactionRuntimeEnabled !== 'boolean') throw new Error('interaction runtime configuration is invalid')
+  const interactionScan = interactionRuntimeEnabled ? setInterval(() => { interactions.routePending().then(() => interactions.flushReplies()).catch(() => {}) }, 1000) : undefined; interactionScan?.unref()
   channel ??= createChannelService({ store, workService: service, conversationService, connectionCatalog })
   const channelRuntimeReady = channelAppId => channelRuntime?.isAvailable?.(channelAppId) === true
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', trustedOrigin)
+      if(a2a&&await a2a.handle(request,response,url))return
+      if (await diagnosis.handleModel(request, response, url)) return
+      if (supervision && await supervision.handle(request, response, url)) return
+      if (url.pathname.startsWith('/internal/supervision/')) return sendJson(response, 403, { error: { code: 'FORBIDDEN', message: '监督入口未启用' } })
+      if (siteRule && request.method === 'POST' && url.pathname === '/internal/site-rule/events') {
+        exactQuery(url)
+        const body = await readJson(request, ['profileVersion', 'maxActiveLoops', 'sourceSha256', 'event'])
+        return sendJson(response, 200, await siteRule.receive(request, body))
+      }
+      if (evidence && await evidence.handle(request, response, url)) return
+      if (nodeBridge && await nodeBridge.handle(request, response, url)) return
+      if (modelGateway && await modelGateway.handle(request, response, url)) return
+      if (spreadsheetArtifacts && await spreadsheetArtifacts.handle(request, response, url)) return
       const eventMatch = url.pathname.match(/^\/api\/events\/kivo\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/)
       if (request.method === 'POST' && eventMatch) {
         try {
@@ -156,7 +222,7 @@ export function createGenewayServer({ service, actionService, conversationServic
           const current = (await store.read()).members.find(item => item.id === member.id && item.enabled === true && item.sessionVersion === member.sessionVersion)
           if (!current) throw httpError('UNAUTHORIZED', '登录名或密码错误')
           const session = await auth.issueSession(current)
-          return sendJson(response, 200, { member: safeMember(current), csrfToken: session.csrfToken, expiresAt: session.expiresAt }, { 'set-cookie': sessionCookie(session.token, session.expiresAt) })
+          return sendJson(response, 200, { member: safeMember(current), csrfToken: session.csrfToken, expiresAt: session.expiresAt }, { 'set-cookie': sessionCookie(session.token, session.expiresAt, secureSession) })
         }
         const context = await authenticated(request, store, auth)
         if (request.method === 'GET') {
@@ -165,13 +231,107 @@ export function createGenewayServer({ service, actionService, conversationServic
         if (request.method === 'DELETE') {
           await protectedWrite(request, context.token, auth, trustedOrigin, [])
           await service.invalidateSession(context.member)
-          return sendJson(response, 200, { ok: true, invalidatedAllSessions: true }, { 'set-cookie': clearSessionCookie() })
+          return sendJson(response, 200, { ok: true, invalidatedAllSessions: true }, { 'set-cookie': clearSessionCookie(secureSession) })
         }
         return notFound(response)
       }
 
       const context = await authenticated(request, store, auth)
       const actor = context.member
+      if (url.pathname === '/api/interaction/threads') {
+        if (request.method === 'GET') return sendJson(response, 200, await interactions.listThreads(actor))
+        if (request.method === 'POST') return sendJson(response, 200, await interactions.createThread(actor, await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId', 'title'])))
+      }
+      if (url.pathname === '/api/interaction/continuation-options' && request.method === 'GET') return sendJson(response, 200, await interactions.continuationOptions(actor))
+      if (url.pathname === '/api/interaction/routing-options' && request.method === 'GET') return sendJson(response, 200, await interactions.routingOptions(actor))
+      if (url.pathname === '/api/interaction/directory' && request.method === 'GET') return sendJson(response, 200, await interactions.directory(actor, { offset: Number(url.searchParams.get('offset') ?? 0), query: url.searchParams.get('query') ?? '' }))
+      if (siteRule && url.pathname === '/api/admin/site-rule') {
+        exactQuery(url)
+        if (request.method === 'GET') return sendJson(response, 200, await siteRule.get(actor))
+        if (request.method === 'PUT') {
+          const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['expectedRevision', 'mode', 'nodeId', 'threadId', 'employeeId', 'profileVersion', 'budgetPolicyId', 'expiresAt'])
+          return sendJson(response, 200, await siteRule.put(actor, body))
+        }
+      }
+      const siteDraft = siteRule && url.pathname.match(/^\/api\/works\/([^/]+)\/site-diagnosis$/)
+      if (siteDraft) {
+        exactQuery(url); const workId = decode(siteDraft[1])
+        if (request.method === 'GET') return sendJson(response, 200, await siteRule.getWork(actor, workId))
+        if (request.method === 'POST') {
+          const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['draftId', 'expectedVersion', 'decision'])
+          return sendJson(response, 200, await siteRule.decide(actor, workId, body))
+        }
+      }
+      if (url.pathname === '/api/admin/routing-policies' && request.method === 'GET') { if (actor.role !== 'admin') throw httpError('FORBIDDEN', '需要管理员权限'); return sendJson(response, 200, (await store.read()).routingPolicies) }
+      const routingPolicyMatch = url.pathname.match(/^\/api\/admin\/routing-policies\/([A-Za-z0-9._-]{1,200})$/)
+      if (routingPolicyMatch && request.method === 'PUT') return sendJson(response, 200, await interactions.putPolicy(actor, routingPolicyMatch[1], await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId','expectedRevision','workspaceId','routerAgentId','routerNodeId','enabled','maxOutputTokens','budget'])))
+      const threadMatch = url.pathname.match(/^\/api\/interaction\/threads\/(thread-[a-f0-9-]{36})(?:\/(events|selection|continuation|artifacts)(?:\/([^/]+)\/([^/]+))?)?$/)
+      if (threadMatch) {
+        const [, threadId, operation, intentId, artifactId] = threadMatch
+        if (request.method === 'GET' && !operation) return sendJson(response, 200, await interactions.getThread(actor, threadId))
+        if (request.method === 'GET' && operation === 'artifacts' && intentId && artifactId) return sendJson(response, 200, await interactions.artifact(actor, threadId, intentId, artifactId))
+        if (request.method === 'POST' && operation === 'events') { const value = await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId','sourceEventId','version','expectedThreadRevision','text','workId','replyToEventId','routingPolicyId','directoryQuery','spreadsheetRequest','expectedInstructionRevision','replyToQuestion','revisionScope','attachmentRefs','replyToIntentQuestion','continueContextRead']); const result = await interactions.submit(actor, threadId, value); void interactions.routePending().catch(() => {}); return sendJson(response, 200, result) }
+        if (request.method === 'POST' && operation === 'selection') return sendJson(response, 200, await interactions.select(actor, threadId, await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId','intentId','expectedRouteRevision','targetWorkId','candidateVersion','offset','query'])))
+        if (request.method === 'POST' && operation === 'continuation') return sendJson(response, 200, await interactions.createContinuation(actor, threadId, await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId','intentId','expectedRouteRevision','employeeId','goal','spreadsheetRequest','budgetPolicyId','artifactReadId'])))
+      }
+      if (url.pathname === '/api/admin/budget-policies' && request.method === 'GET') { exactQuery(url); return sendJson(response, 200, await budgetService.directory(actor)) }
+      const budgetPolicyPath = url.pathname.match(/^\/api\/admin\/budget-policies\/([^/]+)$/)
+      if (budgetPolicyPath && request.method === 'PUT') {
+        exactQuery(url); const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId', 'expectedRevision', 'workspaceId', 'coordinatorAgentId', 'enabled', 'accountingMode', 'limits', 'executionTimeoutMs', 'currency', 'estimator', 'modelPrices'])
+        return sendJson(response, 200, await budgetService.putPolicy(actor, decodeURIComponent(budgetPolicyPath[1]), body))
+      }
+      const budgetWorkPath = url.pathname.match(/^\/api\/admin\/works\/([^/]+)\/budget$/)
+      if (budgetWorkPath && request.method === 'POST') {
+        exactQuery(url); const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId', 'expectedRevision', 'reason', 'limits', 'executionDeadlineAt'])
+        return sendJson(response, 200, await budgetService.adjustWork(actor, decodeURIComponent(budgetWorkPath[1]), body))
+      }
+      if (nodeService && url.pathname === '/api/admin/nodes' && request.method === 'GET') { exactQuery(url); return sendJson(response, 200, await nodeService.directory(actor)) }
+      if (nodeService && url.pathname === '/api/admin/nodes/pairings' && request.method === 'POST') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId', 'nodeId', 'expectedRevision', 'siteId', 'platform', 'runtimeMode', 'allowedAgentIds', 'expiresAt'])
+        return sendJson(response, 200, await nodeService.createPairing(actor, body))
+      }
+      const nodeRevoke = url.pathname.match(/^\/api\/admin\/nodes\/([^/]+)\/revoke$/)
+      if (nodeService && nodeRevoke && request.method === 'POST') {
+        exactQuery(url); const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId', 'expectedRevision'])
+        return sendJson(response, 200, await nodeService.revoke(actor, decode(nodeRevoke[1]), body))
+      }
+      const nodeResource = url.pathname.match(/^\/api\/admin\/resources\/([^/]+)$/)
+      if (nodeService && nodeResource && request.method === 'PUT') {
+        exactQuery(url); const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId', 'expectedRevision', 'workspaceId', 'siteId', 'kind', 'ownerNodeId', 'capabilityIds', 'evidenceReaderAgentIds', 'enabled'])
+        return sendJson(response, 200, await nodeService.putResource(actor, decode(nodeResource[1]), body))
+      }
+      if (request.method === 'POST' && url.pathname === '/api/attachments/init') {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['clientRequestId', 'name', 'mediaType', 'sizeBytes', 'sha256'])
+        if (!attachments) throw httpError('UNAVAILABLE', '附件服务未配置')
+        return sendJson(response, 200, await attachments.init(actor, body))
+      }
+      const artifactMatch = url.pathname.match(/^\/api\/works\/([^/]+)\/artifacts\/([^/]+)\/content$/)
+      if (request.method === 'GET' && artifactMatch) {
+        exactQuery(url)
+        if (!spreadsheetArtifacts) throw httpError('UNAVAILABLE', '成果服务未配置')
+        const file = await spreadsheetArtifacts.download(actor, decode(artifactMatch[1]), decode(artifactMatch[2]))
+        return send(response, 200, file.bytes, file.metadata.mediaType, { 'content-length': file.bytes.length, 'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.metadata.name)}` })
+      }
+      const attachmentMatch = url.pathname.match(/^\/api\/attachments\/([^/]+)(\/content)?$/)
+      if (attachmentMatch) {
+        exactQuery(url)
+        if (!attachments) throw httpError('UNAVAILABLE', '附件服务未配置')
+        const id = decode(attachmentMatch[1])
+        if (request.method === 'GET' && !attachmentMatch[2]) return sendJson(response, 200, await attachments.get(actor, id))
+        if (request.method === 'PUT' && attachmentMatch[2]) {
+          requireOrigin(request, trustedOrigin)
+          if (!await auth.verifyCsrf(context.token, request.headers['x-csrf-token'])) throw httpError('FORBIDDEN', 'CSRF 校验失败')
+          if (String(request.headers['content-type'] ?? '').split(';', 1)[0].trim().toLowerCase() !== 'application/octet-stream') throw httpError('INVALID_REQUEST', '上传必须使用 application/octet-stream')
+          return sendJson(response, 200, await attachments.upload(actor, id, request))
+        }
+        if (request.method === 'GET' && attachmentMatch[2]) {
+          const file = await attachments.download(actor, id)
+          return send(response, 200, file.bytes, file.metadata.mediaType, { 'content-length': file.bytes.length, 'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.metadata.name)}` })
+        }
+        return notFound(response)
+      }
       if (request.method === 'GET' && url.pathname === '/api/bootstrap') { exactQuery(url); return sendJson(response, 200, await service.bootstrap(actor)) }
       if (url.pathname === '/api/conversations') {
         if (request.method === 'GET') {
@@ -282,10 +442,29 @@ export function createGenewayServer({ service, actionService, conversationServic
         return sendJson(response, 200, action)
       }
 
+      const diagnosisMatch = url.pathname.match(/^\/api\/works\/([^/]+)\/supervision(?:\/(diagnosis)|\/diagnoses\/([^/]+)\/(feedback))?$/)
+      if (diagnosisMatch) {
+        exactQuery(url)
+        const workId = decode(diagnosisMatch[1])
+        if (request.method === 'GET' && !diagnosisMatch[2] && !diagnosisMatch[4]) return sendJson(response, 200, await diagnosis.history(actor, workId))
+        if (request.method === 'POST' && diagnosisMatch[2]) { const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['enabled', 'expectedInstructionRevision', 'clientRequestId']); return sendJson(response, 200, await diagnosis.setGrant(actor, workId, body)) }
+        if (request.method === 'POST' && diagnosisMatch[4]) { const body = await protectedWrite(request, context.token, auth, trustedOrigin, ['kind', 'note', 'refs', 'clientRequestId']); return sendJson(response, 200, await diagnosis.feedback(actor, workId, decode(diagnosisMatch[3]), body)) }
+        throw httpError('NOT_FOUND', '未找到监督诊断入口')
+      }
+
+      const multisiteCommand = url.pathname.match(/^\/api\/works\/([^/]+)\/multisite\/(inputs|cancel|pause|resume|remove-member)$/)
+      if (request.method === 'POST' && multisiteCommand) {
+        exactQuery(url)
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, multisiteCommand[2] === 'inputs' ? ['text', 'clientRequestId', 'attachmentRefs', 'spreadsheetRequest', 'revisionScope', 'replyToQuestion', 'expectedInstructionRevision'] : multisiteCommand[2] === 'remove-member' ? ['employeeId', 'clientRequestId'] : ['pause', 'resume'].includes(multisiteCommand[2]) ? ['clientRequestId', 'scope', 'expectedControlGeneration'] : ['clientRequestId'])
+        const reply = await service.multisite.apply(actor, multisiteCommand[2] === 'inputs' ? 'input' : multisiteCommand[2], { ...body, workId: multisiteCommand[1] })
+        return sendJson(response, 200, reply)
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/works') {
         exactQuery(url)
-        const body = await protectedWrite(request, context.token, auth, trustedOrigin, [...WORK_FIELDS, 'workType', 'items'])
+        const body = await protectedWrite(request, context.token, auth, trustedOrigin, [...WORK_FIELDS, 'workType', 'items', 'targets', 'attachmentRefs', 'spreadsheetRequest', 'budgetPolicyId'])
         if (body.workType === undefined) { exactObject(body, WORK_FIELDS); if (body.input !== undefined) exactWorkInput(body.input); return resultResponse(response, await service.createWork(actor, body)) }
+        if (body.workType === 'multisite') { exactObject(body, MULTISITE_FIELDS); return resultResponse(response, await service.createMultisite(actor, body)) }
         if (body.workType !== 'collaboration') throw httpError('INVALID_REQUEST', '工作类型无效')
         exactObject(body, COLLABORATION_ROOT_FIELDS)
         if (!Array.isArray(body.items)) throw httpError('INVALID_REQUEST', '协作计划必须是数组')
@@ -547,12 +726,22 @@ export function createGenewayServer({ service, actionService, conversationServic
       return notFound(response)
     } catch (error) {
       const result = serviceFailure(error)
+      if (error?.code === 'CAPACITY_EXCEEDED' && error.capacity?.domain === 'cloud' && error.capacity.queue === 'ordinary') result.error.capacity = { domain: 'cloud', queue: 'ordinary', reason: error.capacity.reason }
       if (error instanceof ChannelServiceError || Object.hasOwn(CHANNEL_ERROR_STATUS, error?.code)) result.error.status = CHANNEL_ERROR_STATUS[error.code] ?? 500
       else if (error instanceof AutomationServiceError) result.error.status = AUTOMATION_ERROR_STATUS[error.code] ?? 500
       else if (Number.isInteger(error?.status)) result.error.status = error.status
       return sendJson(response, result.error.status, { error: clientError(result.error) })
     }
   })
+  server.closeInteractions = async () => { clearInterval(interactionScan);clearInterval(groupScan);a2a?.close();await Promise.all([interactions.close(),a2aGroups?.close()]) }
+  const closeServer = server.close.bind(server)
+  server.close = callback => {
+    clearInterval(siteRuleScan)
+    const closingDiagnosis = Promise.all([diagnosis.close(), siteRule?.close()])
+    return closeServer(cause => { closingDiagnosis.then(() => callback?.(cause), failure => callback?.(cause ?? failure)) })
+  }
+  server.once('close', () => { void server.closeInteractions() })
+  return server
 }
 
 const CHANNEL_ERROR_STATUS = {
@@ -702,7 +891,7 @@ async function readJson(request, allowed) {
 
 function configFields(kind, create, collectionPatch = false) {
   const id = create || collectionPatch ? ['id'] : []
-  if (kind === 'employees') return [...id, 'name', 'description', 'instructions', 'enabled', 'modelRouteId', 'connectionIds', 'skillIds', 'memberIds', ...(!create ? ['expectedRevision'] : [])]
+  if (kind === 'employees') return [...id, 'name', 'description', 'instructions', 'placement', 'multisitePolicy', 'enabled', 'modelRouteId', 'connectionIds', 'skillIds', 'memberIds', ...(!create ? ['expectedRevision'] : [])]
   if (kind === 'connections') return [...id, 'name', 'kind', 'targetIdentity', 'baseUrl', 'issuer', 'clientId', 'hostHeader', 'credentialRef', 'allowedObjectIds', 'sourceSystem', 'sourceInstance', 'sourceEnvironment', 'dataMode', 'evidenceMode', 'enabled', 'skillIds']
   if (kind === 'skills') return [...id, 'name', 'capabilityId', 'enabled']
   return [...id, 'provider', 'model', 'displayName', 'enabled', 'credentialRef', 'parameters']
@@ -718,8 +907,8 @@ function clientError(error) { return error.status >= 500 ? { ...safeServiceError
 function notFound(response) { return sendJson(response, 404, { error: { code: 'NOT_FOUND', message: '接口不存在', status: 404 } }) }
 function sendJson(response, status, value, headers = {}) { return send(response, status, JSON.stringify(value), 'application/json; charset=utf-8', headers) }
 function send(response, status, body, contentType, headers = {}) { response.writeHead(status, { 'content-type': contentType, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers }); response.end(body) }
-function sessionCookie(token, expiresAt) { return `${COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))}` }
-function clearSessionCookie() { return `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0` }
+function sessionCookie(token, expiresAt, secure) { return `${COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}; Max-Age=${Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))}` }
+function clearSessionCookie(secure) { return `${COOKIE}=; Path=/; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}; Max-Age=0` }
 function cookieValue(header, name) { for (const part of String(header ?? '').split(';')) { const [key, ...rest] = part.trim().split('='); if (key === name) { try { return decodeURIComponent(rest.join('=')) } catch { return undefined } } } return undefined }
 function safeMember(member) { return Object.fromEntries(['id', 'loginName', 'displayName', 'role', 'enabled', 'sessionVersion', 'employeeIds'].map(key => [key, structuredClone(member[key])])) }
 function exactObject(value, allowed) {

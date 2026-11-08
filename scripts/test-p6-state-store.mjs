@@ -49,8 +49,12 @@ async function authorizationCommitChecks() {
 
 function migrationAndValidationChecks() {
   const migrated = migrateState(v7State())
-  assert.equal(STATE_VERSION, 12)
+  assert.equal(STATE_VERSION, 21)
   assert.equal(migrated.version, STATE_VERSION)
+  const previous = { ...structuredClone(migrated), version: 12 }
+  delete previous.multisite
+  delete previous.attachments
+  assert.deepEqual(migrateState(previous), migrated)
   assert.deepEqual(migrated.works[0].actions, [])
   assert.throws(() => migrateState({ ...migrated, version: STATE_VERSION + 1 }), /未来/)
 

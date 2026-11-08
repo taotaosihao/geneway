@@ -56,22 +56,11 @@ const remoteExit = await new Promise(resolve => remote.once('exit', resolve))
 assert.notEqual(remoteExit, 0)
 assert.match(remoteError, /仅允许 loopback/)
 
-const falseTls = spawn(process.execPath, ['src/server.mjs'], {
-  cwd: process.cwd(),
-  env: { ...process.env, GENEWAY_HOST: '127.0.0.1', GENEWAY_TRUSTED_ORIGIN: 'https://127.0.0.1:3471', GENEWAY_AUTH_FILE: join(root, 'tls-auth.json') },
-  stdio: ['ignore', 'ignore', 'pipe'],
-})
-let tlsError = ''
-falseTls.stderr.on('data', chunk => { tlsError += chunk })
-const tlsExit = await new Promise(resolve => falseTls.once('exit', resolve))
-assert.notEqual(tlsExit, 0)
-assert.match(tlsError, /明文 loopback HTTP/)
 
-const child = spawn(process.execPath, ['src/server.mjs'], {
-  cwd: process.cwd(),
-  env: {
+const launchEnvironment = {
     ...process.env,
     GENEWAY_PORT: String(port),
+    GENEWAY_TRUSTED_ORIGIN: 'https://localhost:4443',
     GENEWAY_STATE: statePath,
     GENEWAY_AUTH_FILE: join(root, 'auth.json'),
     GENEWAY_DSH_HOME: join(root, 'dsh'),
@@ -80,10 +69,9 @@ const child = spawn(process.execPath, ['src/server.mjs'], {
     GENEWAY_GEARJOB_BASE_URL: '',
     GENEWAY_GEARJOB_CREDENTIAL_FILE: '',
     GENEWAY_GEARJOB_ALLOWED_WORK_ORDER: '',
-  },
-  stdio: ['ignore', 'ignore', 'pipe'],
-})
-
+}
+const child = spawn(process.execPath, ['src/server.mjs'], { cwd: process.cwd(), env: launchEnvironment, stdio: ['ignore', 'ignore', 'pipe'] })
+let defaultChild
 try {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try { if ((await fetch(`http://127.0.0.1:${port}/`)).ok) break } catch {}
@@ -94,8 +82,18 @@ try {
   const exitCode = await new Promise(resolve => child.once('exit', resolve))
   assert.equal(exitCode, 0)
   await assert.rejects(() => fetch(`http://127.0.0.1:${port}/`))
-  console.log('shutdown checks passed')
+  delete launchEnvironment.GENEWAY_TRUSTED_ORIGIN
+  defaultChild = spawn(process.execPath, ['src/server.mjs'], { cwd: process.cwd(), env: launchEnvironment, stdio: ['ignore', 'ignore', 'pipe'] })
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { if ((await fetch(`http://127.0.0.1:${port}/`)).ok) break } catch {}
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200)
+  const defaultExit = new Promise(resolve => defaultChild.once('exit', resolve)); defaultChild.kill('SIGTERM'); assert.equal(await defaultExit, 0)
+  await assert.rejects(() => fetch(`http://127.0.0.1:${port}/`))
+  console.log('shutdown checks passed: explicit HTTPS origin accepted with loopback listener; default HTTP loopback starts and exits; non-loopback listen rejected')
 } finally {
   if (child.exitCode === null) child.kill('SIGKILL')
+  if (defaultChild?.exitCode === null) defaultChild.kill('SIGKILL')
   await rm(root, { recursive: true, force: true })
 }

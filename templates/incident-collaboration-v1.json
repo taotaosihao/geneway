@@ -1,0 +1,48 @@
+{
+  "id": "incident-collaboration-v1",
+  "version": 1,
+  "calculationVersion": 1,
+  "title": "多来源异常协作整改报告",
+  "sheets": {
+    "history": {
+      "name": "整改明细",
+      "columns": [
+        "序号",
+        "记录日期",
+        "历史描述",
+        "责任人",
+        "整改期限",
+        "同描述次数",
+        "来源Evidence",
+        "原条目索引",
+        "照片引用"
+      ]
+    },
+    "site": {
+      "name": "现场快照",
+      "columns": [
+        "来源Evidence",
+        "字段",
+        "内容"
+      ]
+    },
+    "analysis": {
+      "name": "分析结论",
+      "columns": [
+        "分类",
+        "确定性",
+        "结论",
+        "依据",
+        "限制"
+      ]
+    },
+    "manifest": {
+      "name": "来源依据",
+      "columns": [
+        "内容段",
+        "manifest JSON"
+      ]
+    }
+  },
+  "sha256": "d502b9282003e8a1b5e2e48943407e6c30d8790f2f10f62b66432a40c4361257"
+}

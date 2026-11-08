@@ -1,3 +1,21 @@
+import { assertCloudCapacity } from '../cloud-capacity.mjs'
+import { emptySiteRuleState, assertNoFutureSiteRule, validateSiteRuleState, assertSiteRuleImmutable } from '../site-rule-state.mjs'
+import { emptySupervisionDiagnosisState, validateSupervisionDiagnosisState, assertSupervisionDiagnosisImmutable } from '../supervision-diagnosis-state.mjs'
+import { emptyA2aState, validateA2aState, assertA2aImmutable, assertNoFutureA2a } from '../a2a-state.mjs'
+import { validateA2aGroups, assertA2aGroupsAppendOnly } from '../a2a-group-state.mjs'
+import { emptyWorkMemberRemovalState, validateWorkMemberRemovalState, assertWorkMemberRemovalImmutable } from '../work-member-removal.mjs'
+import { emptySupervisionState, validateSupervisionState, assertSupervisionImmutable } from '../supervision-state.mjs'
+import { emptyContextReadState, validateContextReadState, assertContextReadImmutable } from '../context-read-state.mjs'
+import { emptyManualControlState, validateManualControlState, assertManualControlImmutable } from '../manual-control.mjs'
+import { emptyInteractionState, validateInteractionState, assertInteractionImmutable } from '../interaction-state.mjs'
+import { emptySpreadsheetCollaborationState, validateSpreadsheetCollaborationState, assertSpreadsheetCollaborationImmutable } from '../spreadsheet-sources.mjs'
+import { emptyNodeState, validateNodeState, assertNodeStateImmutable } from '../../packages/agent-contracts/nodes.mjs'
+import { emptyBudgetState, validateBudgetState, assertBudgetImmutable } from '../work-budget.mjs'
+import { emptyEvidenceState, validateEvidenceState, assertEvidenceImmutable } from '../evidence-state.mjs'
+import { validateSpreadsheetState, assertSpreadsheetStateImmutable } from '../spreadsheet-state.mjs'
+import { validateModelGatewayState, assertModelGatewayImmutable } from '../model-gateway.mjs'
+import { validateAttachments, assertAttachmentsImmutable } from '../artifact-service.mjs'
+import { emptyMultisite, validateMultisite, assertMultisiteImmutable } from '../../packages/agent-orchestration/state.mjs'
 import { validateModelSnapshot } from '../model-route.mjs'
 import { validateExecutionRuntime } from '../execution-runtime.mjs'
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
@@ -13,7 +31,7 @@ import { segmentKnowledgeBody } from '../knowledge-search.mjs'
 import { normalizeWeixinApiBaseUrl } from '../../vendor/dsh-im/weixin/weixin-api.mjs'
 import { canonicalRevision, digest, canonical, KIVO_EVENT_RECORD_TYPES, KIVO_EVENT_TRIGGER } from '../kivo-events.mjs'
 
-export const STATE_VERSION = 12
+export const STATE_VERSION = 31
 export const KNOWLEDGE_LIMITS = Object.freeze({
   maxMaterials: 100,
   maxBodyBytes: 32 * 1024,
@@ -45,6 +63,23 @@ const ACTION_NO_EFFECT_REASONS = new Set(['DISPATCH_DEADLINE_EXPIRED', 'SOURCE_R
 
 const EMPTY_STATE = {
   version: STATE_VERSION,
+  multisite: emptyMultisite(),
+  ...emptyNodeState(),
+  ...emptyEvidenceState(),
+  ...emptyBudgetState(),
+  ...emptySpreadsheetCollaborationState(),
+  ...emptyInteractionState(),
+  ...emptyManualControlState(),
+  ...emptyContextReadState(),
+  ...emptySupervisionState(),
+  ...emptySupervisionDiagnosisState(),
+  ...emptySiteRuleState(),
+  ...emptyWorkMemberRemovalState(),
+  ...emptyA2aState(),
+  attachments: [],
+  artifacts: [],
+  modelRequests: [],
+  modelImageVariants: [],
   members: [],
   modelRoutes: [],
   employees: [],
@@ -129,7 +164,26 @@ export function createFileStore(filePath, fsOps = {}) {
         await requireReliable()
         const current = await readState()
         const immutableBaseline = structuredClone(current)
-        const next = migrateState(await mutator(current))
+        const candidate = await mutator(current)
+        assertCloudCapacity(immutableBaseline, candidate)
+        const next = migrateState(candidate)
+        assertSpreadsheetStateImmutable(immutableBaseline, next)
+        assertModelGatewayImmutable(immutableBaseline, next)
+        assertAttachmentsImmutable(immutableBaseline, next)
+        assertMultisiteImmutable(immutableBaseline, next)
+        assertNodeStateImmutable(immutableBaseline, next)
+        assertEvidenceImmutable(immutableBaseline, next)
+        assertBudgetImmutable(immutableBaseline, next)
+        assertSpreadsheetCollaborationImmutable(immutableBaseline, next)
+        assertInteractionImmutable(immutableBaseline, next)
+        assertManualControlImmutable(immutableBaseline, next)
+        assertContextReadImmutable(immutableBaseline, next)
+        assertSupervisionImmutable(immutableBaseline, next)
+        assertSupervisionDiagnosisImmutable(immutableBaseline, next)
+        assertWorkMemberRemovalImmutable(immutableBaseline, next)
+        assertA2aImmutable(immutableBaseline, next)
+        assertSiteRuleImmutable(immutableBaseline, next)
+        assertA2aGroupsAppendOnly(immutableBaseline, next)
         assertActionFactsImmutable(immutableBaseline, next)
         assertExecutionFactsImmutable(immutableBaseline, next)
         assertConversationFactsImmutable(immutableBaseline, next)
@@ -168,12 +222,74 @@ export function createFileStore(filePath, fsOps = {}) {
 
 export function migrateState(value) {
   if (!record(value)) throw new Error('产品状态不是对象')
-  if ([11, STATE_VERSION].includes(value.version)) return normalizeV11(value)
-  return normalizeV11({ ...migrateLegacyState(value), version: STATE_VERSION, automationInbox: [] })
+  assertNoFutureA2a(value)
+  if (value.version < 31) assertNoFutureSiteRule(value)
+  if (value.version < 30 && (value.routingBatches !== undefined && (!Array.isArray(value.routingBatches) || value.routingBatches.length) || value.routingRequests?.some(row => row.routingVersion !== undefined || row.compatibilityKey !== undefined) || value.modelRequests?.some(row => row.purpose === 'routing' && (row.routingVersion !== 1 || row.batchId !== undefined || row.members !== undefined)))) throw new Error('旧版本状态不得包含批量路由事实')
+  if (value.version < 29 && (Object.keys(emptySupervisionDiagnosisState()).some(name => value[name] !== undefined && (!Array.isArray(value[name]) || value[name].length)) || value.modelRequests?.some(row => row.purpose === 'supervision_diagnosis'))) throw new Error('旧版本状态不得包含监督诊断事实')
+  if (value.version < 27 && value.workMemberRemovals !== undefined && (!Array.isArray(value.workMemberRemovals) || value.workMemberRemovals.length)) throw new Error('旧版本状态不得包含工作成员撤销事实')
+  if (value.version < 26 && Object.keys(emptySupervisionState()).some(name => value[name]?.length)) throw new Error('旧版本状态不得包含监督事实')
+  if (value.version < 16 && (value.artifacts?.length || value.multisite?.jobs?.length || value.works?.some(work => work.spreadsheetRequest) || value.multisite?.inputs?.some(input => input.spreadsheetRequest))) throw new Error('旧版本状态不得包含表格要求、Job 或成果事实')
+  if (value.version < 15 && (value.modelRequests?.length || value.modelImageVariants?.length)) throw new Error('旧版本状态不得包含模型代理事实，禁止丢弃请求或图片派生域')
+  if (value.version < 14 && value.attachments?.length) throw new Error('旧版本状态不得包含附件事实，禁止丢弃文件域')
+  if (value.version < 20 && (value.multisite?.questions?.length || value.multisite?.messages?.some(row => row.kind !== 'dependency_result') || value.multisite?.results?.some(row => row.schema === 'geneway.analysis-result/1') || value.evidenceAccessReceipts?.some(row => row.reason !== 'publisher_self') || value.multisite?.delegations?.some(row => row.evidenceRefs?.length))) throw new Error('旧版本状态不得包含定向协作事实')
+  if (value.version < 21 && (Object.keys(emptyBudgetState()).some(field => value[field]?.length) || value.works?.some(row => row.modelRequestBudget?.version === 2) || value.modelRequests?.some(row => row.accountingVersion !== undefined))) throw new Error('旧版本状态不得包含新版预算事实')
+  if (value.version < 22 && (Object.keys(emptySpreadsheetCollaborationState()).some(field => value[field]?.length) || value.works?.some(work => work.spreadsheetRequest?.templateId === 'incident-collaboration-v1') || value.modelRequests?.some(row => row.spreadsheetReadReceiptIds !== undefined))) throw new Error('旧版本状态不得包含多来源表格职责或采纳事实')
+  if (value.version < 23 && (Object.keys(emptyInteractionState()).some(field => value[field]?.length) || value.modelRequests?.some(row => row.purpose !== undefined))) throw new Error('旧版本状态不得包含语义续办或用途账本事实')
+  if (value.version < 24 && (value.manualControls?.length || value.multisite?.commands?.some(row => row.receiptKind === 'spreadsheet_prepared') || value.modelRequests?.some(row => row.manualFence !== undefined || row.manualResumeCommandId !== undefined))) throw new Error('旧版本状态不得包含人工控制事实')
+  if (value.version < 25 && (Object.keys(emptyContextReadState()).some(name => value[name]?.length) || value.modelRequests?.some(row => row.contextReadEnabled !== undefined || row.contextReadReceiptIds !== undefined))) throw new Error('旧版本状态不得包含历史资料读取事实')
+  const validate = state => {
+    const interaction = value.version < 23 ? { ...state, ...emptyInteractionState() } : state
+    const manual = value.version < 24 ? { ...interaction, ...emptyManualControlState() } : interaction
+    const context = value.version < 25 ? { ...manual, ...emptyContextReadState() } : manual
+    const current = value.version < 26 ? { ...context, ...emptySupervisionState() } : context
+    if (value.version < 27) current.workMemberRemovals = []
+    if (value.version < 28) current.a2aProtocol = emptyA2aState().a2aProtocol
+    validateA2aState(current)
+    validateA2aGroups(current)
+    validateWorkMemberRemovalState(current)
+    if (value.version < 29) Object.assign(current, emptySupervisionDiagnosisState())
+    if (value.version < 30) current.routingBatches = []
+    if (value.version < 31) Object.assign(current, emptySiteRuleState())
+    validateSiteRuleState(current)
+    validateSupervisionState(current)
+    validateSupervisionDiagnosisState(current)
+    return validateContextReadState(validateManualControlState(validateInteractionState(validateSpreadsheetCollaborationState(validateBudgetState(validateEvidenceState(validateNodeState(validateSpreadsheetState(validateModelGatewayState(validateAttachments(validateMultisite(normalizeV11(value.version < 22 ? { ...current, ...emptySpreadsheetCollaborationState() } : current))))))))))))
+  }
+  if (value.version < 17 && (value.multisite?.results?.length || value.multisite?.messages?.length || value.multisite?.dependencyWaits?.length || value.multisite?.attempts?.some(row => row.grant))) throw new Error('旧版本状态不得包含主动委派事实')
+  if (value.version < 18 && Object.keys(emptyNodeState()).some(field => value[field]?.length)) throw new Error('旧版本状态不得包含节点注册事实')
+  if (value.version < 19 && Object.keys(emptyEvidenceState()).some(field => value[field]?.length)) throw new Error('旧版本状态不得包含 Evidence 事实')
+  if (value.version === STATE_VERSION) return validate(value)
+  if (value.version === 30) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 29) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 28) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 27) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 26) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 25) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 24) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 23) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 22) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 21) return validate({ ...value, version: STATE_VERSION })
+  if (value.version === 20) return validate({ ...value, version: STATE_VERSION, ...emptyBudgetState() })
+  if (value.version === 19) return validate({ ...value, version: STATE_VERSION, ...emptyBudgetState(), multisite: { ...value.multisite, questions: [] } })
+  if (value.version === 18) return validate({ ...value, version: STATE_VERSION, ...emptyBudgetState(), ...emptyEvidenceState(), multisite: { ...value.multisite, questions: [] }, resources: value.resources.map(resource => ({ ...resource, evidenceReaderAgentIds: resource.evidenceReaderAgentIds ?? [] })) })
+  if (value.version === 17) return validate({ ...value, version: STATE_VERSION, ...emptyBudgetState(), ...emptyNodeState(), ...emptyEvidenceState(), multisite: { ...value.multisite, questions: [] } })
+  if (value.version === 16) return validate({ ...value, version: STATE_VERSION, ...emptyBudgetState(), ...emptyNodeState(), ...emptyEvidenceState(), multisite: { ...value.multisite, results: [], messages: [], dependencyWaits: [], questions: [] } })
+  if ([13, 14, 15].includes(value.version)) return validate({ ...value, version: STATE_VERSION, ...emptyBudgetState(), ...emptyNodeState(), ...emptyEvidenceState(),
+    multisite: { ...value.multisite, jobs: [], results: [], messages: [], dependencyWaits: [], questions: [] }, artifacts: [],
+    attachments: value.version >= 14 ? value.attachments : [],
+    modelRequests: value.version >= 15 ? value.modelRequests : [], modelImageVariants: value.version >= 15 ? value.modelImageVariants : [],
+  })
+  const legacy = [11, 12].includes(value.version) ? normalizeV11(value)
+    : normalizeV11({ ...migrateLegacyState(value), version: STATE_VERSION, automationInbox: [] })
+  return validate({ ...legacy, version: STATE_VERSION, ...emptyBudgetState(), ...emptyNodeState(), ...emptyEvidenceState(), multisite: emptyMultisite(), artifacts: [], attachments: [], modelRequests: [], modelImageVariants: [] })
 }
 
 function migrateLegacyState(value) {
   if (!record(value)) throw new Error('产品状态不是对象')
+  assertNoFutureA2a(value)
+  if (value.version < 30 && (value.routingBatches !== undefined && (!Array.isArray(value.routingBatches) || value.routingBatches.length) || value.routingRequests?.some(row => row.routingVersion !== undefined || row.compatibilityKey !== undefined) || value.modelRequests?.some(row => row.purpose === 'routing' && (row.routingVersion !== 1 || row.batchId !== undefined || row.members !== undefined)))) throw new Error('旧版本状态不得包含批量路由事实')
+  if (value.version < 29 && (Object.keys(emptySupervisionDiagnosisState()).some(name => value[name] !== undefined && (!Array.isArray(value[name]) || value[name].length)) || value.modelRequests?.some(row => row.purpose === 'supervision_diagnosis'))) throw new Error('旧版本状态不得包含监督诊断事实')
+  if (value.version < 27 && value.workMemberRemovals !== undefined && (!Array.isArray(value.workMemberRemovals) || value.workMemberRemovals.length)) throw new Error('旧版本状态不得包含工作成员撤销事实')
   if (value.version !== undefined && !Number.isInteger(value.version)) throw new Error('产品状态版本无效')
   const version = value.version ?? 3
   if (version > 10) throw new Error(`不支持未来产品状态版本：${version}`)

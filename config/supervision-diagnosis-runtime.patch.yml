@@ -1,0 +1,81 @@
+# Private sdk-minimal child: one text turn, no tools, retries or subagents.
+# This profile isolates process state; it does not provide an OS sandbox.
+- id: sdk-app-startup
+  disabled: true
+- id: sdk-jsonrpc-server
+  disabled: true
+- id: session-log-deepseek
+  disabled: true
+- id: plugin-package-inventory-deepseek
+  disabled: true
+- id: llm-deepseek
+  disabled: true
+- id: llm-retry
+  disabled: true
+- id: session-title
+  disabled: true
+- id: jobs
+  disabled: true
+- id: mcp-resources
+  disabled: true
+- id: persistent-bash
+  disabled: true
+- id: persistent-pwsh
+  disabled: true
+- id: terminal-bash
+  disabled: true
+- id: terminal-pwsh
+  disabled: true
+- id: subprocess
+  disabled: true
+- id: pty
+  disabled: true
+- id: subagent
+  disabled: true
+- id: subagent-spawn-in-process
+  disabled: true
+- id: subagent-fork-in-process
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: system-prompt
+  config:
+    personaPrefix: ''
+    personaSuffix: ''
+    includeHarnessIdentity: false
+    includeRuntimeContext: false
+- id: tools
+  config:
+    mode: native
+- id: agent-loop
+  config:
+    agents: []
+- insert:
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          zenmux:
+            displayName: Geneway supervision diagnosis gateway
+            api: openai-completions
+            apiKeyEnv: GENEWAY_DIAGNOSIS_TOKEN
+            baseURL: !!js process.env.GENEWAY_DIAGNOSIS_GATEWAY + '/internal/model/supervision/v1'
+            compat:
+              supportsUsageInStreaming: true
+              supportsFinishReason: true
+              maxTokensField: max_tokens
+            models:
+              - id: deepseek/deepseek-v4.1-flash
+                contextWindow: 200000
+                maxTokens: 4096
+                input: [text]
+              - id: z-ai/glm-5.3-flash
+                contextWindow: 1000000
+                maxTokens: 4096
+                input: [text]

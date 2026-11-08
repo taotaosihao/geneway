@@ -1,12 +1,15 @@
+import { createArtifactService } from '../src/artifact-service.mjs'
+import { createMultisiteService } from '../packages/agent-orchestration/service.mjs'
+import { seedMultisite } from './fixtures/multisite/runtime.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { execFile as execFileCallback } from 'node:child_process'
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
+import { createFileStore, migrateState, STATE_VERSION } from '../src/store/file-store.mjs'
 
 const execFile = promisify(execFileCallback)
 const repo = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -153,6 +156,9 @@ try {
   await run(['backup', '--output', stableBackup], { GENEWAY_STATE: stableStatePath, GENEWAY_DSH_HOME: dshHome })
   assert.equal(Buffer.compare(await readFile(join(stableBackup, 'state.json')), stableBytes), 0)
 
+  await verifyV12Restore(stableBackup)
+  await rejectIncompleteMultisiteTransfer()
+  await rejectIncompleteAttachmentTransfer()
   await verifyKnowledgeTransfer(state, dshHome, replayMarker, root)
   await rejectNonEmptyTarget(backup, statePath, dshHome, root)
   await rejectMaliciousManifests(backup, manifestPath, manifest, originalManifestText, root)
@@ -162,6 +168,60 @@ try {
   console.log('P2 state transfer checks passed')
 } finally {
   await rm(root, { recursive: true, force: true })
+}
+
+async function verifyV12Restore(producedBackup) {
+  const input = join(root, 'v12-backup'), output = join(root, 'v12-restored')
+  await cp(producedBackup, input, { recursive: true })
+  // Versioned external fixture: v12 has the same old business schema and no multisite domain.
+  const legacy = JSON.parse(await readFile(join(input, 'state.json'), 'utf8'))
+  legacy.version = 12; delete legacy.multisite; delete legacy.attachments
+  const bytes = Buffer.from(JSON.stringify(legacy) + '\n')
+  await writeFile(join(input, 'state.json'), bytes)
+  const manifest = JSON.parse(await readFile(join(input, 'manifest.json'), 'utf8'))
+  manifest.schema.stateVersion = 12
+  Object.assign(manifest.entries.find(row => row.path === 'state.json'), { bytes: bytes.length, sha256: digest(bytes) })
+  await writeFile(join(input, 'manifest.json'), JSON.stringify(manifest))
+  await run(['restore', '--input', input, '--data-root', output])
+  assert.deepEqual(JSON.parse(await readFile(join(output, 'state.json'), 'utf8')), migrateState(legacy))
+}
+async function rejectIncompleteAttachmentTransfer() {
+  const source = join(root, 'attachment-source'), statePath = join(source, 'state.json')
+  const store = createFileStore(statePath); await store.update(seedMultisite)
+  const base = join(root, 'empty-attachment-backup')
+  await run(['backup', '--output', base], { GENEWAY_STATE: statePath, GENEWAY_DSH_HOME: join(source, 'dsh') })
+  const attachments = createArtifactService({ store, root: join(source, 'attachments') })
+  const bytes = Buffer.from(JSON.stringify({ format: 'geneway.incident-history', version: 1, entries: [] }))
+  const item = await attachments.init({ id: 'owner' }, { clientRequestId: 'backup-file', name: 'history.json', mediaType: 'application/json', sizeBytes: bytes.length, sha256: digest(bytes) })
+  await attachments.upload({ id: 'owner' }, item.id, (async function* () { yield bytes })())
+  const rejected = join(root, 'attachment-backup-rejected')
+  await runFails(['backup', '--output', rejected], /尚不支持附件字节/, { GENEWAY_STATE: statePath, GENEWAY_DSH_HOME: join(source, 'dsh') })
+  assert.equal(await exists(rejected), false)
+  const stateBytes = await readFile(statePath), manifest = JSON.parse(await readFile(join(base, 'manifest.json'), 'utf8'))
+  Object.assign(manifest.entries.find(row => row.path === 'state.json'), { bytes: stateBytes.length, sha256: digest(stateBytes) })
+  await writeFile(join(base, 'state.json'), stateBytes); await writeFile(join(base, 'manifest.json'), JSON.stringify(manifest))
+  const target = join(root, 'attachment-restore-rejected')
+  await runFails(['restore', '--input', base, '--data-root', target], /尚不支持附件字节/)
+  assert.equal(await exists(target), false)
+}
+async function rejectIncompleteMultisiteTransfer() {
+  const source = join(root, 'multisite-source'), statePath = join(source, 'state.json')
+  const store = createFileStore(statePath); await store.update(seedMultisite)
+  const base = join(root, 'empty-multisite-backup')
+  await run(['backup', '--output', base], { GENEWAY_STATE: statePath, GENEWAY_DSH_HOME: join(source, 'dsh') })
+  const service = createMultisiteService({ store })
+  await service.apply({ id: 'owner' }, 'create', { workType: 'multisite', employeeId: 'coordinator', goal: '不能导出不完整Host状态', clientRequestId: 'backup-boundary' })
+  const rejected = join(root, 'multisite-backup-rejected')
+  await runFails(['backup', '--output', rejected], /尚不支持多地点协作事实及 Host 日志/, { GENEWAY_STATE: statePath, GENEWAY_DSH_HOME: join(source, 'dsh') })
+  assert.equal(await exists(rejected), false)
+  // Deliberately incomplete external bundle: real producer state plus a manifest that omits Host journals.
+  const bytes = await readFile(statePath), manifest = JSON.parse(await readFile(join(base, 'manifest.json'), 'utf8'))
+  manifest.schema.works = 1
+  Object.assign(manifest.entries.find(row => row.path === 'state.json'), { bytes: bytes.length, sha256: digest(bytes) })
+  await writeFile(join(base, 'state.json'), bytes); await writeFile(join(base, 'manifest.json'), JSON.stringify(manifest))
+  const target = join(root, 'multisite-restore-rejected')
+  await runFails(['restore', '--input', base, '--data-root', target], /尚不支持多地点协作事实及 Host 日志/)
+  assert.equal(await exists(target), false)
 }
 
 async function verifyKnowledgeTransfer(state, dshHome, replayMarker, root) {

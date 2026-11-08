@@ -1,0 +1,60 @@
+{
+  "id": "incident-register-v1",
+  "version": 1,
+  "sha256": "e932deff0ffdae324f0018dd59a128d03f38782629a160bb4e1a78ac3f2c3af8",
+  "calculationVersion": 1,
+  "sheetName": "异常整改台账",
+  "title": "异常整改台账",
+  "columns": [
+    {
+      "key": "sequence",
+      "title": "序号",
+      "width": 8
+    },
+    {
+      "key": "date",
+      "title": "发生日期",
+      "width": 16
+    },
+    {
+      "key": "description",
+      "title": "异常描述",
+      "width": 42
+    },
+    {
+      "key": "owner",
+      "title": "责任人",
+      "width": 18
+    },
+    {
+      "key": "dueDate",
+      "title": "整改期限",
+      "width": 16
+    },
+    {
+      "key": "historyCount",
+      "title": "历史次数",
+      "width": 12
+    },
+    {
+      "key": "sourceRef",
+      "title": "资料引用",
+      "width": 34
+    },
+    {
+      "key": "entryIndex",
+      "title": "条目位置",
+      "width": 12
+    },
+    {
+      "key": "photoRefs",
+      "title": "照片引用",
+      "width": 34
+    },
+    {
+      "key": "photoCount",
+      "title": "照片数量",
+      "width": 12
+    }
+  ]
+}

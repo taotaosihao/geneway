@@ -1,0 +1,12 @@
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { evidenceToolNames } from '../agent-contracts/tools.mjs'
+const output = { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'object', additionalProperties: true, required: true } } }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value.result) }] }
+export function createEvidenceTools(call, grant) {
+  const allowed = evidenceToolNames(grant), execute = operation => async parameters => ({ result: await call(operation, parameters) })
+  const common = { clientRequestId: { type: 'string', required: true }, instructionRevision: { type: 'integer', required: true }, resourceId: { type: 'string', required: true } }
+  return [
+    { name: 'geneway_read_history', description: 'Capture and publish one permitted history dataset by logical Resource and dataset ID. Returns only an EvidenceRef, never local paths or history content. Shared read requires separate explicit permission.', parameters: { ...common, datasetId: { type: 'string', required: true } }, operation: 'read_history' },
+    { name: 'geneway_inspect_site', description: 'Capture permitted fixture site health or recent events. Unknown values stay unknown. Select fixed sections and an optional bounded time window; no arbitrary queries or local paths. Read the resulting EvidenceRef separately.', parameters: { ...common, sections: { type: 'array', required: true, items: { type: 'string', enum: ['collector_health', 'recent_events'] } }, window: { type: 'object', additionalProperties: false, properties: { from: { type: 'string', required: true }, to: { type: 'string', required: true } } } }, operation: 'inspect_site' },
+    { name: 'geneway_read_shared_evidence', description: 'Read one authorized immutable Evidence page, up to 16 complete items and 16KiB. Follow nextCursor without altering it; partial means remaining entries have not yet been read. Quality/time refer only to the declared fixture source.', parameters: { ref: { type: 'object', required: true, additionalProperties: false, properties: { kind: { type: 'string', required: true }, id: { type: 'string', required: true }, version: { type: 'integer', required: true }, sha256: { type: 'string', required: true } } }, cursor: { type: 'string' } }, operation: 'read_shared_evidence' },
+  ].filter(tool => allowed.includes(tool.name)).map(({ operation, ...tool }) => defineTool({ ...tool, output, execute: execute(operation) }))
+}

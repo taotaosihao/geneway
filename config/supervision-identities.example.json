@@ -1,0 +1,45 @@
+{
+  "secretRoot": "/srv/geneway/secrets",
+  "identities": [
+    {
+      "id": "local-observer",
+      "role": "observe",
+      "workspaceId": "local",
+      "nodeIds": [
+        "cloud",
+        "pc-b",
+        "pc-a",
+        "gateway",
+        "analysis"
+      ],
+      "credentialRef": "supervision-observe"
+    },
+    {
+      "id": "local-recovery",
+      "role": "recover",
+      "workspaceId": "local",
+      "nodeIds": [
+        "cloud",
+        "pc-b",
+        "pc-a",
+        "gateway",
+        "analysis"
+      ],
+      "credentialRef": "supervision-recover"
+    },
+    {
+      "id": "local-diagnosis",
+      "role": "diagnose",
+      "workspaceId": "local",
+      "nodeIds": [
+        "cloud",
+        "pc-b",
+        "pc-a",
+        "gateway",
+        "analysis"
+      ],
+      "budgetPolicyId": "supervision-diagnosis-policy",
+      "credentialRef": "supervision-diagnose"
+    }
+  ]
+}

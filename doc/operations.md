@@ -43,7 +43,7 @@ pnpm install --frozen-lockfile
 | `GENEWAY_AUTH_FILE` | 仓库外认证文件绝对路径，由停机维护 CLI 供应；不进入普通备份。 |
 | `GENEWAY_CONNECTION_CATALOG` | 仓库外可信目录绝对路径，必须为常规 0600 文件。产品后台只能在该目录登记的精确目标上配置连接。 |
 | `GENEWAY_HOST` / `GENEWAY_PORT` | 主机运维指定监听位置；host 只能为 `127.0.0.1`、`::1` 或 `localhost`，port 默认 3471。 |
-| `GENEWAY_TRUSTED_ORIGIN` | 浏览器实际入口的准确 HTTP origin；与当前 loopback host/port 保持一致，用于写请求的 Origin 校验。 |
+| `GENEWAY_TRUSTED_ORIGIN` | 固定浏览器入口 origin。未设置时为当前 loopback HTTP；可显式设 HTTPS 根入口或 loopback HTTP。拒凭据、路径、查询、fragment；写请求 Origin 必须精确匹配规范化后的固定值。 |
 | `data/event-sources.json` | 运维按真实 Kivo subscription、resource、sourceInstance 和 signingSecretRef 设置；路径固定属于当前 data root。秘密正文只在 secrets 中。 |
 
 `config/runtime.env` 只保存上述非秘密值和路径引用，不保存密码、模型 key、私钥、渠道 token、游标或发送上下文。后台连接里的 `credentialRef` 必须与可信 catalog 一致。Kivo 连接的 resource 为准确 `/api/v1/mes/mcp` 地址，issuer 是同 origin，clientId 是获准机器账号身份。
@@ -189,4 +189,8 @@ node scripts/test-p4-weixin.mjs
 
 Kivo 分支、SDK 或规范变化时，先在获准独立 clone 比较协议、OAuth、输入/输出 schema 和权限；保留 `server/discover`、准确协议/方法/名称头、拒绝旧 initialize、资源受众和当前账号复权，不放宽固定工具/schema 允许清单。业务定位使用 trace、机器账号、准确 sourceInstance、业务单号和独立只读回执；不把外部 OAuth token 传给业务 API，不直连数据库或设备。
 
-当前代码仅提供 loopback HTTP。未来网络部署需另行授权，并保持 TLS/私网、OAuth/MCP well-known 路径、Origin/resource/issuer 与反向代理一致；数据库、Redis 和服务端秘密不对公网暴露。本说明不执行或授权这些部署动作。
+API 仍只监听 loopback HTTP，可由同机 TLS 反向代理提供固定 HTTPS 入口，并显式配置 `GENEWAY_TRUSTED_ORIGIN=https://实际入口`。Cookie 的 Secure 属性仅由该配置决定；签发和清除均保留 Path=/、HttpOnly、SameSite=Strict。Host、Forwarded、X-Forwarded-* 不改变 origin、身份或权限，也不启用 trust-proxy。Node 仍使用原 Bearer/实例绑定，内部本机模型地址保持实际 loopback。
+
+代理应流式转发 SSE，不缓存、不缓冲，并向下游传递上游关闭；原扫描在空闲 15 秒发 comment，comment 不代表业务投递或 ACK。代理超时应允许该周期及正常传输抖动。私有 CA 由运维在实际客户端正常信任；必要时可在远端父进程启动前设置标准 `NODE_EXTRA_CA_CERTS`，产品只将该路径加入必要 DSH 子进程的环境白名单，不向模型暴露证书内容或配置权。不得关闭 TLS 校验。
+
+当前验证仅是本机独立 CA/真实 TLS 代理与模拟资料、provider；不代表公网、双出口、多 OS 或现场多机验收。实际网络部署仍需另行授权，并保持 OAuth/MCP well-known 路径、Origin/resource/issuer 与反向代理一致；数据库及服务端秘密不对公网暴露。本说明不执行或授权这些部署动作。

@@ -1,0 +1,49 @@
+import assert from 'node:assert/strict'
+import {randomUUID,randomBytes} from 'node:crypto'
+import {request} from 'node:https'
+import {Readable} from 'node:stream'
+import {mkdtemp,readFile,writeFile} from 'node:fs/promises'
+import {join} from 'node:path'
+import {fork} from 'node:child_process'
+import {startBridgeService} from './fixtures/multisite/bridge-service.mjs'
+import {createTlsProxy} from './fixtures/multisite/tls-proxy.mjs'
+import {createRemoteClient} from '../packages/agent-host/remote-client.mjs'
+import {createHostJournal} from '../packages/agent-host/journal.mjs'
+import {createAgentHost} from '../packages/agent-host/host.mjs'
+import {createSimulatedRuntime} from './fixtures/multisite/runtime.mjs'
+const directory=await mkdtemp('/home/gewu/.codex/task-checkpoints/geneway-evidence/https-bridge-')
+let proxy,fixture,host,production;const aborts=[],observations=[],productionLogs=[]
+try{
+ proxy=await createTlsProxy(join(directory,'tls'),{idleControlPath:'/fixture-idle-control'});fixture=await startBridgeService({directory:join(directory,'api'),trustedOrigin:proxy.origin});proxy.setTarget(fixture.origin)
+ const ca=await readFile(proxy.ca)
+ const tlsFetch=(url,options={})=>new Promise((resolve,reject)=>{const call=request(url,{method:options.method??'GET',ca,family:4,headers:options.headers,signal:options.signal},response=>{const headers=new Headers();for(const [key,value]of Object.entries(response.headers))if(value!==undefined)headers.set(key,Array.isArray(value)?value.join(','):value);resolve(new Response(Readable.toWeb(response),{status:response.statusCode,headers}))});call.on('error',reject);call.end(options.body)})
+ const login=await tlsFetch(proxy.origin+'/api/session',{method:'POST',headers:{origin:proxy.origin,'content-type':'application/json'},body:JSON.stringify({loginName:'owner',password:'synthetic owner password'})}),session={...await login.json(),cookie:login.headers.get('set-cookie').split(';')[0]}
+ async function admin(path,value,method='POST'){const response=await tlsFetch(proxy.origin+path,{method,headers:{origin:proxy.origin,cookie:session.cookie,'x-csrf-token':session.csrfToken,'content-type':'application/json'},body:JSON.stringify(value)});const body=await response.json();assert.equal(response.status,200,JSON.stringify(body));return body}
+ async function pair(nodeId,allowedAgentIds){const pairing=await admin('/api/admin/nodes/pairings',{clientRequestId:'pair-'+nodeId,nodeId,siteId:'site',platform:'linux',runtimeMode:'agent_node',allowedAgentIds,expiresAt:new Date(Date.now()+120000).toISOString()}),identity={credential:randomBytes(32).toString('base64url'),nodeInstanceId:randomUUID()},client=createRemoteClient({origin:proxy.origin,identity,fetchImpl:tlsFetch});const registered=await client.post('/internal/nodes/pair',{pairingId:pairing.pairingId,pairingCode:pairing.pairingCode,clientRequestId:'redeem-'+nodeId,...identity});identity.registrationRevision=registered.node.registrationRevision;return{client,registered,identity}}
+ const {client,registered}=await pair('cloud',['coordinator','analysis'])
+ const firstAbort=new AbortController();aborts.push(firstAbort);const first=await client.stream(firstAbort.signal),next=first.next();let ended=false;next.then(()=>{ended=true},()=>{ended=true})
+ if(!process.argv.includes('--skip-idle')) {
+ const control=await tlsFetch(proxy.origin+'/fixture-idle-control');let controlClosed=false;void control.text().then(()=>{controlClosed=true},()=>{controlClosed=true})
+ const started=Date.now();await new Promise(resolve=>setTimeout(resolve,33500));assert.equal(ended,false);assert.equal(controlClosed,true,'the same proxy closes a real no-output control stream');assert(proxy.observations.filter(row=>row.comment).length>=2)
+ observations.push({case:'actual idle SSE across 30s proxy timeout',elapsedMs:Date.now()-started,comments:proxy.observations.filter(row=>row.comment),stillConnected:true,noCommentControlDisconnected:true})
+ }
+ const work=await admin('/api/works',{workType:'multisite',employeeId:'coordinator',goal:'TLS SSE exact ACK 与清理',clientRequestId:'tls-work'}),launch=(await next).value
+ const journal=createHostJournal(join(directory,'host.json')),runtime=createSimulatedRuntime({path:join(directory,'sessions.json')});host=createAgentHost({nodeId:'cloud',journal,runtime});await host.accept({workspaceId:'local',nodeId:'cloud'},launch)
+ proxy.disconnect('/internal/bridge/events');firstAbort.abort()
+ const secondAbort=new AbortController();aborts.push(secondAbort);const second=await client.stream(secondAbort.signal),repeated=(await second.next()).value;assert.deepEqual(repeated,launch);await host.accept({workspaceId:'local',nodeId:'cloud'},repeated);assert.equal((await journal.read()).inbox.length,1);await client.ack(repeated);assert.equal((await client.resync()).pending.length,0);await host.process();await host.flushEvents(event=>client.event(event));assert.equal(runtime.starts(),1)
+ observations.push({case:'TLS proxy disconnect before ACK',commandId:launch.command_id,payloadDigest:launch.payload_digest,replayedUnchanged:true,exactAck:true,singleHostLaunch:runtime.starts()})
+ const streamEnd=second.next().then(()=>true,()=>true)
+ await admin('/api/admin/nodes/cloud/revoke',{clientRequestId:'revoke-active',expectedRevision:registered.node.revision});await Promise.race([streamEnd,new Promise((_,reject)=>setTimeout(()=>reject(Error('revoked stream not closed')),3000))])
+ const cleanup=await client.resync();assert.equal(cleanup.status,'cleanup_only');for(const command of cleanup.pending){await host.accept({workspaceId:'local',nodeId:'cloud'},command);await client.ack(command)}await host.process();await host.flushEvents(event=>client.event(event),{cleanupOnly:true});assert.equal((await fixture.store.read()).works.find(row=>row.id===work.id).status,'cancelled');assert((await journal.read()).outbox.some(row=>row.event.kind==='stopped'&&row.acknowledged))
+ observations.push({case:'revoke active TLS stream',cleanupOnly:true,actualHostStoppedExactAck:true})
+ // The real production entry must close an active SSE without stopping the remote Work.
+ await admin('/api/admin/employees/analysis',{expectedRevision:1,placement:{nodeId:'gateway',mode:'agent_host',resourceRefs:[]},multisitePolicy:{execution:{capabilityIds:['analysis.classify.v1'],resourceRefs:[]},delegation:{agentIds:[],capabilityIds:[],resourceRefs:[]}}},'PATCH')
+ const gateway=await pair('gateway',['analysis']),pendingWork=await admin('/api/works',{workType:'multisite',employeeId:'analysis',goal:'生产关闭保留待投命令',clientRequestId:'shutdown-pending'}),pendingBefore=(await fixture.store.read()).multisite.outbox.filter(row=>row.command.work_id===pendingWork.id)
+ const backend=fixture.origin;await fixture.close();fixture=null
+ await writeFile(join(directory,'connections.json'),JSON.stringify({version:1,targets:[]}),{mode:0o600})
+ const logs=productionLogs;production=fork('src/server.mjs',[],{execArgv:[],env:{PATH:process.env.PATH,HOME:directory,GENEWAY_PORT:new URL(backend).port,GENEWAY_HOST:'127.0.0.1',GENEWAY_STATE:join(directory,'api/state.json'),GENEWAY_AUTH_FILE:join(directory,'api/auth.json'),GENEWAY_SECRET_ROOT:join(directory,'api/secrets'),GENEWAY_DSH_HOME:join(directory,'unused-dsh'),GENEWAY_CONNECTION_CATALOG:join(directory,'connections.json'),GENEWAY_MULTISITE_HOST_MODE:'remote',GENEWAY_TRUSTED_ORIGIN:proxy.origin},stdio:['ignore','pipe','pipe','ipc']});production.stdout.on('data',bytes=>logs.push(bytes));production.stderr.on('data',bytes=>logs.push(bytes));await until(()=>{if(production.exitCode!==null||production.signalCode!==null)throw Error('production startup exited; see production.log');return logs.some(bytes=>bytes.toString().includes('Geneway listening on'))})
+ const thirdAbort=new AbortController();aborts.push(thirdAbort);const third=await gateway.client.stream(thirdAbort.signal),pending=(await third.next()).value;assert.equal(pending.command_id,pendingBefore[0].command.command_id);const closing=third.next().then(()=>true,()=>true),exit=new Promise(resolve=>production.once('exit',(code,signal)=>resolve({code,signal})));production.kill('SIGTERM');const terminal=await Promise.race([exit,new Promise((_,reject)=>setTimeout(()=>reject(Error('production active SSE shutdown timed out')),5000))]);assert.equal(terminal.code,0);await closing;await assert.rejects(fetch(backend));const final=JSON.parse(await readFile(join(directory,'api/state.json'),'utf8'));assert.deepEqual(final.multisite.outbox.filter(row=>row.command.work_id===pendingWork.id),pendingBefore)
+ observations.push({case:'real production SIGTERM with active TLS SSE',...terminal,portClosed:true,durablePendingUnchanged:true});await writeFile(join(directory,'production.log'),Buffer.concat(logs))
+ const result={result:'passed',directory,observations,proxyObservations:proxy.observations,boundary:'real CA-verified HTTPS proxy/Node HTTP/Host journal/AgentDelivery with simulated execution; real production shutdown; native DSH/Office separate producer'};await writeFile(join(directory,'result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result,null,2))
+}catch(cause){await writeFile(join(directory,'failure.json'),JSON.stringify({message:cause.message,stack:cause.stack,observations},null,2));console.error('HTTPS bridge evidence:',directory);throw cause}finally{await writeFile(join(directory,'production.log'),Buffer.concat(productionLogs));for(const abort of aborts)abort.abort();if(production&&production.exitCode===null&&production.signalCode===null){production.kill('SIGTERM');await new Promise(resolve=>production.once('exit',resolve))}await host?.close();await fixture?.close();await proxy?.close()}
+async function until(test){const deadline=Date.now()+10000;while(!await test()){assert(Date.now()<deadline);await new Promise(resolve=>setTimeout(resolve,50))}}
